@@ -618,7 +618,7 @@ def test_repository_boundary_exposes_protocols_and_records_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_repository_bundle_can_be_injected(migrated_database_url: str) -> None:
+async def test_sqlalchemy_repository_bundle_can_be_injected(migrated_database_url: str) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
         repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))

@@ -114,7 +114,7 @@ export const OPENAPI_CONTRACT = {
     "/ready": {
       get: {
         operationId: "getRuntimeReadiness",
-        summary: "Check SQLite, Milvus, LLM, and MCP readiness",
+        summary: "Check PostgreSQL, Milvus, LLM, and MCP readiness",
         tags: ["health"],
         responses: {
           "200": okResponse("#/components/schemas/RuntimeReadinessResponse"),

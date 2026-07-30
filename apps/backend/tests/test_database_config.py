@@ -29,6 +29,18 @@ def test_committed_alembic_config_has_no_legacy_sqlite_default() -> None:
     assert "legacy_database_url_placeholder" not in alembic_environment_text.lower()
 
 
+def test_current_product_metadata_has_no_legacy_sqlite_terminology() -> None:
+    metadata_sources = (
+        ROOT / "packages" / "api-contracts" / "src" / "openapi.ts",
+        ROOT / "scripts" / "generate_architecture_diagrams.py",
+    )
+
+    for metadata_source in metadata_sources:
+        metadata_text = metadata_source.read_text(encoding="utf-8").lower()
+        assert "sqlite" not in metadata_text
+        assert "aiosqlite" not in metadata_text
+
+
 def test_development_config_uses_postgresql_asyncpg() -> None:
     settings = load_memory_database_settings(ROOT / "config" / "project.json")
     assert settings.database_url.startswith("postgresql+asyncpg://")
