@@ -117,6 +117,14 @@ Docker Compose **只**负责运行 PostgreSQL、etcd、MinIO、Milvus、Attu 和
 
 在仓库根目录执行：
 
+`start-local.sh` and `start-local.bat` do not start PostgreSQL. Before using either
+script, start PostgreSQL and wait until `ps` reports it as `healthy`:
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml ps postgres
+```
+
 ```bash
 ./scripts/start-local.sh
 ```
@@ -132,6 +140,13 @@ scripts\start-local.bat
 ### 手动启动
 
 安装前端和后端依赖：
+
+Start PostgreSQL first and continue only after its health check reports `healthy`:
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml ps postgres
+```
 
 ```bash
 npm install
@@ -232,7 +247,7 @@ Use the Compose container to inspect durable jobs and ordered events:
 
 ```bash
 docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, status, lease_owner, lease_expires_at, created_at FROM background_jobs ORDER BY created_at, id;"
-docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, event_type, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, payload->>'type' AS event_type, payload, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
 ```
 
 `/ready` reports the `postgresql` dependency and its actual `asyncpg` driver. The

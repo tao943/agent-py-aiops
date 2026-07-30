@@ -145,7 +145,7 @@ the parent job row so each job's event sequence is serialized. Inspect the data 
 
 ```bash
 docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, status, lease_owner, lease_expires_at, created_at FROM background_jobs ORDER BY created_at, id;"
-docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, event_type, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, payload->>'type' AS event_type, payload, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
 ```
 
 `/ready` reports `postgresql` and the actual `asyncpg` driver. `/config/check` uses
