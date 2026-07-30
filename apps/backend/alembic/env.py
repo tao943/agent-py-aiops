@@ -5,11 +5,12 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from super_ai.memory.database import DEFAULT_MEMORY_DATABASE_URL, load_memory_database_settings
+from super_ai.memory.database import (
+    create_memory_engine,
+    load_memory_database_settings,
+)
 from super_ai.memory.models import Base
 
 config = context.config
@@ -25,9 +26,6 @@ def get_database_url() -> str:
     project_config = x_args.get("project_config")
     if project_config:
         return load_memory_database_settings(Path(project_config)).database_url
-    configured_url = config.get_main_option("sqlalchemy.url")
-    if configured_url and configured_url != DEFAULT_MEMORY_DATABASE_URL:
-        return configured_url
     return load_memory_database_settings().database_url
 
 
@@ -51,15 +49,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    configuration = config.get_section(config.config_ini_section)
-    if configuration is None:
-        configuration = {}
-    configuration["sqlalchemy.url"] = get_database_url()
-    connectable = async_engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = create_memory_engine(get_database_url())
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

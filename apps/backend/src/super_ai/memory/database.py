@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,7 +19,7 @@ from super_ai.project_config import (
     required_str,
 )
 
-DEFAULT_MEMORY_DATABASE_URL = "sqlite+aiosqlite:///./var/memory.sqlite3"
+DEFAULT_MEMORY_DATABASE_URL = "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +50,15 @@ def create_memory_engine(
     resolved_url = settings.database_url if settings is not None else database_url
     if resolved_url is None:
         resolved_url = DEFAULT_MEMORY_DATABASE_URL
-    return create_async_engine(resolved_url, echo=echo)
+    if make_url(resolved_url).drivername != "postgresql+asyncpg":
+        raise ValueError("Memory database URL must use the PostgreSQL asyncpg driver.")
+    return create_async_engine(
+        resolved_url,
+        echo=echo,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+    )
 
 
 def create_memory_session_factory(
