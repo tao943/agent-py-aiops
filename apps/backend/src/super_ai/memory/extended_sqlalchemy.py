@@ -1,4 +1,4 @@
-"""SQLite repositories for jobs, feedback, and managed MCP connections."""
+"""SQLAlchemy repositories for jobs, feedback, and managed MCP connections."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from super_ai.memory.repositories import (
 )
 
 
-class SQLiteBackgroundJobRepository:
+class SQLAlchemyBackgroundJobRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
@@ -315,7 +315,7 @@ class SQLiteBackgroundJobRepository:
         )
 
 
-class SQLiteUserFeedbackRepository:
+class SQLAlchemyUserFeedbackRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
@@ -398,7 +398,7 @@ class SQLiteUserFeedbackRepository:
         return True
 
 
-class SQLiteMcpConnectionRepository:
+class SQLAlchemyMcpConnectionRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 

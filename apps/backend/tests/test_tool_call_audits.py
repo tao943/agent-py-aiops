@@ -6,10 +6,10 @@ import pytest
 
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import TenantScopeError
-from super_ai.memory.sqlite import (
-    SQLiteChatMemoryRepository,
-    SQLiteDiagnosticMemoryRepository,
-    SQLiteToolCallAuditRepository,
+from super_ai.memory.sqlalchemy import (
+    SQLAlchemyChatMemoryRepository,
+    SQLAlchemyDiagnosticMemoryRepository,
+    SQLAlchemyToolCallAuditRepository,
 )
 
 
@@ -20,9 +20,9 @@ async def test_tool_call_audit_repository_finalizes_chat_and_diagnostic_calls(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        chat = SQLiteChatMemoryRepository(session_factory)
-        diagnostics = SQLiteDiagnosticMemoryRepository(session_factory)
-        audits = SQLiteToolCallAuditRepository(session_factory)
+        chat = SQLAlchemyChatMemoryRepository(session_factory)
+        diagnostics = SQLAlchemyDiagnosticMemoryRepository(session_factory)
+        audits = SQLAlchemyToolCallAuditRepository(session_factory)
         started_at = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
         await chat.create_session(
             owner_user_id="user-a",
@@ -88,8 +88,8 @@ async def test_tool_call_audit_repository_denies_cross_tenant_parent_writes(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        chat = SQLiteChatMemoryRepository(session_factory)
-        audits = SQLiteToolCallAuditRepository(session_factory)
+        chat = SQLAlchemyChatMemoryRepository(session_factory)
+        audits = SQLAlchemyToolCallAuditRepository(session_factory)
         await chat.create_session(owner_user_id="user-a", session_id="chat-a")
 
         with pytest.raises(TenantScopeError):

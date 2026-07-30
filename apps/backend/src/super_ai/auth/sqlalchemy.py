@@ -1,4 +1,4 @@
-"""SQLite-backed auth repository implementation."""
+"""SQLAlchemy-backed auth repository implementation."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from super_ai.auth.repositories import AuthSessionRecord, UserRecord
 from super_ai.memory.models import AuthSessionModel, UserModel
 
 
-class SQLiteAuthRepository:
-    """SQLite-compatible SQLAlchemy implementation of auth persistence."""
+class SQLAlchemyAuthRepository:
+    """SQLAlchemy implementation of auth persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory

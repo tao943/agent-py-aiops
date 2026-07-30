@@ -1,4 +1,4 @@
-"""SQLite-backed memory repository implementations."""
+"""SQLAlchemy memory repository implementations."""
 
 from __future__ import annotations
 
@@ -58,8 +58,8 @@ ModelT = TypeVar("ModelT")
 _UNSET = object()
 
 
-class SQLiteChatMemoryRepository:
-    """SQLite implementation of chat memory persistence."""
+class SQLAlchemyChatMemoryRepository:
+    """SQLAlchemy implementation of chat memory persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -284,8 +284,8 @@ class SQLiteChatMemoryRepository:
         return _chat_message_record(row) if row is not None else None
 
 
-class SQLiteUserChatConfigurationRepository:
-    """SQLite owner-scoped chat assembly persistence."""
+class SQLAlchemyUserChatConfigurationRepository:
+    """SQLAlchemy owner-scoped chat assembly persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -331,8 +331,8 @@ class SQLiteUserChatConfigurationRepository:
         return _user_chat_configuration_record(row)
 
 
-class SQLiteUserChatPromptRepository:
-    """SQLite owner-scoped editable prompt persistence."""
+class SQLAlchemyUserChatPromptRepository:
+    """SQLAlchemy owner-scoped editable prompt persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -462,8 +462,8 @@ class SQLiteUserChatPromptRepository:
         return True
 
 
-class SQLiteUserChatSkillRepository:
-    """SQLite owner-scoped uploaded Skill persistence."""
+class SQLAlchemyUserChatSkillRepository:
+    """SQLAlchemy owner-scoped uploaded Skill persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -541,8 +541,8 @@ class SQLiteUserChatSkillRepository:
         return True
 
 
-class SQLiteToolCallAuditRepository:
-    """SQLite implementation of generic Agent tool call audit persistence."""
+class SQLAlchemyToolCallAuditRepository:
+    """SQLAlchemy implementation of generic Agent tool call audit persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -695,8 +695,8 @@ class SQLiteToolCallAuditRepository:
         return [_agent_tool_call_audit_record(row) for row in rows]
 
 
-class SQLiteKnowledgeDocumentRepository:
-    """SQLite implementation of knowledge document metadata persistence."""
+class SQLAlchemyKnowledgeDocumentRepository:
+    """SQLAlchemy implementation of knowledge document metadata persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -850,8 +850,8 @@ class SQLiteKnowledgeDocumentRepository:
         return _knowledge_document_record(row)
 
 
-class SQLiteDocumentIndexTaskRepository:
-    """SQLite implementation of document index task persistence."""
+class SQLAlchemyDocumentIndexTaskRepository:
+    """SQLAlchemy implementation of document index task persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -1049,8 +1049,8 @@ class SQLiteDocumentIndexTaskRepository:
         )
 
 
-class SQLiteDiagnosticMemoryRepository:
-    """SQLite implementation of AIOps diagnostic memory persistence."""
+class SQLAlchemyDiagnosticMemoryRepository:
+    """SQLAlchemy implementation of AIOps diagnostic memory persistence."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -1536,28 +1536,28 @@ class SQLiteDiagnosticMemoryRepository:
         return [_graph_checkpoint_record(row) for row in rows]
 
 
-def create_sqlite_memory_repositories(
+def create_sqlalchemy_memory_repositories(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> MemoryRepositories:
-    """Create a repository bundle backed by SQLite-compatible SQLAlchemy sessions."""
-    from super_ai.memory.extended_sqlite import (
-        SQLiteBackgroundJobRepository,
-        SQLiteMcpConnectionRepository,
-        SQLiteUserFeedbackRepository,
+    """Create a repository bundle backed by SQLAlchemy sessions."""
+    from super_ai.memory.extended_sqlalchemy import (
+        SQLAlchemyBackgroundJobRepository,
+        SQLAlchemyMcpConnectionRepository,
+        SQLAlchemyUserFeedbackRepository,
     )
 
     return MemoryRepositories(
-        chat=SQLiteChatMemoryRepository(session_factory),
-        chat_configurations=SQLiteUserChatConfigurationRepository(session_factory),
-        chat_prompts=SQLiteUserChatPromptRepository(session_factory),
-        chat_skills=SQLiteUserChatSkillRepository(session_factory),
-        documents=SQLiteKnowledgeDocumentRepository(session_factory),
-        document_index_tasks=SQLiteDocumentIndexTaskRepository(session_factory),
-        diagnostics=SQLiteDiagnosticMemoryRepository(session_factory),
-        tool_call_audits=SQLiteToolCallAuditRepository(session_factory),
-        background_jobs=SQLiteBackgroundJobRepository(session_factory),
-        feedback=SQLiteUserFeedbackRepository(session_factory),
-        mcp_connections=SQLiteMcpConnectionRepository(session_factory),
+        chat=SQLAlchemyChatMemoryRepository(session_factory),
+        chat_configurations=SQLAlchemyUserChatConfigurationRepository(session_factory),
+        chat_prompts=SQLAlchemyUserChatPromptRepository(session_factory),
+        chat_skills=SQLAlchemyUserChatSkillRepository(session_factory),
+        documents=SQLAlchemyKnowledgeDocumentRepository(session_factory),
+        document_index_tasks=SQLAlchemyDocumentIndexTaskRepository(session_factory),
+        diagnostics=SQLAlchemyDiagnosticMemoryRepository(session_factory),
+        tool_call_audits=SQLAlchemyToolCallAuditRepository(session_factory),
+        background_jobs=SQLAlchemyBackgroundJobRepository(session_factory),
+        feedback=SQLAlchemyUserFeedbackRepository(session_factory),
+        mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
     )
 
 

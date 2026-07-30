@@ -11,7 +11,7 @@ from super_ai.auth.service import (
     AuthService,
     normalize_email,
 )
-from super_ai.auth.sqlite import SQLiteAuthRepository
+from super_ai.auth.sqlalchemy import SQLAlchemyAuthRepository
 
 __all__ = [
     "AuthError",
@@ -19,7 +19,7 @@ __all__ = [
     "AuthResult",
     "AuthService",
     "AuthSessionRecord",
-    "SQLiteAuthRepository",
+    "SQLAlchemyAuthRepository",
     "UserRecord",
     "normalize_email",
 ]

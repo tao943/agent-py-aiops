@@ -8,7 +8,7 @@ import pytest
 
 from super_ai.documents.indexing import DocumentIndexingService, chunk_document_text
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.sqlite import create_sqlite_memory_repositories
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.vector_store import VectorChunkRecord
 
 
@@ -105,7 +105,7 @@ async def test_document_indexing_service_writes_scoped_chunks_and_marks_success(
     vector_store = FakeIndexVectorStore()
     embedding_model = FakeEmbeddingModel()
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         document = await repositories.documents.create_document(
             owner_user_id="user-a",
             document_id="doc-1",
@@ -189,7 +189,7 @@ async def test_document_indexing_service_indexes_more_than_ten_chunks(
     vector_store = FakeIndexVectorStore()
     embedding_model = FakeEmbeddingModel()
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         document = await repositories.documents.create_document(
             owner_user_id="user-a",
             document_id="doc-large",
@@ -234,7 +234,7 @@ async def test_document_indexing_service_records_safe_failure_reason(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         document = await repositories.documents.create_document(
             owner_user_id="user-a",
             document_id="doc-empty",

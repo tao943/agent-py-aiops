@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from super_ai.auth.service import AuthError, AuthService
-from super_ai.auth.sqlite import SQLiteAuthRepository
+from super_ai.auth.sqlalchemy import SQLAlchemyAuthRepository
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.models import AuthSessionModel, UserModel
 
@@ -16,7 +16,7 @@ async def test_register_hashes_password_and_creates_revocable_session(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        service = AuthService(SQLiteAuthRepository(session_factory))
+        service = AuthService(SQLAlchemyAuthRepository(session_factory))
 
         auth_result = await service.register(
             email="Timi@Example.COM",
@@ -51,7 +51,7 @@ async def test_register_hashes_password_and_creates_revocable_session(
 async def test_duplicate_email_and_invalid_login_fail_safely(migrated_database_url: str) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        service = AuthService(SQLiteAuthRepository(create_memory_session_factory(engine)))
+        service = AuthService(SQLAlchemyAuthRepository(create_memory_session_factory(engine)))
         await service.register(
             email="timi@example.com",
             display_name="Timi",
@@ -81,7 +81,7 @@ async def test_duplicate_email_and_invalid_login_fail_safely(migrated_database_u
 async def test_token_validation_and_logout_revocation(migrated_database_url: str) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        service = AuthService(SQLiteAuthRepository(create_memory_session_factory(engine)))
+        service = AuthService(SQLAlchemyAuthRepository(create_memory_session_factory(engine)))
         auth_result = await service.register(
             email="timi@example.com",
             display_name="Timi",

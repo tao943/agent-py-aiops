@@ -15,7 +15,7 @@ from super_ai.llm import LlmProvider, RerankResult
 from super_ai.mcp_client import LocalMcpClient, McpClientError, McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import DiagnosticTaskRecord, TenantScopeError
-from super_ai.memory.sqlite import create_sqlite_memory_repositories
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import StoredVectorChunk, VectorSearchResult
 
@@ -223,7 +223,7 @@ async def test_diagnostic_runs_sop_first_persists_evidence_and_audits(
     caplog.set_level(logging.INFO, logger="super_ai.aiops.diagnostics")
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         task = await repositories.diagnostics.create_task(
             owner_user_id="user-a",
             task_id="diagnostic-a",
@@ -354,7 +354,7 @@ async def test_diagnostic_no_sop_and_mcp_failure_are_explicit(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         task = await repositories.diagnostics.create_task(
             owner_user_id="user-a",
             task_id="diagnostic-b",
@@ -566,7 +566,7 @@ async def test_diagnostic_evidence_repository_rejects_cross_tenant_step(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         task_a = await repositories.diagnostics.create_task(
             owner_user_id="user-a",
             task_id="diagnostic-owner-a",

@@ -8,7 +8,7 @@ import pytest
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService
 from super_ai.llm import LlmProvider
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.sqlite import create_sqlite_memory_repositories
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 
 
 @dataclass
@@ -37,7 +37,7 @@ async def test_thirty_turn_mode_compacts_without_deleting_history(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(
+        repositories = create_sqlalchemy_memory_repositories(
             create_memory_session_factory(engine)
         )
         session = await repositories.chat.create_session(
@@ -88,7 +88,7 @@ async def test_context_threshold_and_manual_mode_are_session_scoped(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(
+        repositories = create_sqlalchemy_memory_repositories(
             create_memory_session_factory(engine)
         )
         threshold_session = await repositories.chat.create_session(
@@ -160,7 +160,7 @@ async def test_hard_limit_rejects_candidate_without_persisting_it(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(
+        repositories = create_sqlalchemy_memory_repositories(
             create_memory_session_factory(engine)
         )
         session = await repositories.chat.create_session(

@@ -29,14 +29,14 @@ from super_ai.memory.repositories import (
     UserChatSkillRecord,
     UserChatSkillRepository,
 )
-from super_ai.memory.sqlite import (
-    SQLiteChatMemoryRepository,
-    SQLiteDiagnosticMemoryRepository,
-    SQLiteToolCallAuditRepository,
-    SQLiteUserChatConfigurationRepository,
-    SQLiteUserChatPromptRepository,
-    SQLiteUserChatSkillRepository,
-    create_sqlite_memory_repositories,
+from super_ai.memory.sqlalchemy import (
+    SQLAlchemyChatMemoryRepository,
+    SQLAlchemyDiagnosticMemoryRepository,
+    SQLAlchemyToolCallAuditRepository,
+    SQLAlchemyUserChatConfigurationRepository,
+    SQLAlchemyUserChatPromptRepository,
+    SQLAlchemyUserChatSkillRepository,
+    create_sqlalchemy_memory_repositories,
 )
 
 __all__ = [
@@ -59,17 +59,17 @@ __all__ = [
     "MemoryDatabaseSettings",
     "MemoryRepositories",
     "ReportEvidenceLinkRecord",
-    "SQLiteChatMemoryRepository",
-    "SQLiteDiagnosticMemoryRepository",
-    "SQLiteToolCallAuditRepository",
-    "SQLiteUserChatConfigurationRepository",
-    "SQLiteUserChatPromptRepository",
-    "SQLiteUserChatSkillRepository",
+    "SQLAlchemyChatMemoryRepository",
+    "SQLAlchemyDiagnosticMemoryRepository",
+    "SQLAlchemyToolCallAuditRepository",
+    "SQLAlchemyUserChatConfigurationRepository",
+    "SQLAlchemyUserChatPromptRepository",
+    "SQLAlchemyUserChatSkillRepository",
     "TimeRangeFilter",
     "ToolCallAuditRecord",
     "ToolCallAuditRepository",
     "create_memory_engine",
     "create_memory_session_factory",
-    "create_sqlite_memory_repositories",
+    "create_sqlalchemy_memory_repositories",
     "load_memory_database_settings",
 ]

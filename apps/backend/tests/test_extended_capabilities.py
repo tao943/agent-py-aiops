@@ -11,7 +11,7 @@ from super_ai.api.app import create_app
 from super_ai.jobs import BackgroundJobRuntime
 from super_ai.mcp_client import LocalMcpClient, McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.extended_sqlite import SQLiteBackgroundJobRepository
+from super_ai.memory.extended_sqlalchemy import SQLAlchemyBackgroundJobRepository
 from super_ai.vector_store import MilvusHealthCheckResult
 
 
@@ -25,7 +25,7 @@ async def test_background_runtime_recovers_leases_persists_events_and_retries(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
-    repository = SQLiteBackgroundJobRepository(create_memory_session_factory(engine))
+    repository = SQLAlchemyBackgroundJobRepository(create_memory_session_factory(engine))
     handled: list[str] = []
 
     async def handler(context: Any) -> None:
@@ -232,7 +232,7 @@ async def test_mcp_connection_api_validates_scope_and_persists_discovered_tools(
 
 
 async def _wait_for_job(
-    repository: SQLiteBackgroundJobRepository,
+    repository: SQLAlchemyBackgroundJobRepository,
     owner_user_id: str,
     job_id: str,
     status: str,

@@ -20,13 +20,13 @@ from super_ai.memory.repositories import (
     TimeRangeFilter,
     ToolCallAuditRecord,
 )
-from super_ai.memory.sqlite import (
-    SQLiteChatMemoryRepository,
-    SQLiteDiagnosticMemoryRepository,
-    SQLiteKnowledgeDocumentRepository,
-    SQLiteUserChatPromptRepository,
-    SQLiteUserChatSkillRepository,
-    create_sqlite_memory_repositories,
+from super_ai.memory.sqlalchemy import (
+    SQLAlchemyChatMemoryRepository,
+    SQLAlchemyDiagnosticMemoryRepository,
+    SQLAlchemyKnowledgeDocumentRepository,
+    SQLAlchemyUserChatPromptRepository,
+    SQLAlchemyUserChatSkillRepository,
+    create_sqlalchemy_memory_repositories,
 )
 
 
@@ -35,7 +35,7 @@ async def test_chat_repository_persists_and_queries_history(migrated_database_ur
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        chat_repository = SQLiteChatMemoryRepository(session_factory)
+        chat_repository = SQLAlchemyChatMemoryRepository(session_factory)
         created_at = datetime(2026, 7, 8, 10, 0, tzinfo=timezone.utc)
 
         session = await chat_repository.create_session(
@@ -116,7 +116,7 @@ async def test_chat_repository_denies_cross_tenant_parent_writes(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        chat_repository = SQLiteChatMemoryRepository(session_factory)
+        chat_repository = SQLAlchemyChatMemoryRepository(session_factory)
         await chat_repository.create_session(
             owner_user_id="user-a",
             session_id="session-a",
@@ -142,7 +142,7 @@ async def test_chat_repository_updates_clears_and_deletes_sessions_by_owner(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        chat_repository = SQLiteChatMemoryRepository(session_factory)
+        chat_repository = SQLAlchemyChatMemoryRepository(session_factory)
         created_at = datetime(2026, 7, 9, 9, 0, tzinfo=timezone.utc)
         session = await chat_repository.create_session(
             owner_user_id="user-a",
@@ -241,7 +241,7 @@ async def test_diagnostic_repository_persists_artifacts_and_filters_tasks(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        diagnostic_repository = SQLiteDiagnosticMemoryRepository(session_factory)
+        diagnostic_repository = SQLAlchemyDiagnosticMemoryRepository(session_factory)
         created_at = datetime(2026, 7, 8, 11, 0, tzinfo=timezone.utc)
 
         await diagnostic_repository.create_task(
@@ -338,7 +338,7 @@ async def test_diagnostic_repository_denies_cross_tenant_artifact_writes(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        diagnostic_repository = SQLiteDiagnosticMemoryRepository(session_factory)
+        diagnostic_repository = SQLAlchemyDiagnosticMemoryRepository(session_factory)
         await diagnostic_repository.create_task(
             owner_user_id="user-a",
             task_id="task-a",
@@ -364,7 +364,7 @@ async def test_diagnosis_case_repository_is_owner_scoped_and_idempotent(
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
         created_at = datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)
         task = await repositories.diagnostics.create_task(
             owner_user_id="user-a",
@@ -452,7 +452,7 @@ async def test_document_repository_persists_queries_duplicates_and_marks_deleted
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        document_repository = SQLiteKnowledgeDocumentRepository(session_factory)
+        document_repository = SQLAlchemyKnowledgeDocumentRepository(session_factory)
         uploaded_at = datetime(2026, 7, 9, 12, 0, tzinfo=timezone.utc)
 
         document = await document_repository.create_document(
@@ -520,7 +520,7 @@ async def test_document_index_task_repository_tracks_status_failure_and_retry(
     engine = create_memory_engine(migrated_database_url)
     try:
         session_factory = create_memory_session_factory(engine)
-        repositories = create_sqlite_memory_repositories(session_factory)
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
         created_at = datetime(2026, 7, 9, 14, 0, tzinfo=timezone.utc)
 
         await repositories.documents.create_document(
@@ -621,13 +621,13 @@ def test_repository_boundary_exposes_protocols_and_records_only() -> None:
 async def test_sqlite_repository_bundle_can_be_injected(migrated_database_url: str) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
-        repositories = create_sqlite_memory_repositories(create_memory_session_factory(engine))
+        repositories = create_sqlalchemy_memory_repositories(create_memory_session_factory(engine))
     finally:
         await engine.dispose()
 
-    assert isinstance(repositories.chat, SQLiteChatMemoryRepository)
-    assert isinstance(repositories.documents, SQLiteKnowledgeDocumentRepository)
+    assert isinstance(repositories.chat, SQLAlchemyChatMemoryRepository)
+    assert isinstance(repositories.documents, SQLAlchemyKnowledgeDocumentRepository)
     assert repositories.document_index_tasks is not None
-    assert isinstance(repositories.diagnostics, SQLiteDiagnosticMemoryRepository)
-    assert isinstance(repositories.chat_prompts, SQLiteUserChatPromptRepository)
-    assert isinstance(repositories.chat_skills, SQLiteUserChatSkillRepository)
+    assert isinstance(repositories.diagnostics, SQLAlchemyDiagnosticMemoryRepository)
+    assert isinstance(repositories.chat_prompts, SQLAlchemyUserChatPromptRepository)
+    assert isinstance(repositories.chat_skills, SQLAlchemyUserChatSkillRepository)

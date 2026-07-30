@@ -37,7 +37,7 @@ from super_ai.alerts import (
 )
 from super_ai.auth.repositories import UserRecord
 from super_ai.auth.service import AuthError, AuthResult, AuthService
-from super_ai.auth.sqlite import SQLiteAuthRepository
+from super_ai.auth.sqlalchemy import SQLAlchemyAuthRepository
 from super_ai.chat import (
     ChatAgentRunner,
     ChatStreamingService,
@@ -111,7 +111,7 @@ from super_ai.memory.repositories import (
     UserChatSkillRepository,
     UserFeedbackRecord,
 )
-from super_ai.memory.sqlite import create_sqlite_memory_repositories
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.observability import (
     configure_structured_logging,
     elapsed_ms,
@@ -329,8 +329,8 @@ def create_app(
     app.state.project_config_path = resolved_project_config_path
     app.state.memory_engine = engine
     app.state.memory_session_factory = session_factory
-    app.state.auth_service = AuthService(SQLiteAuthRepository(session_factory))
-    repositories = create_sqlite_memory_repositories(session_factory)
+    app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
+    repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
         config_path=resolved_project_config_path

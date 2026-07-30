@@ -1,4 +1,4 @@
-"""SQLite-leased durable worker runtime for local background work."""
+"""Database-leased durable worker runtime for local background work."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class BackgroundJobContext:
 
 
 class BackgroundJobRuntime:
-    """Run registered handlers using renewable SQLite leases."""
+    """Run registered handlers using renewable database leases."""
 
     def __init__(
         self,
