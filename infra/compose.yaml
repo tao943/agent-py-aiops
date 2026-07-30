@@ -2,6 +2,20 @@ name: agent-py
 
 services:
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   postgres:
     image: postgres:16
     environment:
@@ -107,6 +121,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  redis-data:
   postgres-data:
   etcd-data:
   minio-data:

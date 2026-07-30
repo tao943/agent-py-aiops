@@ -18,6 +18,25 @@ The SQL files in `infra/postgres/init/` run only when PostgreSQL initializes a
 new `postgres-data` volume. To rerun them, remove that volume deliberately and
 then start the service again.
 
+## Redis recoverable runtime
+
+Start Redis from the repository root:
+
+```bash
+docker compose -f infra/compose.yaml up -d redis
+docker compose -f infra/compose.yaml ps redis
+docker compose -f infra/compose.yaml exec redis redis-cli ping
+```
+
+Redis listens on `localhost:6379`. It is healthy when Compose reports
+`healthy` and `redis-cli ping` returns `PONG`. The service uses Redis 7 with
+append-only-file (AOF) persistence in the named `redis-data` volume.
+
+Redis supports caches, rate limits, and low-latency event delivery only. It is
+recoverable infrastructure: PostgreSQL remains the source of truth for jobs
+and their user-visible events. Redis may be restarted or its data rebuilt
+without treating it as a durable job queue or the canonical event store.
+
 `infra/compose.yaml` 仅管理本机开发所需的容器基础设施：**PostgreSQL，以及 etcd, MinIO, Milvus, Attu 和 Alertmanager**。后端、前端和腾讯云 CLS MCP Server 由仓库根目录启动脚本直接在本机启动，不属于 Compose 服务。
 
 ## 启动基础设施

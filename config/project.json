@@ -8,6 +8,16 @@
     "port": 8000,
     "databaseUrl": "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py"
   },
+  "redis": {
+    "url": "redis://localhost:6379/0",
+    "streamPrefix": "agent-py",
+    "streamMaxlen": 10000,
+    "blockTimeoutMs": 1000,
+    "eventDedupeTtlSeconds": 86400,
+    "mcpCacheTtlSeconds": 60,
+    "retrievalCacheTtlSeconds": 300,
+    "rateLimit": {"capacity": 60, "refillPerSecond": 1.0}
+  },
   "frontend": {
     "title": "Super AI",
     "apiBaseUrl": "http://127.0.0.1:8000",
