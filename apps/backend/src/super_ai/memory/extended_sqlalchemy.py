@@ -145,7 +145,9 @@ class SQLAlchemyBackgroundJobRepository:
                 .order_by(
                     BackgroundJobModel.available_at.asc(),
                     BackgroundJobModel.created_at.asc(),
+                    BackgroundJobModel.id.asc(),
                 )
+                .with_for_update(skip_locked=True)
                 .limit(1)
             )
             row = (await session.scalars(stmt)).first()
@@ -157,7 +159,9 @@ class SQLAlchemyBackgroundJobRepository:
             row.lease_expires_at = lease_expires_at
             row.started_at = row.started_at or claimed_at
             row.updated_at = claimed_at
-        return _background_job_record(row)
+            await session.flush()
+            record = _background_job_record(row)
+        return record
 
     async def renew_lease(
         self,
@@ -188,7 +192,13 @@ class SQLAlchemyBackgroundJobRepository:
     ) -> BackgroundJobEventRecord:
         now = utc_now()
         async with self._session_factory() as session, session.begin():
-            job = await session.get(BackgroundJobModel, job_id)
+            job = (
+                await session.scalars(
+                    select(BackgroundJobModel)
+                    .where(BackgroundJobModel.id == job_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
             if job is None or job.owner_user_id != owner_user_id:
                 raise PermissionError(f"Background job is not accessible: {job_id}")
             latest = await session.scalar(
@@ -205,7 +215,9 @@ class SQLAlchemyBackgroundJobRepository:
                 created_at=now,
             )
             session.add(row)
-        return _background_job_event_record(row)
+            await session.flush()
+            record = _background_job_event_record(row)
+        return record
 
     async def list_events(
         self,
