@@ -1,6 +1,6 @@
 # Agent Py
 
-Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，FastAPI 提供 API 与 Agent 运行时，SQLite 保存用户归属的数据，Milvus 保存受权限控制的知识向量，腾讯云官方 CLS MCP Server 提供真实日志访问。
+Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，FastAPI 提供 API 与 Agent 运行时，PostgreSQL 16 保存用户归属的关系数据，Milvus 保存受权限控制的知识向量，腾讯云官方 CLS MCP Server 提供真实日志访问。
 
 ## 当前功能
 
@@ -15,13 +15,13 @@ Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，F
 
 ### 流式聊天与 Agent
 
-- **持久化会话**：支持创建、切换、倒序查询、自动生成标题、清空和删除会话；SQLite 是会话与消息的主存储。
+- **持久化会话**：支持创建、切换、倒序查询、自动生成标题、清空和删除会话；PostgreSQL 16 是会话与消息的主存储。
 - **流式聊天**：使用 `langchain` `create_agent`、OpenAI-compatible Qwen 和 SSE 输出内容增量、工具调用、引用、完成与错误事件，前端以可感知的打字机节奏渲染回答。
 - **自主工具调用**：模型根据问题自行决定是否调用知识库、当前时间或已启用 MCP 工具，不把 RAG 固定为每次对话的前置流程。
 - **Prompt 配置**：用户可以创建、编辑、选择和删除会话使用的系统 Prompt，服务端负责组装最终 system prompt。
 - **渐进式 Skill**：支持上传和选择符合 `SKILL.md` 规范的 Skill；初始上下文只注入 `name` 与 `description`，模型需要时再通过 `load_skill` 加载正文。
 - **会话级记忆模式**：每个会话可独立选择“每 30 轮压缩”“上下文占用 70% 自动压缩”或“手动压缩”，输入框旁展示上下文窗口占用率；压缩只生成摘要，不删除完整历史。
-- **推理与工具过程**：回答可折叠展示推理上下文、工具调用状态和结果摘要，工具调用同时写入 SQLite 审计记录。
+- **推理与工具过程**：回答可折叠展示推理上下文、工具调用状态和结果摘要，工具调用同时写入 PostgreSQL 审计记录。
 - **内容反馈**：用户可对助手回答和单条知识引用点赞、点踩，填写问题类型、评论和纠正内容；反馈可更新、删除并在重新打开会话后恢复。
 
 ### 知识库、索引与 RAG
@@ -38,7 +38,7 @@ Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，F
 
 - **Plan-Execute-Replan**：使用 LangGraph 实现 `Planner -> Executor -> Replanner -> Report`，Planner 先检索 SOP，Executor 调用真实工具，Replanner 决定继续、调整或生成报告。
 - **真实告警入口**：聚合 Prometheus v1 和 Alertmanager v2 活跃告警，用户可刷新告警并从某条告警直接创建诊断任务。
-- **持久后台执行**：诊断由 SQLite durable job runtime 调度，不阻塞 API；页面展示排队、执行、取消、失败和完成状态，并支持用户取消任务。
+- **持久后台执行**：诊断由 PostgreSQL durable job runtime 调度，不阻塞 API；页面展示排队、执行、取消、失败和完成状态，并支持用户取消任务。
 - **诊断 SSE**：实时输出计划、步骤、工具调用、证据、重规划、报告、完成和错误事件；断开后可根据持久化事件和任务数据恢复。
 - **证据链与报告**：持久化原始输入、计划、执行步骤、工具调用、日志/指标/告警/知识引用证据、checkpoint 和 Markdown 报告，报告结论可追溯到证据。
 - **诊断历史与案例库**：支持按用户查询历史任务和完整证据链；成功诊断可自动或手动沉淀为用户知识库中的故障案例并参与后续检索。
@@ -53,10 +53,10 @@ Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，F
 
 ### 后台任务、存储与平台能力
 
-- **Durable job runtime**：SQLite 保存后台任务、事件、尝试次数和租约；Worker 支持并发领取、心跳续租、进程重启恢复、指数退避重试、超时和协作式取消。
-- **Repository 存储边界**：SQLAlchemy 模型和 Repository 隔离业务层与 SQLite 细节，Alembic 管理迁移，并为后续替换 PostgreSQL 保留边界。
+- **Durable job runtime**：PostgreSQL 保存后台任务、事件、尝试次数和租约；Worker 支持并发领取、心跳续租、进程重启恢复、指数退避重试、超时和协作式取消。
+- **Repository 存储边界**：SQLAlchemy 模型和 Repository 隔离业务层与 PostgreSQL 细节，Alembic 管理 PostgreSQL 迁移。
 - **统一 API 契约**：`packages/api-contracts` 是前后端共享的 HTTP、错误码、OpenAPI 和 SSE 类型来源，覆盖认证、聊天、知识库、后台任务、反馈、MCP 和 AIOps。
-- **运行状态检查与指标**：`/health` 检查存活，`/ready` 检查 SQLite、Milvus、Qwen 与 MCP，`/config/check` 校验项目配置，`/metrics` 暴露本地请求指标。
+- **运行状态检查与指标**：`/health` 检查存活，`/ready` 检查 PostgreSQL、Milvus、Qwen 与 MCP，`/config/check` 校验项目配置，`/metrics` 暴露本地请求指标。
 - **结构化可观测性**：请求日志包含 request id、路径、状态和耗时；敏感字段统一脱敏，Agent/MCP 工具调用有独立审计生命周期。
 - **真实演示数据工具**：提供显式脚本上传 Java 电商事故 CLS 日志、发布本地告警和索引 SOP，可完成“告警 -> 诊断 -> 证据 -> 报告 -> 案例知识”的完整演示。
 - **本地优先启动**：Docker Compose 仅托管 etcd、MinIO、Milvus、Attu 和 Alertmanager；前端、后端与 CLS MCP Server 使用 macOS/Linux/Windows 本机启动脚本运行。
@@ -74,7 +74,7 @@ Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，F
 ## 项目结构
 
 ```text
-apps/backend/          FastAPI、LangChain/LangGraph、SQLite、Alembic、uv
+apps/backend/          FastAPI、LangChain/LangGraph、PostgreSQL、Alembic、uv
 apps/frontend/         Vue 3、Vite、TypeScript
 packages/api-contracts 共享的 TypeScript HTTP 与 SSE 契约
 config/                可提交的配置模板与被 Git 忽略的本地 JSON 配置
@@ -111,7 +111,7 @@ cp config/user.project.template.json config/user.project.json
 
 ## 本地开发
 
-Docker Compose **只**负责运行 etcd、MinIO、Milvus、Attu 和 Alertmanager。CLS MCP Server、后端与前端均直接在本机运行，不会通过 Compose 启动。
+Docker Compose **只**负责运行 PostgreSQL、etcd、MinIO、Milvus、Attu 和 Alertmanager。CLS MCP Server、后端与前端均直接在本机运行，不会通过 Compose 启动。
 
 ### 一键启动
 
@@ -127,7 +127,7 @@ Docker Compose **只**负责运行 etcd、MinIO、Milvus、Attu 和 Alertmanager
 scripts\start-local.bat
 ```
 
-启动脚本会启动基础设施容器、准备项目依赖、执行 SQLite 迁移，并在本机启动 MCP、后端和前端。进程日志写入 `apps/backend/var/`。
+启动脚本会启动基础设施容器、准备项目依赖、执行 PostgreSQL Alembic 迁移，并在本机启动 MCP、后端和前端。进程日志写入 `apps/backend/var/`。
 
 ### 手动启动
 
@@ -142,6 +142,13 @@ uv run alembic upgrade head
 ```
 
 在仓库根目录启动所有容器基础设施：
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres etcd minio milvus attu alertmanager
+```
+
+PostgreSQL is required for the backend. To start only the remaining optional
+Compose-managed services after PostgreSQL is already running, use:
 
 ```bash
 docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
@@ -198,3 +205,36 @@ npm run typecheck
 npm run test
 npm run build
 ```
+
+## PostgreSQL runtime operations
+
+PostgreSQL 16 is the sole relational source of truth. The development database is
+`agent_py`; integration tests use the isolated `agent_py_test` database. Start and
+inspect only PostgreSQL when preparing the backend:
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml ps postgres
+cd apps/backend
+uv run alembic upgrade head
+uv run uvicorn super_ai.api.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Run Alembic before starting the backend. This migration is a fresh-database policy:
+no SQLite importer, compatibility path, or dual-write path exists because no source
+database was supplied for preservation.
+
+Background workers claim jobs with PostgreSQL row locks and `FOR UPDATE SKIP LOCKED`.
+The claiming transaction ends before a handler performs external work. Appending an
+event locks the parent job row, serializing event numbers for that job.
+
+Use the Compose container to inspect durable jobs and ordered events:
+
+```bash
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, status, lease_owner, lease_expires_at, created_at FROM background_jobs ORDER BY created_at, id;"
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, event_type, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
+```
+
+`/ready` reports the `postgresql` dependency and its actual `asyncpg` driver. The
+`/config/check` response validates and reports the same `postgresql`/`asyncpg`
+configuration without exposing credentials.

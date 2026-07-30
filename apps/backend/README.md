@@ -59,13 +59,13 @@ result = await provider.check_readiness()
 报告、工具调用审计以及 LangGraph checkpoints 的仓库背后
 `src/super_ai/memory` 中的接口
 
-默认的本地数据库 URL 是：
+默认的本地 PostgreSQL 数据库 URL 是：
 
 ```json
-"memoryDatabaseUrl": "sqlite+aiosqlite:///./var/memory.sqlite3"
+"databaseUrl": "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py"
 ```
 
-使用 Alembic 初始化或升级本地 SQLite 模式：
+使用 Alembic 初始化或升级本地 PostgreSQL 模式：
 
 ```bash
 mkdir -p var
@@ -74,8 +74,8 @@ uv run alembic upgrade head
 
 业务服务应依赖 `MemoryRepositories`，
 `ChatMemoryRepository`，或 `DiagnosticMemoryRepository` 从
-`super_ai.memory.repositories`。SQLite 特定的代码位于
-`super_ai.memory.sqlite`。
+`super_ai.memory.repositories`。SQLAlchemy/PostgreSQL 实现位于
+`super_ai.memory.sqlalchemy`。
 
 ## Milvus 向量存储
 
@@ -114,7 +114,7 @@ API 暴露了：
 
 密码通过 `pwdlib` 使用 Argon2 进行哈希处理；明文密码不会被存储。
 身份验证会话使用不透明的 bearer 令牌，该令牌一旦返回给前端就会被使用。
-仅在 SQLite 中存储 SHA-256 令牌哈希，因此注销可以撤销当前会话。
+仅在 PostgreSQL 中存储 SHA-256 令牌哈希，因此注销可以撤销当前会话。
 。
 
 知识库、聊天和 AIOps API 路由需要：
@@ -122,3 +122,31 @@ API 暴露了：
 ```text
 Authorization: Bearer <token>
 ```
+
+## PostgreSQL runtime operations
+
+PostgreSQL 16 is the only relational runtime. `agent_py` is the development
+database and `agent_py_test` is reserved for isolated integration tests. From the
+repository root, start and inspect PostgreSQL with:
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml ps postgres
+```
+
+Before starting this backend, run `uv run alembic upgrade head` from this directory.
+The schema is intended for fresh PostgreSQL databases: no SQLite importer, dual-write
+path, or compatibility path is provided because no source database was supplied for
+preservation.
+
+The durable job repository claims queued work with PostgreSQL row locks and `FOR
+UPDATE SKIP LOCKED`; it commits before handlers do external work. Event appends lock
+the parent job row so each job's event sequence is serialized. Inspect the data with:
+
+```bash
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, status, lease_owner, lease_expires_at, created_at FROM background_jobs ORDER BY created_at, id;"
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT job_id, sequence, event_type, created_at FROM background_job_events ORDER BY job_id, sequence, created_at, id;"
+```
+
+`/ready` reports `postgresql` and the actual `asyncpg` driver. `/config/check` uses
+the same names when reporting PostgreSQL configuration and dependency status.
