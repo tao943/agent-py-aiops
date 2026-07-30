@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -17,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -91,7 +91,7 @@ class BackgroundJobModel(Base):
     resource_type: Mapped[str] = mapped_column(String(80), nullable=False)
     resource_id: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=900)
@@ -126,7 +126,7 @@ class BackgroundJobEventModel(Base):
     )
     owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -177,7 +177,7 @@ class McpConnectionModel(Base):
     retries: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_check_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_tool_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    last_tools: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    last_tools: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -219,7 +219,7 @@ class KnowledgeDocumentModel(Base):
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     index_status: Mapped[str] = mapped_column(String(40), nullable=False)
     source: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -311,7 +311,7 @@ class UserChatConfigurationModel(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     system_prompt_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    skill_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    skill_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
@@ -398,7 +398,7 @@ class ChatMessageModel(Base):
     )
     role: Mapped[str] = mapped_column(String(40), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -444,7 +444,7 @@ class AgentToolCallAuditModel(Base):
     )
     tool_name: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    arguments: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -470,8 +470,8 @@ class DiagnosticTaskModel(Base):
     owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     query: Mapped[str] = mapped_column(Text, nullable=False)
-    input_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -508,7 +508,7 @@ class DiagnosticReportModel(Base):
     )
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -552,11 +552,11 @@ class DiagnosticCaseModel(Base):
     )
     alert_name: Mapped[str] = mapped_column(String(240), nullable=False)
     service: Mapped[str] = mapped_column(String(240), nullable=False)
-    keywords: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     root_cause: Mapped[str] = mapped_column(Text, nullable=False)
     remediation: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    evidence_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -587,7 +587,7 @@ class DiagnosticStepModel(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     phase: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -630,7 +630,7 @@ class DiagnosticEvidenceModel(Base):
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
     source: Mapped[str] = mapped_column(String(240), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -703,8 +703,8 @@ class ToolCallAuditModel(Base):
     )
     tool_name: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
-    arguments: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -745,8 +745,8 @@ class GraphCheckpointModel(Base):
     thread_id: Mapped[str] = mapped_column(String(160), nullable=False)
     checkpoint_ns: Mapped[str] = mapped_column(String(160), nullable=False)
     checkpoint_id: Mapped[str] = mapped_column(String(160), nullable=False)
-    checkpoint_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False)
+    checkpoint_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
