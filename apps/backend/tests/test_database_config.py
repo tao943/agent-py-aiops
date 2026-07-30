@@ -14,6 +14,21 @@ UNSUPPORTED_POSTGRESQL_URL = (
 )
 
 
+def test_committed_alembic_config_has_no_legacy_sqlite_default() -> None:
+    alembic_config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    alembic_config_text = (BACKEND_ROOT / "alembic.ini").read_text(encoding="utf-8")
+    alembic_environment_text = (BACKEND_ROOT / "alembic" / "env.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert alembic_config.get_main_option("sqlalchemy.url") == ""
+    assert "sqlite" not in alembic_config_text.lower()
+    assert "aiosqlite" not in alembic_config_text.lower()
+    assert "sqlite" not in alembic_environment_text.lower()
+    assert "aiosqlite" not in alembic_environment_text.lower()
+    assert "legacy_database_url_placeholder" not in alembic_environment_text.lower()
+
+
 def test_development_config_uses_postgresql_asyncpg() -> None:
     settings = load_memory_database_settings(ROOT / "config" / "project.json")
     assert settings.database_url.startswith("postgresql+asyncpg://")
