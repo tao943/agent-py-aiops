@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import cast
+from uuid import uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -207,7 +208,7 @@ class SQLAlchemyBackgroundJobRepository:
                 )
             )
             row = BackgroundJobEventModel(
-                id=f"job_event_{job_id[-16:]}_{int(latest or 0) + 1}",
+                id=f"job_event_{uuid4().hex}",
                 job_id=job_id,
                 owner_user_id=owner_user_id,
                 sequence=int(latest or 0) + 1,

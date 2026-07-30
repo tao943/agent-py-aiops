@@ -4,9 +4,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.extended_sqlalchemy import SQLAlchemyBackgroundJobRepository
+from super_ai.memory.models import BackgroundJobModel
 
 
 @pytest.mark.asyncio
@@ -150,3 +152,107 @@ async def test_concurrent_events_receive_unique_ordered_sequences(
     sequences = [event.sequence for event in events]
     assert sequences == list(range(1, 21))
     assert len(set(sequences)) == 20
+
+
+@pytest.mark.asyncio
+async def test_events_for_jobs_with_matching_suffixes_have_unique_ids(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    repository = SQLAlchemyBackgroundJobRepository(session_factory)
+    first_job_id = "first-job-1234567890abcdef"
+    second_job_id = "second-job-1234567890abcdef"
+    try:
+        for job_id in (first_job_id, second_job_id):
+            await repository.enqueue(
+                owner_user_id="owner",
+                job_id=job_id,
+                kind="test",
+                resource_type="resource",
+                resource_id=job_id,
+            )
+        first_event = await repository.append_event(
+            owner_user_id="owner",
+            job_id=first_job_id,
+            payload={"event": "first"},
+        )
+        second_event = await repository.append_event(
+            owner_user_id="owner",
+            job_id=second_job_id,
+            payload={"event": "second"},
+        )
+    finally:
+        await engine.dispose()
+
+    assert [first_event.sequence, second_event.sequence] == [1, 1]
+    assert first_event.id != second_event.id
+
+
+@pytest.mark.asyncio
+async def test_claim_next_skips_a_candidate_locked_by_another_transaction(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    repository = SQLAlchemyBackgroundJobRepository(session_factory)
+    now = datetime.now(timezone.utc)
+    try:
+        await repository.enqueue(
+            owner_user_id="owner",
+            job_id="first-candidate",
+            kind="test",
+            resource_type="resource",
+            resource_id="first",
+            available_at=now,
+        )
+        await repository.enqueue(
+            owner_user_id="owner",
+            job_id="second-candidate",
+            kind="test",
+            resource_type="resource",
+            resource_id="second",
+            available_at=now,
+        )
+
+        async with session_factory() as locking_session:
+            async with locking_session.begin():
+                locked = (
+                    await locking_session.scalars(
+                        select(BackgroundJobModel)
+                        .where(
+                            BackgroundJobModel.status == "queued",
+                            BackgroundJobModel.available_at <= now,
+                            BackgroundJobModel.cancel_requested_at.is_(None),
+                        )
+                        .order_by(
+                            BackgroundJobModel.available_at.asc(),
+                            BackgroundJobModel.created_at.asc(),
+                            BackgroundJobModel.id.asc(),
+                        )
+                        .with_for_update()
+                        .limit(1)
+                    )
+                ).one()
+                assert locked.id == "first-candidate"
+                while_locked = await asyncio.wait_for(
+                    repository.claim_next(
+                        worker_id="worker-one",
+                        lease_expires_at=now + timedelta(seconds=30),
+                        now=now,
+                    ),
+                    timeout=1,
+                )
+
+        after_release = await repository.claim_next(
+            worker_id="worker-two",
+            lease_expires_at=now + timedelta(seconds=30),
+            now=now,
+        )
+    finally:
+        await engine.dispose()
+
+    assert while_locked is not None
+    assert while_locked.id == "second-candidate"
+    assert after_release is not None
+    assert after_release.id == "first-candidate"
