@@ -18,19 +18,20 @@ The SQL files in `infra/postgres/init/` run only when PostgreSQL initializes a
 new `postgres-data` volume. To rerun them, remove that volume deliberately and
 then start the service again.
 
-`infra/compose.yaml` 仅管理本机开发所需的容器基础设施：**etcd, MinIO, Milvus, Attu 和 Alertmanager**。后端、前端和腾讯云 CLS MCP Server 由仓库根目录启动脚本直接在本机启动，不属于 Compose 服务。
+`infra/compose.yaml` 仅管理本机开发所需的容器基础设施：**PostgreSQL，以及 etcd, MinIO, Milvus, Attu 和 Alertmanager**。后端、前端和腾讯云 CLS MCP Server 由仓库根目录启动脚本直接在本机启动，不属于 Compose 服务。
 
 ## 启动基础设施
 
 在仓库根目录执行：
 
 ```bash
-docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d postgres etcd minio milvus attu alertmanager
 ```
 
 服务地址：
 
 - Alertmanager：`http://localhost:9093`
+- PostgreSQL：`localhost:5432`（数据库 `agent_py`）
 - Milvus：`localhost:19530`
 - MinIO 控制台：`http://localhost:9001`
 - Attu：`http://localhost:8001`

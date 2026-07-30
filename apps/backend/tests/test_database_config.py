@@ -33,12 +33,33 @@ def test_current_product_metadata_has_no_legacy_sqlite_terminology() -> None:
     metadata_sources = (
         ROOT / "packages" / "api-contracts" / "src" / "openapi.ts",
         ROOT / "scripts" / "generate_architecture_diagrams.py",
+        ROOT / "AGENTS.md",
+        ROOT / "docs" / "setup" / "linux.md",
+        ROOT / "docs" / "setup" / "macos.md",
+        ROOT / "docs" / "setup" / "windows.md",
+        ROOT / "infra" / "README.md",
     )
 
     for metadata_source in metadata_sources:
         metadata_text = metadata_source.read_text(encoding="utf-8").lower()
         assert "sqlite" not in metadata_text
         assert "aiosqlite" not in metadata_text
+
+
+def test_local_first_topology_places_postgresql_in_compose_infrastructure() -> None:
+    generator_text = (
+        ROOT / "scripts" / "generate_architecture_diagrams.py"
+    ).read_text(encoding="utf-8")
+    local_topology = generator_text.split('"29-local-first-topology"', 1)[1].split(
+        "DiagramSpec(", 1
+    )[0]
+
+    assert '"items": ["Vue :5173", "FastAPI :8000", "CLS MCP :3000"]' in local_topology
+    assert '"subtitle": "仅托管六个服务"' in local_topology
+    assert (
+        '"items": ["PostgreSQL :5432", "Milvus :19530", "etcd", "MinIO", '
+        '"Attu :8001 / Alertmanager :9093"]'
+    ) in local_topology
 
 
 def test_development_config_uses_postgresql_asyncpg() -> None:

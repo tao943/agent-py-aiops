@@ -1407,8 +1407,8 @@ SPECS = (
             "agent": "仓库级 harness 让整个项目可在本机复现",
             "agent_subtitle": "准备依赖、启动基础设施、迁移数据、运行 MCP、后端与前端",
             "columns": [
-                {"title": "本机应用", "subtitle": "不进入 Docker Compose", "accent": "product", "items": ["Vue :5173", "FastAPI :8000", "CLS MCP :3000", "PostgreSQL 本地服务"]},
-                {"title": "Compose 基础设施", "subtitle": "仅托管五个服务", "accent": "agent", "items": ["Milvus :19530", "etcd", "MinIO", "Attu :8001 / Alertmanager :9093"]},
+                {"title": "本机应用", "subtitle": "不进入 Docker Compose", "accent": "product", "items": ["Vue :5173", "FastAPI :8000", "CLS MCP :3000"]},
+                {"title": "Compose 基础设施", "subtitle": "仅托管六个服务", "accent": "agent", "items": ["PostgreSQL :5432", "Milvus :19530", "etcd", "MinIO", "Attu :8001 / Alertmanager :9093"]},
                 {"title": "外部真实服务", "subtitle": "通过项目配置连接", "accent": "spec", "items": ["Qwen / 百炼", "腾讯云 CLS", "可配置 Prometheus", "其他用户级 MCP 服务"]},
                 {"title": "工程验证", "subtitle": "启动不是黑盒", "accent": "evidence", "items": ["/health", "/ready", "/config/check", "/metrics 与结构化日志"]},
             ],

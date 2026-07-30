@@ -8,7 +8,7 @@ Agent Py 是一个本地优先的 AIOps 工作台：
 
 - Vue 3 前端提供认证、聊天、知识库、智能诊断和 MCP 管理界面。
 - FastAPI 后端负责认证、SSE、Agent、RAG、AIOps、后台任务和外部集成。
-- SQLite + SQLAlchemy/Alembic 保存用户归属的业务数据和后台任务状态。
+- PostgreSQL + SQLAlchemy/Alembic 保存用户归属的业务数据和后台任务状态。
 - Milvus 保存带 owner/user/tenant 元数据的知识向量。
 - `langchain` `create_agent` 驱动聊天 Agent，LangGraph 驱动 AIOps Plan-Execute-Replan。
 - 腾讯云官方 CLS MCP Server 提供真实日志工具；不得用 mock 日志或虚构诊断替代。
@@ -18,15 +18,15 @@ Agent Py 是一个本地优先的 AIOps 工作台：
 ```text
 apps/backend/           Python 3.10+、FastAPI、Pydantic v2、SQLAlchemy、uv、pytest
   src/super_ai/         后端业务代码（src 布局）
-  alembic/              SQLite schema 迁移
+  alembic/              PostgreSQL schema 迁移
   tests/                后端测试
-  var/                  本地数据库与运行日志（不提交）
+  var/                  本地运行时产物与日志（不提交）
 apps/frontend/          Vue 3、Vite、TypeScript、Pinia、Vitest
   src/                  页面、组件、stores、API/SSE clients
   tests/                前端单元和组件测试
 packages/api-contracts/ 前后端共享的 TypeScript HTTP、错误码、OpenAPI、SSE 契约
 config/                 可提交模板和被忽略的本地 JSON 配置
-infra/                  etcd、MinIO、Milvus、Attu、Alertmanager 的 Compose 资产
+infra/                  PostgreSQL、etcd、MinIO、Milvus、Attu、Alertmanager 的 Compose 资产
 scripts/                macOS/Linux 与 Windows 本机启动器、文档图生成器
 openspec/               主规格、活动变更和归档
 docs/                   VitePress 文档、安装指南、教程与 OpenSpec WIKI
@@ -69,7 +69,7 @@ npm run docs:build
 openspec validate --all
 
 # 本地基础设施
-docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d postgres etcd minio milvus attu alertmanager
 docker compose -f infra/compose.yaml down
 
 # 完整本机启动（基础设施 + 迁移 + CLS MCP + 后端 + 前端）
@@ -92,9 +92,9 @@ Windows 使用 `scripts\start-local.bat`。不要引入 Poetry、PDM、pip-tools
 ## 后端约定
 
 - Python 必须有完整类型注解，并通过 Ruff 与 strict Pyright；目标版本为 Python 3.10。
-- 业务层依赖 Protocol、Repository 或显式注入的服务，不要把 SQLite、Milvus、LLM、MCP 的具体实现散落到领域代码。
+- 业务层依赖 Protocol、Repository 或显式注入的服务，不要把 PostgreSQL、Milvus、LLM、MCP 的具体实现散落到领域代码。
 - 模块导入不得建立数据库、Milvus、网络、LLM 或 MCP 连接。外部资源应在 FastAPI lifespan、依赖提供者、惰性工厂或显式初始化路径中创建。
-- SQLite schema 变更必须新增 Alembic revision；不要只修改 ORM/model，也不要改写已经发布的迁移来伪造新状态。
+- PostgreSQL schema 变更必须新增 Alembic revision；不要只修改 ORM/model，也不要改写已经发布的迁移来伪造新状态。
 - API 保持统一成功/错误 envelope 和错误目录；不要在新路由中发明另一种响应格式。
 - 长任务使用现有 durable background job runtime，保留任务、事件、租约、重试、超时和取消语义；不要用请求内裸 `asyncio.create_task()` 代替持久任务。
 - 聊天流和诊断流保持现有 SSE 事件契约、顺序、终止和错误语义。任何事件字段变更都必须同步共享契约、前端解析器和合同测试。
