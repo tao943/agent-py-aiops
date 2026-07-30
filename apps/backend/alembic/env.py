@@ -21,15 +21,13 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+LEGACY_DATABASE_URL_PLACEHOLDER = "sqlite+aiosqlite:///./var/memory.sqlite3"
+
 
 def get_database_url() -> str:
     configured_url = config.get_main_option("sqlalchemy.url")
-    if configured_url:
-        try:
-            return validate_memory_database_url(configured_url)
-        except ValueError:
-            # Ignore the legacy unsupported placeholder in alembic.ini.
-            pass
+    if configured_url and configured_url != LEGACY_DATABASE_URL_PLACEHOLDER:
+        return validate_memory_database_url(configured_url)
     x_args = context.get_x_argument(as_dictionary=True)
     project_config = x_args.get("project_config")
     if project_config:

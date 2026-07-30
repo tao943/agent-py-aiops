@@ -1,11 +1,17 @@
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 
 import super_ai.memory.database as memory_database
 from super_ai.memory.database import create_memory_engine, load_memory_database_settings
 
 ROOT = Path(__file__).resolve().parents[3]
+BACKEND_ROOT = ROOT / "apps" / "backend"
+UNSUPPORTED_POSTGRESQL_URL = (
+    "postgresql+psycopg://agent_py:agent_py_dev@localhost:5432/agent_py_test"
+)
 
 
 def test_development_config_uses_postgresql_asyncpg() -> None:
@@ -19,16 +25,23 @@ def test_test_config_targets_isolated_database() -> None:
     assert settings.database_url.endswith("/agent_py_test")
 
 
-def test_engine_rejects_non_postgresql_urls() -> None:
+def test_engine_rejects_non_asyncpg_postgresql_urls() -> None:
     with pytest.raises(ValueError, match="PostgreSQL"):
-        create_memory_engine("mysql+aiomysql://agent_py:test@localhost/agent_py_test")
+        create_memory_engine(UNSUPPORTED_POSTGRESQL_URL)
 
 
-def test_shared_url_validation_rejects_non_postgresql_urls() -> None:
+def test_shared_url_validation_rejects_non_asyncpg_postgresql_urls() -> None:
     with pytest.raises(ValueError, match="PostgreSQL"):
-        memory_database.validate_memory_database_url(
-            "mysql+aiomysql://agent_py:test@localhost/agent_py_test"
-        )
+        memory_database.validate_memory_database_url(UNSUPPORTED_POSTGRESQL_URL)
+
+
+def test_alembic_rejects_explicit_postgresql_url_without_asyncpg() -> None:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", UNSUPPORTED_POSTGRESQL_URL)
+
+    with pytest.raises(ValueError, match="asyncpg"):
+        command.upgrade(config, "202607080001", sql=True)
 
 
 def test_engine_uses_asyncpg_driver() -> None:
