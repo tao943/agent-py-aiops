@@ -70,7 +70,11 @@ async def test_readiness_aggregates_safe_component_results(
     assert response.status_code == 200
     payload = response.json()["data"]
     assert payload["status"] == "ready"
-    assert payload["dependencies"]["sqlite"]["ok"] is True
+    postgresql = payload["dependencies"]["postgresql"]
+    assert postgresql["ok"] is True
+    assert postgresql["engine"] == "postgresql"
+    assert postgresql["driver"] == "asyncpg"
+    assert set(payload["dependencies"]) == {"postgresql", "milvus", "llm", "mcp"}
     assert payload["dependencies"]["llm"]["model"] == "qwen-test"
     assert "apiKey" not in str(payload)
 
@@ -93,8 +97,35 @@ async def test_readiness_reports_degraded_dependency(
     assert response.status_code == 503
     payload = response.json()["data"]
     assert payload["status"] == "degraded"
-    assert payload["dependencies"]["sqlite"]["ok"] is True
+    postgresql = payload["dependencies"]["postgresql"]
+    assert postgresql["ok"] is True
+    assert postgresql["engine"] == "postgresql"
+    assert postgresql["driver"] == "asyncpg"
     assert payload["dependencies"]["mcp"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_safe_postgresql_connection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "readiness-test-password"
+    app = create_app(
+        database_url=f"postgresql+asyncpg://agent_py:{secret}@localhost:1/agent_py_test",
+        vector_store=FakeVectorStore(),
+        llm_provider=cast(LlmProvider, FakeLlmProvider()),
+    )
+    monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    postgresql = response.json()["data"]["dependencies"]["postgresql"]
+    assert postgresql["ok"] is False
+    assert postgresql["engine"] == "postgresql"
+    assert postgresql["driver"] == "asyncpg"
+    assert postgresql["error"] == "PostgreSQL is unavailable."
+    assert secret not in response.text
 
 
 @pytest.mark.asyncio
@@ -172,7 +203,14 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
     assert response.status_code == 200
     payload = response.json()["data"]
     assert payload["configuration"]["llm"]["model"] == "qwen-test"
-    assert payload["dependencies"]["sqlite"]["ok"] is True
+    assert payload["configuration"]["postgresql"] == {
+        "valid": True,
+        "engine": "postgresql",
+        "driver": "asyncpg",
+        "error": None,
+    }
+    assert set(payload["configuration"]) == {"postgresql", "llm", "milvus", "mcp"}
+    assert payload["dependencies"]["postgresql"]["ok"] is True
     assert secret not in response.text
 
 
@@ -198,7 +236,13 @@ async def test_config_check_surfaces_invalid_configuration_without_crashing(
     assert response.status_code == 503
     payload = response.json()["data"]
     assert payload["status"] == "degraded"
-    assert payload["configuration"]["sqlite"]["valid"] is False
+    assert payload["configuration"]["postgresql"] == {
+        "valid": False,
+        "engine": "postgresql",
+        "driver": "asyncpg",
+        "error": "PostgreSQL configuration is invalid.",
+    }
+    assert set(payload["configuration"]) == {"postgresql", "llm", "milvus", "mcp"}
     assert payload["configuration"]["llm"]["valid"] is False
     assert payload["configuration"]["milvus"]["valid"] is False
     assert payload["configuration"]["mcp"]["valid"] is False

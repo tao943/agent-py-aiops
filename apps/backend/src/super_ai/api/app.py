@@ -84,6 +84,7 @@ from super_ai.memory.database import (
     create_memory_engine,
     create_memory_session_factory,
     load_memory_database_settings,
+    validate_memory_database_url,
 )
 from super_ai.memory.repositories import (
     AgentToolCallAuditRecord,
@@ -1897,35 +1898,40 @@ def _memory_session_factory(request: Request) -> async_sessionmaker[AsyncSession
 
 
 async def _runtime_dependency_payload(request: Request) -> dict[str, dict[str, object]]:
-    sqlite_result, milvus_result, llm_result, mcp_result = await asyncio.gather(
-        _sqlite_readiness_payload(request),
+    postgresql_result, milvus_result, llm_result, mcp_result = await asyncio.gather(
+        _postgresql_readiness_payload(request),
         _milvus_readiness_payload(request),
         _llm_readiness_payload(request),
         _mcp_readiness_payload(request),
     )
     return {
-        "sqlite": sqlite_result,
+        "postgresql": postgresql_result,
         "milvus": milvus_result,
         "llm": llm_result,
         "mcp": mcp_result,
     }
 
 
-async def _sqlite_readiness_payload(request: Request) -> dict[str, object]:
+async def _postgresql_readiness_payload(request: Request) -> dict[str, object]:
     started_at = monotonic()
     try:
         async with _memory_session_factory(request)() as session:
+            dialect = session.get_bind().dialect
+            if dialect.name != "postgresql" or dialect.driver != "asyncpg":
+                raise RuntimeError("Unexpected database dialect.")
             await session.execute(sql_text("SELECT 1"))
     except Exception:
         return {
             "ok": False,
-            "engine": "sqlite",
+            "engine": "postgresql",
+            "driver": "asyncpg",
             "latencyMs": _elapsed_ms(started_at),
-            "error": "SQLite is unavailable.",
+            "error": "PostgreSQL is unavailable.",
         }
     return {
         "ok": True,
-        "engine": "sqlite",
+        "engine": "postgresql",
+        "driver": "asyncpg",
         "latencyMs": _elapsed_ms(started_at),
         "error": None,
     }
@@ -1994,15 +2000,22 @@ def _configuration_check_payload(request: Request) -> dict[str, dict[str, object
     config_path = request.app.state.project_config_path
     configuration: dict[str, dict[str, object]] = {}
     try:
-        load_memory_database_settings(config_path=config_path)
+        database_settings = load_memory_database_settings(config_path=config_path)
+        validate_memory_database_url(database_settings.database_url)
     except Exception:
-        configuration["sqlite"] = {
+        configuration["postgresql"] = {
             "valid": False,
-            "engine": "sqlite",
-            "error": "SQLite configuration is invalid.",
+            "engine": "postgresql",
+            "driver": "asyncpg",
+            "error": "PostgreSQL configuration is invalid.",
         }
     else:
-        configuration["sqlite"] = {"valid": True, "engine": "sqlite", "error": None}
+        configuration["postgresql"] = {
+            "valid": True,
+            "engine": "postgresql",
+            "driver": "asyncpg",
+            "error": None,
+        }
     try:
         llm_config = load_llm_provider_config(config_path=config_path)
     except Exception:
