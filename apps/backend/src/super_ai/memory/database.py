@@ -39,6 +39,13 @@ def load_memory_database_settings(config_path: Path | str | None = None) -> Memo
     return MemoryDatabaseSettings(database_url=database_url)
 
 
+def validate_memory_database_url(database_url: str) -> str:
+    """Validate that a database URL uses the supported PostgreSQL driver."""
+    if make_url(database_url).drivername != "postgresql+asyncpg":
+        raise ValueError("Memory database URL must use the PostgreSQL asyncpg driver.")
+    return database_url
+
+
 def create_memory_engine(
     database_url: str | None = None,
     *,
@@ -50,10 +57,8 @@ def create_memory_engine(
     resolved_url = settings.database_url if settings is not None else database_url
     if resolved_url is None:
         resolved_url = DEFAULT_MEMORY_DATABASE_URL
-    if make_url(resolved_url).drivername != "postgresql+asyncpg":
-        raise ValueError("Memory database URL must use the PostgreSQL asyncpg driver.")
     return create_async_engine(
-        resolved_url,
+        validate_memory_database_url(resolved_url),
         echo=echo,
         pool_pre_ping=True,
         pool_size=10,

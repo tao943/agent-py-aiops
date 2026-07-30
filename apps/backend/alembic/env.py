@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from super_ai.memory.database import (
     create_memory_engine,
     load_memory_database_settings,
+    validate_memory_database_url,
 )
 from super_ai.memory.models import Base
 
@@ -30,8 +31,9 @@ def get_database_url() -> str:
 
 
 def run_migrations_offline() -> None:
+    database_url = validate_memory_database_url(get_database_url())
     context.configure(
-        url=get_database_url(),
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
