@@ -1,5 +1,23 @@
 # Docker Compose 基础设施
 
+## PostgreSQL development database
+
+Start PostgreSQL from the repository root:
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml ps postgres
+```
+
+The service is healthy when `docker compose -f infra/compose.yaml ps postgres`
+reports `healthy`. Development credentials are database `agent_py`, user
+`agent_py`, password `agent_py_dev`, on `localhost:5432`. The separate test
+database is `agent_py_test`.
+
+The SQL files in `infra/postgres/init/` run only when PostgreSQL initializes a
+new `postgres-data` volume. To rerun them, remove that volume deliberately and
+then start the service again.
+
 `infra/compose.yaml` 仅管理本机开发所需的容器基础设施：**etcd, MinIO, Milvus, Attu 和 Alertmanager**。后端、前端和腾讯云 CLS MCP Server 由仓库根目录启动脚本直接在本机启动，不属于 Compose 服务。
 
 ## 启动基础设施

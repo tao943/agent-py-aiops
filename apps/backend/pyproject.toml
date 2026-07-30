@@ -5,7 +5,7 @@ description = "Backend foundation for the Super AI monorepo."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "aiosqlite>=0.22.1",
+    "asyncpg>=0.30.0",
     "alembic>=1.18.5",
     "fastapi>=0.116.0",
     "greenlet>=3.5.3",

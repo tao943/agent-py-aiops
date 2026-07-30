@@ -2,6 +2,24 @@ name: agent-py
 
 services:
 
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: agent_py
+      POSTGRES_USER: agent_py
+      POSTGRES_PASSWORD: agent_py_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_py -d agent_py"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   alertmanager:
     image: prom/alertmanager:v0.28.1
     command:
@@ -89,6 +107,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   etcd-data:
   minio-data:
   milvus-data:

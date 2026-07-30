@@ -32,7 +32,7 @@ def load_memory_database_settings(config_path: Path | str | None = None) -> Memo
     """Load memory database settings from the repository project config."""
     try:
         backend_config = project_config_section("backend", config_path=config_path)
-        database_url = required_str(backend_config, "memoryDatabaseUrl")
+        database_url = required_str(backend_config, "databaseUrl")
     except ProjectConfigurationError as exc:
         raise RuntimeError(str(exc)) from exc
     return MemoryDatabaseSettings(database_url=database_url)

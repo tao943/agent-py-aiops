@@ -6,7 +6,7 @@
   "backend": {
     "host": "127.0.0.1",
     "port": 8000,
-    "databaseUrl": "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py"
+    "databaseUrl": "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py_test"
   },
   "frontend": {
     "title": "Super AI",
