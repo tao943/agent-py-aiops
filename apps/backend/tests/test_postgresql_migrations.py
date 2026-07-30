@@ -1,6 +1,30 @@
+from io import StringIO
+from pathlib import Path
+
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+AGENT_PY_TEST_DATABASE_URL = (
+    "postgresql+asyncpg://agent_py:agent_py_dev@localhost:5432/agent_py_test"
+)
+
+
+def test_alembic_head_renders_offline_for_postgresql() -> None:
+    output_buffer = StringIO()
+    config = Config(
+        str(BACKEND_ROOT / "alembic.ini"),
+        output_buffer=output_buffer,
+    )
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", AGENT_PY_TEST_DATABASE_URL)
+
+    command.upgrade(config, "head", sql=True)
+
+    assert "202607300001" in output_buffer.getvalue()
 
 
 async def test_alembic_head_exists_in_postgresql(migrated_database_url: str) -> None:

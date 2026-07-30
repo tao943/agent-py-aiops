@@ -17,37 +17,29 @@ down_revision: str | None = "202607110003"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+LEGACY_SKILL_DESCRIPTION = (
+    "由旧版聊天配置迁移的 Skill；请重新上传标准 SKILL.md 以补充准确描述。"
+)
+
 
 def upgrade() -> None:
     with op.batch_alter_table("user_chat_skills") as batch_op:
         batch_op.add_column(sa.Column("name", sa.String(length=64), nullable=True))
         batch_op.add_column(sa.Column("description", sa.String(length=1024), nullable=True))
 
-    connection = op.get_bind()
-    rows = connection.execute(
-        sa.text("SELECT id, content FROM user_chat_skills")
-    ).mappings()
-    for row in rows:
-        skill_name = f"legacy-skill-{str(row['id'])[-12:].lower()}"
-        description = "由旧版聊天配置迁移的 Skill；请重新上传标准 SKILL.md 以补充准确描述。"
-        content = str(row["content"])
-        if not content.lstrip().startswith("---"):
-            content = (
-                f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{content}"
-            )
-        connection.execute(
-            sa.text(
-                "UPDATE user_chat_skills "
-                "SET name = :name, description = :description, content = :content "
-                "WHERE id = :id"
-            ),
-            {
-                "id": row["id"],
-                "name": skill_name,
-                "description": description,
-                "content": content,
-            },
-        )
+    op.execute(
+        sa.text(
+            "UPDATE user_chat_skills "
+            "SET name = 'legacy-skill-' || lower(right(id::text, 12)), "
+            "description = :description, "
+            "content = CASE "
+            "WHEN regexp_replace(content, '^[[:space:]]*', '') LIKE '---%' "
+            "THEN content "
+            "ELSE '---' || E'\\nname: legacy-skill-' || lower(right(id::text, 12)) "
+            "|| E'\\ndescription: ' || :description || E'\\n---\\n\\n' || content "
+            "END"
+        ).bindparams(sa.bindparam("description", LEGACY_SKILL_DESCRIPTION))
+    )
 
     with op.batch_alter_table("user_chat_skills") as batch_op:
         batch_op.alter_column("name", existing_type=sa.String(length=64), nullable=False)
