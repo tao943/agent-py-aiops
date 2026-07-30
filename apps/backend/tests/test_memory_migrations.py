@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+from sqlalchemy import JSON, Connection, inspect
 
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import JSON, create_engine, inspect
-
+from super_ai.memory.database import create_memory_engine
 from super_ai.memory.models import Base
 
 REQUIRED_MEMORY_TABLES = {
@@ -23,25 +20,15 @@ REQUIRED_MEMORY_TABLES = {
 }
 
 
-def test_alembic_upgrade_creates_memory_tables(tmp_path: Path) -> None:
-    database_path = tmp_path / "memory.sqlite3"
-    command.upgrade(_alembic_config(database_path), "head")
-
-    engine = create_engine(f"sqlite:///{database_path}")
+async def test_alembic_upgrade_creates_memory_tables(migrated_database_url: str) -> None:
+    engine = create_memory_engine(migrated_database_url)
     try:
-        inspector = inspect(engine)
-        table_names = set(inspector.get_table_names())
-        table_columns = {
-            table_name: {column["name"] for column in inspector.get_columns(table_name)}
-            for table_name in REQUIRED_MEMORY_TABLES
-        }
-        index_names = {
-            index["name"]
-            for table_name in REQUIRED_MEMORY_TABLES
-            for index in inspector.get_indexes(table_name)
-        }
+        async with engine.connect() as connection:
+            table_names, table_columns, index_names = await connection.run_sync(
+                _inspect_memory_schema
+            )
     finally:
-        engine.dispose()
+        await engine.dispose()
 
     assert REQUIRED_MEMORY_TABLES <= table_names
     assert "alembic_version" in table_names
@@ -86,8 +73,18 @@ def test_memory_metadata_exposes_required_tables_and_json_columns() -> None:
     assert "description" in tables["user_chat_skills"].c
 
 
-def _alembic_config(database_path: Path) -> Config:
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    return config
+def _inspect_memory_schema(
+    connection: Connection,
+) -> tuple[set[str], dict[str, set[str]], set[str | None]]:
+    inspector = inspect(connection)
+    table_names = set(inspector.get_table_names())
+    table_columns = {
+        table_name: {column["name"] for column in inspector.get_columns(table_name)}
+        for table_name in REQUIRED_MEMORY_TABLES
+    }
+    index_names = {
+        index["name"]
+        for table_name in REQUIRED_MEMORY_TABLES
+        for index in inspector.get_indexes(table_name)
+    }
+    return table_names, table_columns, index_names

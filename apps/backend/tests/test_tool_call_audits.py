@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import TenantScopeError
@@ -104,13 +101,3 @@ async def test_tool_call_audit_repository_denies_cross_tenant_parent_writes(
             )
     finally:
         await engine.dispose()
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "tool-call-audits.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
 
 from super_ai.auth.service import AuthError, AuthService
@@ -101,13 +97,3 @@ async def test_token_validation_and_logout_revocation(migrated_database_url: str
 
     assert current_user.id == auth_result.user.id
     assert revoked_exc.value.code == "AUTH_SESSION_REVOKED"
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "auth.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

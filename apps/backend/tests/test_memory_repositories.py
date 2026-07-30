@@ -3,11 +3,8 @@ from __future__ import annotations
 import inspect
 from dataclasses import is_dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 
 import super_ai.memory.repositories as repositories_module
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -634,13 +631,3 @@ async def test_sqlite_repository_bundle_can_be_injected(migrated_database_url: s
     assert isinstance(repositories.diagnostics, SQLiteDiagnosticMemoryRepository)
     assert isinstance(repositories.chat_prompts, SQLiteUserChatPromptRepository)
     assert isinstance(repositories.chat_skills, SQLiteUserChatSkillRepository)
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "memory.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

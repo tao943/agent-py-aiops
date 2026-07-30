@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.alerts import (
     ActiveAlert,
@@ -193,13 +190,3 @@ async def _register(client: httpx.AsyncClient, email: str) -> dict[str, Any]:
         },
     )
     return cast(dict[str, Any], response.json()["data"])
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "active-alerts.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

@@ -4,13 +4,10 @@ import json
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
 from super_ai.api.app import AiopsDiagnosticRunner, create_app
@@ -644,13 +641,3 @@ def _is_failed_tool_event(event: dict[str, object]) -> bool:
     return bool(
         event.get("type") == "tool.call" and tool_call_payload.get("status") == "failed"
     )
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "aiops-diagnostics.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

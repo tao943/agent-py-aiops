@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.api.app import create_app
 
@@ -199,13 +195,3 @@ async def test_protected_resources_are_scoped_to_current_user(
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "auth-api.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

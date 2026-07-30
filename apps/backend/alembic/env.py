@@ -23,6 +23,13 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
+    configured_url = config.get_main_option("sqlalchemy.url")
+    if configured_url:
+        try:
+            return validate_memory_database_url(configured_url)
+        except ValueError:
+            # Ignore the legacy unsupported placeholder in alembic.ini.
+            pass
     x_args = context.get_x_argument(as_dictionary=True)
     project_config = x_args.get("project_config")
     if project_config:

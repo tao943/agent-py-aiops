@@ -6,13 +6,10 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
@@ -645,13 +642,3 @@ class FailingAssistantChatRepository:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "stream-rag-chat-api.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

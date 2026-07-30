@@ -53,8 +53,12 @@ def fake_mcp_client(_request: object) -> FakeMcpClient:
 
 
 @pytest.mark.asyncio
-async def test_readiness_aggregates_safe_component_results(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_readiness_aggregates_safe_component_results(
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_database_url: str,
+) -> None:
     app = create_app(
+        database_url=migrated_database_url,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
     )
@@ -72,8 +76,12 @@ async def test_readiness_aggregates_safe_component_results(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_readiness_reports_degraded_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_readiness_reports_degraded_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_database_url: str,
+) -> None:
     app = create_app(
+        database_url=migrated_database_url,
         vector_store=FakeVectorStore(ok=False),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
     )
@@ -107,13 +115,14 @@ async def test_health_is_liveness_without_dependency_probes() -> None:
 async def test_config_check_reports_safe_configuration_and_dependency_results(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    migrated_database_url: str,
 ) -> None:
     secret = "readiness-test-api-key"
     config_path = tmp_path / "project.json"
     config_path.write_text(
         json.dumps(
             {
-                "backend": {"memoryDatabaseUrl": "sqlite+aiosqlite:///:memory:"},
+                "backend": {"databaseUrl": migrated_database_url},
                 "llm": {
                     "provider": "qwen-openai",
                     "apiKey": secret,
@@ -150,7 +159,7 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
         encoding="utf-8",
     )
     app = create_app(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_database_url,
         project_config_path=config_path,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
@@ -171,11 +180,12 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
 async def test_config_check_surfaces_invalid_configuration_without_crashing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    migrated_database_url: str,
 ) -> None:
     config_path = tmp_path / "invalid-project.json"
     config_path.write_text("{}", encoding="utf-8")
     app = create_app(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=migrated_database_url,
         project_config_path=config_path,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),

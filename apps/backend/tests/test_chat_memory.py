@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService
 from super_ai.llm import LlmProvider
@@ -34,18 +31,6 @@ class FakeProvider:
 
     def create_chat_model(self) -> FakeChatModel:
         return self.model
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "memory.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"
-
-
 @pytest.mark.asyncio
 async def test_thirty_turn_mode_compacts_without_deleting_history(
     migrated_database_url: str,

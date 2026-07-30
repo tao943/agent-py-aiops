@@ -3,11 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 
 from super_ai.documents.indexing import DocumentIndexingService, chunk_document_text
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -273,13 +270,3 @@ async def test_document_indexing_service_records_safe_failure_reason(
     assert result.failure_reason == "Document has no indexable text."
     assert updated_document is not None
     assert updated_document.index_status == "failed"
-
-
-@pytest.fixture
-def migrated_database_url(tmp_path: Path) -> str:
-    database_path = tmp_path / "document-indexing.sqlite3"
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    command.upgrade(config, "head")
-    return f"sqlite+aiosqlite:///{database_path}"

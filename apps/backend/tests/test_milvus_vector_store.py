@@ -454,8 +454,8 @@ def test_delete_document_chunks_applies_scope_filter_and_rejects_empty_scope() -
 
 @pytest.mark.asyncio
 async def test_ready_endpoint_reports_milvus_readiness_without_startup_connection(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    migrated_database_url: str,
 ) -> None:
     import httpx
 
@@ -496,7 +496,7 @@ async def test_ready_endpoint_reports_milvus_readiness_without_startup_connectio
 
     vector_store = FakeVectorStore()
     app = create_app(
-        database_url=f"sqlite+aiosqlite:///{tmp_path}/health.sqlite3",
+        database_url=migrated_database_url,
         vector_store=vector_store,
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
     )

@@ -21,12 +21,14 @@ def test_test_config_targets_isolated_database() -> None:
 
 def test_engine_rejects_non_postgresql_urls() -> None:
     with pytest.raises(ValueError, match="PostgreSQL"):
-        create_memory_engine("sqlite+aiosqlite:///memory.sqlite3")
+        create_memory_engine("mysql+aiomysql://agent_py:test@localhost/agent_py_test")
 
 
 def test_shared_url_validation_rejects_non_postgresql_urls() -> None:
     with pytest.raises(ValueError, match="PostgreSQL"):
-        memory_database.validate_memory_database_url("sqlite+aiosqlite:///memory.sqlite3")
+        memory_database.validate_memory_database_url(
+            "mysql+aiomysql://agent_py:test@localhost/agent_py_test"
+        )
 
 
 def test_engine_uses_asyncpg_driver() -> None:

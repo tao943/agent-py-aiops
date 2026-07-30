@@ -1,31 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
+from sqlalchemy import Connection, inspect
 
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import create_engine, inspect
-
+from super_ai.memory.database import create_memory_engine
 from super_ai.memory.models import Base
 
 
-def test_auth_tables_are_migrated_without_plaintext_secret_columns(tmp_path: Path) -> None:
-    database_path = tmp_path / "auth.sqlite3"
-    command.upgrade(_alembic_config(database_path), "head")
-
-    engine = create_engine(f"sqlite:///{database_path}")
+async def test_auth_tables_are_migrated_without_plaintext_secret_columns(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
     try:
-        inspector = inspect(engine)
-        table_names = set(inspector.get_table_names())
-        user_columns = {column["name"] for column in inspector.get_columns("users")}
-        session_columns = {column["name"] for column in inspector.get_columns("auth_sessions")}
-        index_names = {
-            index["name"]
-            for table_name in ("users", "auth_sessions")
-            for index in inspector.get_indexes(table_name)
-        }
+        async with engine.connect() as connection:
+            table_names, user_columns, session_columns, index_names = await connection.run_sync(
+                _inspect_auth_schema
+            )
     finally:
-        engine.dispose()
+        await engine.dispose()
 
     assert {"users", "auth_sessions"} <= table_names
     expected_user_columns = {
@@ -62,8 +53,16 @@ def test_auth_metadata_exposes_user_and_session_tables() -> None:
     assert "token" not in tables["auth_sessions"].c
 
 
-def _alembic_config(database_path: Path) -> Config:
-    config = Config("alembic.ini")
-    config.set_main_option("script_location", "alembic")
-    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
-    return config
+def _inspect_auth_schema(
+    connection: Connection,
+) -> tuple[set[str], set[str], set[str], set[str | None]]:
+    inspector = inspect(connection)
+    table_names = set(inspector.get_table_names())
+    user_columns = {column["name"] for column in inspector.get_columns("users")}
+    session_columns = {column["name"] for column in inspector.get_columns("auth_sessions")}
+    index_names = {
+        index["name"]
+        for table_name in ("users", "auth_sessions")
+        for index in inspector.get_indexes(table_name)
+    }
+    return table_names, user_columns, session_columns, index_names
