@@ -16,7 +16,7 @@ from time import monotonic
 from typing import Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,6 +68,7 @@ from super_ai.documents import (
     extract_indexable_text,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
+from super_ai.events.subscriber import JobEventSubscriber
 from super_ai.feedback import FeedbackError, UserFeedbackService
 from super_ai.foundation import get_foundation_info
 from super_ai.jobs import BackgroundJobContext, BackgroundJobRuntime, JobCancelled
@@ -348,6 +349,11 @@ def create_app(
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
     app.state.background_job_runtime = background_runtime
+    app.state.job_event_subscriber = JobEventSubscriber(
+        repository=repositories.background_jobs,
+        relay=None,
+        poll_interval_seconds=0.1,
+    )
     app.state.index_task_scheduler = index_task_scheduler or DurableDocumentIndexTaskScheduler(app)
     app.state.request_metrics = RequestMetrics()
 
@@ -1551,6 +1557,7 @@ def create_app(
         request: Request,
         diagnostic_id: str,
         user: Annotated[UserRecord, Depends(_current_user)],
+        after_sequence: str | None = Query(default=None, alias="afterSequence"),
     ) -> StreamingResponse:
         task = await _memory_repositories(request).diagnostics.get_task(
             owner_user_id=user.id,
@@ -1566,29 +1573,50 @@ def create_app(
         )
         if job is None:
             raise ApiErrorException("BUSINESS_NOT_FOUND")
+        resume_sequence = _aiops_resume_sequence(
+            after_sequence=after_sequence,
+            last_event_id=request.headers.get("last-event-id"),
+        )
         await _background_job_runtime(request).start()
+        subscriber = cast(JobEventSubscriber, request.app.state.job_event_subscriber)
 
         async def event_stream() -> AsyncIterator[str]:
-            sequence = 0
+            sequence = resume_sequence
             error_emitted = False
-            while True:
-                events = await repository.list_events(
+            initial_events = await repository.list_events(
+                owner_user_id=user.id,
+                job_id=job.id,
+                after_sequence=sequence,
+            )
+            current = await repository.get(owner_user_id=user.id, job_id=job.id)
+            if not initial_events and current is not None and current.status in {
+                "succeeded",
+                "failed",
+                "cancelled",
+            }:
+                if current.status == "failed":
+                    yield _encode_aiops_sse(_background_job_error_event(), sequence)
+                return
+            async for stored in subscriber.iter_events(
+                owner_user_id=user.id,
+                job_id=job.id,
+                after_sequence=sequence,
+            ):
+                sequence = stored.sequence
+                error_emitted = error_emitted or stored.payload.get("type") == "error"
+                yield _encode_aiops_sse(stored.payload, sequence)
+                current = await repository.get(owner_user_id=user.id, job_id=job.id)
+                if current is None:
+                    return
+                pending = await repository.list_events(
                     owner_user_id=user.id,
                     job_id=job.id,
                     after_sequence=sequence,
                 )
-                for stored in events:
-                    sequence = stored.sequence
-                    error_emitted = error_emitted or stored.payload.get("type") == "error"
-                    yield encode_sse(stored.payload)
-                current = await repository.get(owner_user_id=user.id, job_id=job.id)
-                if current is None:
-                    return
-                if current.status in {"succeeded", "failed", "cancelled"} and not events:
+                if current.status in {"succeeded", "failed", "cancelled"} and not pending:
                     if current.status == "failed" and not error_emitted:
-                        yield encode_sse(_background_job_error_event())
+                        yield _encode_aiops_sse(_background_job_error_event(), sequence)
                     return
-                await asyncio.sleep(0.1)
 
         return StreamingResponse(
             event_stream(),
@@ -1910,6 +1938,27 @@ async def _runtime_dependency_payload(request: Request) -> dict[str, dict[str, o
         "llm": llm_result,
         "mcp": mcp_result,
     }
+
+
+def _aiops_resume_sequence(*, after_sequence: str | None, last_event_id: str | None) -> int:
+    """Validate and combine the two standard AIOps SSE resume cursors."""
+    values = [value for value in (after_sequence, last_event_id) if value is not None]
+    parsed: list[int] = []
+    for value in values:
+        if not value.isascii() or not value.isdecimal():
+            raise HTTPException(
+                status_code=422,
+                detail="SSE resume cursors must be non-negative integers.",
+            )
+        parsed.append(int(value))
+    return max(parsed, default=0)
+
+
+def _encode_aiops_sse(event: dict[str, object], sequence: int) -> str:
+    """Add a durable sequence ID to AIOps frames without changing chat SSE."""
+    event_type = str(event["type"])
+    data = json.dumps(event, separators=(",", ":"))
+    return f"id: {sequence}\nevent: {event_type}\ndata: {data}\n\n"
 
 
 async def _postgresql_readiness_payload(request: Request) -> dict[str, object]:
