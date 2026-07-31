@@ -36,8 +36,10 @@ _SENSITIVE_FIELD_NAMES = frozenset(
         "access_key_id",
         "client_secret",
         "credential",
+        "credentials",
         "cookie",
         "header",
+        "headers",
         "password",
         "private_key",
         "secret",
@@ -47,6 +49,7 @@ _SENSITIVE_FIELD_NAMES = frozenset(
     }
 )
 _SENSITIVE_FIELD_SUFFIXES = (
+    "_access_key",
     "_access_key_id",
     "_api_key",
     "_authorization",

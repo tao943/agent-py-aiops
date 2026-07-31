@@ -71,3 +71,11 @@ unknown library member/response types; production code remains strict-clean.
 - Redaction now uses only exact sensitive names and documented credential
   suffixes. It intentionally preserves ordinary fields such as `tokenCount`
   and `secretaryName`.
+
+## Credential-container follow-up
+
+- Exact plural `credentials` and `headers` fields are now redacted as whole
+  containers, so nested raw values cannot survive transport serialization.
+- The explicit `_access_key` suffix covers `AWS_SECRET_ACCESS_KEY`,
+  `SecretAccessKey`, and `secret_access_key` without introducing a generic
+  `key` match.

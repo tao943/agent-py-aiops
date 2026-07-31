@@ -225,7 +225,7 @@ async def test_publish_normalizes_acronyms_without_redacting_unrelated_business_
     publisher = RedisStreamJobEventPublisher(client, settings)
     event = _event(
         payload={
-            "credentials": {
+            "configuration": {
                 "APIKey": "api-key",
                 "API_KEY": "api-key-underscore",
                 "AWSAccessKeyId": "aws-access",
@@ -249,7 +249,7 @@ async def test_publish_normalizes_acronyms_without_redacting_unrelated_business_
     assert fields is not None
     payload = json.loads(fields["payload"])
     assert payload == {
-        "credentials": {
+        "configuration": {
             "APIKey": "[REDACTED]",
             "API_KEY": "[REDACTED]",
             "AWSAccessKeyId": "[REDACTED]",
@@ -258,6 +258,46 @@ async def test_publish_normalizes_acronyms_without_redacting_unrelated_business_
         "items": [{"PRIVATE_KEY": "[REDACTED]", "CLIENT_SECRET": "[REDACTED]"}],
         "tokenCount": 123,
         "secretaryName": "Alice",
+    }
+
+
+@pytest.mark.asyncio
+async def test_publish_redacts_credential_containers_and_access_key_variants(
+    redis_prefix: str,
+) -> None:
+    settings = RedisRuntimeSettings(url="redis://localhost:6379/15", stream_prefix=redis_prefix)
+    client = Redis.from_url(settings.url, decode_responses=True)
+    publisher = RedisStreamJobEventPublisher(client, settings)
+    event = _event(
+        payload={
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "nested": [
+                {"SecretAccessKey": "secret-access"},
+                {"secret_access_key": "secret-access-underscore"},
+            ],
+            "credentials": {"raw": "must-not-survive"},
+            "headers": {"Authorization": "must-not-survive"},
+        }
+    )
+    try:
+        await publisher.publish(event)
+        entries = await client.xrange(f"{redis_prefix}:aiops:events")
+    finally:
+        await client.aclose()
+
+    assert entries is not None
+    assert len(entries) == 1
+    assert entries[0] is not None
+    _, fields = entries[0]
+    assert fields is not None
+    assert json.loads(fields["payload"]) == {
+        "AWS_SECRET_ACCESS_KEY": "[REDACTED]",
+        "nested": [
+            {"SecretAccessKey": "[REDACTED]"},
+            {"secret_access_key": "[REDACTED]"},
+        ],
+        "credentials": "[REDACTED]",
+        "headers": "[REDACTED]",
     }
 
 
