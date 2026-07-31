@@ -79,3 +79,13 @@ unknown library member/response types; production code remains strict-clean.
 - The explicit `_access_key` suffix covers `AWS_SECRET_ACCESS_KEY`,
   `SecretAccessKey`, and `secret_access_key` without introducing a generic
   `key` match.
+
+## Plural credential-field follow-up
+
+- Sensitive field detection now starts from a complete base-name set and
+  generates each singular and plural variant. A name is redacted only when it
+  exactly equals a variant or ends with an underscore-delimited variant.
+- Real Redis coverage includes plural API/access/private/client-secret/secret/
+  password/token/cookie/credential/header fields and an owner-scoped
+  `userTokens` suffix, while proving `tokenCount`, `secretaryName`, and
+  `ordinary_key` remain unchanged.

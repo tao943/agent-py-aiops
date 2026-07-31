@@ -302,6 +302,54 @@ async def test_publish_redacts_credential_containers_and_access_key_variants(
 
 
 @pytest.mark.asyncio
+async def test_publish_redacts_plural_credential_fields_without_matching_substrings(
+    redis_prefix: str,
+) -> None:
+    settings = RedisRuntimeSettings(url="redis://localhost:6379/15", stream_prefix=redis_prefix)
+    client = Redis.from_url(settings.url, decode_responses=True)
+    publisher = RedisStreamJobEventPublisher(client, settings)
+    plural_fields = {
+        "apiKeys": "api-keys",
+        "accessKeys": "access-keys",
+        "access_key_ids": "access-key-ids",
+        "privateKeys": "private-keys",
+        "clientSecrets": "client-secrets",
+        "secrets": "secrets",
+        "passwords": "passwords",
+        "tokens": "tokens",
+        "cookies": "cookies",
+        "credentials": "credentials",
+        "headers": "headers",
+        "userTokens": "user-tokens",
+    }
+    event = _event(
+        payload={
+            "nested": plural_fields,
+            "tokenCount": 123,
+            "secretaryName": "Alice",
+            "ordinary_key": "preserved",
+        }
+    )
+    try:
+        await publisher.publish(event)
+        entries = await client.xrange(f"{redis_prefix}:aiops:events")
+    finally:
+        await client.aclose()
+
+    assert entries is not None
+    assert len(entries) == 1
+    assert entries[0] is not None
+    _, fields = entries[0]
+    assert fields is not None
+    assert json.loads(fields["payload"]) == {
+        "nested": {field: "[REDACTED]" for field in plural_fields},
+        "tokenCount": 123,
+        "secretaryName": "Alice",
+        "ordinary_key": "preserved",
+    }
+
+
+@pytest.mark.asyncio
 async def test_publish_uses_bounded_retention_without_creating_another_stream_under_prefix(
     redis_prefix: str,
 ) -> None:

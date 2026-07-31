@@ -28,38 +28,33 @@ redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
 return stream_id
 """
 
-_SENSITIVE_FIELD_NAMES = frozenset(
+_SENSITIVE_FIELD_BASES = frozenset(
     {
         "apikey",
         "api_key",
         "authorization",
         "access_key_id",
+        "access_key",
+        "access_token",
         "client_secret",
         "credential",
-        "credentials",
         "cookie",
         "header",
-        "headers",
+        "id_token",
         "password",
         "private_key",
+        "refresh_token",
         "secret",
         "secret_id",
         "secret_key",
+        "session_token",
         "token",
     }
 )
-_SENSITIVE_FIELD_SUFFIXES = (
-    "_access_key",
-    "_access_key_id",
-    "_api_key",
-    "_authorization",
-    "_cookie",
-    "_credentials",
-    "_headers",
-    "_password",
-    "_private_key",
-    "_secret",
-    "_token",
+_SENSITIVE_FIELD_VARIANTS = frozenset(
+    variant
+    for base in _SENSITIVE_FIELD_BASES
+    for variant in (base, f"{base}s")
 )
 
 
@@ -118,7 +113,10 @@ def _redact_payload(value: object, *, field_name: str | None = None) -> object:
 
 def _is_sensitive_field(field_name: str) -> bool:
     normalized = _normalize_field_name(field_name)
-    return normalized in _SENSITIVE_FIELD_NAMES or normalized.endswith(_SENSITIVE_FIELD_SUFFIXES)
+    return any(
+        normalized == variant or normalized.endswith(f"_{variant}")
+        for variant in _SENSITIVE_FIELD_VARIANTS
+    )
 
 
 def _normalize_field_name(field_name: str) -> str:
