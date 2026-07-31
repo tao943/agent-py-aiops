@@ -1543,6 +1543,7 @@ def create_sqlalchemy_memory_repositories(
     from super_ai.memory.extended_sqlalchemy import (
         SQLAlchemyBackgroundJobRepository,
         SQLAlchemyMcpConnectionRepository,
+        SQLAlchemyOutboxEventRepository,
         SQLAlchemyUserFeedbackRepository,
     )
 
@@ -1556,6 +1557,7 @@ def create_sqlalchemy_memory_repositories(
         diagnostics=SQLAlchemyDiagnosticMemoryRepository(session_factory),
         tool_call_audits=SQLAlchemyToolCallAuditRepository(session_factory),
         background_jobs=SQLAlchemyBackgroundJobRepository(session_factory),
+        outbox_events=SQLAlchemyOutboxEventRepository(session_factory),
         feedback=SQLAlchemyUserFeedbackRepository(session_factory),
         mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
     )

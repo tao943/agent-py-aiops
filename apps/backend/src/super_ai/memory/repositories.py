@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -267,6 +268,26 @@ class BackgroundJobEventRecord:
     sequence: int
     payload: JsonDict
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxEventRecord:
+    """An immutable pending or published background-job event message."""
+
+    id: str
+    owner_user_id: str
+    aggregate_type: str
+    aggregate_id: str
+    sequence: int
+    event_type: str
+    payload: JsonDict
+    created_at: datetime
+    available_at: datetime
+    published_at: datetime | None
+    claimed_by: str | None
+    claim_expires_at: datetime | None
+    attempt_count: int
+    last_error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1095,6 +1116,24 @@ class BackgroundJobRepository(Protocol):
     ) -> BackgroundJobRecord | None: ...
 
 
+class OutboxEventRepository(Protocol):
+    """Repository contract for dispatching transactionally persisted event messages."""
+
+    async def claim_batch(
+        self, *, worker_id: str, limit: int, lease_seconds: int
+    ) -> Sequence[OutboxEventRecord]:
+        """Lease an ordered batch of available, unpublished messages."""
+        ...
+
+    async def mark_published(self, event_id: str, *, published_at: datetime) -> None:
+        """Mark one message as published without moving its publication time backwards."""
+        ...
+
+    async def release(self, event_id: str, *, error: str, available_at: datetime) -> None:
+        """Release a failed message for a later delivery attempt."""
+        ...
+
+
 class UserFeedbackRepository(Protocol):
     """Repository contract for owner-scoped polymorphic feedback."""
 
@@ -1184,5 +1223,6 @@ class MemoryRepositories:
     chat_prompts: UserChatPromptRepository | None = None
     chat_skills: UserChatSkillRepository | None = None
     background_jobs: BackgroundJobRepository | None = None
+    outbox_events: OutboxEventRepository | None = None
     feedback: UserFeedbackRepository | None = None
     mcp_connections: McpConnectionRepository | None = None

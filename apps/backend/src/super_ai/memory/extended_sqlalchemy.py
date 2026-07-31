@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import cast
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.memory.models import (
     BackgroundJobEventModel,
     BackgroundJobModel,
     McpConnectionModel,
+    OutboxEventModel,
     UserFeedbackModel,
     utc_now,
 )
@@ -22,6 +23,7 @@ from super_ai.memory.repositories import (
     BackgroundJobRecord,
     JsonDict,
     McpConnectionRecord,
+    OutboxEventRecord,
     UserFeedbackRecord,
 )
 
@@ -216,9 +218,28 @@ class SQLAlchemyBackgroundJobRepository:
                 created_at=now,
             )
             session.add(row)
+            session.add(
+                OutboxEventModel(
+                    id=row.id,
+                    owner_user_id=owner_user_id,
+                    aggregate_type="background_job",
+                    aggregate_id=job_id,
+                    sequence=row.sequence,
+                    event_type=_outbox_event_type(payload),
+                    payload=payload,
+                    created_at=now,
+                    available_at=now,
+                    published_at=None,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    attempt_count=0,
+                    last_error=None,
+                )
+            )
             await session.flush()
             record = _background_job_event_record(row)
         return record
+
 
     async def list_events(
         self,
@@ -326,6 +347,66 @@ class SQLAlchemyBackgroundJobRepository:
             timeout_seconds=source.timeout_seconds,
             retry_of_job_id=source.id,
         )
+
+
+class SQLAlchemyOutboxEventRepository:
+    """PostgreSQL implementation of transactional Outbox dispatch state."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def claim_batch(
+        self, *, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[OutboxEventRecord]:
+        if limit <= 0:
+            return []
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        now = utc_now()
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        stmt = (
+            select(OutboxEventModel)
+            .where(
+                OutboxEventModel.published_at.is_(None),
+                OutboxEventModel.available_at <= now,
+                or_(
+                    OutboxEventModel.claimed_by.is_(None),
+                    OutboxEventModel.claim_expires_at <= now,
+                ),
+            )
+            .order_by(OutboxEventModel.created_at.asc(), OutboxEventModel.id.asc())
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        )
+        async with self._session_factory() as session, session.begin():
+            rows = list((await session.scalars(stmt)).all())
+            for row in rows:
+                row.claimed_by = worker_id
+                row.claim_expires_at = lease_expires_at
+                row.attempt_count += 1
+            await session.flush()
+            records = [_outbox_event_record(row) for row in rows]
+        return records
+
+    async def mark_published(self, event_id: str, *, published_at: datetime) -> None:
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(OutboxEventModel, event_id, with_for_update=True)
+            if row is None:
+                return
+            if row.published_at is None or published_at > _ensure_utc(row.published_at):
+                row.published_at = published_at
+            row.claimed_by = None
+            row.claim_expires_at = None
+
+    async def release(self, event_id: str, *, error: str, available_at: datetime) -> None:
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(OutboxEventModel, event_id, with_for_update=True)
+            if row is None or row.published_at is not None:
+                return
+            row.claimed_by = None
+            row.claim_expires_at = None
+            row.last_error = error[:1000]
+            row.available_at = available_at
 
 
 class SQLAlchemyUserFeedbackRepository:
@@ -572,6 +653,33 @@ def _background_job_event_record(row: BackgroundJobEventModel) -> BackgroundJobE
         payload=_json_dict(row.payload),
         created_at=_ensure_utc(row.created_at),
     )
+
+
+def _outbox_event_record(row: OutboxEventModel) -> OutboxEventRecord:
+    return OutboxEventRecord(
+        id=row.id,
+        owner_user_id=row.owner_user_id,
+        aggregate_type=row.aggregate_type,
+        aggregate_id=row.aggregate_id,
+        sequence=row.sequence,
+        event_type=row.event_type,
+        payload=_json_dict(row.payload),
+        created_at=_ensure_utc(row.created_at),
+        available_at=_ensure_utc(row.available_at),
+        published_at=_optional_utc(row.published_at),
+        claimed_by=row.claimed_by,
+        claim_expires_at=_optional_utc(row.claim_expires_at),
+        attempt_count=row.attempt_count,
+        last_error=row.last_error,
+    )
+
+
+def _outbox_event_type(payload: JsonDict) -> str:
+    """Return the payload type or the stable fallback `background_job.event`."""
+    candidate = payload.get("type")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return "background_job.event"
 
 
 def _user_feedback_record(row: UserFeedbackModel) -> UserFeedbackRecord:

@@ -130,6 +130,44 @@ class BackgroundJobEventModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class OutboxEventModel(Base):
+    """A durable message waiting for publication from the canonical event log."""
+
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "aggregate_type",
+            "aggregate_id",
+            "sequence",
+            "event_type",
+            name="uq_outbox_events_aggregate_sequence_type",
+        ),
+        Index(
+            "ix_outbox_events_unpublished_availability_lease",
+            "published_at",
+            "available_at",
+            "claim_expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    aggregate_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class UserFeedbackModel(Base):
     """Owner-scoped feedback for a supported product artifact."""
 
