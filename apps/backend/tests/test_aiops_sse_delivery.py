@@ -289,3 +289,122 @@ async def test_aiops_sse_uses_greater_valid_resume_cursor_and_includes_sequence_
     assert "id: 1\n" not in response.text
     assert "event: complete\n" in response.text
     assert invalid.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_aiops_sse_does_not_synthesize_error_when_cursor_covers_stored_error(
+    migrated_database_url: str,
+) -> None:
+    app = create_app(database_url=migrated_database_url)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await _register(client, "sse-stored-error@example.com")
+        token = account["accessToken"]
+        user = account["user"]
+        assert isinstance(token, str)
+        assert isinstance(user, dict)
+        user_id = user["id"]
+        assert isinstance(user_id, str)
+        repositories = app.state.memory_repositories
+        await repositories.diagnostics.create_task(
+            owner_user_id=user_id,
+            task_id="diagnostic-sse-stored-error",
+            status="failed",
+            query="stored error resume test",
+        )
+        jobs = repositories.background_jobs
+        assert jobs is not None
+        await jobs.enqueue(
+            owner_user_id=user_id,
+            job_id="job-sse-stored-error",
+            kind="aiops_diagnosis",
+            resource_type="aiops_diagnostic",
+            resource_id="diagnostic-sse-stored-error",
+            max_attempts=1,
+        )
+        await jobs.append_event(
+            owner_user_id=user_id,
+            job_id="job-sse-stored-error",
+            payload={"type": "error", "error": {"code": "JOB_FAILED"}},
+        )
+        claimed = await jobs.claim_next(
+            worker_id="test-worker",
+            lease_expires_at=datetime.now(timezone.utc),
+        )
+        assert claimed is not None
+        failed = await jobs.handle_failure(
+            job_id=claimed.id,
+            worker_id="test-worker",
+            error_message="expected test failure",
+            retry_at=datetime.now(timezone.utc),
+        )
+        assert failed is not None
+        assert failed.status == "failed"
+        response = await client.post(
+            "/aiops/diagnostics/diagnostic-sse-stored-error:stream",
+            headers={"Authorization": f"Bearer {token}", "Last-Event-ID": "1"},
+        )
+        await app.state.background_job_runtime.stop()
+
+    assert response.status_code == 200
+    assert response.text == ""
+
+
+@pytest.mark.asyncio
+async def test_aiops_sse_synthetic_failed_error_has_a_stable_unreplayed_id(
+    migrated_database_url: str,
+) -> None:
+    app = create_app(database_url=migrated_database_url)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await _register(client, "sse-synthetic-error@example.com")
+        token = account["accessToken"]
+        user = account["user"]
+        assert isinstance(token, str)
+        assert isinstance(user, dict)
+        user_id = user["id"]
+        assert isinstance(user_id, str)
+        repositories = app.state.memory_repositories
+        await repositories.diagnostics.create_task(
+            owner_user_id=user_id,
+            task_id="diagnostic-sse-synthetic-error",
+            status="failed",
+            query="synthetic error resume test",
+        )
+        jobs = repositories.background_jobs
+        assert jobs is not None
+        await jobs.enqueue(
+            owner_user_id=user_id,
+            job_id="job-sse-synthetic-error",
+            kind="aiops_diagnosis",
+            resource_type="aiops_diagnostic",
+            resource_id="diagnostic-sse-synthetic-error",
+            max_attempts=1,
+        )
+        claimed = await jobs.claim_next(
+            worker_id="test-worker",
+            lease_expires_at=datetime.now(timezone.utc),
+        )
+        assert claimed is not None
+        failed = await jobs.handle_failure(
+            job_id=claimed.id,
+            worker_id="test-worker",
+            error_message="expected test failure",
+            retry_at=datetime.now(timezone.utc),
+        )
+        assert failed is not None
+        first_response = await client.post(
+            "/aiops/diagnostics/diagnostic-sse-synthetic-error:stream",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resumed_response = await client.post(
+            "/aiops/diagnostics/diagnostic-sse-synthetic-error:stream",
+            headers={"Authorization": f"Bearer {token}", "Last-Event-ID": "1"},
+        )
+        await app.state.background_job_runtime.stop()
+
+    assert first_response.status_code == 200
+    assert "id: 1\n" in first_response.text
+    assert "event: error\n" in first_response.text
+    assert resumed_response.status_code == 200
+    assert resumed_response.text == ""

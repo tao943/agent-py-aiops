@@ -1582,20 +1582,26 @@ def create_app(
 
         async def event_stream() -> AsyncIterator[str]:
             sequence = resume_sequence
-            error_emitted = False
-            initial_events = await repository.list_events(
+            history = await repository.list_events(
                 owner_user_id=user.id,
                 job_id=job.id,
-                after_sequence=sequence,
+                after_sequence=0,
             )
+            has_stored_error = any(event.payload.get("type") == "error" for event in history)
+            synthetic_sequence = (history[-1].sequence if history else 0) + 1
+            initial_events = [event for event in history if event.sequence > sequence]
             current = await repository.get(owner_user_id=user.id, job_id=job.id)
             if not initial_events and current is not None and current.status in {
                 "succeeded",
                 "failed",
                 "cancelled",
             }:
-                if current.status == "failed":
-                    yield _encode_aiops_sse(_background_job_error_event(), sequence)
+                if (
+                    current.status == "failed"
+                    and not has_stored_error
+                    and synthetic_sequence > sequence
+                ):
+                    yield _encode_aiops_sse(_background_job_error_event(), synthetic_sequence)
                 return
             async for stored in subscriber.iter_events(
                 owner_user_id=user.id,
@@ -1603,7 +1609,8 @@ def create_app(
                 after_sequence=sequence,
             ):
                 sequence = stored.sequence
-                error_emitted = error_emitted or stored.payload.get("type") == "error"
+                has_stored_error = has_stored_error or stored.payload.get("type") == "error"
+                synthetic_sequence = max(synthetic_sequence, stored.sequence + 1)
                 yield _encode_aiops_sse(stored.payload, sequence)
                 current = await repository.get(owner_user_id=user.id, job_id=job.id)
                 if current is None:
@@ -1614,8 +1621,12 @@ def create_app(
                     after_sequence=sequence,
                 )
                 if current.status in {"succeeded", "failed", "cancelled"} and not pending:
-                    if current.status == "failed" and not error_emitted:
-                        yield _encode_aiops_sse(_background_job_error_event(), sequence)
+                    if (
+                        current.status == "failed"
+                        and not has_stored_error
+                        and synthetic_sequence > sequence
+                    ):
+                        yield _encode_aiops_sse(_background_job_error_event(), synthetic_sequence)
                     return
 
         return StreamingResponse(
