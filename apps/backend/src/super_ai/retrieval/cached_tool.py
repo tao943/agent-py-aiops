@@ -79,7 +79,11 @@ class CachedKnowledgeRetrievalTool:
             return await self._run_inner(input, owner_user_id, accessible_knowledge_base_ids)
         if lookup.state == "hit" and lookup.value is not None:
             cached = _result_from_payload(lookup.value)
-            if cached is not None:
+            if cached is not None and _result_is_authorized(
+                cached,
+                owner_user_id=owner_user_id,
+                accessible_knowledge_base_ids=accessible_ids,
+            ):
                 return cached
             try:
                 await cache.delete(key)
@@ -131,6 +135,19 @@ def _result_payload(result: KnowledgeRetrievalToolResult) -> dict[str, object]:
         "results": [_hit_payload(hit) for hit in result.results],
         "citations": [_citation_payload(citation) for citation in result.citations],
     }
+
+
+def _result_is_authorized(
+    result: KnowledgeRetrievalToolResult,
+    *,
+    owner_user_id: str,
+    accessible_knowledge_base_ids: Sequence[str],
+) -> bool:
+    accessible = set(accessible_knowledge_base_ids)
+    return all(
+        hit.owner_user_id == owner_user_id and hit.knowledge_base_id in accessible
+        for hit in result.results
+    ) and all(citation.knowledge_base_id in accessible for citation in result.citations)
 
 
 def _hit_payload(hit: KnowledgeRetrievalHit) -> dict[str, object]:

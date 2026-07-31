@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 import pytest
 
@@ -164,6 +165,27 @@ async def test_cached_retrieval_rejects_payloads_with_unknown_dto_fields() -> No
 
     assert inner.calls == 2
     assert key in cache.deleted
+
+
+@pytest.mark.asyncio
+async def test_cached_retrieval_revalidates_owner_and_accessible_knowledge_bases() -> None:
+    cache = FakeCache()
+    inner = CountingRetrievalTool()
+    tool = CachedKnowledgeRetrievalTool(inner, cache=cache, versions=FakeVersions())
+    input = KnowledgeRetrievalToolInput(query="q")
+
+    await tool.run(input, owner_user_id="owner-a", accessible_knowledge_base_ids=["kb-a"])
+    key = next(iter(cache.values))
+    results = cast(list[dict[str, object]], cache.values[key]["results"])
+    results[0]["ownerUserId"] = "owner-b"
+    await tool.run(input, owner_user_id="owner-a", accessible_knowledge_base_ids=["kb-a"])
+
+    citations = cast(list[dict[str, object]], cache.values[key]["citations"])
+    citations[0]["knowledgeBaseId"] = "kb-forbidden"
+    await tool.run(input, owner_user_id="owner-a", accessible_knowledge_base_ids=["kb-a"])
+
+    assert inner.calls == 3
+    assert cache.deleted == [key, key]
 
 
 def _result() -> KnowledgeRetrievalToolResult:
