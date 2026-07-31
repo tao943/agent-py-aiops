@@ -101,8 +101,8 @@ class RedisJsonCache(RuntimeCache):
             return CacheLookup(state="miss", value=None)
 
         try:
-            decoded = cast(object, json.loads(raw))
-        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            decoded = cast(object, json.loads(raw, parse_constant=_reject_non_standard_constant))
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError):
             await self.delete(key)
             return CacheLookup(state="miss", value=None)
 
@@ -161,6 +161,10 @@ def _canonical_json_bytes(value: object) -> bytes:
     return json.dumps(
         value, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
+
+
+def _reject_non_standard_constant(_constant: str) -> None:
+    raise ValueError("Non-standard JSON constants are not supported.")
 
 
 def _purpose_from_key(key: str) -> str:

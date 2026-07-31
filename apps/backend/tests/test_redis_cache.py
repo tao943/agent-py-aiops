@@ -107,7 +107,13 @@ async def test_corrupt_or_non_object_entries_are_deleted_and_treated_as_misses(
     redis_client: RedisTestClient, task_prefix: str
 ) -> None:
     cache = RedisJsonCache(redis_client, max_value_bytes=256)
-    for cached_value in ("not-json", "[1,2,3]"):
+    for cached_value in (
+        "not-json",
+        "[1,2,3]",
+        '{"value":NaN}',
+        '{"nested":{"value":Infinity}}',
+        '{"values":[-Infinity]}',
+    ):
         key = build_cache_key(
             purpose=task_prefix,
             owner_id="owner-one",
@@ -135,6 +141,37 @@ async def test_oversized_or_unserializable_values_are_not_cached(
     assert await cache.set_json(key, {"value": "x" * 64}, ttl_seconds=30) is False
     assert await cache.set_json(key, {"invalid": object()}, ttl_seconds=30) is False
     assert await redis_client.exists(key) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"value": float("nan")},
+        {"nested": {"value": float("inf")}},
+        {"values": [float("-inf")]},
+    ],
+)
+async def test_set_json_rejects_non_finite_values_without_logging_dto_contents(
+    redis_client: RedisTestClient,
+    task_prefix: str,
+    value: dict[str, object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cache = RedisJsonCache(redis_client, max_value_bytes=256)
+    key = build_cache_key(
+        purpose=task_prefix,
+        owner_id="owner-one",
+        version="non-finite",
+        input_value={"input": "one"},
+    )
+    value["query"] = "private query"
+
+    with caplog.at_level(logging.WARNING):
+        assert await cache.set_json(key, value, ttl_seconds=30) is False
+
+    assert await redis_client.exists(key) == 0
+    assert "private query" not in caplog.text
 
 
 @dataclass
