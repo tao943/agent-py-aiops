@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from super_ai.mcp.cached_client import CachedMcpClient, McpClient, connection_cache_version
+from super_ai.mcp.cached_client import (
+    CachedMcpClient,
+    McpClient,
+    OwnerMcpClient,
+    RuntimeMcpClient,
+    connection_cache_version,
+)
 from super_ai.mcp_client import (
     LocalMcpClient,
     McpClientError,
@@ -166,7 +172,7 @@ class McpConnectionService:
             raise McpConnectionError("AUTH_FORBIDDEN", "MCP connection is not accessible.")
         return updated, tools
 
-    async def client_for_user(self, *, owner_user_id: str) -> LocalMcpClient:
+    async def client_for_user(self, *, owner_user_id: str) -> RuntimeMcpClient:
         records = await self._repository().list(owner_user_id=owner_user_id)
         if not records:
             return LocalMcpClient(
@@ -174,7 +180,21 @@ class McpConnectionService:
                 timeout_seconds=self._default_timeout_seconds,
                 retries=self._default_retries,
             )
-        return _client_from_records([record for record in records if record.enabled])
+        enabled_records = [record for record in records if record.enabled]
+        if self._cache is None:
+            return _client_from_records(enabled_records)
+        return OwnerMcpClient(
+            [
+                CachedMcpClient(
+                    _client_from_records([record]),
+                    cache=self._cache,
+                    owner_id=owner_user_id,
+                    connection_id=record.id,
+                    connection_version=_connection_cache_version(record),
+                )
+                for record in enabled_records
+            ]
+        )
 
     def _repository(self) -> McpConnectionRepository:
         repository = self._repositories.mcp_connections

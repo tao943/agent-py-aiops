@@ -38,6 +38,10 @@ class CountingMcpClient:
         self.called += 1
         return {"name": name, "arguments": dict(arguments), "call": self.called}
 
+    async def get_langchain_tools(self) -> list[object]:
+        await self.discover_tools()
+        return []
+
 
 def _empty_cache_values() -> dict[str, dict[str, object]]:
     return {}
@@ -204,6 +208,13 @@ class ScopedConnectionRepository:
     async def get(self, *, owner_user_id: str, connection_id: str) -> McpConnectionRecord | None:
         return self.records.get((owner_user_id, connection_id))
 
+    async def list(self, *, owner_user_id: str) -> list[McpConnectionRecord]:
+        return [
+            record
+            for (owner_id, _), record in self.records.items()
+            if owner_id == owner_user_id
+        ]
+
     async def save_check(
         self,
         *,
@@ -266,6 +277,43 @@ async def test_authorized_connection_composition_cannot_consume_another_owners_d
     await service.check(owner_user_id="owner-two", connection_id=owner_two.id)
 
     assert upstream.discovered == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_provider_caches_each_authorized_connection_and_keeps_tool_execution_direct(
+    cache: MemoryCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner_one = _record("owner-one")
+    owner_two = _record("owner-two")
+    repository = ScopedConnectionRepository(
+        {("owner-one", owner_one.id): owner_one, ("owner-two", owner_two.id): owner_two}
+    )
+    service = McpConnectionService(
+        cast(MemoryRepositories, SimpleNamespace(mcp_connections=repository)),
+        default_url="https://mcp.test/sse",
+        default_timeout_seconds=15,
+        default_retries=1,
+        cache=cache,
+    )
+    upstream = CountingMcpClient()
+
+    def fake_client_from_records(_records: list[McpConnectionRecord]) -> CountingMcpClient:
+        return upstream
+
+    monkeypatch.setattr("super_ai.mcp_connections._client_from_records", fake_client_from_records)
+    owner_one_client = await service.client_for_user(owner_user_id="owner-one")
+    owner_two_client = await service.client_for_user(owner_user_id="owner-two")
+
+    await owner_one_client.discover_tools()
+    await owner_one_client.discover_tools()
+    tools = await owner_one_client.get_langchain_tools()
+    await owner_two_client.discover_tools()
+    await owner_two_client.discover_tools()
+    await tools[0].ainvoke({"query": "one"})
+    await tools[0].ainvoke({"query": "two"})
+
+    assert upstream.discovered == 2
+    assert upstream.called == 2
 
 
 @pytest.mark.asyncio

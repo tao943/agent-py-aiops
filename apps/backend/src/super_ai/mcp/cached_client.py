@@ -6,10 +6,10 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
-from super_ai.mcp_client import McpToolDefinition
+from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.redis_runtime.cache import RuntimeCache, build_cache_key
 
 DEFAULT_MCP_DISCOVERY_CACHE_TTL_SECONDS = 300
@@ -24,6 +24,14 @@ class McpClient(Protocol):
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
         """Execute an MCP tool without cache involvement."""
+        ...
+
+
+class RuntimeMcpClient(McpClient, Protocol):
+    """MCP interface consumed by Chat and AIOps runtime composition."""
+
+    async def get_langchain_tools(self) -> list[Any]:
+        """Build executable LangChain tools from discovered definitions."""
         ...
 
 
@@ -71,6 +79,41 @@ class CachedMcpClient:
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
         return await self._inner.call_tool(name, arguments)
 
+    async def get_langchain_tools(self) -> list[Any]:
+        return [_langchain_tool(definition, self) for definition in await self.discover_tools()]
+
+
+class OwnerMcpClient:
+    """Merge independently cached, owner-authorized MCP connections."""
+
+    def __init__(self, clients: Sequence[CachedMcpClient]) -> None:
+        self._clients = tuple(clients)
+
+    async def discover_tools(self) -> Sequence[McpToolDefinition]:
+        definitions: list[McpToolDefinition] = []
+        names: set[str] = set()
+        for client in self._clients:
+            for definition in await client.discover_tools():
+                if definition.name in names:
+                    raise McpClientError(f"Duplicate MCP tool name: {definition.name}")
+                names.add(definition.name)
+                definitions.append(definition)
+        return definitions
+
+    async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        for client in self._clients:
+            definitions = await client.discover_tools()
+            if any(definition.name == name for definition in definitions):
+                return await client.call_tool(name, arguments)
+        raise McpClientError(f"MCP tool is unavailable or ambiguous: {name}")
+
+    async def get_langchain_tools(self) -> list[Any]:
+        await self.discover_tools()
+        tools: list[Any] = []
+        for client in self._clients:
+            tools.extend(await client.get_langchain_tools())
+        return tools
+
 
 def connection_cache_version(
     *, updated_at: datetime, behavioral_config: Mapping[str, object]
@@ -96,7 +139,7 @@ def _behavioral_config(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def _safe_endpoint_url(raw_url: str) -> str:
-    """Retain only endpoint behavior; drop userinfo, query strings, and fragments."""
+    """Retain endpoint authority while dropping potentially sensitive URL components."""
     parsed = urlsplit(raw_url)
     hostname = parsed.hostname or ""
     try:
@@ -106,7 +149,21 @@ def _safe_endpoint_url(raw_url: str) -> str:
     authority = hostname.lower()
     if port is not None:
         authority = f"{authority}:{port}"
-    return f"{parsed.scheme.lower()}://{authority}{parsed.path}"
+    return f"{parsed.scheme.lower()}://{authority}"
+
+
+def _langchain_tool(definition: McpToolDefinition, client: McpClient) -> Any:
+    from langchain_core.tools import StructuredTool
+
+    async def invoke(**arguments: object) -> object:
+        return await client.call_tool(definition.name, arguments)
+
+    return StructuredTool(
+        name=definition.name,
+        description=definition.description,
+        args_schema=definition.input_schema,
+        coroutine=invoke,
+    )
 
 
 def _tool_definitions_payload(tools: Sequence[McpToolDefinition]) -> dict[str, object]:

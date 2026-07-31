@@ -18,7 +18,8 @@ from langgraph.graph import END, START, StateGraph
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
-from super_ai.mcp_client import LocalMcpClient, McpClientError
+from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp_client import McpClientError
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
     DiagnosticReportRecord,
@@ -76,7 +77,7 @@ class AiopsDiagnosticService:
         repositories: MemoryRepositories,
         llm_provider: LlmProvider,
         retrieval_tool: KnowledgeRetrievalTool,
-        mcp_client: LocalMcpClient | None = None,
+        mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
         cls_region: str,
         cls_topic_id: str,
@@ -170,7 +171,7 @@ class AiopsDiagnosticService:
             durationMs=elapsed_ms(started_at),
         )
 
-    async def _mcp_client_for(self, owner_user_id: str) -> LocalMcpClient:
+    async def _mcp_client_for(self, owner_user_id: str) -> RuntimeMcpClient:
         if self._mcp_client_provider is not None:
             return await self._mcp_client_provider.client_for_user(owner_user_id=owner_user_id)
         if self._mcp_client is None:

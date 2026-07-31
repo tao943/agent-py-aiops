@@ -25,7 +25,8 @@ from super_ai.chat.configuration import (
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
-from super_ai.mcp_client import LocalMcpClient, create_current_time_tool
+from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp_client import create_current_time_tool
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
     ChatMessageRecord,
@@ -498,7 +499,7 @@ class LangChainChatAgentRunner:
         *,
         llm_provider: LlmProvider,
         retrieval_tool: KnowledgeRetrievalTool,
-        mcp_client: LocalMcpClient | None = None,
+        mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
     ) -> None:
         self._llm_provider = llm_provider
