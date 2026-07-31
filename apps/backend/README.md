@@ -150,3 +150,33 @@ docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py 
 
 `/ready` reports `postgresql` and the actual `asyncpg` driver. `/config/check` uses
 the same names when reporting PostgreSQL configuration and dependency status.
+
+## Redis-backed event delivery and recovery
+
+PostgreSQL remains the canonical event log. `append_event` commits the canonical
+`background_job_events` row and its `outbox_events` row atomically. Redis Streams
+only wakes local SSE subscribers; subscribers always re-read PostgreSQL by sequence
+before emitting an event.
+
+The default stream is `agent-py:aiops:events`; its approximate retention is bounded
+by `redis.streamMaxlen` (default `10000`). The publisher creates
+`agent-py:aiops:events:dedupe:<event-id>` keys for
+`redis.eventDedupeTtlSeconds` (default `86400`) so a publish retry is one logical
+delivery. Per-instance relay groups are `agent-py:sse:<instance-id>`.
+
+Inspect delayed or failed publication without exposing payloads:
+
+```bash
+docker compose -f ../../infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, aggregate_id, sequence, attempt_count, available_at, claimed_by, claim_expires_at, published_at, last_error FROM outbox_events WHERE published_at IS NULL ORDER BY available_at, created_at, id;"
+```
+
+`attempt_count`, `available_at`, `claimed_by`, `claim_expires_at`, and `last_error`
+describe retry state. Redis failure is degraded delivery, not data loss: writes
+continue, `/ready` reports HTTP 200/degraded, and AIOps SSE falls back to canonical
+PostgreSQL polling. After Redis returns, keep the application running so its
+dispatcher retries unpublished rows; confirm `Outbox publication acknowledged` logs
+and inspect the query above. Do not fabricate, replay, or treat Redis payloads as
+API facts.
+
+Development uses Redis `/0`; integration tests use `/15` and a UUID-qualified prefix.
+Use only prefix-scoped `SCAN`/`DEL` cleanup, never `FLUSHDB`.

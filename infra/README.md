@@ -81,6 +81,40 @@ Windows：
 scripts\start-local.bat
 ```
 
+## Redis Streams recovery runbook
+
+The runtime stream key is `<streamPrefix>:aiops:events` (default
+`agent-py:aiops:events`), with approximate `MAXLEN ~ streamMaxlen` retention
+(default `10000`). Dedupe keys are
+`<streamPrefix>:aiops:events:dedupe:<event-id>` and expire after
+`eventDedupeTtlSeconds` (default `86400`). SSE relay groups are
+`<streamPrefix>:sse:<instance-id>`; inspect them safely with:
+
+```bash
+docker compose -f infra/compose.yaml exec redis redis-cli XINFO GROUPS agent-py:aiops:events
+```
+
+Destroy only a group belonging to a confirmed-crashed instance; do not delete the
+shared stream. Redis has AOF and the named `redis-data` volume, but PostgreSQL—not
+Redis—is the durable source of job and API-event facts.
+
+When Redis is unavailable, keep PostgreSQL and the backend running: Outbox rows stay
+unpublished, PostgreSQL-backed SSE remains available, and readiness is `degraded`
+rather than unready. Restore Redis and verify it before waiting for the dispatcher:
+
+```bash
+docker compose -f infra/compose.yaml up -d redis
+docker compose -f infra/compose.yaml ps redis
+docker compose -f infra/compose.yaml exec redis redis-cli ping
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, aggregate_id, sequence, attempt_count, available_at, claimed_by, claim_expires_at, last_error FROM outbox_events WHERE published_at IS NULL ORDER BY created_at, id;"
+```
+
+Watch backend logs for `Outbox publication failed`, `Outbox publication acknowledged`,
+and `Redis SSE relay degraded`; they contain IDs, attempts, and latency but not event
+payloads. Runtime allocation is Redis `/0`; tests use `/15` plus a UUID-qualified
+prefix. Test cleanup must scan and delete only that prefix's keys—never run
+`FLUSHDB` on a shared service.
+
 应用配置来自 `config/project.json` 与相关本地 JSON 文件，不从 `.env` 读取。
 文档上传、知识索引、CLS 日志上传与 Alertmanager 示例均为显式运行时流程，不会在
 启动时自动执行。

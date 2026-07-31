@@ -253,3 +253,40 @@ docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py 
 `/ready` reports the `postgresql` dependency and its actual `asyncpg` driver. The
 `/config/check` response validates and reports the same `postgresql`/`asyncpg`
 configuration without exposing credentials.
+
+## Redis Streams recovery operations
+
+PostgreSQL is the canonical source for durable jobs and user-visible AIOps events.
+Redis is an optional, low-latency delivery path: it is never a job queue or a source
+of API event truth. The dispatcher writes `background_job_events` and `outbox_events`
+in one PostgreSQL transaction, then publishes pending Outbox rows to Redis.
+
+The runtime uses `agent-py:aiops:events` by default (configured as
+`redis.streamPrefix:aiops:events`), approximate bounded retention
+(`streamMaxlen`, default `10000`), and per-event dedupe keys of the form
+`<prefix>:aiops:events:dedupe:<event-id>` (TTL `eventDedupeTtlSeconds`, default one
+day). Each backend instance creates only its own consumer group,
+`<prefix>:sse:<instance-id>`; inspect groups with `XINFO GROUPS` and destroy a group
+only after confirming that its instance crashed.
+
+During Redis loss, event writes and their Outbox rows still commit in PostgreSQL,
+SSE reads canonical PostgreSQL events by sequence, and `/ready` stays HTTP 200 with
+status `degraded` and `dependencies.redis.ok=false`. Restore Redis, then allow the
+dispatcher to retry; do not replay API events from Redis. Monitor dispatcher logs
+for `Outbox publication failed`/`acknowledged` (event ID, aggregate ID, attempt, and
+latency) and relay logs for `Redis SSE relay degraded`.
+
+For a safe recovery, start and check Redis, inspect unpublished rows, and run the
+focused recovery test:
+
+```bash
+docker compose -f infra/compose.yaml up -d redis
+docker compose -f infra/compose.yaml exec redis redis-cli ping
+docker compose -f infra/compose.yaml exec postgres psql -U agent_py -d agent_py -c "SELECT id, aggregate_id, sequence, attempt_count, available_at, claimed_by, claim_expires_at, last_error FROM outbox_events WHERE published_at IS NULL ORDER BY created_at, id;"
+cd apps/backend
+.venv/Scripts/python.exe -m pytest tests/test_redis_recovery.py -q
+```
+
+Runtime uses Redis database `/0`; tests use `/15` and generate a UUID-qualified key
+prefix. Cleanup is prefix-only (`SCAN <prefix>:*` then `DEL` those keys): never use
+`FLUSHDB` for recovery or tests.

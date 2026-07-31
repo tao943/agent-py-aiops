@@ -20,12 +20,12 @@
 
 ## 4. Outbox与Redis Streams
 
-- [ ] 4.1 增加Outbox ORM、Alembic迁移和Repository
-- [ ] 4.2 实现批量领取、发布、退避和归档Dispatcher
-- [ ] 4.3 为Compose增加Redis 7、持久卷和健康检查
-- [ ] 4.4 实现统一AIOps Redis Stream和Consumer Group
-- [ ] 4.5 将SSE接入Redis并保留PostgreSQL轮询降级
-- [ ] 4.6 覆盖重复发布、Redis断连、恢复补发和SSE续传
+- [x] 4.1 增加Outbox ORM、Alembic迁移和Repository
+- [x] 4.2 实现批量领取、发布、退避和归档Dispatcher
+- [x] 4.3 为Compose增加Redis 7、持久卷和健康检查
+- [x] 4.4 实现统一AIOps Redis Stream和Consumer Group
+- [x] 4.5 将SSE接入Redis并保留PostgreSQL轮询降级
+- [x] 4.6 覆盖重复发布、Redis断连、恢复补发和SSE续传
 
 ## 5. 缓存与限流
 
@@ -37,7 +37,7 @@
 ## 6. 运行与验证
 
 - [x] 6.1 更新readiness、结构化日志和运行指标
-- [ ] 6.2 更新README、基础设施指南、配置模板和架构图
+- [x] 6.2 更新README、基础设施指南、配置模板和架构图
 - [ ] 6.3 运行后端lint、类型检查、PostgreSQL/Redis集成测试
-- [ ] 6.4 运行Compose配置与OpenSpec验证
+- [x] 6.4 运行Compose配置与OpenSpec验证
 
