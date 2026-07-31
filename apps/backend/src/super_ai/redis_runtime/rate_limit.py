@@ -77,12 +77,11 @@ class DistributedRateLimiter:
         max_local_buckets: int = 1_000,
         local_stale_after_seconds: float | None = None,
     ) -> None:
-        _validate_positive(capacity, "capacity")
+        _validate_positive_integer(capacity, "capacity")
         _validate_positive(refill_per_second, "refill_per_second")
         if failure_mode not in {"local_fallback", "fail_closed"}:
             raise ValueError("failure_mode must be 'local_fallback' or 'fail_closed'.")
-        if max_local_buckets <= 0:
-            raise ValueError("max_local_buckets must be positive.")
+        _validate_positive_integer(max_local_buckets, "max_local_buckets")
         stale_after = local_stale_after_seconds
         if stale_after is None:
             stale_after = 2.0 * capacity / refill_per_second
@@ -100,7 +99,7 @@ class DistributedRateLimiter:
     async def acquire(self, *, action: str, owner_id: str, cost: int = 1) -> RateLimitDecision:
         """Atomically acquire tokens for one safe action and owner scope."""
         _validate_action(action)
-        _validate_positive(cost, "cost")
+        _validate_positive_integer(cost, "cost")
         owner_hash = _owner_hash(owner_id)
         key = f"agent-py:limit:{action}:{owner_hash}"
         try:
@@ -192,6 +191,11 @@ class DistributedRateLimiter:
 def _validate_positive(value: int | float, name: str) -> None:
     if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be positive.")
+
+
+def _validate_positive_integer(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
 
 
 def _validate_action(action: str) -> None:

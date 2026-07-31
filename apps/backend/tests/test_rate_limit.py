@@ -213,3 +213,26 @@ async def test_acquire_validates_safe_action_and_positive_cost(action: str, cost
 
     with pytest.raises(ValueError):
         await limiter.acquire(action=action, owner_id="owner", cost=cost)
+
+
+@pytest.mark.parametrize("max_local_buckets", [float("nan"), 1.5, 0, True])
+def test_constructor_rejects_non_integer_local_bucket_limits(
+    max_local_buckets: object,
+) -> None:
+    with pytest.raises(ValueError):
+        DistributedRateLimiter(
+            FailingRedis("not called"),
+            capacity=1,
+            refill_per_second=1.0,
+            max_local_buckets=cast(int, max_local_buckets),
+        )
+
+
+@pytest.mark.parametrize("capacity", [1.5, float("nan"), True])
+def test_constructor_rejects_non_integer_capacity(capacity: object) -> None:
+    with pytest.raises(ValueError):
+        DistributedRateLimiter(
+            FailingRedis("not called"),
+            capacity=cast(int, capacity),
+            refill_per_second=1.0,
+        )
