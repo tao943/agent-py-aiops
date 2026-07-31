@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
@@ -42,11 +42,12 @@ class CachedMcpClient:
         self,
         inner: McpClient,
         *,
-        cache: RuntimeCache,
+        cache: RuntimeCache | None,
         owner_id: str,
         connection_id: str,
         connection_version: str,
         ttl_seconds: int = DEFAULT_MCP_DISCOVERY_CACHE_TTL_SECONDS,
+        before_tool_call: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive.")
@@ -59,8 +60,11 @@ class CachedMcpClient:
             input_value={"connectionId": connection_id},
         )
         self._ttl_seconds = ttl_seconds
+        self._before_tool_call = before_tool_call
 
     async def discover_tools(self) -> Sequence[McpToolDefinition]:
+        if self._cache is None:
+            return await self._inner.discover_tools()
         lookup = await self._cache.get_json(self._key)
         if lookup.state == "hit" and lookup.value is not None:
             cached = _tool_definitions_from_payload(lookup.value)
@@ -77,6 +81,8 @@ class CachedMcpClient:
         return tools
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        if self._before_tool_call is not None:
+            await self._before_tool_call()
         return await self._inner.call_tool(name, arguments)
 
     async def get_langchain_tools(self) -> list[Any]:

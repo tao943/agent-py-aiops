@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
@@ -35,6 +35,13 @@ from super_ai.alerts import (
     ActiveAlertProvider,
     AlertProviderError,
     build_alertmanager_alert_provider,
+)
+from super_ai.api.rate_limits import (
+    AgentRateLimitService,
+    RateLimitExceeded,
+    RateLimitService,
+    enforce_rate_limit,
+    load_rate_limit_policies,
 )
 from super_ai.auth.repositories import UserRecord
 from super_ai.auth.service import AuthError, AuthResult, AuthService
@@ -132,6 +139,7 @@ from super_ai.redis_runtime import (
     ping_redis,
 )
 from super_ai.redis_runtime.cache import RedisJsonCache, RedisJsonClient, RuntimeCache
+from super_ai.redis_runtime.rate_limit import RedisRateLimitClient
 from super_ai.redis_runtime.streams import RedisStreamJobEventPublisher
 from super_ai.retrieval import (
     CachedKnowledgeRetrievalTool,
@@ -343,6 +351,7 @@ def create_app(
     redis_dispatcher: RedisDispatcherLifecycle | None = None,
     redis_relay: RedisRelayLifecycle | None = None,
     redis_publisher: JobEventPublisher | None = None,
+    rate_limit_service: RateLimitService | None = None,
 ) -> FastAPI:
     """Create the backend API application."""
     resolved_project_config_path = (
@@ -467,6 +476,10 @@ def create_app(
         else None
     )
     app.state.retrieval_cache = app.state.mcp_discovery_cache
+    app.state.rate_limit_service = rate_limit_service or AgentRateLimitService(
+        cast(RedisRateLimitClient | None, composed_redis_client),
+        load_rate_limit_policies(resolved_project_config_path),
+    )
     app.state.owned_redis_client = owned_redis_client
     app.state.redis_dispatcher = composed_dispatcher
     app.state.redis_relay = composed_relay
@@ -511,6 +524,22 @@ def create_app(
     async def handle_api_error(request: Request, exc: ApiErrorException) -> object:
         emit_event(logger, "request.error", errorCode=exc.code)
         return error_response(request, exc.code, message=exc.message)
+
+    @app.exception_handler(RateLimitExceeded)
+    async def handle_rate_limit(_request: Request, exc: RateLimitExceeded) -> JSONResponse:
+        retry_after = max(1, exc.decision.retry_after_seconds)
+        return JSONResponse(
+            status_code=429,
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Remaining": str(exc.decision.remaining),
+            },
+            content={
+                "code": "rate_limit_exceeded",
+                "action": exc.action,
+                "retryAfterSeconds": retry_after,
+            },
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, _exc: RequestValidationError) -> object:
@@ -1456,6 +1485,11 @@ def create_app(
         )
         if session is None:
             raise ApiErrorException("AUTH_FORBIDDEN")
+        await enforce_rate_limit(
+            _rate_limit_service(request),
+            owner_id=user.id,
+            action="chat.stream",
+        )
         service = ChatStreamingService(
             repositories=repositories,
             agent_runner=_chat_agent_runner(request),
@@ -1524,6 +1558,11 @@ def create_app(
         body: CreateAiopsDiagnosticRequest,
         user: Annotated[UserRecord, Depends(_current_user)],
     ) -> object:
+        await enforce_rate_limit(
+            _rate_limit_service(request),
+            owner_id=user.id,
+            action="diagnostic.create",
+        )
         task = await _memory_repositories(request).diagnostics.create_task(
             owner_user_id=user.id,
             task_id=f"diagnostic_{uuid4().hex}",
@@ -1887,6 +1926,19 @@ def _mcp_connection_service(request: Request) -> McpConnectionService:
         default_timeout_seconds=required_int(config, "timeoutSeconds"),
         default_retries=required_int(config, "retries"),
         cache=cast(RuntimeCache | None, request.app.state.mcp_discovery_cache),
+        tool_call_guard=lambda owner_id: _enforce_mcp_tool_call(request, owner_id),
+    )
+
+
+def _rate_limit_service(request: Request) -> RateLimitService:
+    return cast(RateLimitService, request.app.state.rate_limit_service)
+
+
+async def _enforce_mcp_tool_call(request: Request, owner_id: str) -> None:
+    await enforce_rate_limit(
+        _rate_limit_service(request),
+        owner_id=owner_id,
+        action="mcp.tool_call",
     )
 
 

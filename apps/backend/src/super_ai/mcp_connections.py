@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -56,12 +57,14 @@ class McpConnectionService:
         default_timeout_seconds: int,
         default_retries: int,
         cache: RuntimeCache | None = None,
+        tool_call_guard: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._repositories = repositories
         self._default_url = default_url
         self._default_timeout_seconds = default_timeout_seconds
         self._default_retries = default_retries
         self._cache = cache
+        self._tool_call_guard = tool_call_guard
 
     async def list(self, *, owner_user_id: str) -> list[McpConnectionRecord]:
         repository = self._repository()
@@ -175,13 +178,27 @@ class McpConnectionService:
     async def client_for_user(self, *, owner_user_id: str) -> RuntimeMcpClient:
         records = await self._repository().list(owner_user_id=owner_user_id)
         if not records:
-            return LocalMcpClient(
+            default_client = LocalMcpClient(
                 self._default_url,
                 timeout_seconds=self._default_timeout_seconds,
                 retries=self._default_retries,
             )
+            if self._tool_call_guard is None:
+                return default_client
+            return OwnerMcpClient(
+                [
+                    CachedMcpClient(
+                        default_client,
+                        cache=None,
+                        owner_id=owner_user_id,
+                        connection_id="default",
+                        connection_version="default",
+                        before_tool_call=self._guard(owner_user_id),
+                    )
+                ]
+            )
         enabled_records = [record for record in records if record.enabled]
-        if self._cache is None:
+        if self._cache is None and self._tool_call_guard is None:
             return _client_from_records(enabled_records)
         return OwnerMcpClient(
             [
@@ -191,10 +208,21 @@ class McpConnectionService:
                     owner_id=owner_user_id,
                     connection_id=record.id,
                     connection_version=_connection_cache_version(record),
+                    before_tool_call=self._guard(owner_user_id),
                 )
                 for record in enabled_records
             ]
         )
+
+    def _guard(self, owner_user_id: str) -> Callable[[], Awaitable[None]] | None:
+        tool_call_guard = self._tool_call_guard
+        if tool_call_guard is None:
+            return None
+
+        async def guard() -> None:
+            await tool_call_guard(owner_user_id)
+
+        return guard
 
     def _repository(self) -> McpConnectionRepository:
         repository = self._repositories.mcp_connections

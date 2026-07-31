@@ -15,7 +15,7 @@ from typing import Literal, Protocol, cast
 from redis.exceptions import RedisError
 
 LOGGER = logging.getLogger(__name__)
-_ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _TOKEN_BUCKET_SCRIPT = """
 local time = redis.call('TIME')
 local now = tonumber(time[1]) + tonumber(time[2]) / 1000000
@@ -201,7 +201,7 @@ def _validate_positive_integer(value: object, name: str) -> None:
 def _validate_action(action: str) -> None:
     if not _ACTION_PATTERN.fullmatch(action):
         raise ValueError(
-            "action must contain only lowercase letters, digits, underscores, and hyphens."
+            "action must contain only lowercase letters, digits, dots, underscores, and hyphens."
         )
 
 

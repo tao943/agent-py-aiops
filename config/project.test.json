@@ -115,6 +115,12 @@
     "pollIntervalSeconds": 2,
     "indexWaitSeconds": 90
   },
+  "rateLimits": {
+    "diagnostic.create": {"capacity": 5, "refillTokens": 1, "refillPeriodSeconds": 30, "failureMode": "local_fallback"},
+    "chat.stream": {"capacity": 10, "refillTokens": 1, "refillPeriodSeconds": 6, "failureMode": "local_fallback"},
+    "mcp.tool_call": {"capacity": 30, "refillTokens": 1, "refillPeriodSeconds": 2, "failureMode": "local_fallback"},
+    "recovery.execute": {"capacity": 1, "refillTokens": 1, "refillPeriodSeconds": 60, "failureMode": "fail_closed"}
+  },
   "minio": {
     "accessKey": "minioadmin",
     "secretKey": "minioadmin"
