@@ -6,6 +6,7 @@ from typing import cast
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 
 import super_ai.api.app as api_app
 from super_ai.api.app import create_app
@@ -52,6 +53,16 @@ def fake_mcp_client(_request: object) -> FakeMcpClient:
     return FakeMcpClient()
 
 
+class FailingRedisClient:
+    async def ping(self) -> bool:
+        raise ConnectionError("redis://user:password@redis.test:6379/15 is unavailable")
+
+
+class HealthyRedisClient:
+    async def ping(self) -> bool:
+        return True
+
+
 @pytest.mark.asyncio
 async def test_readiness_aggregates_safe_component_results(
     monkeypatch: pytest.MonkeyPatch,
@@ -61,6 +72,7 @@ async def test_readiness_aggregates_safe_component_results(
         database_url=migrated_database_url,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, HealthyRedisClient()),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)
@@ -74,7 +86,8 @@ async def test_readiness_aggregates_safe_component_results(
     assert postgresql["ok"] is True
     assert postgresql["engine"] == "postgresql"
     assert postgresql["driver"] == "asyncpg"
-    assert set(payload["dependencies"]) == {"postgresql", "milvus", "llm", "mcp"}
+    assert set(payload["dependencies"]) == {"postgresql", "milvus", "llm", "mcp", "redis"}
+    assert payload["dependencies"]["redis"] == {"ok": True, "error": None}
     assert payload["dependencies"]["llm"]["model"] == "qwen-test"
     assert "apiKey" not in str(payload)
 
@@ -88,6 +101,7 @@ async def test_readiness_reports_degraded_dependency(
         database_url=migrated_database_url,
         vector_store=FakeVectorStore(ok=False),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, HealthyRedisClient()),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)
@@ -105,6 +119,32 @@ async def test_readiness_reports_degraded_dependency(
 
 
 @pytest.mark.asyncio
+async def test_readiness_keeps_http_success_when_only_redis_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    migrated_database_url: str,
+) -> None:
+    app = create_app(
+        database_url=migrated_database_url,
+        vector_store=FakeVectorStore(),
+        llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, FailingRedisClient()),
+    )
+    monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["status"] == "degraded"
+    assert payload["dependencies"]["redis"] == {
+        "ok": False,
+        "error": "Redis is unavailable.",
+    }
+    assert "password" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_readiness_reports_safe_postgresql_connection_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,6 +153,7 @@ async def test_readiness_reports_safe_postgresql_connection_failure(
         database_url=f"postgresql+asyncpg://agent_py:{secret}@localhost:1/agent_py_test",
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, HealthyRedisClient()),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)
@@ -194,6 +235,7 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
         project_config_path=config_path,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, HealthyRedisClient()),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)
@@ -210,6 +252,7 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
         "error": None,
     }
     assert set(payload["configuration"]) == {"postgresql", "llm", "milvus", "mcp"}
+    assert payload["dependencies"]["redis"] == {"ok": True, "error": None}
     assert payload["dependencies"]["postgresql"]["ok"] is True
     assert secret not in response.text
 
@@ -227,6 +270,7 @@ async def test_config_check_surfaces_invalid_configuration_without_crashing(
         project_config_path=config_path,
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
+        redis_client=cast(Redis, HealthyRedisClient()),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)

@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
+from redis.asyncio import Redis
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
@@ -68,7 +69,9 @@ from super_ai.documents import (
     extract_indexable_text,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
-from super_ai.events.subscriber import JobEventSubscriber
+from super_ai.events.outbox import JobEventPublisher, OutboxDispatcher
+from super_ai.events.relay import RedisJobEventRelay
+from super_ai.events.subscriber import JobEventSubscriber, JobEventWakeRelay
 from super_ai.feedback import FeedbackError, UserFeedbackService
 from super_ai.foundation import get_foundation_info
 from super_ai.jobs import BackgroundJobContext, BackgroundJobRuntime, JobCancelled
@@ -122,6 +125,13 @@ from super_ai.observability import (
     set_request_id,
 )
 from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.redis_runtime import (
+    RedisRuntimeSettings,
+    create_redis_client,
+    load_redis_runtime_settings,
+    ping_redis,
+)
+from super_ai.redis_runtime.streams import RedisStreamJobEventPublisher
 from super_ai.retrieval import KnowledgeRetrievalTool, RetrievalVectorStore
 from super_ai.vector_store import (
     MilvusHealthCheckResult,
@@ -258,6 +268,30 @@ class DocumentIndexTaskScheduler(Protocol):
         ...
 
 
+class RedisDispatcherLifecycle(Protocol):
+    """Injectable lifecycle boundary for the Redis Outbox dispatcher."""
+
+    def start(self) -> None:
+        """Start one dispatcher task."""
+        ...
+
+    async def stop(self) -> None:
+        """Await dispatcher cancellation."""
+        ...
+
+
+class RedisRelayLifecycle(Protocol):
+    """Injectable lifecycle boundary for the Redis SSE relay."""
+
+    async def start(self) -> None:
+        """Start one relay task."""
+        ...
+
+    async def stop(self) -> None:
+        """Await relay cancellation."""
+        ...
+
+
 class DurableDocumentIndexTaskScheduler:
     """Enqueue document indexing in the durable background runtime."""
 
@@ -298,6 +332,12 @@ def create_app(
     aiops_diagnostic_runner: AiopsDiagnosticRunner | None = None,
     alert_provider: ActiveAlertProvider | None = None,
     index_task_scheduler: DocumentIndexTaskScheduler | None = None,
+    redis_settings: RedisRuntimeSettings | None = None,
+    redis_client: Redis | None = None,
+    redis_client_factory: Callable[[RedisRuntimeSettings], Redis] = create_redis_client,
+    redis_dispatcher: RedisDispatcherLifecycle | None = None,
+    redis_relay: RedisRelayLifecycle | None = None,
+    redis_publisher: JobEventPublisher | None = None,
 ) -> FastAPI:
     """Create the backend API application."""
     resolved_project_config_path = (
@@ -308,9 +348,37 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
         runtime = cast(BackgroundJobRuntime, application.state.background_job_runtime)
         await runtime.start()
+        dispatcher = cast(RedisDispatcherLifecycle | None, application.state.redis_dispatcher)
+        relay = cast(RedisRelayLifecycle | None, application.state.redis_relay)
+        if dispatcher is not None:
+            try:
+                dispatcher.start()
+            except Exception as exc:
+                _record_redis_lifecycle_failure(application, exc)
+        if relay is not None:
+            try:
+                await relay.start()
+            except Exception as exc:
+                _record_redis_lifecycle_failure(application, exc)
         try:
             yield
         finally:
+            if relay is not None:
+                try:
+                    await relay.stop()
+                except Exception as exc:
+                    _record_redis_lifecycle_failure(application, exc)
+            if dispatcher is not None:
+                try:
+                    await dispatcher.stop()
+                except Exception as exc:
+                    _record_redis_lifecycle_failure(application, exc)
+            owned_redis_client = cast(Redis | None, application.state.owned_redis_client)
+            if owned_redis_client is not None:
+                try:
+                    await owned_redis_client.aclose()
+                except Exception as exc:
+                    _record_redis_lifecycle_failure(application, exc)
             await runtime.stop()
             owned_engine = cast(AsyncEngine | None, application.state.memory_engine)
             if owned_engine is not None:
@@ -345,13 +413,53 @@ def create_app(
     app.state.alert_provider = alert_provider
     if repositories.background_jobs is None:
         raise RuntimeError("Background job repository is required.")
+    if repositories.outbox_events is None:
+        raise RuntimeError("Outbox event repository is required.")
     background_runtime = BackgroundJobRuntime(repositories.background_jobs)
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
     app.state.background_job_runtime = background_runtime
+    composed_redis_settings = redis_settings
+    redis_configuration_error: str | None = None
+    if composed_redis_settings is None:
+        try:
+            composed_redis_settings = load_redis_runtime_settings(resolved_project_config_path)
+        except Exception as exc:
+            redis_configuration_error = _redis_failure_message(exc)
+    owned_redis_client: Redis | None = None
+    composed_redis_client = redis_client
+    if composed_redis_client is None and composed_redis_settings is not None:
+        try:
+            composed_redis_client = redis_client_factory(composed_redis_settings)
+            owned_redis_client = composed_redis_client
+        except Exception as exc:
+            redis_configuration_error = _redis_failure_message(exc)
+    composed_dispatcher = redis_dispatcher
+    composed_relay = redis_relay
+    if composed_redis_client is not None and composed_redis_settings is not None:
+        publisher = redis_publisher or RedisStreamJobEventPublisher(
+            composed_redis_client, composed_redis_settings
+        )
+        instance_id = f"{uuid4().hex}"
+        composed_dispatcher = composed_dispatcher or OutboxDispatcher(
+            repository=repositories.outbox_events,
+            publisher=publisher,
+            worker_id=f"redis-outbox:{instance_id}",
+        )
+        composed_relay = composed_relay or RedisJobEventRelay(
+            client=composed_redis_client,
+            settings=composed_redis_settings,
+            instance_id=instance_id,
+        )
+    app.state.redis_settings = composed_redis_settings
+    app.state.redis_client = composed_redis_client
+    app.state.owned_redis_client = owned_redis_client
+    app.state.redis_dispatcher = composed_dispatcher
+    app.state.redis_relay = composed_relay
+    app.state.redis_lifecycle_error = redis_configuration_error
     app.state.job_event_subscriber = JobEventSubscriber(
         repository=repositories.background_jobs,
-        relay=None,
+        relay=cast(JobEventWakeRelay | None, composed_relay),
         poll_interval_seconds=0.1,
     )
     app.state.index_task_scheduler = index_task_scheduler or DurableDocumentIndexTaskScheduler(app)
@@ -430,11 +538,15 @@ def create_app(
     @app.get("/ready")
     async def ready(request: Request) -> object:
         dependencies = await _runtime_dependency_payload(request)
-        is_ready = all(bool(component["ok"]) for component in dependencies.values())
+        blocking_dependencies = {
+            name: component for name, component in dependencies.items() if name != "redis"
+        }
+        blocking_ready = all(bool(component["ok"]) for component in blocking_dependencies.values())
+        is_ready = blocking_ready and bool(dependencies["redis"]["ok"])
         return success_response(
             request,
             {"status": "ready" if is_ready else "degraded", "dependencies": dependencies},
-            status_code=200 if is_ready else 503,
+            status_code=200 if blocking_ready else 503,
         )
 
     @app.get("/config/check")
@@ -442,7 +554,11 @@ def create_app(
         configuration = _configuration_check_payload(request)
         dependencies = await _runtime_dependency_payload(request)
         is_valid = all(bool(component["valid"]) for component in configuration.values())
-        is_ready = all(bool(component["ok"]) for component in dependencies.values())
+        blocking_dependencies = {
+            name: component for name, component in dependencies.items() if name != "redis"
+        }
+        blocking_ready = all(bool(component["ok"]) for component in blocking_dependencies.values())
+        is_ready = blocking_ready and bool(dependencies["redis"]["ok"])
         return success_response(
             request,
             {
@@ -450,7 +566,7 @@ def create_app(
                 "configuration": configuration,
                 "dependencies": dependencies,
             },
-            status_code=200 if is_valid and is_ready else 503,
+            status_code=200 if is_valid and blocking_ready else 503,
         )
 
     @app.post("/auth/register")
@@ -1937,17 +2053,19 @@ def _memory_session_factory(request: Request) -> async_sessionmaker[AsyncSession
 
 
 async def _runtime_dependency_payload(request: Request) -> dict[str, dict[str, object]]:
-    postgresql_result, milvus_result, llm_result, mcp_result = await asyncio.gather(
+    postgresql_result, milvus_result, llm_result, mcp_result, redis_result = await asyncio.gather(
         _postgresql_readiness_payload(request),
         _milvus_readiness_payload(request),
         _llm_readiness_payload(request),
         _mcp_readiness_payload(request),
+        _redis_readiness_payload(request),
     )
     return {
         "postgresql": postgresql_result,
         "milvus": milvus_result,
         "llm": llm_result,
         "mcp": mcp_result,
+        "redis": redis_result,
     }
 
 
@@ -2054,6 +2172,27 @@ async def _mcp_readiness_payload(request: Request) -> dict[str, object]:
         "toolCount": tool_count if isinstance(tool_count, int) else 0,
         "error": None if is_ready else "MCP server is unavailable.",
     }
+
+
+async def _redis_readiness_payload(request: Request) -> dict[str, object]:
+    client = cast(Redis | None, request.app.state.redis_client)
+    if client is None:
+        return {"ok": False, "error": "Redis is unavailable."}
+    result = await ping_redis(client)
+    return {
+        "ok": result.ok,
+        "error": None if result.ok else "Redis is unavailable.",
+    }
+
+
+def _record_redis_lifecycle_failure(application: FastAPI, exc: Exception) -> None:
+    application.state.redis_lifecycle_error = _redis_failure_message(exc)
+    logger.warning("Redis event delivery degraded: %s", type(exc).__name__)
+
+
+def _redis_failure_message(exc: Exception) -> str:
+    """Return a concise diagnostic without preserving endpoint credentials."""
+    return f"Redis unavailable: {type(exc).__name__}"
 
 
 def _configuration_check_payload(request: Request) -> dict[str, dict[str, object]]:

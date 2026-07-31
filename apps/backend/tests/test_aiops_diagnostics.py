@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
 from super_ai.api.app import AiopsDiagnosticRunner, create_app
@@ -433,13 +434,21 @@ class FakeAiopsRunner:
         }
 
 
+class UnavailableRedisClient:
+    async def ping(self) -> bool:
+        raise ConnectionError("Redis is unavailable")
+
+
 @pytest.mark.asyncio
-async def test_aiops_stream_requires_task_owner(migrated_database_url: str) -> None:
+async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_unavailable(
+    migrated_database_url: str,
+) -> None:
     runner = FakeAiopsRunner()
     transport = httpx.ASGITransport(
         app=create_app(
             database_url=migrated_database_url,
             aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
+            redis_client=cast(Redis, UnavailableRedisClient()),
         )
     )
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -451,13 +460,13 @@ async def test_aiops_stream_requires_task_owner(migrated_database_url: str) -> N
             json={"query": "Inspect CPU", "alert": {"severity": "high"}},
         )
         diagnostic_id = create_response.json()["data"]["id"]
-        denied = await client.post(
-            f"/aiops/diagnostics/{diagnostic_id}:stream",
-            headers=_auth_headers(other["accessToken"]),
-        )
         stream = await client.post(
             f"/aiops/diagnostics/{diagnostic_id}:stream",
             headers=_auth_headers(owner["accessToken"]),
+        )
+        denied = await client.post(
+            f"/aiops/diagnostics/{diagnostic_id}:stream",
+            headers=_auth_headers(other["accessToken"]),
         )
         history = await client.get(
             "/aiops/diagnostics",
