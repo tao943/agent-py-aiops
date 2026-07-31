@@ -85,6 +85,12 @@ class BlockingRepository(FakeRepository):
         return []
 
 
+class ReleaseFailingRepository(FakeRepository):
+    async def release(self, event_id: str, *, error: str, available_at: datetime) -> None:
+        self.released.append((event_id, error, available_at))
+        raise RuntimeError("release unavailable")
+
+
 @pytest.mark.asyncio
 async def test_run_once_marks_event_published_only_after_publisher_acknowledges() -> None:
     repository = FakeRepository([_event()])
@@ -163,3 +169,27 @@ async def test_start_is_idempotent_and_stop_awaits_its_cancelled_task() -> None:
     await dispatcher.stop()
 
     assert repository.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_release_failure_for_poison_event_does_not_block_later_event() -> None:
+    repository = ReleaseFailingRepository([_event(event_id="poison"), _event(event_id="healthy")])
+    publisher = SelectivePublisher({"poison": RuntimeError("publish unavailable")})
+    dispatcher = OutboxDispatcher(repository=repository, publisher=publisher, worker_id="worker-1")
+
+    await dispatcher.run_once()
+
+    assert publisher.events == ["poison", "healthy"]
+    assert repository.published == ["healthy"]
+
+
+@pytest.mark.asyncio
+async def test_release_failure_during_cancellation_preserves_original_cancellation() -> None:
+    repository = ReleaseFailingRepository([_event(event_id="cancelled")])
+    publisher = SelectivePublisher({"cancelled": asyncio.CancelledError()})
+    dispatcher = OutboxDispatcher(repository=repository, publisher=publisher, worker_id="worker-1")
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.run_once()
+
+    assert repository.published == []

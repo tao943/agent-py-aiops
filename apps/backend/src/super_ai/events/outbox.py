@@ -82,7 +82,7 @@ class OutboxDispatcher:
                     event.id, published_at=datetime.now(timezone.utc)
                 )
             except asyncio.CancelledError:
-                await self._release(event, "CancelledError")
+                await self._release_safely(event, "CancelledError")
                 logger.info(
                     "Outbox publication cancelled event_id=%s aggregate_id=%s "
                     "attempt=%s latency_ms=%d",
@@ -93,7 +93,7 @@ class OutboxDispatcher:
                 )
                 raise
             except Exception as exc:
-                await self._release(event, type(exc).__name__)
+                await self._release_safely(event, type(exc).__name__)
                 logger.warning(
                     "Outbox publication failed event_id=%s aggregate_id=%s "
                     "attempt=%s latency_ms=%d error=%s",
@@ -118,13 +118,22 @@ class OutboxDispatcher:
             await self.run_once()
             await asyncio.sleep(self._poll_interval_seconds)
 
-    async def _release(self, event: OutboxEventRecord, error: str) -> None:
-        await self._repository.release(
-            event.id,
-            error=error[:1_000],
-            available_at=datetime.now(timezone.utc)
-            + timedelta(seconds=self._backoff_seconds(event.attempt_count)),
-        )
+    async def _release_safely(self, event: OutboxEventRecord, error: str) -> None:
+        try:
+            await self._repository.release(
+                event.id,
+                error=error[:1_000],
+                available_at=datetime.now(timezone.utc)
+                + timedelta(seconds=self._backoff_seconds(event.attempt_count)),
+            )
+        except Exception as release_error:
+            logger.warning(
+                "Outbox release failed event_id=%s aggregate_id=%s attempt=%s error=%s",
+                event.id,
+                event.aggregate_id,
+                event.attempt_count,
+                type(release_error).__name__,
+            )
 
     def _backoff_seconds(self, attempt_count: int) -> int:
         exponent = max(attempt_count - 1, 0)

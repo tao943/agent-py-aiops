@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from super_ai.memory.repositories import OutboxEventRecord
 from super_ai.redis_runtime.config import RedisRuntimeSettings
@@ -78,6 +79,7 @@ async def test_publish_writes_one_canonical_redacted_entry_to_prefixed_stream(
 
     assert entries is not None
     assert len(entries) == 1
+    assert entries[0] is not None
     _, fields = entries[0]
     assert fields == {
         "event_id": event.id,
@@ -136,6 +138,82 @@ async def test_publish_deduplicates_repeated_event_and_keeps_ttl_at_least_config
         assert await client.ttl(f"{redis_prefix}:aiops:events:dedupe:{event.id}") >= 60
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_xadd_does_not_leave_a_dedupe_key_and_retry_delivers_once(
+    redis_prefix: str,
+) -> None:
+    settings = RedisRuntimeSettings(
+        url="redis://localhost:6379/15", stream_prefix=redis_prefix, event_dedupe_ttl_seconds=60
+    )
+    client = Redis.from_url(settings.url, decode_responses=True)
+    publisher = RedisStreamJobEventPublisher(client, settings)
+    event = _event()
+    stream_key = f"{redis_prefix}:aiops:events"
+    dedupe_key = f"{stream_key}:dedupe:{event.id}"
+    try:
+        await client.set(stream_key, "not-a-stream")
+        with pytest.raises(ResponseError):
+            await publisher.publish(event)
+        assert await client.exists(dedupe_key) == 0
+
+        await client.delete(stream_key)
+        await publisher.publish(event)
+        assert await client.xlen(stream_key) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_publish_recursively_redacts_known_credential_field_variants(
+    redis_prefix: str,
+) -> None:
+    settings = RedisRuntimeSettings(url="redis://localhost:6379/15", stream_prefix=redis_prefix)
+    client = Redis.from_url(settings.url, decode_responses=True)
+    publisher = RedisStreamJobEventPublisher(client, settings)
+    event = _event(
+        payload={
+            "privateKey": "private",
+            "private_key": "private-underscore",
+            "ordinary_key": "preserved",
+            "items": [
+                {
+                    "accessKeyId": "access",
+                    "access_key_id": "access-underscore",
+                    "secretId": "secret-id",
+                    "secretKey": "secret-key",
+                    "clientSecret": "client-secret",
+                }
+            ],
+        }
+    )
+    try:
+        await publisher.publish(event)
+        entries = await client.xrange(f"{redis_prefix}:aiops:events")
+    finally:
+        await client.aclose()
+
+    assert entries is not None
+    assert len(entries) == 1
+    assert entries[0] is not None
+    _, fields = entries[0]
+    assert fields is not None
+    payload = json.loads(fields["payload"])
+    assert payload == {
+        "privateKey": "[REDACTED]",
+        "private_key": "[REDACTED]",
+        "ordinary_key": "preserved",
+        "items": [
+            {
+                "accessKeyId": "[REDACTED]",
+                "access_key_id": "[REDACTED]",
+                "secretId": "[REDACTED]",
+                "secretKey": "[REDACTED]",
+                "clientSecret": "[REDACTED]",
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio

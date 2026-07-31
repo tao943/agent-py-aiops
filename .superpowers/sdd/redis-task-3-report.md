@@ -48,3 +48,16 @@
 `redis-py`'s Stream response stubs are incomplete under strict Pyright. The
 real Redis integration test uses narrowly scoped per-file suppressions for its
 unknown library member/response types; production code remains strict-clean.
+
+## Follow-up review hardening
+
+- The Lua script now checks an existing dedupe key, performs `XADD`, and sets
+  the dedupe TTL only after `XADD` succeeds. A real Redis test pre-sets the
+  stream key to a string, proves the failed `XADD` leaves no dedupe key, then
+  removes the bad key and confirms exactly one retry delivery.
+- Recursive redaction now recognizes normalized `privateKey`/`private_key`,
+  `accessKeyId`/`access_key_id`, `secretId`, `secretKey`, and `clientSecret`
+  fields in addition to the previously tested credentials. Ordinary
+  `ordinary_key` data remains untouched.
+- Repository release failures are logged without payloads, do not block later
+  claimed events, and cannot replace the original `CancelledError`.

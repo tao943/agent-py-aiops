@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import cast
 
 from redis.asyncio import Redis
@@ -12,30 +13,37 @@ from super_ai.memory.repositories import OutboxEventRecord
 from super_ai.redis_runtime.config import RedisRuntimeSettings
 
 _PUBLISH_SCRIPT = """
-if redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[1]) then
-    return redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*',
-        'event_id', ARGV[3],
-        'owner_id_hash', ARGV[4],
-        'job_id', ARGV[5],
-        'sequence', ARGV[6],
-        'event_type', ARGV[7],
-        'payload', ARGV[8],
-        'created_at', ARGV[9])
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return false
 end
-return false
+local stream_id = redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*',
+    'event_id', ARGV[3],
+    'owner_id_hash', ARGV[4],
+    'job_id', ARGV[5],
+    'sequence', ARGV[6],
+    'event_type', ARGV[7],
+    'payload', ARGV[8],
+    'created_at', ARGV[9])
+redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
+return stream_id
 """
 
-_SENSITIVE_FIELD_PARTS = frozenset(
+_SENSITIVE_FIELD_NAMES = frozenset(
     {
         "apikey",
+        "api_key",
         "authorization",
+        "access_key_id",
+        "client_secret",
         "credential",
         "cookie",
         "header",
         "password",
+        "private_key",
         "secret",
+        "secret_id",
+        "secret_key",
         "token",
-        "api_key",
     }
 )
 
@@ -94,5 +102,18 @@ def _redact_payload(value: object, *, field_name: str | None = None) -> object:
 
 
 def _is_sensitive_field(field_name: str) -> bool:
-    normalized = field_name.lower().replace("-", "_")
-    return any(part in normalized for part in _SENSITIVE_FIELD_PARTS)
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", field_name).lower().replace("-", "_")
+    if normalized in _SENSITIVE_FIELD_NAMES:
+        return True
+    return any(
+        part in normalized
+        for part in (
+            "authorization",
+            "credential",
+            "cookie",
+            "header",
+            "password",
+            "secret",
+            "token",
+        )
+    )
