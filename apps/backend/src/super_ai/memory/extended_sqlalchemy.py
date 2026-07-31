@@ -393,7 +393,7 @@ class SQLAlchemyOutboxEventRepository:
             row = await session.get(OutboxEventModel, event_id, with_for_update=True)
             if row is None:
                 return
-            if row.published_at is None or published_at > _ensure_utc(row.published_at):
+            if row.published_at is None:
                 row.published_at = published_at
             row.claimed_by = None
             row.claim_expires_at = None

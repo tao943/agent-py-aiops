@@ -203,6 +203,7 @@ async def test_release_reschedules_claim_and_mark_published_is_idempotent(
 
         await outbox.mark_published(event.id, published_at=published_at)
         await outbox.mark_published(event.id, published_at=published_at - timedelta(seconds=1))
+        await outbox.mark_published(event.id, published_at=published_at + timedelta(seconds=1))
         async with session_factory() as session:
             published = await session.get(OutboxEventModel, event.id)
             assert published is not None
