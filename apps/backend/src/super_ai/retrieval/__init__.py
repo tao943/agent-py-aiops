@@ -1,5 +1,6 @@
 """Knowledge retrieval tool boundary."""
 
+from super_ai.retrieval.cached_tool import CachedKnowledgeRetrievalTool
 from super_ai.retrieval.tool import (
     DEFAULT_RETRIEVAL_TOP_K,
     KNOWLEDGE_RETRIEVAL_TOOL_NAME,
@@ -11,6 +12,7 @@ from super_ai.retrieval.tool import (
     KnowledgeRetrievalTool,
     KnowledgeRetrievalToolInput,
     KnowledgeRetrievalToolResult,
+    KnowledgeRetrievalToolRunner,
     RetrievalVectorStore,
     create_langchain_knowledge_retrieval_tool,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "KnowledgeRetrievalFilters",
     "KnowledgeRetrievalHit",
     "KnowledgeRetrievalTool",
+    "CachedKnowledgeRetrievalTool",
+    "KnowledgeRetrievalToolRunner",
     "KnowledgeRetrievalToolInput",
     "KnowledgeRetrievalToolResult",
     "RetrievalVectorStore",

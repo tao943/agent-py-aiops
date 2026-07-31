@@ -128,6 +128,20 @@ class KnowledgeRetrievalToolResult:
     citations: list[KnowledgeRetrievalCitationSource]
 
 
+class KnowledgeRetrievalToolRunner(Protocol):
+    """Minimal retrieval boundary shared by canonical and cached tools."""
+
+    async def run(
+        self,
+        input: KnowledgeRetrievalToolInput,
+        *,
+        owner_user_id: str,
+        accessible_knowledge_base_ids: Sequence[str],
+    ) -> KnowledgeRetrievalToolResult:
+        """Run an owner-authorized knowledge retrieval."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class KnowledgeRetrievalError(Exception):
     """Unified retrieval error that can be mapped to API error responses."""
@@ -355,7 +369,7 @@ class LangChainKnowledgeRetrievalInput(BaseModel):
 
 
 def create_langchain_knowledge_retrieval_tool(
-    retrieval_tool: KnowledgeRetrievalTool,
+    retrieval_tool: KnowledgeRetrievalToolRunner,
     *,
     owner_user_id: str,
     accessible_knowledge_base_ids: Sequence[str],

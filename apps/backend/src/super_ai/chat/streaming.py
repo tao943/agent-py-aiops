@@ -36,7 +36,7 @@ from super_ai.memory.repositories import (
 )
 from super_ai.observability import elapsed_ms, emit_event
 from super_ai.retrieval import (
-    KnowledgeRetrievalTool,
+    KnowledgeRetrievalToolRunner,
     create_langchain_knowledge_retrieval_tool,
 )
 
@@ -498,7 +498,7 @@ class LangChainChatAgentRunner:
         self,
         *,
         llm_provider: LlmProvider,
-        retrieval_tool: KnowledgeRetrievalTool,
+        retrieval_tool: KnowledgeRetrievalToolRunner,
         mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
     ) -> None:

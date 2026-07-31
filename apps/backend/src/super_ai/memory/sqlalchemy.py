@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -848,6 +850,50 @@ class SQLAlchemyKnowledgeDocumentRepository:
             row.updated_at = timestamp
             await session.commit()
         return _knowledge_document_record(row)
+
+    async def get_knowledge_base_cache_version(
+        self,
+        *,
+        owner_user_id: str,
+        knowledge_base_ids: Sequence[str],
+    ) -> str:
+        """Hash canonical document identity/revision facts in one owner scope."""
+        knowledge_base_ids = tuple(sorted(set(knowledge_base_ids)))
+        stmt = (
+            select(KnowledgeDocumentModel)
+            .where(
+                KnowledgeDocumentModel.owner_user_id == owner_user_id,
+                KnowledgeDocumentModel.knowledge_base_id.in_(knowledge_base_ids),
+            )
+            .order_by(
+                KnowledgeDocumentModel.knowledge_base_id.asc(),
+                KnowledgeDocumentModel.id.asc(),
+            )
+        )
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(stmt)).all()) if knowledge_base_ids else []
+        facts = {
+            "ownerUserId": owner_user_id,
+            "knowledgeBaseIds": knowledge_base_ids,
+            "documents": [
+                {
+                    "knowledgeBaseId": row.knowledge_base_id,
+                    "documentId": row.id,
+                    "contentHash": row.content_hash,
+                    "status": row.status,
+                    "indexStatus": row.index_status,
+                    "updatedAt": _ensure_utc(row.updated_at).isoformat(),
+                    "deletedAt": (
+                        _ensure_utc(row.deleted_at).isoformat()
+                        if row.deleted_at is not None
+                        else None
+                    ),
+                }
+                for row in rows
+            ],
+        }
+        serialized = json.dumps(facts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class SQLAlchemyDocumentIndexTaskRepository:

@@ -618,6 +618,15 @@ class KnowledgeDocumentRepository(Protocol):
         """Update a scoped document's latest index status."""
         ...
 
+    async def get_knowledge_base_cache_version(
+        self,
+        *,
+        owner_user_id: str,
+        knowledge_base_ids: Sequence[str],
+    ) -> str:
+        """Return a deterministic owner-scoped version for retrieval cache entries."""
+        ...
+
 
 class DocumentIndexTaskRepository(Protocol):
     """Repository contract for user-owned document index task attempts."""

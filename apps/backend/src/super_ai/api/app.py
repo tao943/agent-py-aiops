@@ -133,7 +133,11 @@ from super_ai.redis_runtime import (
 )
 from super_ai.redis_runtime.cache import RedisJsonCache, RedisJsonClient, RuntimeCache
 from super_ai.redis_runtime.streams import RedisStreamJobEventPublisher
-from super_ai.retrieval import KnowledgeRetrievalTool, RetrievalVectorStore
+from super_ai.retrieval import (
+    CachedKnowledgeRetrievalTool,
+    KnowledgeRetrievalTool,
+    RetrievalVectorStore,
+)
 from super_ai.vector_store import (
     MilvusHealthCheckResult,
     VectorChunkRecord,
@@ -462,6 +466,7 @@ def create_app(
         if composed_redis_client is not None
         else None
     )
+    app.state.retrieval_cache = app.state.mcp_discovery_cache
     app.state.owned_redis_client = owned_redis_client
     app.state.redis_dispatcher = composed_dispatcher
     app.state.redis_relay = composed_relay
@@ -1716,11 +1721,16 @@ def create_app(
             synthetic_sequence = (history[-1].sequence if history else 0) + 1
             initial_events = [event for event in history if event.sequence > sequence]
             current = await repository.get(owner_user_id=user.id, job_id=job.id)
-            if not initial_events and current is not None and current.status in {
-                "succeeded",
-                "failed",
-                "cancelled",
-            }:
+            if (
+                not initial_events
+                and current is not None
+                and current.status
+                in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                }
+            ):
                 if (
                     current.status == "failed"
                     and not has_stored_error
@@ -2339,10 +2349,13 @@ async def _chat_memory_context(
 def _chat_agent_runner(request: Request) -> ChatAgentRunner:
     runner = request.app.state.chat_agent_runner
     if runner is None:
-        retrieval_tool = KnowledgeRetrievalTool(
-            embedding_model=_embedding_model(request),
-            vector_store=cast(RetrievalVectorStore, _vector_store(request)),
-            rerank_model=_rerank_model(request),
+        retrieval_tool = _cached_knowledge_retrieval_tool(
+            request,
+            KnowledgeRetrievalTool(
+                embedding_model=_embedding_model(request),
+                vector_store=cast(RetrievalVectorStore, _vector_store(request)),
+                rerank_model=_rerank_model(request),
+            ),
         )
         runner = LangChainChatAgentRunner(
             llm_provider=_llm_provider(request),
@@ -2382,10 +2395,13 @@ def _aiops_diagnostic_runner(request: Request) -> AiopsDiagnosticRunner:
         runner = AiopsDiagnosticService(
             repositories=_memory_repositories(request),
             llm_provider=_llm_provider(request),
-            retrieval_tool=KnowledgeRetrievalTool(
-                embedding_model=_embedding_model(request),
-                vector_store=cast(RetrievalVectorStore, _vector_store(request)),
-                rerank_model=_rerank_model(request),
+            retrieval_tool=_cached_knowledge_retrieval_tool(
+                request,
+                KnowledgeRetrievalTool(
+                    embedding_model=_embedding_model(request),
+                    vector_store=cast(RetrievalVectorStore, _vector_store(request)),
+                    rerank_model=_rerank_model(request),
+                ),
             ),
             mcp_client_provider=_mcp_connection_service(request),
             cls_region=required_str(cls_log_config, "region"),
@@ -2397,6 +2413,16 @@ def _aiops_diagnostic_runner(request: Request) -> AiopsDiagnosticRunner:
         )
         request.app.state.aiops_diagnostic_runner = runner
     return runner
+
+
+def _cached_knowledge_retrieval_tool(
+    request: Request, inner: KnowledgeRetrievalTool
+) -> CachedKnowledgeRetrievalTool:
+    return CachedKnowledgeRetrievalTool(
+        inner,
+        cache=cast(RuntimeCache | None, request.app.state.retrieval_cache),
+        versions=_memory_repositories(request).documents,
+    )
 
 
 def _document_indexing_service(request: Request) -> DocumentIndexingService:

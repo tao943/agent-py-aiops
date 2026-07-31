@@ -33,9 +33,9 @@ from super_ai.retrieval import (
     KnowledgeRetrievalCitationSource,
     KnowledgeRetrievalError,
     KnowledgeRetrievalHit,
-    KnowledgeRetrievalTool,
     KnowledgeRetrievalToolInput,
     KnowledgeRetrievalToolResult,
+    KnowledgeRetrievalToolRunner,
 )
 
 
@@ -76,7 +76,7 @@ class AiopsDiagnosticService:
         *,
         repositories: MemoryRepositories,
         llm_provider: LlmProvider,
-        retrieval_tool: KnowledgeRetrievalTool,
+        retrieval_tool: KnowledgeRetrievalToolRunner,
         mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
         cls_region: str,

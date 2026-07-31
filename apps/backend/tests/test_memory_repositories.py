@@ -31,6 +31,85 @@ from super_ai.memory.sqlalchemy import (
 
 
 @pytest.mark.asyncio
+async def test_knowledge_document_cache_version_is_owner_scoped_stable_and_changes(
+    migrated_database_url: str,
+) -> None:
+    """The PostgreSQL version includes each document's deterministic identity facts."""
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repository = SQLAlchemyKnowledgeDocumentRepository(create_memory_session_factory(engine))
+        timestamp = datetime(2026, 7, 31, 10, 0, tzinfo=timezone.utc)
+        await repository.create_document(
+            owner_user_id="owner-a",
+            document_id="doc-a",
+            knowledge_base_id="kb-a",
+            filename="a.txt",
+            size_bytes=1,
+            mime_type="text/plain",
+            content_hash="hash-a",
+            uploaded_at=timestamp,
+        )
+        await repository.create_document(
+            owner_user_id="owner-a",
+            document_id="doc-b",
+            knowledge_base_id="kb-b",
+            filename="b.txt",
+            size_bytes=1,
+            mime_type="text/plain",
+            content_hash="hash-b",
+            uploaded_at=timestamp,
+        )
+
+        initial = await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-a", knowledge_base_ids=["kb-b", "kb-a"]
+        )
+        assert initial == await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-a", knowledge_base_ids=["kb-a", "kb-b"]
+        )
+
+        await repository.create_document(
+            owner_user_id="owner-a",
+            document_id="doc-c",
+            knowledge_base_id="kb-a",
+            filename="c.txt",
+            size_bytes=1,
+            mime_type="text/plain",
+            content_hash="hash-c",
+            uploaded_at=timestamp,
+        )
+        after_insert = await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-a", knowledge_base_ids=["kb-a", "kb-b"]
+        )
+        await repository.update_index_status(
+            owner_user_id="owner-a",
+            knowledge_base_id="kb-a",
+            document_id="doc-c",
+            index_status="succeeded",
+            updated_at=timestamp,
+        )
+        after_update = await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-a", knowledge_base_ids=["kb-a", "kb-b"]
+        )
+        await repository.mark_document_deleted(
+            owner_user_id="owner-a",
+            knowledge_base_id="kb-a",
+            document_id="doc-a",
+            deleted_at=timestamp,
+        )
+        after_delete = await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-a", knowledge_base_ids=["kb-a", "kb-b"]
+        )
+        other_owner = await repository.get_knowledge_base_cache_version(
+            owner_user_id="owner-b", knowledge_base_ids=["kb-a", "kb-b"]
+        )
+    finally:
+        await engine.dispose()
+
+    assert len(initial) == 64
+    assert len({initial, after_insert, after_update, after_delete, other_owner}) == 5
+
+
+@pytest.mark.asyncio
 async def test_chat_repository_persists_and_queries_history(migrated_database_url: str) -> None:
     engine = create_memory_engine(migrated_database_url)
     try:
