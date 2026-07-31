@@ -180,3 +180,24 @@ API facts.
 
 Development uses Redis `/0`; integration tests use `/15` and a UUID-qualified prefix.
 Use only prefix-scoped `SCAN`/`DEL` cleanup, never `FLUSHDB`.
+
+## Cache, rate limit, and degraded-mode evidence
+
+`RedisJsonCache` stores validated DTOs only. MCP discovery keys are owner/connection
+version scoped; `call_tool` always reaches the MCP server. RAG keys include owner,
+normalized query/settings, sorted authorized KB IDs, and a PostgreSQL document
+version. Cached RAG evidence is revalidated against the current owner and KB scope.
+
+`DistributedRateLimiter` uses Redis server time in one Lua token-bucket operation.
+Diagnostic creation, Chat streaming, and MCP tool execution use local fallback on
+Redis loss; `recovery.execute` is fail-closed. Policy values are in project JSON.
+The in-memory fallback is locked, bounded, and stale-entry aware.
+
+Run focused evidence:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_redis_cache.py tests/test_retrieval_cache.py tests/test_rate_limit.py tests/test_agent_rate_limits.py tests/test_redis_degraded_mode.py -q
+```
+
+`/metrics` exposes only bounded purpose/action labels. Tests use Redis `/15` and
+prefix-only cleanup.

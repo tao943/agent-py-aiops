@@ -153,7 +153,7 @@ from super_ai.vector_store import (
     load_milvus_vector_store_settings,
 )
 
-from .observability import RequestMetrics
+from .observability import RedisFeatureMetrics, RequestMetrics
 from .responses import ApiErrorException, error_response, success_response
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -470,8 +470,12 @@ def create_app(
         )
     app.state.redis_settings = composed_redis_settings
     app.state.redis_client = composed_redis_client
+    app.state.redis_feature_metrics = RedisFeatureMetrics()
     app.state.mcp_discovery_cache = (
-        RedisJsonCache(cast(RedisJsonClient, composed_redis_client))
+        RedisJsonCache(
+            cast(RedisJsonClient, composed_redis_client),
+            metrics=app.state.redis_feature_metrics,
+        )
         if composed_redis_client is not None
         else None
     )
@@ -479,6 +483,7 @@ def create_app(
     app.state.rate_limit_service = rate_limit_service or AgentRateLimitService(
         cast(RedisRateLimitClient | None, composed_redis_client),
         load_rate_limit_policies(resolved_project_config_path),
+        metrics=app.state.redis_feature_metrics,
     )
     app.state.owned_redis_client = owned_redis_client
     app.state.redis_dispatcher = composed_dispatcher
@@ -570,6 +575,7 @@ def create_app(
                 "requestCount": snapshot.request_count,
                 "failureCount": snapshot.failure_count,
                 "averageLatencyMs": round(average, 3),
+                "redisFeatures": request.app.state.redis_feature_metrics.snapshot(),
             },
         )
 

@@ -290,3 +290,29 @@ cd apps/backend
 Runtime uses Redis database `/0`; tests use `/15` and generate a UUID-qualified key
 prefix. Cleanup is prefix-only (`SCAN <prefix>:*` then `DEL` those keys): never use
 `FLUSHDB` for recovery or tests.
+
+## Redis cache and Agent rate limits
+
+Redis accelerates owner-authorized MCP discovery and RAG retrieval; it never grants
+access. Cache keys hash owner, version, and input:
+`agent-py:cache:<purpose>:<owner-hash>:<version-hash>:<input-hash>`.
+MCP discovery defaults to 300 seconds. RAG results use a PostgreSQL-derived document
+version, 120 seconds for non-empty results, and 15 seconds for empty results. Tool
+execution and retrieval errors are never cached.
+
+Costly entry points use an atomic Redis token bucket:
+`agent-py:limit:<action>:<owner-hash>`. Policies live in `config/project*.json`.
+Redis loss switches diagnostics, Chat, and MCP execution to a bounded per-process
+fallback; recovery execution is fail-closed. HTTP 429 returns `Retry-After`,
+`X-RateLimit-Remaining`, and `rate_limit_exceeded`.
+
+`GET /metrics` reports bounded-label cache hit/miss/degraded counts, cache lookup
+latency, and rate-limit allow/reject/fallback counts. It never labels metrics with
+owner IDs, queries, job IDs, or tool arguments. Demo evidence:
+
+```bash
+redis-cli -n 0 --scan --pattern 'agent-py:cache:*'
+redis-cli -n 0 TTL '<cache-key>'
+redis-cli -n 0 HGETALL 'agent-py:limit:diagnostic.create:<owner-hash>'
+curl http://127.0.0.1:8000/metrics
+```

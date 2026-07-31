@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
+from time import monotonic
 from typing import Generic, Literal, Protocol, TypeVar, cast
 
 from redis.exceptions import RedisError
@@ -58,6 +59,15 @@ class RedisJsonClient(Protocol):
         ...
 
 
+class CacheLookupMetrics(Protocol):
+    def record_cache_lookup(
+        self,
+        purpose: str,
+        state: Literal["hit", "miss", "degraded"],
+        latency_ms: float,
+    ) -> None: ...
+
+
 def build_cache_key(
     *, purpose: str, owner_id: object, version: object, input_value: object
 ) -> str:
@@ -82,33 +92,44 @@ class RedisJsonCache(RuntimeCache):
     """A non-authoritative, JSON-object cache backed by Redis."""
 
     def __init__(
-        self, client: RedisJsonClient, *, max_value_bytes: int = _DEFAULT_MAX_VALUE_BYTES
+        self,
+        client: RedisJsonClient,
+        *,
+        max_value_bytes: int = _DEFAULT_MAX_VALUE_BYTES,
+        metrics: CacheLookupMetrics | None = None,
     ) -> None:
         if max_value_bytes <= 0:
             raise ValueError("max_value_bytes must be positive.")
         self._client = client
         self._max_value_bytes = max_value_bytes
+        self._metrics = metrics
 
     async def get_json(self, key: str) -> CacheLookup[dict[str, object]]:
         """Return a hit, miss, or degraded result without leaking cached content."""
+        started_at = monotonic()
         try:
             raw = await self._client.get(key)
         except RedisError:
             self._log_degraded(key, "get")
+            self._record_lookup(key, "degraded", started_at)
             return CacheLookup(state="degraded", value=None)
 
         if raw is None:
+            self._record_lookup(key, "miss", started_at)
             return CacheLookup(state="miss", value=None)
 
         try:
             decoded = cast(object, json.loads(raw, parse_constant=_reject_non_standard_constant))
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError, ValueError):
             await self.delete(key)
+            self._record_lookup(key, "miss", started_at)
             return CacheLookup(state="miss", value=None)
 
         if not isinstance(decoded, dict):
             await self.delete(key)
+            self._record_lookup(key, "miss", started_at)
             return CacheLookup(state="miss", value=None)
+        self._record_lookup(key, "hit", started_at)
         return CacheLookup(state="hit", value=cast(dict[str, object], decoded))
 
     async def set_json(self, key: str, value: Mapping[str, object], ttl_seconds: int) -> bool:
@@ -145,6 +166,19 @@ class RedisJsonCache(RuntimeCache):
                 "cache_operation": operation,
             },
         )
+
+    def _record_lookup(
+        self,
+        key: str,
+        state: Literal["hit", "miss", "degraded"],
+        started_at: float,
+    ) -> None:
+        if self._metrics is not None:
+            self._metrics.record_cache_lookup(
+                _purpose_from_key(key),
+                state,
+                (monotonic() - started_at) * 1000,
+            )
 
 
 def _compact_json(value: Mapping[str, object]) -> str:

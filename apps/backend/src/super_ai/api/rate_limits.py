@@ -27,6 +27,16 @@ class RateLimitService(Protocol):
     async def acquire(self, *, owner_id: str, action: str) -> RateLimitDecision: ...
 
 
+class RateLimitMetrics(Protocol):
+    def record_rate_limit(
+        self,
+        action: str,
+        *,
+        allowed: bool,
+        mode: Literal["redis", "local_fallback", "fail_closed"],
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RateLimitExceeded(Exception):
     action: str
@@ -44,6 +54,8 @@ class AgentRateLimitService:
         self,
         client: RedisRateLimitClient | None,
         policies: Mapping[str, RateLimitPolicy],
+        *,
+        metrics: RateLimitMetrics | None = None,
     ) -> None:
         resolved_client = client or _UnavailableRedisClient()
         self._limiters = {
@@ -55,13 +67,21 @@ class AgentRateLimitService:
             )
             for action, policy in policies.items()
         }
+        self._metrics = metrics
 
     async def acquire(self, *, owner_id: str, action: str) -> RateLimitDecision:
         try:
             limiter = self._limiters[action]
         except KeyError as exc:
             raise ValueError(f"Unknown rate-limit action: {action}") from exc
-        return await limiter.acquire(owner_id=owner_id, action=action)
+        decision = await limiter.acquire(owner_id=owner_id, action=action)
+        if self._metrics is not None:
+            self._metrics.record_rate_limit(
+                action,
+                allowed=decision.allowed,
+                mode=decision.mode,
+            )
+        return decision
 
 
 async def enforce_rate_limit(
