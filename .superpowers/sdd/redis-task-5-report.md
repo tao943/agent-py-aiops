@@ -44,3 +44,17 @@ existing dependency set attempts to build `python-snappy` without Microsoft C++
 Build Tools. Docker smoke checks are unavailable because the Docker Desktop
 npipe endpoint returns permission denied. Task 1–4 retain their prior real
 Redis/PostgreSQL verification evidence; no Docker retry was attempted here.
+
+## Lifecycle-readiness follow-up
+
+- RED: a relay startup failure was recorded while the Redis client still
+  answered `PING`; within the same FastAPI lifespan `/ready` incorrectly
+  reported `status: ready`. The new regression also verifies PostgreSQL runtime
+  startup, HTTP 200, `dependencies.redis.ok: false`, and credential-safe output.
+- GREEN: readiness now treats a recorded dispatcher/relay startup failure as
+  Redis degradation before probing Redis. A successful later lifecycle startup
+  clears stale lifecycle state. Shutdown-only relay, dispatcher, or pool-close
+  errors are logged but cannot alter an app that is already stopping, and
+  transient failed pings are never persisted.
+- Follow-up focused verification expanded to 40 passing tests with the same
+  Ruff, scoped Pyright, and diff checks listed above.

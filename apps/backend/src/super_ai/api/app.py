@@ -350,6 +350,9 @@ def create_app(
         await runtime.start()
         dispatcher = cast(RedisDispatcherLifecycle | None, application.state.redis_dispatcher)
         relay = cast(RedisRelayLifecycle | None, application.state.redis_relay)
+        has_redis_lifecycle = dispatcher is not None or relay is not None
+        if has_redis_lifecycle:
+            application.state.redis_lifecycle_error = None
         if dispatcher is not None:
             try:
                 dispatcher.start()
@@ -367,18 +370,18 @@ def create_app(
                 try:
                     await relay.stop()
                 except Exception as exc:
-                    _record_redis_lifecycle_failure(application, exc)
+                    _log_redis_lifecycle_failure(exc)
             if dispatcher is not None:
                 try:
                     await dispatcher.stop()
                 except Exception as exc:
-                    _record_redis_lifecycle_failure(application, exc)
+                    _log_redis_lifecycle_failure(exc)
             owned_redis_client = cast(Redis | None, application.state.owned_redis_client)
             if owned_redis_client is not None:
                 try:
                     await owned_redis_client.aclose()
                 except Exception as exc:
-                    _record_redis_lifecycle_failure(application, exc)
+                    _log_redis_lifecycle_failure(exc)
             await runtime.stop()
             owned_engine = cast(AsyncEngine | None, application.state.memory_engine)
             if owned_engine is not None:
@@ -421,7 +424,7 @@ def create_app(
     app.state.background_job_runtime = background_runtime
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
-    if composed_redis_settings is None:
+    if composed_redis_settings is None and redis_client is None:
         try:
             composed_redis_settings = load_redis_runtime_settings(resolved_project_config_path)
         except Exception as exc:
@@ -2175,6 +2178,9 @@ async def _mcp_readiness_payload(request: Request) -> dict[str, object]:
 
 
 async def _redis_readiness_payload(request: Request) -> dict[str, object]:
+    lifecycle_error = cast(str | None, request.app.state.redis_lifecycle_error)
+    if lifecycle_error is not None:
+        return {"ok": False, "error": "Redis is unavailable."}
     client = cast(Redis | None, request.app.state.redis_client)
     if client is None:
         return {"ok": False, "error": "Redis is unavailable."}
@@ -2187,6 +2193,10 @@ async def _redis_readiness_payload(request: Request) -> dict[str, object]:
 
 def _record_redis_lifecycle_failure(application: FastAPI, exc: Exception) -> None:
     application.state.redis_lifecycle_error = _redis_failure_message(exc)
+    _log_redis_lifecycle_failure(exc)
+
+
+def _log_redis_lifecycle_failure(exc: Exception) -> None:
     logger.warning("Redis event delivery degraded: %s", type(exc).__name__)
 
 
