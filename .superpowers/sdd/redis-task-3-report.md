@@ -61,3 +61,13 @@ unknown library member/response types; production code remains strict-clean.
   `ordinary_key` data remains untouched.
 - Repository release failures are logged without payloads, do not block later
   claimed events, and cannot replace the original `CancelledError`.
+
+## Credential-name normalization follow-up
+
+- Field normalization now preserves acronym boundaries before converting
+  separators to snake case. It recognizes `APIKey`, `API_KEY`,
+  `AWSAccessKeyId`, `AccessKeyID`, `PRIVATE_KEY`, and `CLIENT_SECRET` in nested
+  dictionaries and lists.
+- Redaction now uses only exact sensitive names and documented credential
+  suffixes. It intentionally preserves ordinary fields such as `tokenCount`
+  and `secretaryName`.

@@ -46,6 +46,18 @@ _SENSITIVE_FIELD_NAMES = frozenset(
         "token",
     }
 )
+_SENSITIVE_FIELD_SUFFIXES = (
+    "_access_key_id",
+    "_api_key",
+    "_authorization",
+    "_cookie",
+    "_credentials",
+    "_headers",
+    "_password",
+    "_private_key",
+    "_secret",
+    "_token",
+)
 
 
 class RedisStreamJobEventPublisher:
@@ -102,18 +114,12 @@ def _redact_payload(value: object, *, field_name: str | None = None) -> object:
 
 
 def _is_sensitive_field(field_name: str) -> bool:
-    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", field_name).lower().replace("-", "_")
-    if normalized in _SENSITIVE_FIELD_NAMES:
-        return True
-    return any(
-        part in normalized
-        for part in (
-            "authorization",
-            "credential",
-            "cookie",
-            "header",
-            "password",
-            "secret",
-            "token",
-        )
-    )
+    normalized = _normalize_field_name(field_name)
+    return normalized in _SENSITIVE_FIELD_NAMES or normalized.endswith(_SENSITIVE_FIELD_SUFFIXES)
+
+
+def _normalize_field_name(field_name: str) -> str:
+    """Normalize separators, camel case, and acronyms without matching substrings."""
+    first_pass = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", field_name)
+    second_pass = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", first_pass)
+    return re.sub(r"[^A-Za-z0-9]+", "_", second_pass).strip("_").lower()
