@@ -36,10 +36,16 @@ class RedisRuntimeSettings:
     rate_limit_refill_per_second: float = 1.0
 
     def __post_init__(self) -> None:
-        parsed = urlsplit(self.url)
-        if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
+        try:
+            parsed = urlsplit(self.url)
+            hostname = parsed.hostname
+        except ValueError:
             raise RedisRuntimeConfigurationError(
-                "Redis URL must use redis:// or rediss:// and include a host."
+                "Redis URL must use redis:// or rediss:// and include a valid host."
+            ) from None
+        if parsed.scheme not in {"redis", "rediss"} or not hostname:
+            raise RedisRuntimeConfigurationError(
+                "Redis URL must use redis:// or rediss:// and include a valid host."
             )
         if not self.stream_prefix.strip():
             raise RedisRuntimeConfigurationError("Redis streamPrefix must be a non-empty string.")

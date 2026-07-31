@@ -1,26 +1,42 @@
 # Docker Compose 基础设施
 
-## PostgreSQL development database
+`infra/compose.yaml` 管理七个本地基础设施服务：PostgreSQL、Redis、etcd、
+MinIO、Milvus、Attu 和 Alertmanager。后端、前端与腾讯云 CLS MCP Server
+仍作为本机应用进程运行，不进入 Compose。
 
-Start PostgreSQL from the repository root:
+## 启动全部基础设施
+
+在仓库根目录执行：
+
+```bash
+docker compose -f infra/compose.yaml up -d postgres redis etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml ps
+```
+
+主要服务地址：
+
+- PostgreSQL：`localhost:5432`，开发数据库 `agent_py`
+- Redis：`localhost:6379`，开发数据库 `/0`
+- Milvus：`localhost:19530`
+- MinIO 控制台：`http://localhost:9001`
+- Attu：`http://localhost:8001`
+- Alertmanager：`http://localhost:9093`
+- Milvus Web UI/指标端口：`http://localhost:9091`
+
+## PostgreSQL 开发数据库
 
 ```bash
 docker compose -f infra/compose.yaml up -d postgres
 docker compose -f infra/compose.yaml ps postgres
 ```
 
-The service is healthy when `docker compose -f infra/compose.yaml ps postgres`
-reports `healthy`. Development credentials are database `agent_py`, user
-`agent_py`, password `agent_py_dev`, on `localhost:5432`. The separate test
-database is `agent_py_test`.
+Compose 报告 `healthy` 后再执行 Alembic。开发凭据为数据库 `agent_py`、用户
+`agent_py`、密码 `agent_py_dev`；独立集成测试数据库为 `agent_py_test`。
 
-The SQL files in `infra/postgres/init/` run only when PostgreSQL initializes a
-new `postgres-data` volume. To rerun them, remove that volume deliberately and
-then start the service again.
+`infra/postgres/init/` 中的 SQL 只会在新的 `postgres-data` 卷初始化时执行。
+项目采用 fresh-database 策略，不提供 SQLite 数据导入或双写路径。
 
-## Redis recoverable runtime
-
-Start Redis from the repository root:
+## Redis 可恢复运行时
 
 ```bash
 docker compose -f infra/compose.yaml up -d redis
@@ -28,65 +44,43 @@ docker compose -f infra/compose.yaml ps redis
 docker compose -f infra/compose.yaml exec redis redis-cli ping
 ```
 
-Redis listens on `localhost:6379`. It is healthy when Compose reports
-`healthy` and `redis-cli ping` returns `PONG`. The service uses Redis 7 with
-append-only-file (AOF) persistence in the named `redis-data` volume.
+Redis 使用 Redis 7、AOF 持久化和命名卷 `redis-data`。Compose 应报告
+`healthy`，`redis-cli ping` 应返回 `PONG`。
 
-Redis supports caches, rate limits, and low-latency event delivery only. It is
-recoverable infrastructure: PostgreSQL remains the source of truth for jobs
-and their user-visible events. Redis may be restarted or its data rebuilt
-without treating it as a durable job queue or the canonical event store.
+Redis 仅承担缓存、限流与低延迟事件传输。PostgreSQL 始终是任务和用户可见事件
+的事实源；Redis 数据丢失或重建不得造成业务事实丢失，也不得把 Redis 当作持久任务队列。
+测试配置使用 Redis 数据库 `/15`，测试清理只能清理该数据库或专用键前缀。
 
-`infra/compose.yaml` 仅管理本机开发所需的容器基础设施：**PostgreSQL，以及 etcd, MinIO, Milvus, Attu 和 Alertmanager**。后端、前端和腾讯云 CLS MCP Server 由仓库根目录启动脚本直接在本机启动，不属于 Compose 服务。
+## 停止与清理
 
-## 启动基础设施
-
-在仓库根目录执行：
-
-```bash
-docker compose -f infra/compose.yaml up -d postgres etcd minio milvus attu alertmanager
-```
-
-服务地址：
-
-- Alertmanager：`http://localhost:9093`
-- PostgreSQL：`localhost:5432`（数据库 `agent_py`）
-- Milvus：`localhost:19530`
-- MinIO 控制台：`http://localhost:9001`
-- Attu：`http://localhost:8001`
-- Milvus Web UI/指标端口：`http://localhost:9091`
-
-停止基础设施：
+停止服务但保留数据：
 
 ```bash
 docker compose -f infra/compose.yaml down
 ```
 
-仅在需要清除本地状态时才删除 Compose 卷：
+只有明确需要清除全部本地基础设施状态时才删除命名卷：
 
 ```bash
 docker compose -f infra/compose.yaml down -v
 ```
 
-## 本机应用服务
+删除卷会清除 PostgreSQL 与 Redis 等本地数据，操作不可恢复。
 
-在完成基础设施启动后，使用下列任一启动器运行官方 MCP、FastAPI 后端和 Vite 前端：
+## 启动本机应用
+
+基础设施健康后，可运行：
 
 ```bash
 ./scripts/start-local.sh
 ```
 
-Windows 命令提示符：
+Windows：
 
 ```text
 scripts\start-local.bat
 ```
 
-## 配置与边界
-
-- `config/project.json`：直接本机开发使用。
-- `infra/compose.yaml`：只描述容器基础设施。
-
-私有仓库允许在受版本控制的配置文件中保存开发模型与 CLS 凭据。应用代码不会读取本机 `.env` 文件。
-
-文档上传与知识索引都是运行时工作流，绝不会在启动时自动执行。真实 CLS 日志上传与 Alertmanager 样例请遵循[真实日志与告警教程](../docs/tutorials/real-log-and-alert.md)。Compose 栈不会部署外部日志、链路追踪或云可观测性后端。
+应用配置来自 `config/project.json` 与相关本地 JSON 文件，不从 `.env` 读取。
+文档上传、知识索引、CLS 日志上传与 Alertmanager 示例均为显式运行时流程，不会在
+启动时自动执行。

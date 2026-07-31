@@ -65,6 +65,18 @@ def test_settings_representations_and_validation_errors_redact_passwords() -> No
     assert "super-secret" not in str(error.value)
 
 
+def test_settings_redact_malformed_unicode_netloc() -> None:
+    malformed_url = "redis://alice:super-secret" + chr(0xFF20) + "localhost:6379/0"
+
+    with pytest.raises(RedisRuntimeConfigurationError) as error:
+        RedisRuntimeSettings(url=malformed_url)
+
+    message = str(error.value)
+    assert "super-secret" not in message
+    assert "alice" not in message
+    assert "localhost" not in message
+
+
 def test_create_redis_client_uses_bounded_safe_connection_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
