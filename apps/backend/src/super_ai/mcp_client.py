@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
@@ -137,7 +137,7 @@ class LocalMcpClient:
             "error": None,
         }
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: Mapping[str, object]) -> Any:
         started_at = monotonic()
         emit_event(logger, "mcp.tool.started", toolName=name, argumentKeys=sorted(arguments))
         try:
@@ -146,10 +146,8 @@ class LocalMcpClient:
                 result = await self._run(
                     lambda session: session.call_tool(
                         name,
-                        arguments,
-                        read_timeout_seconds=timedelta(
-                            seconds=connection.timeout_seconds
-                        ),
+                        dict(arguments),
+                        read_timeout_seconds=timedelta(seconds=connection.timeout_seconds),
                     )
                 )
             else:
@@ -163,10 +161,8 @@ class LocalMcpClient:
                     connection,
                     lambda session: session.call_tool(
                         name,
-                        arguments,
-                        read_timeout_seconds=timedelta(
-                            seconds=connection.timeout_seconds
-                        ),
+                        dict(arguments),
+                        read_timeout_seconds=timedelta(seconds=connection.timeout_seconds),
                     ),
                 )
         except Exception as exc:

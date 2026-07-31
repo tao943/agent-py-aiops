@@ -131,6 +131,7 @@ from super_ai.redis_runtime import (
     load_redis_runtime_settings,
     ping_redis,
 )
+from super_ai.redis_runtime.cache import RedisJsonCache, RedisJsonClient, RuntimeCache
 from super_ai.redis_runtime.streams import RedisStreamJobEventPublisher
 from super_ai.retrieval import KnowledgeRetrievalTool, RetrievalVectorStore
 from super_ai.vector_store import (
@@ -456,6 +457,11 @@ def create_app(
         )
     app.state.redis_settings = composed_redis_settings
     app.state.redis_client = composed_redis_client
+    app.state.mcp_discovery_cache = (
+        RedisJsonCache(cast(RedisJsonClient, composed_redis_client))
+        if composed_redis_client is not None
+        else None
+    )
     app.state.owned_redis_client = owned_redis_client
     app.state.redis_dispatcher = composed_dispatcher
     app.state.redis_relay = composed_relay
@@ -1870,6 +1876,7 @@ def _mcp_connection_service(request: Request) -> McpConnectionService:
         default_url=required_str(config, "clsSseUrl"),
         default_timeout_seconds=required_int(config, "timeoutSeconds"),
         default_retries=required_int(config, "retries"),
+        cache=cast(RuntimeCache | None, request.app.state.mcp_discovery_cache),
     )
 
 

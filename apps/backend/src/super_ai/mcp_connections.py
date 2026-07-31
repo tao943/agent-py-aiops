@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from super_ai.mcp.cached_client import CachedMcpClient, McpClient, connection_cache_version
 from super_ai.mcp_client import (
     LocalMcpClient,
     McpClientError,
@@ -17,6 +18,7 @@ from super_ai.memory.repositories import (
     McpConnectionRepository,
     MemoryRepositories,
 )
+from super_ai.redis_runtime.cache import RuntimeCache
 
 SUPPORTED_MCP_TRANSPORTS = {"sse", "streamable_http"}
 
@@ -47,11 +49,13 @@ class McpConnectionService:
         default_url: str,
         default_timeout_seconds: int,
         default_retries: int,
+        cache: RuntimeCache | None = None,
     ) -> None:
         self._repositories = repositories
         self._default_url = default_url
         self._default_timeout_seconds = default_timeout_seconds
         self._default_retries = default_retries
+        self._cache = cache
 
     async def list(self, *, owner_user_id: str) -> list[McpConnectionRecord]:
         repository = self._repository()
@@ -136,11 +140,19 @@ class McpConnectionService:
         )
         if record is None:
             raise McpConnectionError("AUTH_FORBIDDEN", "MCP connection is not accessible.")
-        client = _client_from_records([record])
+        client: McpClient = _client_from_records([record])
+        if self._cache is not None:
+            client = CachedMcpClient(
+                client,
+                cache=self._cache,
+                owner_id=owner_user_id,
+                connection_id=record.id,
+                connection_version=_connection_cache_version(record),
+            )
         tools: list[McpToolDefinition] = []
         error: str | None = None
         try:
-            tools = await client.discover_tools()
+            tools = list(await client.discover_tools())
         except McpClientError:
             error = "MCP Server 不可用或工具发现失败。"
         updated = await repository.save_check(
@@ -215,6 +227,19 @@ def _client_from_records(records: list[McpConnectionRecord]) -> LocalMcpClient:
             )
             for record in records
         ]
+    )
+
+
+def _connection_cache_version(record: McpConnectionRecord) -> str:
+    return connection_cache_version(
+        updated_at=record.updated_at,
+        behavioral_config={
+            "transport": record.transport,
+            "url": record.url,
+            "enabled": record.enabled,
+            "timeoutSeconds": record.timeout_seconds,
+            "retries": record.retries,
+        },
     )
 
 
