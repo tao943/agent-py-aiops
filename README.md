@@ -323,3 +323,23 @@ redis-cli -n 0 TTL '<cache-key>'
 redis-cli -n 0 HGETALL 'agent-py:limit:diagnostic.create:<owner-hash>'
 curl http://127.0.0.1:8000/metrics
 ```
+
+## GitHub Actions CI
+
+`.github/workflows/ci.yml` 在面向 `main` 的 Pull Request、推送到 `main` 和手动
+`workflow_dispatch` 时运行。`changes` Job 先判断 backend、frontend、docs/spec 哪些
+区域受到影响，再并行执行相关检查：
+
+- `backend-quality`：Ruff 和 strict Pyright；
+- `backend-tests`：PostgreSQL 16、Redis 7 和完整离线 pytest；
+- `frontend`：共享契约 typecheck/test、Vitest 和 Vite build；
+- `docs-spec`：固定版本 OpenSpec 校验和 VitePress build；
+- `CI Gate`：汇总实际执行或按路径跳过的 Job。
+
+工作流不读取 DashScope、CLS 或部署 secret，也不运行 `live_llm`。真实 Chat、
+Embedding 和 Rerank 契约继续使用后端文档中的显式手动命令验证。
+
+仓库推送到 GitHub 并首次确认 Actions 通过后，在仓库 Settings 的 Branches 或
+Rulesets 中为 `main` 启用 required status checks，并选择名称稳定的 `CI Gate`。
+同一 PR 的新提交会自动取消旧流水线。本阶段没有自动部署；部署平台、制品和回滚
+策略确定后再单独设计 CD。

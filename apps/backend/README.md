@@ -211,3 +211,29 @@ Run focused evidence:
 
 `/metrics` exposes only bounded purpose/action labels. Tests use Redis `/15` and
 prefix-only cleanup.
+
+## GitHub Actions backend checks
+
+CI 的 `backend-quality` Job 在 Python 3.13 上按 `uv.lock` 执行：
+
+```powershell
+uv sync --frozen
+uv run ruff check .
+uv run pyright
+```
+
+`backend-tests` 使用 PostgreSQL 16 和 Redis 7 service containers。PostgreSQL 同时
+提供开发契约数据库 `agent_py` 和隔离集成数据库 `agent_py_test`；运行时 Redis 使用
+`/0`，集成测试使用 `/15`。工作流从可提交模板生成临时且被 Git 忽略的
+`config/project.json` 和 `config/user.project.json`，只写入固定假密钥
+`offline-test-key`，不读取 GitHub secrets。
+
+完整离线测试命令为：
+
+```powershell
+uv run pytest
+```
+
+pytest 默认排除 `live_llm`。只有需要显式验证本地 DashScope Chat、Embedding 和
+Rerank 配置时，才手动运行 `uv run pytest -m live_llm tests/test_live_llm.py -q`；
+该命令不属于普通 PR CI。
