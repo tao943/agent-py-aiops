@@ -213,6 +213,13 @@ uv run pyright
 uv run pytest
 ```
 
+上述后端测试默认排除真实模型调用，只使用临时离线配置。确认本地 DashScope
+密钥和模型配置后，可在 `apps/backend` 显式执行会消耗额度的在线契约测试：
+
+```bash
+uv run pytest -m live_llm tests/test_live_llm.py -q
+```
+
 在 `apps/frontend` 执行前端检查：
 
 ```bash

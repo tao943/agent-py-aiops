@@ -15,6 +15,16 @@ uv run pyright
 uv run pytest
 ```
 
+普通测试使用临时离线配置，不读取本地 API Key，也不会调用外部模型。需要验证本地
+DashScope 配置以及真实的 Chat、Embedding 和 Rerank 模型时，显式运行：
+
+```bash
+uv run pytest -m live_llm tests/test_live_llm.py -q
+```
+
+真实模型测试会读取被 Git 忽略的 `config/project.json` 和
+`config/user.project.json`，并消耗对应模型额度。
+
 在应用迁移后运行本地 API：
 
 ```bash

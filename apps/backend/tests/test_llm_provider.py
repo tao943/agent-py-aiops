@@ -9,6 +9,7 @@ import pytest
 from super_ai.llm import (
     EmbeddingModel,
     LlmConfigurationError,
+    LlmProviderConfig,
     QwenOpenAIProvider,
     load_llm_provider_config,
 )
@@ -50,20 +51,32 @@ class FakeAsyncEmbeddingClient:
         }
 
 
-def test_loads_tracked_qwen_defaults() -> None:
-    config = load_llm_provider_config()
+@pytest.fixture
+def offline_config(tmp_path: Path) -> LlmProviderConfig:
+    return load_llm_provider_config(
+        config_path=_write_config(
+            tmp_path,
+            api_key="offline-test-key",
+            chat_model="qwen-test-chat",
+            embedding_model="qwen-test-embedding",
+        )
+    )
+
+
+def test_loads_offline_qwen_configuration(offline_config: LlmProviderConfig) -> None:
+    config = offline_config
 
     assert config.provider == "qwen-openai"
-    assert config.api_key.startswith("sk-")
+    assert config.api_key == "offline-test-key"
     assert config.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert config.chat_model == "qwen3.7-max"
-    assert config.embedding_model == "text-embedding-v4"
+    assert config.chat_model == "qwen-test-chat"
+    assert config.embedding_model == "qwen-test-embedding"
     assert config.embedding_dimensions == 1024
     assert config.rerank_model == "qwen3-vl-rerank"
-    assert config.rerank_url.endswith("/text-rerank/text-rerank")
+    assert config.rerank_url == "https://example.test/rerank"
     assert config.context_window_tokens == 1_000_000
     assert config.temperature == 0.2
-    assert config.timeout_seconds == 120.0
+    assert config.timeout_seconds == 30.0
     assert config.max_retries == 2
 
 
@@ -149,8 +162,10 @@ def test_chat_model_requires_matching_capability_profile(tmp_path: Path) -> None
         load_llm_provider_config(config_path=config_path)
 
 
-def test_provider_constructs_model_with_config() -> None:
-    config = load_llm_provider_config()
+def test_provider_constructs_model_with_config(
+    offline_config: LlmProviderConfig,
+) -> None:
+    config = offline_config
     captured: dict[str, Any] = {}
 
     def fake_factory(factory_config: object) -> FakeChatModel:
@@ -165,8 +180,10 @@ def test_provider_constructs_model_with_config() -> None:
     assert captured["config"] is config
 
 
-def test_provider_constructs_embedding_model_with_config() -> None:
-    config = load_llm_provider_config()
+def test_provider_constructs_embedding_model_with_config(
+    offline_config: LlmProviderConfig,
+) -> None:
+    config = offline_config
     captured: dict[str, object] = {}
 
     def fake_embedding_factory(factory_config: object) -> EmbeddingModel:
@@ -186,8 +203,10 @@ def test_provider_constructs_embedding_model_with_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_embedding_model_preserves_raw_qwen_inputs_and_batches_by_ten() -> None:
-    config = load_llm_provider_config()
+async def test_default_embedding_model_preserves_raw_qwen_inputs_and_batches_by_ten(
+    offline_config: LlmProviderConfig,
+) -> None:
+    config = offline_config
     provider = QwenOpenAIProvider(config=config, model_factory=lambda _: FakeChatModel())
 
     model = provider.create_embedding_model()
@@ -206,8 +225,10 @@ async def test_default_embedding_model_preserves_raw_qwen_inputs_and_batches_by_
 
 
 @pytest.mark.asyncio
-async def test_readiness_succeeds_without_exposing_secret() -> None:
-    config = load_llm_provider_config()
+async def test_readiness_succeeds_without_exposing_secret(
+    offline_config: LlmProviderConfig,
+) -> None:
+    config = offline_config
     fake_model = FakeChatModel(response="ready")
     provider = QwenOpenAIProvider(config=config, model_factory=lambda _: fake_model)
 
@@ -215,7 +236,7 @@ async def test_readiness_succeeds_without_exposing_secret() -> None:
 
     assert result.ok is True
     assert result.provider == "qwen-openai"
-    assert result.model == "qwen3.7-max"
+    assert result.model == "qwen-test-chat"
     assert result.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert result.error is None
     assert result.latency_ms >= 0
@@ -224,8 +245,10 @@ async def test_readiness_succeeds_without_exposing_secret() -> None:
 
 
 @pytest.mark.asyncio
-async def test_readiness_failure_is_safe() -> None:
-    config = load_llm_provider_config()
+async def test_readiness_failure_is_safe(
+    offline_config: LlmProviderConfig,
+) -> None:
+    config = offline_config
     provider = QwenOpenAIProvider(
         config=config,
         model_factory=lambda _: FakeChatModel(error=RuntimeError("provider unavailable")),
