@@ -66,7 +66,11 @@ async def test_concurrent_workers_claim_distinct_queued_jobs(
     assert first is not None
     assert second is not None
     assert first.id != second.id
-    assert [job.status for job in persisted] == ["running", "running"]
+    persisted_statuses: list[str] = []
+    for job in persisted:
+        assert job is not None
+        persisted_statuses.append(job.status)
+    assert persisted_statuses == ["running", "running"]
     assert third is None
 
 
