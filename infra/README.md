@@ -34,7 +34,7 @@ Compose 报告 `healthy` 后再执行 Alembic。开发凭据为数据库 `agent_
 `agent_py`、密码 `agent_py_dev`；独立集成测试数据库为 `agent_py_test`。
 
 `infra/postgres/init/` 中的 SQL 只会在新的 `postgres-data` 卷初始化时执行。
-项目采用 fresh-database 策略，不提供 SQLite 数据导入或双写路径。
+项目采用 fresh-database 策略，不提供旧数据库导入或双写路径。
 
 ## Redis 可恢复运行时
 

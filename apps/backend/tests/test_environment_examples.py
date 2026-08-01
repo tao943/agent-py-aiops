@@ -43,10 +43,21 @@ def test_local_project_configs_are_ignored_and_templates_are_sanitized() -> None
     assert user_template["clsMcpServer"]["secretKey"] == ""
 
 
-def test_project_config_contains_development_provider_config() -> None:
-    base_config = json.loads(Path("../../config/project.json").read_text(encoding="utf-8"))
-    user_config = json.loads(Path("../../config/user.project.json").read_text(encoding="utf-8"))
-    merged_config = load_project_config(Path("../../config/project.json"))
+def test_project_templates_merge_with_offline_provider_config(tmp_path: Path) -> None:
+    base_config = json.loads(
+        (REPO_ROOT / "config" / "project.template.json").read_text(encoding="utf-8")
+    )
+    user_config = json.loads(
+        (REPO_ROOT / "config" / "user.project.template.json").read_text(encoding="utf-8")
+    )
+    user_config["llm"]["apiKey"] = "offline-test-key"
+    project_path = tmp_path / "project.json"
+    project_path.write_text(json.dumps(base_config), encoding="utf-8")
+    (tmp_path / "user.project.json").write_text(
+        json.dumps(user_config), encoding="utf-8"
+    )
+
+    merged_config = load_project_config(project_path)
     llm = merged_config["llm"]
 
     assert base_config["llm"]["apiKey"] == ""
@@ -57,8 +68,8 @@ def test_project_config_contains_development_provider_config() -> None:
     assert base_config["clsLogUpload"]["region"] == ""
     assert base_config["clsLogUpload"]["logsetId"] == ""
     assert base_config["clsLogUpload"]["topicId"] == ""
-    assert user_config["llm"]["apiKey"].startswith("sk-")
-    assert llm["apiKey"].startswith("sk-")
+    assert user_config["llm"]["apiKey"] == "offline-test-key"
+    assert llm["apiKey"] == "offline-test-key"
     assert llm["baseUrl"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert llm["chatModel"] == "qwen3.7-max"
     assert llm["embeddingModel"] == "text-embedding-v4"
@@ -70,12 +81,13 @@ def test_project_config_contains_development_provider_config() -> None:
     assert llm["maxRetries"] == 2
 
 
-def test_project_config_declares_real_prometheus_and_alertmanager_sources() -> None:
-    config = json.loads(Path("../../config/project.json").read_text(encoding="utf-8"))
+def test_project_template_declares_prometheus_and_alertmanager_sources() -> None:
+    config = json.loads(
+        (REPO_ROOT / "config" / "project.template.json").read_text(encoding="utf-8")
+    )
     sources = config["prometheusAlerts"]["sources"]
 
     assert sources[0]["type"] == "prometheus-v1"
-    assert sources[0]["alertsApi"].startswith("https://")
-    assert sources[0]["alertsApi"].endswith("/api/v1/alerts")
+    assert sources[0]["alertsApi"] == ""
     assert sources[1]["type"] == "alertmanager-v2"
     assert sources[1]["alertsApi"] == "http://127.0.0.1:9093/api/v2/alerts"

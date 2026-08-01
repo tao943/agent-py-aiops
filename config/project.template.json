@@ -122,7 +122,7 @@
     "recovery.execute": {"capacity": 1, "refillTokens": 1, "refillPeriodSeconds": 60, "failureMode": "fail_closed"}
   },
   "minio": {
-    "accessKey": "minioadmin",
-    "secretKey": "minioadmin"
+    "accessKey": "",
+    "secretKey": ""
   }
 }

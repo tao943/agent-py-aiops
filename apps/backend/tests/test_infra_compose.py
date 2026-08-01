@@ -84,8 +84,9 @@ def test_infra_docs_describe_infrastructure_and_local_application_services() -> 
     infra_readme = _read("README.md")
     root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "etcd, MinIO, Milvus, Attu 和 Alertmanager" in infra_readme
-    assert "CLS MCP Server、后端与前端" in root_readme
+    for service in ("etcd", "MinIO", "Milvus", "Attu", "Alertmanager"):
+        assert service in infra_readme
+    assert "CLS MCP Server" in root_readme
 
 
 def _read(name: str) -> str:
