@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 import super_ai.api.app as api_app
 from super_ai.api.app import create_app
 from super_ai.llm import LlmProvider, LlmReadinessResult
+from super_ai.redis_runtime.rate_limit import RateLimitDecision
 from super_ai.vector_store import MilvusHealthCheckResult
 
 
@@ -61,6 +62,12 @@ class FailingRedisClient:
 class HealthyRedisClient:
     async def ping(self) -> bool:
         return True
+
+
+class AllowAllRateLimitService:
+    async def acquire(self, *, owner_id: str, action: str) -> RateLimitDecision:
+        del owner_id, action
+        return RateLimitDecision(True, 1, 0, "local_fallback")
 
 
 @pytest.mark.asyncio
@@ -236,6 +243,7 @@ async def test_config_check_reports_safe_configuration_and_dependency_results(
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
         redis_client=cast(Redis, HealthyRedisClient()),
+        rate_limit_service=AllowAllRateLimitService(),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)
@@ -271,6 +279,7 @@ async def test_config_check_surfaces_invalid_configuration_without_crashing(
         vector_store=FakeVectorStore(),
         llm_provider=cast(LlmProvider, FakeLlmProvider()),
         redis_client=cast(Redis, HealthyRedisClient()),
+        rate_limit_service=AllowAllRateLimitService(),
     )
     monkeypatch.setattr(api_app, "_mcp_client", fake_mcp_client)
     transport = httpx.ASGITransport(app=app)

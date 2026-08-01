@@ -9,6 +9,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
 from super_ai.api.app import AiopsDiagnosticRunner, create_app
@@ -437,6 +438,11 @@ class FakeAiopsRunner:
 class UnavailableRedisClient:
     async def ping(self) -> bool:
         raise ConnectionError("Redis is unavailable")
+
+    async def eval(
+        self, _script: str, _numkeys: int, *_keys_and_args: object
+    ) -> object:
+        raise RedisError("Redis is unavailable")
 
 
 @pytest.mark.asyncio
