@@ -6,6 +6,19 @@ from super_ai.project_config import load_project_config
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def test_backend_test_runtime_is_reproducible() -> None:
+    pyproject = (REPO_ROOT / "apps" / "backend" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"python-snappy>=0.7.3"' in pyproject
+    assert '"lz4>=4.4.5"' in pyproject
+    assert 'cache-dir = "var/uv-cache"' in pyproject
+    assert "--basetemp=var/pytest" in pyproject
+    assert "not live_llm" in pyproject
+    assert "live_llm = calls the configured real DashScope models" in pyproject
+
+
 def test_local_project_configs_are_ignored_and_templates_are_sanitized() -> None:
     ignore_patterns = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "config/project.json" in ignore_patterns

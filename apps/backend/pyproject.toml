@@ -29,7 +29,12 @@ dependencies = [
 ]
 
 [tool.uv]
-override-dependencies = ["protobuf>=5.27.2"]
+cache-dir = "var/uv-cache"
+override-dependencies = [
+  "lz4>=4.4.5",
+  "protobuf>=5.27.2",
+  "python-snappy>=0.7.3",
+]
 
 [dependency-groups]
 dev = [
@@ -47,10 +52,11 @@ build-backend = "hatchling.build"
 packages = ["src/super_ai"]
 
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --basetemp=var/pytest -m 'not live_llm'"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["live_llm = calls the configured real DashScope models"]
 
 [tool.ruff]
 line-length = 100
