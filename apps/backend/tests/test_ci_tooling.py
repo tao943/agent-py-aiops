@@ -4,10 +4,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DETECT_CHANGES = REPO_ROOT / "scripts" / "ci" / "detect_changes.py"
 PREPARE_CONFIG = REPO_ROOT / "scripts" / "ci" / "prepare_test_config.py"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _run_change_detection(tmp_path: Path, paths: list[str]) -> dict[str, str]:
@@ -119,3 +123,47 @@ def test_ci_config_generation_is_offline_and_refuses_overwrite(tmp_path: Path) -
         check=False,
     )
     assert repeated.returncode != 0
+
+
+def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
+    workflow_text = CI_WORKFLOW.read_text(encoding="utf-8")
+    parsed: object = yaml.safe_load(workflow_text)
+    assert isinstance(parsed, dict)
+    workflow = cast(dict[str, object], parsed)
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    job_map = cast(dict[str, object], jobs)
+    assert set(job_map) == {
+        "changes",
+        "backend-quality",
+        "backend-tests",
+        "frontend",
+        "docs-spec",
+        "ci-gate",
+    }
+
+    required_tokens = [
+        "pull_request:",
+        "workflow_dispatch:",
+        "permissions:\n  contents: read",
+        "cancel-in-progress: true",
+        "postgres:16",
+        "redis:7-alpine",
+        "uv sync --frozen",
+        "uv run ruff check .",
+        "uv run pyright",
+        "uv run pytest",
+        "npm ci",
+        "npm run frontend:test",
+        "npm run frontend:build",
+        "@fission-ai/openspec@1.6.0 validate --all",
+        "npm run docs:build",
+        "name: CI Gate",
+        "if: always()",
+    ]
+    for token in required_tokens:
+        assert token in workflow_text
+
+    assert "pull_request_target" not in workflow_text
+    assert "secrets." not in workflow_text
+    assert "-m live_llm" not in workflow_text

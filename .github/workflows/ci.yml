@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.detect.outputs.backend }}
+      frontend: ${{ steps.detect.outputs.frontend }}
+      docs_spec: ${{ steps.detect.outputs.docs_spec }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: detect
+        name: Detect affected areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 scripts/ci/detect_changes.py
+          --event "$EVENT_NAME"
+          --base "$BASE_SHA"
+          --head "$HEAD_SHA"
+          --output "$GITHUB_OUTPUT"
+
+  backend-quality:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.11.32'
+          enable-cache: true
+          cache-dependency-glob: apps/backend/uv.lock
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run pyright
+
+  backend-tests:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: agent_py
+          POSTGRES_PASSWORD: agent_py_dev
+          POSTGRES_DB: agent_py
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U agent_py -d agent_py"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.11.32'
+          enable-cache: true
+          cache-dependency-glob: apps/backend/uv.lock
+      - name: Create integration database
+        env:
+          PGPASSWORD: agent_py_dev
+        run: >-
+          psql -h localhost -U agent_py -d agent_py -v ON_ERROR_STOP=1
+          -c "CREATE DATABASE agent_py_test"
+      - name: Prepare offline configuration
+        run: >-
+          python3 scripts/ci/prepare_test_config.py
+          --repo-root .
+          --output-dir config
+      - name: Install backend
+        working-directory: apps/backend
+        run: uv sync --frozen
+      - name: Run offline backend suite
+        working-directory: apps/backend
+        run: uv run pytest
+
+  frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run contracts:typecheck
+      - run: npm --workspace packages/api-contracts run test
+      - run: npm run frontend:test
+      - run: npm run frontend:build
+
+  docs-spec:
+    needs: changes
+    if: needs.changes.outputs.docs_spec == 'true'
+    runs-on: ubuntu-latest
+    env:
+      OPENSPEC_TELEMETRY: '0'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npx --yes @fission-ai/openspec@1.6.0 validate --all
+      - run: npm run docs:build
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [changes, backend-quality, backend-tests, frontend, docs-spec]
+    runs-on: ubuntu-latest
+    env:
+      RESULTS: ${{ join(needs.*.result, ',') }}
+    steps:
+      - name: Require every selected check to pass
+        run: |
+          echo "Job results: $RESULTS"
+          if [[ ",$RESULTS," == *",failure,"* || ",$RESULTS," == *",cancelled,"* ]]; then
+            exit 1
+          fi
