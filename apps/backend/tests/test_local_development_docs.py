@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _bash_command() -> str | None:
+    if os.name == "nt":
+        git_bash = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe"
+        )
+        if git_bash.exists():
+            return str(git_bash)
+    return shutil.which("bash")
 
 
 def test_root_readme_documents_local_first_startup_and_optional_compose() -> None:
@@ -71,9 +88,13 @@ def test_cross_platform_launchers_start_only_milvus_compose_dependencies() -> No
 
 def test_posix_launcher_has_valid_shell_syntax() -> None:
     shell_launcher = REPO_ROOT / "scripts" / "start-local.sh"
+    bash = _bash_command()
+    if bash is None:
+        pytest.skip("Bash is unavailable on this platform.")
 
     result = subprocess.run(
-        ["bash", "-n", str(shell_launcher)],
+        [bash, "-n"],
+        input=shell_launcher.read_text(encoding="utf-8"),
         check=False,
         capture_output=True,
         text=True,

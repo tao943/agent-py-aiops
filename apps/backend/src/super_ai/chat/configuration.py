@@ -101,7 +101,7 @@ def validate_skill_upload(filename: str | None, content: bytes) -> ValidatedChat
         decoded = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("Skill 文件必须是 UTF-8 编码的 Markdown 文本。") from exc
-    normalized_content = decoded.strip()
+    normalized_content = decoded.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized_content:
         raise ValueError("Skill 文件不能为空，请写入可读的 Markdown 指令。")
     match = _SKILL_FRONTMATTER_PATTERN.match(normalized_content)

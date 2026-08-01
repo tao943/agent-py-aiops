@@ -3,6 +3,14 @@ from pathlib import Path
 from super_ai.chat.configuration import MAX_CHAT_SKILL_BYTES, validate_skill_upload
 
 
+def test_skill_upload_normalizes_windows_newlines() -> None:
+    content = b"---\r\nname: ops\r\ndescription: Ops\r\n---\r\n# Ops\r\n"
+
+    validated = validate_skill_upload("SKILL.md", content)
+
+    assert validated.content == "---\nname: ops\ndescription: Ops\n---\n# Ops"
+
+
 def test_repository_contains_five_uploadable_skill_examples() -> None:
     repository_root = Path(__file__).resolve().parents[3]
     examples_dir = repository_root / "docs" / "examples" / "skills"
