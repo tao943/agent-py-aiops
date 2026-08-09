@@ -209,22 +209,38 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
     assert "-m live_llm" not in workflow_text
 
 
-def test_ci_prepares_ignored_configuration_before_frontend_checks() -> None:
-    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["frontend"]["steps"]
-    runs = [str(step.get("run", "")) for step in steps]
+def test_ci_jobs_bootstrap_ignored_runtime_inputs() -> None:
+    parsed: object = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    workflow = cast(dict[str, object], parsed)
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    job_map = cast(dict[str, object], jobs)
 
-    prepare_runs = [run for run in runs if "prepare_test_config.py" in run]
+    def job_runs(job_name: str) -> list[str]:
+        job = job_map.get(job_name)
+        assert isinstance(job, dict)
+        steps = cast(dict[str, object], job).get("steps")
+        assert isinstance(steps, list)
+        runs: list[str] = []
+        for raw_step in cast(list[object], steps):
+            assert isinstance(raw_step, dict)
+            run = cast(dict[str, object], raw_step).get("run")
+            if isinstance(run, str):
+                runs.append(run)
+        return runs
+
+    backend_runs = job_runs("backend-tests")
+    assert "mkdir -p apps/backend/var" in backend_runs
+    assert backend_runs.index("mkdir -p apps/backend/var") < backend_runs.index(
+        "uv run pytest"
+    )
+
+    frontend_runs = job_runs("frontend")
+    prepare_runs = [run for run in frontend_runs if "prepare_test_config.py" in run]
     assert prepare_runs == [
         "python3 scripts/ci/prepare_test_config.py --repo-root . --output-dir config"
     ]
-    assert runs.index(prepare_runs[0]) < runs.index("npm run frontend:test")
-
-
-def test_ci_creates_backend_pytest_basetemp_parent_before_tests() -> None:
-    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["backend-tests"]["steps"]
-    runs = [str(step.get("run", "")) for step in steps]
-
-    assert "mkdir -p apps/backend/var" in runs
-    assert runs.index("mkdir -p apps/backend/var") < runs.index("uv run pytest")
+    assert frontend_runs.index(prepare_runs[0]) < frontend_runs.index(
+        "npm run frontend:test"
+    )

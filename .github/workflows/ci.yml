@@ -109,7 +109,7 @@ jobs:
           python3 scripts/ci/prepare_test_config.py
           --repo-root .
           --output-dir config
-      - name: Prepare pytest runtime directory
+      - name: Prepare backend runtime directories
         run: mkdir -p apps/backend/var
       - name: Install backend
         working-directory: apps/backend
@@ -129,12 +129,12 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci
       - name: Prepare offline configuration
         run: >-
           python3 scripts/ci/prepare_test_config.py
           --repo-root .
           --output-dir config
+      - run: npm ci
       - run: npm run contracts:typecheck
       - run: npm --workspace packages/api-contracts run test
       - run: npm run frontend:test
