@@ -2,7 +2,8 @@
 import { defineConfig } from "vitepress";
 
 const activeItems = [
-
+  { text: "add-nginx-rate-limit-gateway", link: "/changes/active/add-nginx-rate-limit-gateway/" },
+  { text: "migrate-postgresql-add-redis-runtime", link: "/changes/active/migrate-postgresql-add-redis-runtime/" },
 ];
 
 const archivedItems = [

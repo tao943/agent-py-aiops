@@ -6,7 +6,8 @@ title: OpenSpec 变更
 
 ## 进行中
 
-当前没有进行中的变更。
+- [add-nginx-rate-limit-gateway](/changes/active/add-nginx-rate-limit-gateway/)
+- [migrate-postgresql-add-redis-runtime](/changes/active/migrate-postgresql-add-redis-runtime/)
 
 ## 已归档
 
