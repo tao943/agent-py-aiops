@@ -20,7 +20,7 @@
   },
   "frontend": {
     "title": "Super AI",
-    "apiBaseUrl": "http://127.0.0.1:8000",
+    "apiBaseUrl": "http://127.0.0.1:8080",
     "publicAnalyticsKey": "local-dev-analytics-disabled"
   },
   "llm": {
@@ -108,7 +108,7 @@
     "maxCount": 100
   },
   "aiopsDemo": {
-    "backendBaseUrl": "http://127.0.0.1:8000",
+    "backendBaseUrl": "http://127.0.0.1:8080",
     "email": "aiops-demo@agent-py.local",
     "displayName": "AIOps Demo",
     "password": "",
