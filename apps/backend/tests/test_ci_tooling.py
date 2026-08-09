@@ -167,3 +167,32 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
     assert "pull_request_target" not in workflow_text
     assert "secrets." not in workflow_text
     assert "-m live_llm" not in workflow_text
+
+
+def test_ci_jobs_bootstrap_ignored_runtime_inputs() -> None:
+    parsed: object = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    workflow = cast(dict[str, object], parsed)
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict)
+    job_map = cast(dict[str, object], jobs)
+
+    def job_runs(job_name: str) -> list[str]:
+        job = job_map.get(job_name)
+        assert isinstance(job, dict)
+        steps = cast(dict[str, object], job).get("steps")
+        assert isinstance(steps, list)
+        runs: list[str] = []
+        for raw_step in cast(list[object], steps):
+            assert isinstance(raw_step, dict)
+            run = cast(dict[str, object], raw_step).get("run")
+            if isinstance(run, str):
+                runs.append(run)
+        return runs
+
+    assert any(
+        "mkdir -p apps/backend/var" in run for run in job_runs("backend-tests")
+    )
+    assert any(
+        "scripts/ci/prepare_test_config.py" in run for run in job_runs("frontend")
+    )
