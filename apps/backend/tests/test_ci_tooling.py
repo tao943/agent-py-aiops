@@ -46,21 +46,35 @@ def test_ci_change_detection_classifies_known_areas(tmp_path: Path) -> None:
         "backend": "true",
         "frontend": "false",
         "docs_spec": "false",
+        "gateway": "false",
     }
     assert _run_change_detection(tmp_path, ["apps/frontend/src/App.vue"]) == {
         "backend": "false",
         "frontend": "true",
         "docs_spec": "false",
+        "gateway": "false",
     }
     assert _run_change_detection(tmp_path, ["docs/index.md"]) == {
         "backend": "false",
         "frontend": "false",
         "docs_spec": "true",
+        "gateway": "false",
+    }
+    assert _run_change_detection(tmp_path, ["infra/nginx/default.conf"]) == {
+        "backend": "true",
+        "frontend": "false",
+        "docs_spec": "false",
+        "gateway": "true",
     }
 
 
 def test_ci_change_detection_expands_shared_and_unknown_changes(tmp_path: Path) -> None:
-    all_areas = {"backend": "true", "frontend": "true", "docs_spec": "true"}
+    all_areas = {
+        "backend": "true",
+        "frontend": "true",
+        "docs_spec": "true",
+        "gateway": "true",
+    }
     assert _run_change_detection(tmp_path, [".github/workflows/ci.yml"]) == all_areas
     assert _run_change_detection(tmp_path, ["unclassified-root-file.txt"]) == all_areas
 
@@ -69,7 +83,12 @@ def test_ci_change_detection_combines_multiple_areas(tmp_path: Path) -> None:
     assert _run_change_detection(
         tmp_path,
         ["apps/backend/pyproject.toml", "packages/api-contracts/src/index.ts"],
-    ) == {"backend": "true", "frontend": "true", "docs_spec": "false"}
+    ) == {
+        "backend": "true",
+        "frontend": "true",
+        "docs_spec": "false",
+        "gateway": "false",
+    }
 
 
 def test_ci_manual_dispatch_runs_every_area(tmp_path: Path) -> None:
@@ -90,6 +109,7 @@ def test_ci_manual_dispatch_runs_every_area(tmp_path: Path) -> None:
         "backend=true",
         "frontend=true",
         "docs_spec=true",
+        "gateway=true",
     ]
 
 
@@ -156,6 +176,7 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
         "backend-tests",
         "frontend",
         "docs-spec",
+        "gateway",
         "ci-gate",
     }
 
@@ -175,6 +196,8 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
         "npm run frontend:build",
         "@fission-ai/openspec@1.6.0 validate --all",
         "npm run docs:build",
+        "docker compose -f infra/compose.yaml config",
+        "docker compose -f infra/compose.yaml run --rm --no-deps nginx nginx -t",
         "name: CI Gate",
         "if: always()",
     ]

@@ -13,6 +13,8 @@ FRONTEND_PREFIXES = ("apps/frontend/", "packages/api-contracts/")
 FRONTEND_FILES = {"package.json", "package-lock.json"}
 DOCS_PREFIXES = ("docs/", "openspec/")
 DOCS_FILES = {"README.md", "openspec从0到1项目实战的提示词.md"}
+GATEWAY_PREFIXES = ("infra/nginx/",)
+GATEWAY_FILES = {"infra/compose.yaml"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +22,11 @@ class ChangeAreas:
     backend: bool
     frontend: bool
     docs_spec: bool
+    gateway: bool
 
     @classmethod
     def all(cls) -> ChangeAreas:
-        return cls(backend=True, frontend=True, docs_spec=True)
+        return cls(backend=True, frontend=True, docs_spec=True, gateway=True)
 
 
 def _normalize(path: str) -> str:
@@ -34,6 +37,7 @@ def classify_paths(paths: list[str]) -> ChangeAreas:
     backend = False
     frontend = False
     docs_spec = False
+    gateway = False
     saw_path = False
     for raw_path in paths:
         if not raw_path.strip():
@@ -52,13 +56,21 @@ def classify_paths(paths: list[str]) -> ChangeAreas:
         if path.startswith(DOCS_PREFIXES) or path in DOCS_FILES:
             docs_spec = True
             matched = True
+        if path.startswith(GATEWAY_PREFIXES) or path in GATEWAY_FILES:
+            gateway = True
+            matched = True
         if path in FRONTEND_FILES:
             docs_spec = True
         if not matched:
             return ChangeAreas.all()
     if not saw_path:
         return ChangeAreas.all()
-    return ChangeAreas(backend=backend, frontend=frontend, docs_spec=docs_spec)
+    return ChangeAreas(
+        backend=backend,
+        frontend=frontend,
+        docs_spec=docs_spec,
+        gateway=gateway,
+    )
 
 
 def _git_changed_paths(event: str, base: str, head: str) -> list[str] | None:
@@ -84,6 +96,7 @@ def _write_outputs(path: Path, areas: ChangeAreas) -> None:
                 f"backend={str(areas.backend).lower()}",
                 f"frontend={str(areas.frontend).lower()}",
                 f"docs_spec={str(areas.docs_spec).lower()}",
+                f"gateway={str(areas.gateway).lower()}",
             ]
         )
         + "\n",

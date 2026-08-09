@@ -24,6 +24,7 @@ jobs:
       backend: ${{ steps.detect.outputs.backend }}
       frontend: ${{ steps.detect.outputs.frontend }}
       docs_spec: ${{ steps.detect.outputs.docs_spec }}
+      gateway: ${{ steps.detect.outputs.gateway }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -150,10 +151,19 @@ jobs:
       - run: npx --yes @fission-ai/openspec@1.6.0 validate --all
       - run: npm run docs:build
 
+  gateway:
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker compose -f infra/compose.yaml config
+      - run: docker compose -f infra/compose.yaml run --rm --no-deps nginx nginx -t
+
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [changes, backend-quality, backend-tests, frontend, docs-spec]
+    needs: [changes, backend-quality, backend-tests, frontend, docs-spec, gateway]
     runs-on: ubuntu-latest
     env:
       RESULTS: ${{ join(needs.*.result, ',') }}
