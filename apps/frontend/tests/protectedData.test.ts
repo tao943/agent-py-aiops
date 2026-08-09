@@ -222,12 +222,12 @@ describe("protected data client", () => {
     expect(cleared.deletedMessages).toBe(1);
     expect(deleted.deleted).toBe(true);
     expect(requests.map((request) => request.input.toString())).toEqual([
-      "http://127.0.0.1:8000/chat/sessions",
-      "http://127.0.0.1:8000/chat/sessions",
-      "http://127.0.0.1:8000/chat/sessions/chat_1",
-      "http://127.0.0.1:8000/chat/sessions/chat_1/messages",
-      "http://127.0.0.1:8000/chat/sessions/chat_1/messages:clear",
-      "http://127.0.0.1:8000/chat/sessions/chat_1"
+      "http://127.0.0.1:8080/chat/sessions",
+      "http://127.0.0.1:8080/chat/sessions",
+      "http://127.0.0.1:8080/chat/sessions/chat_1",
+      "http://127.0.0.1:8080/chat/sessions/chat_1/messages",
+      "http://127.0.0.1:8080/chat/sessions/chat_1/messages:clear",
+      "http://127.0.0.1:8080/chat/sessions/chat_1"
     ]);
     expect(new Headers(requests[0]?.init.headers).get("Authorization")).toBe("Bearer token-1");
   });
@@ -299,7 +299,7 @@ describe("protected data client", () => {
     }
 
     expect(requests[0]?.input.toString()).toBe(
-      "http://127.0.0.1:8000/chat/sessions/chat_1/messages:stream"
+      "http://127.0.0.1:8080/chat/sessions/chat_1/messages:stream"
     );
     expect(requests[0]?.init.method).toBe("POST");
     expect(new Headers(requests[0]?.init.headers).get("Authorization")).toBe("Bearer token-1");

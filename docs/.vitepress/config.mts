@@ -2,11 +2,11 @@
 import { defineConfig } from "vitepress";
 
 const activeItems = [
-  { text: "add-nginx-rate-limit-gateway", link: "/changes/active/add-nginx-rate-limit-gateway/" },
   { text: "migrate-postgresql-add-redis-runtime", link: "/changes/active/migrate-postgresql-add-redis-runtime/" },
 ];
 
 const archivedItems = [
+  { text: "add-nginx-rate-limit-gateway", link: "/changes/archive/2026-08-09-add-nginx-rate-limit-gateway/" },
   { text: "use-positive-idf-bm25", link: "/changes/archive/2026-07-11-use-positive-idf-bm25/" },
   { text: "show-retrieval-stage-ranks", link: "/changes/archive/2026-07-11-show-retrieval-stage-ranks/" },
   { text: "remove-project-config-from-git-history", link: "/changes/archive/2026-07-11-remove-project-config-from-git-history/" },

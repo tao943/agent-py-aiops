@@ -4,7 +4,7 @@
 
 项目 SHALL 在 `infra` 下提供一个 Docker Compose 文件，管理 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx 本地基础设施。Nginx SHALL 作为访问宿主机 FastAPI 的统一开发入口；后端、前端和官方 CLS MCP Server SHALL 继续由本地启动器直接在宿主机运行，Compose SHALL NOT 构建或运行应用程序镜像。
 
-#### Scenario: Compose defines infrastructure and gateway services
+#### Scenario: Compose 文件定义了基础设施服务
 
 - **WHEN** `infra/compose.yaml` 被检查
 - **THEN** 它 MUST 定义 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx，并且 MUST NOT 定义 backend、frontend 或 `cls-mcp-server`

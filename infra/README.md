@@ -1,7 +1,7 @@
 # Docker Compose 基础设施
 
-`infra/compose.yaml` 管理七个本地基础设施服务：PostgreSQL、Redis、etcd、
-MinIO、Milvus、Attu 和 Alertmanager。后端、前端与腾讯云 CLS MCP Server
+`infra/compose.yaml` 管理八个本地基础设施服务：PostgreSQL、Redis、etcd、
+MinIO、Milvus、Attu、Alertmanager 和 Nginx。后端、前端与腾讯云 CLS MCP Server
 仍作为本机应用进程运行，不进入 Compose。
 
 ## 启动全部基础设施
@@ -9,7 +9,7 @@ MinIO、Milvus、Attu 和 Alertmanager。后端、前端与腾讯云 CLS MCP Ser
 在仓库根目录执行：
 
 ```bash
-docker compose -f infra/compose.yaml up -d postgres redis etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d postgres redis etcd minio milvus attu alertmanager nginx
 docker compose -f infra/compose.yaml ps
 ```
 
@@ -22,6 +22,35 @@ docker compose -f infra/compose.yaml ps
 - Attu：`http://localhost:8001`
 - Alertmanager：`http://localhost:9093`
 - Milvus Web UI/指标端口：`http://localhost:9091`
+- Nginx API 网关：`http://127.0.0.1:8080`
+
+## Nginx API 网关
+
+Nginx 使用官方 `nginx:1.30-alpine` 镜像，只发布 `127.0.0.1:8080:80`，通过
+`host.docker.internal:8000` 访问宿主机 FastAPI。Linux Docker Engine 使用 Compose
+中的 `host-gateway` 映射；backend、frontend 和 CLS MCP Server 仍不进入 Compose。
+
+```bash
+docker compose -f infra/compose.yaml up -d nginx
+docker compose -f infra/compose.yaml ps nginx
+docker compose -f infra/compose.yaml logs nginx
+docker compose -f infra/compose.yaml exec nginx nginx -T
+```
+
+限流按客户端 IP 分级：普通 API 为 20 r/s、burst 40；登录和注册为 10 r/m、
+burst 5；Chat/AIOps SSE 建连为 5 r/s、burst 10。`/nginx-health`、`/health` 和
+`/ready` 不限流。超限请求由 Nginx 直接返回 429；FastAPI 内部 Redis Token Bucket
+继续按认证用户控制高成本 Agent 资源。
+
+SSE 路由关闭 buffering/cache，读取超时为 600 秒。`client_max_body_size 12m`
+允许 10 MB 文档及 multipart 开销，后端继续执行内容限制。访问日志记录 URI（不含
+查询参数）、响应/上游状态、耗时、request ID 和 `limitStatus`，不记录认证头、Cookie
+或请求体。
+
+- `limitStatus=REJECTED`：Nginx 入口限流。
+- 上游 429：FastAPI/Redis 应用限流。
+- 502：宿主机 FastAPI 未启动或 Nginx 无法连接 8000。
+- 504：FastAPI 或下游处理超过代理超时。
 
 ## PostgreSQL 开发数据库
 
