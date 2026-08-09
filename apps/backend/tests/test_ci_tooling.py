@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DETECT_CHANGES = REPO_ROOT / "scripts" / "ci" / "detect_changes.py"
 PREPARE_CONFIG = REPO_ROOT / "scripts" / "ci" / "prepare_test_config.py"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WIKI_SYNC = REPO_ROOT / ".codex" / "skills" / "wiki-sync" / "scripts" / "sync_wiki.py"
 
 
 def _run_change_detection(tmp_path: Path, paths: list[str]) -> dict[str, str]:
@@ -88,6 +91,20 @@ def test_ci_manual_dispatch_runs_every_area(tmp_path: Path) -> None:
         "frontend=true",
         "docs_spec=true",
     ]
+
+
+def test_wiki_sync_accepts_resolved_directory_link_not_placeholder(tmp_path: Path) -> None:
+    target = tmp_path / "openspec"
+    target.mkdir()
+    placeholder = tmp_path / "materialized-link"
+    placeholder.write_text("../openspec\n", encoding="utf-8")
+    namespace = runpy.run_path(str(WIKI_SYNC))
+    openspec_link_is_valid = cast(
+        Callable[[Path, Path], bool], namespace["openspec_link_is_valid"]
+    )
+
+    assert openspec_link_is_valid(target, target) is True
+    assert openspec_link_is_valid(placeholder, target) is False
 
 
 def test_ci_config_generation_is_offline_and_refuses_overwrite(tmp_path: Path) -> None:
