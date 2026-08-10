@@ -1,0 +1,9 @@
+type: agentpy-original
+origin:
+  - AgentPy Docker Compose service topology
+  - Nginx upstream failure observations reproduced by project-owned fixtures
+validation_references:
+  - https://github.com/nginx/nginx
+  - https://github.com/docker/compose
+license: project-license
+created: 2026-08-10

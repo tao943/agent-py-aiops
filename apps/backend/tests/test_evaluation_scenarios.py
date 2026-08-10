@@ -9,6 +9,8 @@ from super_ai.evaluation import (
     validate_scenario_bundle,
 )
 
+SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
 
 @pytest.fixture
 def valid_scenario_dir(tmp_path: Path) -> Path:
@@ -96,3 +98,30 @@ def test_bundle_validation_rejects_missing_snapshot(
 
     with pytest.raises(ValueError, match="snapshot"):
         validate_scenario_bundle(bundle)
+
+
+def test_paired_502_cases_have_same_symptom_and_different_mechanisms() -> None:
+    process_down = load_public_scenario(SCENARIOS / "APY-003")
+    port_mismatch = load_public_scenario(SCENARIOS / "APY-006")
+    process_oracle = load_scenario_oracle(SCENARIOS / "APY-003")
+    port_oracle = load_scenario_oracle(SCENARIOS / "APY-006")
+
+    assert process_down.symptom_family == port_mismatch.symptom_family
+    assert process_down.alert["alertname"] == port_mismatch.alert["alertname"]
+    assert process_oracle.primary_cause.mechanism == "process_unavailable"
+    assert port_oracle.primary_cause.mechanism == "upstream_port_mismatch"
+
+    validate_scenario_bundle(
+        ScenarioBundle(
+            public=process_down,
+            oracle=process_oracle,
+            root=SCENARIOS / "APY-003",
+        )
+    )
+    validate_scenario_bundle(
+        ScenarioBundle(
+            public=port_mismatch,
+            oracle=port_oracle,
+            root=SCENARIOS / "APY-006",
+        )
+    )

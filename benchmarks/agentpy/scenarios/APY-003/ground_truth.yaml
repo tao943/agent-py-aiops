@@ -1,0 +1,20 @@
+primary_cause:
+  component: checkout-service
+  mechanism: process_unavailable
+  trigger: benchmark_container_stopped
+contributing_causes: []
+causal_chain:
+  - the checkout benchmark container stopped
+  - no process accepted connections on checkout-service port 8080
+  - nginx returned HTTP 502 after the upstream connection was refused
+required_evidence:
+  - id: upstream-process-not-running
+    alternatives:
+      - [container-status-exited]
+  - id: gateway-observed-refused-connection
+    alternatives:
+      - [nginx-upstream-connection-refused]
+required_rule_outs:
+  - upstream_port_mismatch
+forbidden_claims:
+  - dns_resolution_failure

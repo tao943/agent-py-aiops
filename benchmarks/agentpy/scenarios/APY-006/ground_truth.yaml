@@ -1,0 +1,20 @@
+primary_cause:
+  component: nginx-gateway
+  mechanism: upstream_port_mismatch
+  trigger: benchmark_nginx_upstream_port_changed
+contributing_causes: []
+causal_chain:
+  - checkout remained healthy and listened on port 8080
+  - the benchmark Nginx upstream configuration targeted port 8081
+  - nginx returned HTTP 502 after the configured upstream port refused connections
+required_evidence:
+  - id: upstream-running-on-different-port
+    alternatives:
+      - [container-healthy-listening-8080]
+  - id: gateway-targets-wrong-port
+    alternatives:
+      - [nginx-targets-8081]
+required_rule_outs:
+  - upstream_process_down
+forbidden_claims:
+  - dns_resolution_failure
