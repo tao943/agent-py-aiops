@@ -59,7 +59,7 @@ Agent Py 是一个本地优先的 AIOps 工作台。Vue 3 提供操作界面，F
 - **运行状态检查与指标**：`/health` 检查存活，`/ready` 检查 PostgreSQL、Milvus、Qwen 与 MCP，`/config/check` 校验项目配置，`/metrics` 暴露本地请求指标。
 - **结构化可观测性**：请求日志包含 request id、路径、状态和耗时；敏感字段统一脱敏，Agent/MCP 工具调用有独立审计生命周期。
 - **真实演示数据工具**：提供显式脚本上传 Java 电商事故 CLS 日志、发布本地告警和索引 SOP，可完成“告警 -> 诊断 -> 证据 -> 报告 -> 案例知识”的完整演示。
-- **本地优先启动**：Docker Compose 仅托管 etcd、MinIO、Milvus、Attu 和 Alertmanager；前端、后端与 CLS MCP Server 使用 macOS/Linux/Windows 本机启动脚本运行。
+- **本地优先启动**：Docker Compose 托管 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx；前端、后端与 CLS MCP Server 使用 macOS/Linux/Windows 本机启动脚本运行。
 
 ## 前端入口
 
@@ -111,7 +111,7 @@ cp config/user.project.template.json config/user.project.json
 
 ## 本地开发
 
-Docker Compose **只**负责运行 PostgreSQL、etcd、MinIO、Milvus、Attu 和 Alertmanager。CLS MCP Server、后端与前端均直接在本机运行，不会通过 Compose 启动。
+Docker Compose **只**负责运行 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx。CLS MCP Server、后端与前端均直接在本机运行，不会通过 Compose 启动。
 
 ### 一键启动
 
@@ -135,7 +135,7 @@ docker compose -f infra/compose.yaml ps postgres
 scripts\start-local.bat
 ```
 
-启动脚本会启动基础设施容器、准备项目依赖、执行 PostgreSQL Alembic 迁移，并在本机启动 MCP、后端和前端。进程日志写入 `apps/backend/var/`。
+启动脚本会启动基础设施容器和 Nginx 网关、准备项目依赖、执行 PostgreSQL Alembic 迁移，并在本机启动 MCP、后端和前端。进程日志写入 `apps/backend/var/`。
 
 ### 手动启动
 
@@ -159,14 +159,14 @@ uv run alembic upgrade head
 在仓库根目录启动所有容器基础设施：
 
 ```bash
-docker compose -f infra/compose.yaml up -d postgres etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d postgres redis etcd minio milvus attu alertmanager nginx
 ```
 
 PostgreSQL is required for the backend. To start only the remaining optional
 Compose-managed services after PostgreSQL is already running, use:
 
 ```bash
-docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager nginx
 ```
 
 使用 `config/project.json` 中 `clsMcpServer` 的配置启动官方 CLS MCP Server，然后启动后端：
@@ -186,8 +186,9 @@ npm run dev -- --host 127.0.0.1
 本地地址：
 
 - 前端：`http://127.0.0.1:5173`
-- 后端：`http://127.0.0.1:8000`
-- 后端就绪检查：`http://127.0.0.1:8000/ready`
+- API 网关：`http://127.0.0.1:8080`
+- 网关就绪检查：`http://127.0.0.1:8080/ready`
+- 后端直连：`http://127.0.0.1:8000`，仅用于本机调试
 - CLS MCP SSE：`http://127.0.0.1:3000/sse`
 - Alertmanager：`http://127.0.0.1:9093`
 - Milvus：`http://127.0.0.1:19530`
@@ -321,19 +322,53 @@ owner IDs, queries, job IDs, or tool arguments. Demo evidence:
 redis-cli -n 0 --scan --pattern 'agent-py:cache:*'
 redis-cli -n 0 TTL '<cache-key>'
 redis-cli -n 0 HGETALL 'agent-py:limit:diagnostic.create:<owner-hash>'
-curl http://127.0.0.1:8000/metrics
+curl http://127.0.0.1:8080/metrics
 ```
+
+## Nginx API 网关与入口限流
+
+本地前端和 AIOps 演示脚本默认通过 `http://127.0.0.1:8080` 访问 Nginx，
+Nginx 再代理宿主机 `127.0.0.1:8000` 的 FastAPI。网关端口只绑定 loopback；
+FastAPI 的 8000 端口保留为本机调试直连，不应在服务器防火墙中公开。
+
+Nginx 使用客户端 IP 做入口保护：
+
+- 普通 API：20 requests/s，`burst=40`；
+- `/auth/login`、`/auth/register`：10 requests/minute，`burst=5`；
+- Chat 和 AIOps SSE 建连：5 requests/s，`burst=10`；
+- `/nginx-health`、`/health` 和 `/ready` 不限流，`/metrics` 使用普通 API 限流。
+
+网关超限立即返回 HTTP 429。FastAPI 内部 Redis Token Bucket 仍按认证用户限制
+`chat.stream`、`diagnostic.create` 和 MCP 等高成本动作，因此应用 429 仍带统一错误
+envelope、`Retry-After` 和 `X-RateLimit-Remaining`。Nginx 429 出现在请求到达应用前，
+不保证使用 FastAPI JSON envelope。
+
+SSE 路由关闭代理缓冲与缓存并使用 600 秒读取超时。Nginx 请求体上限为 `12m`，
+用于容纳后端允许的 10 MB 文件及 multipart 开销；文件类型和实际大小仍由 FastAPI
+校验。检查网关：
+
+```bash
+docker compose -f infra/compose.yaml ps nginx
+docker compose -f infra/compose.yaml logs nginx
+docker compose -f infra/compose.yaml exec nginx nginx -T
+curl http://127.0.0.1:8080/nginx-health
+curl http://127.0.0.1:8080/health
+```
+
+访问日志的 `limitStatus=REJECTED` 表示 Nginx 限流；上游返回的 429 表示 FastAPI
+应用限流。502 通常表示 FastAPI 未启动或不可连接，504 表示上游响应超时。
 
 ## GitHub Actions CI
 
 `.github/workflows/ci.yml` 在面向 `main` 的 Pull Request、推送到 `main` 和手动
-`workflow_dispatch` 时运行。`changes` Job 先判断 backend、frontend、docs/spec 哪些
+`workflow_dispatch` 时运行。`changes` Job 先判断 backend、frontend、docs/spec、gateway 哪些
 区域受到影响，再并行执行相关检查：
 
 - `backend-quality`：Ruff 和 strict Pyright；
 - `backend-tests`：PostgreSQL 16、Redis 7 和完整离线 pytest；
 - `frontend`：共享契约 typecheck/test、Vitest 和 Vite build；
 - `docs-spec`：固定版本 OpenSpec 校验和 VitePress build；
+- `gateway`：Docker Compose 结构验证和官方 Nginx `nginx -t`；
 - `CI Gate`：汇总实际执行或按路径跳过的 Job。
 
 工作流不读取 DashScope、CLS 或部署 secret，也不运行 `live_llm`。真实 Chat、

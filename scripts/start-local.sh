@@ -66,7 +66,7 @@ for name, value in {
 PY
 )"
 
-docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager nginx
 
 (
   cd "$BACKEND_DIR"
@@ -99,7 +99,8 @@ if ! port_is_open 5173; then
   )
 fi
 
-printf '前端：     http://127.0.0.1:5173\n'
-printf '后端：     http://127.0.0.1:8000\n'
-printf 'MCP SSE：  http://127.0.0.1:%s/sse\n' "$PORT"
-printf '本地日志： %s\n' "$RUNTIME_DIR"
+printf '前端：       http://127.0.0.1:5173\n'
+printf 'API 网关：   http://127.0.0.1:8080\n'
+printf '后端直连：   http://127.0.0.1:8000（仅本机调试）\n'
+printf 'MCP SSE：    http://127.0.0.1:%s/sse\n' "$PORT"
+printf '本地日志：   %s\n' "$RUNTIME_DIR"

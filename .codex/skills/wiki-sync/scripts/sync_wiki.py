@@ -136,10 +136,16 @@ def main() -> int:
 
 def validate_layout() -> None:
     link = DOCS_ROOT / "openspec"
-    if not link.is_symlink() or link.resolve() != (REPO_ROOT / "openspec").resolve():
-        raise WikiSyncError("docs/openspec must be a symlink to ../openspec")
+    if not openspec_link_is_valid(link, REPO_ROOT / "openspec"):
+        raise WikiSyncError("docs/openspec must be a symlink or directory junction to ../openspec")
     if not OPENSPEC_CHANGES.is_dir():
         raise WikiSyncError("openspec/changes does not exist")
+
+
+def openspec_link_is_valid(link: Path, target: Path) -> bool:
+    if link.is_symlink() or link.is_dir():
+        return link.resolve() == target.resolve()
+    return False
 
 
 def validate_selected_change(mode: str, name: str | None) -> str | None:

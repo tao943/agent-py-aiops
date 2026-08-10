@@ -1,8 +1,5 @@
-# local-development-operations-guide Specification
+## MODIFIED Requirements
 
-## Purpose
-定义本地优先开发环境的中文操作边界，统一说明 Compose 基础设施与 Nginx 网关、宿主机应用进程、跨平台启动器、安全配置模板以及演示数据工具的启动和排障方式。
-## Requirements
 ### Requirement: Local-first developer startup guide
 
 仓库 SHALL 提供中文的根级本地优先开发者指南，从 Compose 管理的 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx 开始，并在宿主机直接运行后端、Vue 前端和官方本地 CLS MCP Server。该指南 MUST 用中文标识本地 URL 和状态，表明应用服务未通过 Compose 启动。
@@ -16,17 +13,6 @@
 
 - **WHEN** 开发者调用记录在案的 Compose 命令
 - **THEN** 它 MUST 启动 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx，且 MUST NOT 启动 backend、frontend 或 CLS MCP Server 容器
-
-### Requirement: Local configuration and operations reference
-仓库 SHALL 提供中文操作指南，将 `config/project.json` 和 `config/user.project.json` 定义为被 Git 忽略的本地运行配置，并将 `config/project.template.json` 和 `config/user.project.template.json` 定义为可安全跟踪的无凭据模板。指南 SHALL 为真实 CLS 日志上传和 Alertmanager/AIOps 固定装置提供单独、明确的中文教程。
-
-#### Scenario: Recipient initializes local configuration
-- **WHEN** 项目接收方从新克隆开始配置项目
-- **THEN** 指南 MUST 提供从两个模板复制本地配置的命令，MUST 指明填写模型与 CLS 配置的位置，并且 MUST 警告不得提交真实凭据
-
-#### Scenario: Developer uses log and monitoring fixtures
-- **WHEN** 开发者希望上传真实的 CLS 日志或创建本地 active-alert 演示
-- **THEN** 中文操作指南 MUST 链接到一个专用教程，该教程将显式脚本和 Alertmanager 命令与普通应用程序启动分开列出
 
 ### Requirement: Cross-platform local launchers
 
@@ -46,6 +32,8 @@
 
 - **WHEN** 启动程序完成进程启动
 - **THEN** 它 MUST 报告前端、API 网关、后端直连、MCP 和本地日志地址，并 MUST NOT 打印凭据
+
+## ADDED Requirements
 
 ### Requirement: Gateway-aware local configuration
 

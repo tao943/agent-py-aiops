@@ -11,7 +11,7 @@ where cls-mcp-server >nul 2>nul || (echo 缺少必需命令：cls-mcp-server & e
 
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "function Merge-Config($base,$override){ foreach($p in $override.PSObject.Properties){ if($null -ne $base.($p.Name) -and $base.($p.Name) -is [pscustomobject] -and $p.Value -is [pscustomobject]){ Merge-Config $base.($p.Name) $p.Value } else { $base ^| Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } }; $base }; $config = Get-Content -Raw 'config/project.json' ^| ConvertFrom-Json; if(Test-Path 'config/user.project.json'){ $user = Get-Content -Raw 'config/user.project.json' ^| ConvertFrom-Json; $config = Merge-Config $config $user }; Write-Output ('TRANSPORT=' + $config.clsMcpServer.transport); Write-Output ('PORT=' + $config.clsMcpServer.port); Write-Output ('TENCENTCLOUD_SECRET_ID=' + $config.clsMcpServer.secretId); Write-Output ('TENCENTCLOUD_SECRET_KEY=' + $config.clsMcpServer.secretKey); Write-Output ('TZ=' + $config.clsMcpServer.timezone)"`) do set "%%A"
 
-docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager
+docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager nginx
 
 pushd apps\backend
 if not exist var mkdir var
@@ -29,7 +29,8 @@ if errorlevel 1 exit /b 1
 start "Agent Py Frontend" /D "%CD%" cmd /c "npm run dev -- --host 127.0.0.1 > ..\backend\var\frontend-local.log 2>&1"
 popd
 
-echo 前端：     http://127.0.0.1:5173
-echo 后端：     http://127.0.0.1:8000
-echo MCP SSE：  http://127.0.0.1:%PORT%/sse
-echo 本地日志： apps\backend\var
+echo 前端：       http://127.0.0.1:5173
+echo API 网关：   http://127.0.0.1:8080
+echo 后端直连：   http://127.0.0.1:8000（仅本机调试）
+echo MCP SSE：    http://127.0.0.1:%PORT%/sse
+echo 本地日志：   apps\backend\var

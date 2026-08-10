@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DETECT_CHANGES = REPO_ROOT / "scripts" / "ci" / "detect_changes.py"
 PREPARE_CONFIG = REPO_ROOT / "scripts" / "ci" / "prepare_test_config.py"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WIKI_SYNC = REPO_ROOT / ".codex" / "skills" / "wiki-sync" / "scripts" / "sync_wiki.py"
 
 
 def _run_change_detection(tmp_path: Path, paths: list[str]) -> dict[str, str]:
@@ -43,21 +46,35 @@ def test_ci_change_detection_classifies_known_areas(tmp_path: Path) -> None:
         "backend": "true",
         "frontend": "false",
         "docs_spec": "false",
+        "gateway": "false",
     }
     assert _run_change_detection(tmp_path, ["apps/frontend/src/App.vue"]) == {
         "backend": "false",
         "frontend": "true",
         "docs_spec": "false",
+        "gateway": "false",
     }
     assert _run_change_detection(tmp_path, ["docs/index.md"]) == {
         "backend": "false",
         "frontend": "false",
         "docs_spec": "true",
+        "gateway": "false",
+    }
+    assert _run_change_detection(tmp_path, ["infra/nginx/default.conf"]) == {
+        "backend": "true",
+        "frontend": "false",
+        "docs_spec": "false",
+        "gateway": "true",
     }
 
 
 def test_ci_change_detection_expands_shared_and_unknown_changes(tmp_path: Path) -> None:
-    all_areas = {"backend": "true", "frontend": "true", "docs_spec": "true"}
+    all_areas = {
+        "backend": "true",
+        "frontend": "true",
+        "docs_spec": "true",
+        "gateway": "true",
+    }
     assert _run_change_detection(tmp_path, [".github/workflows/ci.yml"]) == all_areas
     assert _run_change_detection(tmp_path, ["unclassified-root-file.txt"]) == all_areas
 
@@ -66,7 +83,12 @@ def test_ci_change_detection_combines_multiple_areas(tmp_path: Path) -> None:
     assert _run_change_detection(
         tmp_path,
         ["apps/backend/pyproject.toml", "packages/api-contracts/src/index.ts"],
-    ) == {"backend": "true", "frontend": "true", "docs_spec": "false"}
+    ) == {
+        "backend": "true",
+        "frontend": "true",
+        "docs_spec": "false",
+        "gateway": "false",
+    }
 
 
 def test_ci_manual_dispatch_runs_every_area(tmp_path: Path) -> None:
@@ -87,7 +109,22 @@ def test_ci_manual_dispatch_runs_every_area(tmp_path: Path) -> None:
         "backend=true",
         "frontend=true",
         "docs_spec=true",
+        "gateway=true",
     ]
+
+
+def test_wiki_sync_accepts_resolved_directory_link_not_placeholder(tmp_path: Path) -> None:
+    target = tmp_path / "openspec"
+    target.mkdir()
+    placeholder = tmp_path / "materialized-link"
+    placeholder.write_text("../openspec\n", encoding="utf-8")
+    namespace = runpy.run_path(str(WIKI_SYNC))
+    openspec_link_is_valid = cast(
+        Callable[[Path, Path], bool], namespace["openspec_link_is_valid"]
+    )
+
+    assert openspec_link_is_valid(target, target) is True
+    assert openspec_link_is_valid(placeholder, target) is False
 
 
 def test_ci_config_generation_is_offline_and_refuses_overwrite(tmp_path: Path) -> None:
@@ -139,6 +176,7 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
         "backend-tests",
         "frontend",
         "docs-spec",
+        "gateway",
         "ci-gate",
     }
 
@@ -158,6 +196,8 @@ def test_ci_workflow_has_required_jobs_services_and_safety_guards() -> None:
         "npm run frontend:build",
         "@fission-ai/openspec@1.6.0 validate --all",
         "npm run docs:build",
+        "docker compose -f infra/compose.yaml config",
+        "docker compose -f infra/compose.yaml run --rm --no-deps nginx nginx -t",
         "name: CI Gate",
         "if: always()",
     ]
@@ -190,9 +230,17 @@ def test_ci_jobs_bootstrap_ignored_runtime_inputs() -> None:
                 runs.append(run)
         return runs
 
-    assert any(
-        "mkdir -p apps/backend/var" in run for run in job_runs("backend-tests")
+    backend_runs = job_runs("backend-tests")
+    assert "mkdir -p apps/backend/var" in backend_runs
+    assert backend_runs.index("mkdir -p apps/backend/var") < backend_runs.index(
+        "uv run pytest"
     )
-    assert any(
-        "scripts/ci/prepare_test_config.py" in run for run in job_runs("frontend")
+
+    frontend_runs = job_runs("frontend")
+    prepare_runs = [run for run in frontend_runs if "prepare_test_config.py" in run]
+    assert prepare_runs == [
+        "python3 scripts/ci/prepare_test_config.py --repo-root . --output-dir config"
+    ]
+    assert frontend_runs.index(prepare_runs[0]) < frontend_runs.index(
+        "npm run frontend:test"
     )
