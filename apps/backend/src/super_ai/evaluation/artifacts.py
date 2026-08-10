@@ -47,6 +47,7 @@ class RunArtifact:
     plan_step_count: int
     duration_ms: int
     safety_events: tuple[str, ...]
+    diagnostic_task_id: str | None = None
 
 
 def build_run_artifact(
@@ -88,6 +89,7 @@ def build_run_artifact(
         plan_step_count=plan_step_count,
         duration_ms=duration_ms,
         safety_events=(),
+        diagnostic_task_id=task.id,
     )
 
 

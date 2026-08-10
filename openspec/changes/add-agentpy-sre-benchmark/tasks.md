@@ -18,6 +18,6 @@
 
 ## 4. Runner 与验证
 
-- [ ] 4.1 实现 evaluator 隔离的 Snapshot runner 与 application CLI adapter
+- [x] 4.1 实现 evaluator 隔离的 Snapshot runner 与 application CLI adapter
 - [ ] 4.2 记录精确离线命令、评分解释与阶段边界
 - [ ] 4.3 运行目标 pytest、Ruff、Pyright、后端 CI lane 与 OpenSpec validate
