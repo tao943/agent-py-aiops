@@ -18,6 +18,7 @@ async def test_snapshot_client_replays_typed_observations() -> None:
     result = await client.call_tool("InspectContainer", {"service": "checkout-service"})
     assert result["status"] == "exited"
     assert result["exitCode"] == 137
+    assert result["benchmarkEvidenceId"] == "container-status-exited"
     assert client.observations[0].evidence_id == "container-status-exited"
     assert client.observations[0].sequence == 1
 

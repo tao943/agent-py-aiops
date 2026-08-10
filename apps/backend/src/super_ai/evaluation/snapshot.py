@@ -102,6 +102,7 @@ class SnapshotMcpClient:
         if call is None:
             raise McpClientError(f"Snapshot arguments are not registered for tool {name}.")
         result = copy.deepcopy(call.result)
+        result["benchmarkEvidenceId"] = call.evidence_id
         self._observations.append(
             SnapshotToolObservation(
                 sequence=len(self._observations) + 1,

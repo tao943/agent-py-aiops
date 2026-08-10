@@ -1,5 +1,11 @@
 """Public contracts for AgentPy's evaluator-owned SRE benchmark."""
 
+from super_ai.evaluation.artifacts import (
+    ArtifactEvidence,
+    ArtifactToolCall,
+    RunArtifact,
+    build_run_artifact,
+)
 from super_ai.evaluation.domain import (
     EvidenceMilestone,
     PublicHypothesis,
@@ -13,10 +19,14 @@ from super_ai.evaluation.scenarios import (
     load_scenario_oracle,
     validate_scenario_bundle,
 )
+from super_ai.evaluation.scoring import EvaluationResult, ScoreReason, score_run
 from super_ai.evaluation.snapshot import SnapshotMcpClient, SnapshotToolObservation
 
 __all__ = [
     "EvidenceMilestone",
+    "ArtifactEvidence",
+    "ArtifactToolCall",
+    "RunArtifact",
     "PublicHypothesis",
     "PublicScenario",
     "RootCause",
@@ -24,7 +34,11 @@ __all__ = [
     "ScenarioOracle",
     "SnapshotMcpClient",
     "SnapshotToolObservation",
+    "EvaluationResult",
+    "ScoreReason",
+    "build_run_artifact",
     "load_public_scenario",
     "load_scenario_oracle",
     "validate_scenario_bundle",
+    "score_run",
 ]
