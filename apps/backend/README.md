@@ -25,6 +25,14 @@ uv run pytest -m live_llm tests/test_live_llm.py -q
 真实模型测试会读取被 Git 忽略的 `config/project.json` 和
 `config/user.project.json`，并消耗对应模型额度。
 
+## AgentPy DomainBench
+
+首个评测切片包含 `APY-003` 与 `APY-006` 两个同为 Nginx 502、但根因不同的
+Snapshot 场景。默认测试验证冻结工具、答案隔离、结构化证据链和确定性评分，不调用
+真实模型；`application` CLI adapter 会复用现有 AIOps workflow 并消耗本地配置的
+模型额度。运行方式、评分规则、PostgreSQL 审计查询和当前阶段边界见
+[`docs/aiops/agentpy-domainbench.md`](../../docs/aiops/agentpy-domainbench.md)。
+
 在应用迁移后运行本地 API：
 
 ```bash

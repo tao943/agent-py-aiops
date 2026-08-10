@@ -124,3 +124,23 @@ def test_platform_installation_guides_and_log_alert_tutorial_exist() -> None:
         "SearchLog",
     ):
         assert expected in tutorial
+
+
+def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
+    guide = (REPO_ROOT / "docs" / "aiops" / "agentpy-domainbench.md").read_text(
+        encoding="utf-8"
+    )
+
+    required = [
+        "APY-003",
+        "APY-006",
+        "uv run python scripts/run_snapshot_benchmark.py",
+        "ground_truth.yaml",
+        "deterministic_score",
+        "Snapshot 不启动故障容器",
+        "L1/L2 恢复",
+        "可选 Judge",
+        "剩余八个 Snapshot",
+    ]
+    for expected in required:
+        assert expected in guide

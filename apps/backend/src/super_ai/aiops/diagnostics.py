@@ -1033,9 +1033,10 @@ def _update_hypothesis_states(
     updated: list[JsonDict] = []
     for item in current:
         hypothesis_id = str(item.get("id") or "")
+        raw_evidence_ids = item.get("evidenceIds")
         existing_evidence_ids = _unique_strings(
-            [str(value) for value in item.get("evidenceIds", [])]
-            if isinstance(item.get("evidenceIds"), list)
+            [str(value) for value in raw_evidence_ids]
+            if isinstance(raw_evidence_ids, list)
             else []
         )
         status = str(item.get("status") or "open")
