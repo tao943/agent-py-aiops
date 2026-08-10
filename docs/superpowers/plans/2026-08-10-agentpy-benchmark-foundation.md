@@ -102,11 +102,8 @@ import pytest
 from super_ai.evaluation import load_public_scenario, load_scenario_oracle
 
 
-FIXTURE = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios" / "APY-003"
-
-
-def test_public_scenario_excludes_ground_truth() -> None:
-    scenario = load_public_scenario(FIXTURE)
+def test_public_scenario_excludes_ground_truth(valid_scenario_dir: Path) -> None:
+    scenario = load_public_scenario(valid_scenario_dir)
     serialized = repr(scenario)
     assert scenario.id == "APY-003"
     assert scenario.symptom_family == "nginx_upstream_5xx"
@@ -114,8 +111,10 @@ def test_public_scenario_excludes_ground_truth() -> None:
     assert "benchmark_container_stopped" not in serialized
 
 
-def test_oracle_requires_primary_component_mechanism_and_trigger() -> None:
-    oracle = load_scenario_oracle(FIXTURE)
+def test_oracle_requires_primary_component_mechanism_and_trigger(
+    valid_scenario_dir: Path,
+) -> None:
+    oracle = load_scenario_oracle(valid_scenario_dir)
     assert oracle.primary_cause.component == "checkout-service"
     assert oracle.primary_cause.mechanism == "process_unavailable"
     assert oracle.primary_cause.trigger == "benchmark_container_stopped"
@@ -131,6 +130,11 @@ def test_loader_rejects_public_file_with_answer_keys(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="ground-truth keys"):
         load_public_scenario(scenario_dir)
 ```
+
+Define `valid_scenario_dir` in this test module with `tmp_path`; it writes the
+smallest valid `scenario.yaml` and `ground_truth.yaml`. The repository-owned
+APY-003/APY-006 directories are intentionally introduced only in Task 2 so Task
+1 can pass independently.
 
 - [ ] **Step 2: Run the tests and verify import failure**
 
