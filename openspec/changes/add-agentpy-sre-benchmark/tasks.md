@@ -6,9 +6,9 @@
 
 ## 2. 诊断决策链
 
-- [ ] 2.1 以失败测试定义假设状态、观测判断和根因决策校验
-- [ ] 2.2 将 LangGraph 扩展为 Planner、Executor、Evidence Evaluator、Replanner、Decision、Report
-- [ ] 2.3 验证每个决策证据 ID 都能解析到已持久化证据
+- [x] 2.1 以失败测试定义假设状态、观测判断和根因决策校验
+- [x] 2.2 将 LangGraph 扩展为 Planner、Executor、Evidence Evaluator、Replanner、Decision、Report
+- [x] 2.3 验证每个决策证据 ID 都能解析到已持久化证据
 
 ## 3. 评分与持久化
 

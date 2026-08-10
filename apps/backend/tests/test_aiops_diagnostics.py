@@ -315,14 +315,24 @@ async def test_diagnostic_runs_sop_first_persists_evidence_and_audits(
     assert report_evidence[0]["tool"] == "SearchLog"
     assert "cpu_pressure" in str(report_evidence[0]["summary"])
     assert "must-not-enter-report-context" not in str(report_evidence[0]["summary"])
+    assert reports[0].payload["rootCauseDecision"] is None
     assert [checkpoint.checkpoint_ns for checkpoint in checkpoints] == [
         "planner",
         "executor",
+        "evidence_evaluation",
         "replanner",
+        "decision",
         "report",
     ]
     assert [audit.tool_name for audit in audits] == ["knowledge_retrieval", "SearchLog"]
-    assert [step.phase for step in steps] == ["planner", "executor", "replanner", "report"]
+    assert [step.phase for step in steps] == [
+        "planner",
+        "executor",
+        "evidence_evaluation",
+        "replanner",
+        "decision",
+        "report",
+    ]
     assert {item.kind for item in evidence} == {"alert", "knowledge_reference", "log"}
     assert all(link.report_id == reports[0].id for link in report_links)
     assert {link.evidence_id for link in report_links} == {item.id for item in evidence}
