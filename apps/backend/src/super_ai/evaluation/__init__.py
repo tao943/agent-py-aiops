@@ -13,6 +13,7 @@ from super_ai.evaluation.scenarios import (
     load_scenario_oracle,
     validate_scenario_bundle,
 )
+from super_ai.evaluation.snapshot import SnapshotMcpClient, SnapshotToolObservation
 
 __all__ = [
     "EvidenceMilestone",
@@ -21,6 +22,8 @@ __all__ = [
     "RootCause",
     "ScenarioBundle",
     "ScenarioOracle",
+    "SnapshotMcpClient",
+    "SnapshotToolObservation",
     "load_public_scenario",
     "load_scenario_oracle",
     "validate_scenario_bundle",
