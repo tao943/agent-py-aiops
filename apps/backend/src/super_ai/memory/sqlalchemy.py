@@ -24,6 +24,8 @@ from super_ai.memory.models import (
     DiagnosticStepModel,
     DiagnosticTaskModel,
     DocumentIndexTaskModel,
+    EvaluationResultModel,
+    EvaluationRunModel,
     GraphCheckpointModel,
     KnowledgeDocumentModel,
     ReportEvidenceLinkModel,
@@ -43,6 +45,8 @@ from super_ai.memory.repositories import (
     DiagnosticStepRecord,
     DiagnosticTaskRecord,
     DocumentIndexTaskRecord,
+    EvaluationResultRecord,
+    EvaluationRunRecord,
     GraphCheckpointRecord,
     JsonDict,
     KnowledgeDocumentRecord,
@@ -1582,6 +1586,140 @@ class SQLAlchemyDiagnosticMemoryRepository:
         return [_graph_checkpoint_record(row) for row in rows]
 
 
+class SQLAlchemyEvaluationRepository:
+    """PostgreSQL implementation for deterministic benchmark records."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def create_run(
+        self,
+        *,
+        run_id: str,
+        scenario_id: str,
+        mode: str,
+        suite_version: str,
+        agent_version: JsonDict,
+        model_configuration: JsonDict,
+        created_at: datetime | None = None,
+    ) -> EvaluationRunRecord:
+        async with self._session_factory() as session:
+            existing = await session.get(EvaluationRunModel, run_id)
+            if existing is not None:
+                identity = (
+                    existing.scenario_id,
+                    existing.mode,
+                    existing.suite_version,
+                    existing.agent_version,
+                    existing.model_configuration,
+                )
+                requested = (
+                    scenario_id,
+                    mode,
+                    suite_version,
+                    agent_version,
+                    model_configuration,
+                )
+                if identity != requested:
+                    raise ValueError(f"Run {run_id} has a different evaluation identity.")
+                return _evaluation_run_record(existing)
+
+            row = EvaluationRunModel(
+                run_id=run_id,
+                scenario_id=scenario_id,
+                mode=mode,
+                suite_version=suite_version,
+                agent_version=agent_version,
+                model_configuration=model_configuration,
+                status="pending",
+                created_at=created_at or utc_now(),
+            )
+            session.add(row)
+            await session.commit()
+        return _evaluation_run_record(row)
+
+    async def complete_run(
+        self,
+        *,
+        run_id: str,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord:
+        timestamp = completed_at or utc_now()
+        async with self._session_factory() as session:
+            row = await session.get(EvaluationRunModel, run_id)
+            if row is None:
+                raise ValueError(f"Evaluation run does not exist: {run_id}")
+            if row.status != "completed":
+                row.status = "completed"
+                row.started_at = row.started_at or row.created_at
+                row.completed_at = timestamp
+                row.diagnostic_task_id = diagnostic_task_id
+                await session.commit()
+        return _evaluation_run_record(row)
+
+    async def save_result(
+        self,
+        *,
+        result_id: str,
+        run_id: str,
+        dimension_scores: JsonDict,
+        total: int,
+        raw_total: int,
+        validity: str,
+        passed: bool,
+        failures: list[str],
+        score_reasons: list[JsonDict],
+        hard_gate: str | None,
+        created_at: datetime | None = None,
+    ) -> EvaluationResultRecord:
+        async with self._session_factory() as session:
+            run = await session.get(EvaluationRunModel, run_id)
+            if run is None or run.status != "completed":
+                raise ValueError(f"Evaluation run {run_id} must be completed before scoring.")
+            existing = (
+                await session.scalars(
+                    select(EvaluationResultModel).where(EvaluationResultModel.run_id == run_id)
+                )
+            ).one_or_none()
+            if existing is not None:
+                if existing.result_id != result_id:
+                    raise ValueError(f"Evaluation run {run_id} already has a scorecard.")
+                return _evaluation_result_record(existing)
+            row = EvaluationResultModel(
+                result_id=result_id,
+                run_id=run_id,
+                dimension_scores=dimension_scores,
+                total=total,
+                raw_total=raw_total,
+                validity=validity,
+                passed=passed,
+                failures=failures,
+                score_reasons=score_reasons,
+                hard_gate=hard_gate,
+                created_at=created_at or utc_now(),
+            )
+            session.add(row)
+            await session.commit()
+        return _evaluation_result_record(row)
+
+    async def get_run_with_result(
+        self, run_id: str
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None] | None:
+        async with self._session_factory() as session:
+            run = await session.get(EvaluationRunModel, run_id)
+            if run is None:
+                return None
+            result = (
+                await session.scalars(
+                    select(EvaluationResultModel).where(EvaluationResultModel.run_id == run_id)
+                )
+            ).one_or_none()
+        return _evaluation_run_record(run), (
+            _evaluation_result_record(result) if result is not None else None
+        )
+
+
 def create_sqlalchemy_memory_repositories(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> MemoryRepositories:
@@ -1606,6 +1744,7 @@ def create_sqlalchemy_memory_repositories(
         outbox_events=SQLAlchemyOutboxEventRepository(session_factory),
         feedback=SQLAlchemyUserFeedbackRepository(session_factory),
         mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
+        evaluations=SQLAlchemyEvaluationRepository(session_factory),
     )
 
 
@@ -2023,6 +2162,38 @@ def _graph_checkpoint_record(row: GraphCheckpointModel) -> GraphCheckpointRecord
         checkpoint_id=row.checkpoint_id,
         checkpoint_payload=_json_dict(row.checkpoint_payload),
         metadata=_json_dict(row.metadata_json),
+        created_at=_ensure_utc(row.created_at),
+    )
+
+
+def _evaluation_run_record(row: EvaluationRunModel) -> EvaluationRunRecord:
+    return EvaluationRunRecord(
+        run_id=row.run_id,
+        scenario_id=row.scenario_id,
+        mode=row.mode,
+        suite_version=row.suite_version,
+        agent_version=_json_dict(row.agent_version),
+        model_configuration=_json_dict(row.model_configuration),
+        status=row.status,
+        diagnostic_task_id=row.diagnostic_task_id,
+        created_at=_ensure_utc(row.created_at),
+        started_at=_ensure_utc_optional(row.started_at),
+        completed_at=_ensure_utc_optional(row.completed_at),
+    )
+
+
+def _evaluation_result_record(row: EvaluationResultModel) -> EvaluationResultRecord:
+    return EvaluationResultRecord(
+        result_id=row.result_id,
+        run_id=row.run_id,
+        dimension_scores=_json_dict(row.dimension_scores),
+        total=row.total,
+        raw_total=row.raw_total,
+        validity=row.validity,
+        passed=row.passed,
+        failures=list(row.failures),
+        score_reasons=[_json_dict(item) for item in row.score_reasons],
+        hard_gate=row.hard_gate,
         created_at=_ensure_utc(row.created_at),
     )
 

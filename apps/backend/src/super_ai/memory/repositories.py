@@ -237,6 +237,36 @@ class GraphCheckpointRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class EvaluationRunRecord:
+    run_id: str
+    scenario_id: str
+    mode: str
+    suite_version: str
+    agent_version: JsonDict
+    model_configuration: JsonDict
+    status: str
+    diagnostic_task_id: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationResultRecord:
+    result_id: str
+    run_id: str
+    dimension_scores: JsonDict
+    total: int
+    raw_total: int
+    validity: str
+    passed: bool
+    failures: list[str]
+    score_reasons: list[JsonDict]
+    hard_gate: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class BackgroundJobRecord:
     id: str
     owner_user_id: str
@@ -1219,6 +1249,50 @@ class McpConnectionRepository(Protocol):
     async def delete(self, *, owner_user_id: str, connection_id: str) -> bool: ...
 
 
+class EvaluationMemoryRepository(Protocol):
+    """PostgreSQL contract for benchmark run and scorecard persistence."""
+
+    async def create_run(
+        self,
+        *,
+        run_id: str,
+        scenario_id: str,
+        mode: str,
+        suite_version: str,
+        agent_version: JsonDict,
+        model_configuration: JsonDict,
+        created_at: datetime | None = None,
+    ) -> EvaluationRunRecord: ...
+
+    async def complete_run(
+        self,
+        *,
+        run_id: str,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord: ...
+
+    async def save_result(
+        self,
+        *,
+        result_id: str,
+        run_id: str,
+        dimension_scores: JsonDict,
+        total: int,
+        raw_total: int,
+        validity: str,
+        passed: bool,
+        failures: list[str],
+        score_reasons: list[JsonDict],
+        hard_gate: str | None,
+        created_at: datetime | None = None,
+    ) -> EvaluationResultRecord: ...
+
+    async def get_run_with_result(
+        self, run_id: str
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None] | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRepositories:
     """Repository bundle for dependency injection."""
@@ -1235,3 +1309,4 @@ class MemoryRepositories:
     outbox_events: OutboxEventRepository | None = None
     feedback: UserFeedbackRepository | None = None
     mcp_connections: McpConnectionRepository | None = None
+    evaluations: EvaluationMemoryRepository | None = None
