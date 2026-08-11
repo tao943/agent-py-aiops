@@ -441,7 +441,7 @@ git commit -m "test: harden benchmark failure and isolation contracts"
 - Consumes: all production failure-path work from Tasks 1–4.
 - Produces: fresh CI-equivalent verification evidence and an updated remote Draft PR.
 
-- [ ] **Step 1: Run the complete offline backend lane once**
+- [x] **Step 1: Run the complete offline backend lane once**
 
 Run from `apps/backend`:
 
@@ -454,7 +454,7 @@ uv run pytest
 
 Expected: exit 0; `live_llm` remains deselected by default.
 
-- [ ] **Step 2: Validate OpenSpec strictly**
+- [x] **Step 2: Validate OpenSpec strictly**
 
 Run from repository root:
 
@@ -464,19 +464,19 @@ Run from repository root:
 
 Expected: `Change 'add-agentpy-sre-benchmark' is valid`.
 
-- [ ] **Step 3: Mark the new OpenSpec checklist complete and revalidate**
+- [x] **Step 3: Mark the new OpenSpec checklist complete and revalidate**
 
 Change only the production-failure checklist entries proven by Steps 1–2 to `[x]`, then rerun strict
 validation.
 
-- [ ] **Step 4: Commit final task state**
+- [x] **Step 4: Commit final task state**
 
 ```powershell
 git add openspec/changes/add-agentpy-sre-benchmark/tasks.md
 git commit -m "docs: complete benchmark failure hardening tasks"
 ```
 
-- [ ] **Step 5: Push the existing branch and verify Draft PR checks start**
+- [x] **Step 5: Push the existing branch and verify Draft PR checks start**
 
 ```powershell
 git push origin feat/nginx-rate-limit-gateway
