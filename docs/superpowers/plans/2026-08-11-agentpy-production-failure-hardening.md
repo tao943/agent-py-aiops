@@ -275,7 +275,7 @@ git commit -m "feat: make benchmark persistence concurrency safe"
 - Consumes: `EvaluationPersistence.fail_run` and `finalize_run` from Tasks 1–2.
 - Changes: `SnapshotBenchmarkRunner.run` uses atomic finalize instead of `complete_run` + `save_result`.
 
-- [ ] **Step 1: Extend the fake persistence and write failing adapter/artifact tests**
+- [x] **Step 1: Extend the fake persistence and write failing adapter/artifact tests**
 
 Make `RecordingPersistence` record `failed` and `finalized` calls. Add:
 
@@ -290,21 +290,21 @@ assert not persistence.finalized
 
 Repeat for wrong scenario/mode as `artifact_invalid`.
 
-- [ ] **Step 2: Write failing evaluator/finalize tests**
+- [x] **Step 2: Write failing evaluator/finalize tests**
 
 Inject evaluator and persistence failure boundaries into the Runner constructor using small
 callable protocols/defaults. Assert evaluator failure records `infra_failed/evaluation_error` and
 finalize failure attempts `infra_failed/persistence_error`. The raised error message must not
 contain an injected sentinel secret.
 
-- [ ] **Step 3: Run tests and verify RED**
+- [x] **Step 3: Run tests and verify RED**
 
 Run: `uv run pytest tests/test_snapshot_benchmark_runner.py -q`
 
 Expected: FAIL because Runner still leaks raw exceptions, leaves pending runs, and calls two-step
 completion.
 
-- [ ] **Step 4: Implement stage-specific safe failure handling**
+- [x] **Step 4: Implement stage-specific safe failure handling**
 
 Define fixed `BenchmarkRunError`, evaluator injection defaults to `load_scenario_oracle` plus
 `score_run`, and a `_record_failure` helper. Suppress external exception text while retaining
@@ -313,7 +313,7 @@ exception chaining for local debugging. Classify only by the current stage, not 
 Call `finalize_run` on success. If failure persistence itself fails, raise a fixed
 `BenchmarkRunError("infra_failed", "persistence_error")`; never report that the failure was stored.
 
-- [ ] **Step 5: Verify GREEN and related regressions**
+- [x] **Step 5: Verify GREEN and related regressions**
 
 Run:
 
@@ -325,7 +325,7 @@ uv run pyright src/super_ai/evaluation/runner.py tests/test_snapshot_benchmark_r
 
 Expected: PASS and zero static errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add apps/backend/src/super_ai/evaluation/runner.py apps/backend/tests/test_snapshot_benchmark_runner.py

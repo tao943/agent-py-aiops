@@ -15,7 +15,7 @@ from super_ai.evaluation.scoring import EvaluationResult, score_run
 from super_ai.evaluation.snapshot import SnapshotMcpClient
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
-from super_ai.memory.repositories import JsonDict, MemoryRepositories
+from super_ai.memory.repositories import EvaluationFailureStatus, JsonDict, MemoryRepositories
 from super_ai.retrieval import KnowledgeRetrievalToolRunner
 
 
@@ -30,6 +30,15 @@ class AgentVersion:
         return {"git_sha": self.git_sha, "workflow_version": self.workflow_version}
 
 
+class BenchmarkRunError(RuntimeError):
+    """Safe public failure for a benchmark production boundary."""
+
+    def __init__(self, status: EvaluationFailureStatus, category: str) -> None:
+        super().__init__("Benchmark run failed at a classified production boundary.")
+        self.status = status
+        self.category = category
+
+
 class DiagnosticRunAdapter(Protocol):
     """Boundary that prevents diagnostic runtimes from receiving an oracle."""
 
@@ -40,6 +49,12 @@ class DiagnosticRunAdapter(Protocol):
         scenario: PublicScenario,
         mcp_client: RuntimeMcpClient,
     ) -> RunArtifact: ...
+
+
+class BenchmarkEvaluator(Protocol):
+    """Evaluator-only boundary that may load the private scenario oracle."""
+
+    def __call__(self, artifact: RunArtifact, scenario_dir: Path) -> EvaluationResult: ...
 
 
 class EvaluationPersistence(Protocol):
@@ -54,19 +69,21 @@ class EvaluationPersistence(Protocol):
         model_configuration: JsonDict,
     ) -> object: ...
 
-    async def complete_run(
+    async def fail_run(
         self,
         *,
         run_id: str,
-        diagnostic_task_id: str | None,
+        status: EvaluationFailureStatus,
+        failure_category: str,
     ) -> object: ...
 
-    async def save_result(
+    async def finalize_run(
         self,
         *,
-        result_id: str,
         run_id: str,
+        result_id: str,
         result: EvaluationResult,
+        diagnostic_task_id: str | None,
     ) -> object: ...
 
 
@@ -160,12 +177,14 @@ class SnapshotBenchmarkRunner:
         persistence: EvaluationPersistence,
         suite_version: str,
         model_configuration: JsonDict,
+        evaluator: BenchmarkEvaluator | None = None,
     ) -> None:
         self._scenario_root = scenario_root.resolve()
         self._adapter = adapter
         self._persistence = persistence
         self._suite_version = suite_version
         self._model_configuration = dict(model_configuration)
+        self._evaluator = evaluator or _evaluate_snapshot
 
     async def run(
         self,
@@ -175,42 +194,90 @@ class SnapshotBenchmarkRunner:
         run_id: str | None = None,
     ) -> EvaluationResult:
         scenario_dir = self._scenario_directory(scenario_id)
-        scenario = load_public_scenario(scenario_dir)
-        if "snapshot" not in scenario.modes:
-            raise ValueError(f"Scenario {scenario.id} does not support Snapshot mode.")
-        snapshot = SnapshotMcpClient.from_yaml(scenario_dir / scenario.snapshot_file)
+        try:
+            scenario = load_public_scenario(scenario_dir)
+            if "snapshot" not in scenario.modes:
+                raise ValueError(f"Scenario {scenario.id} does not support Snapshot mode.")
+            snapshot = SnapshotMcpClient.from_yaml(scenario_dir / scenario.snapshot_file)
+        except Exception as exc:
+            raise BenchmarkRunError("infra_failed", "scenario_error") from exc
+
         resolved_run_id = run_id or f"eval-{uuid4().hex}"
-        await self._persistence.create_run(
-            run_id=resolved_run_id,
-            scenario_id=scenario.id,
-            mode="snapshot",
-            suite_version=self._suite_version,
-            agent_version=agent_version.as_json(),
-            model_configuration=self._model_configuration,
-        )
+        try:
+            await self._persistence.create_run(
+                run_id=resolved_run_id,
+                scenario_id=scenario.id,
+                mode="snapshot",
+                suite_version=self._suite_version,
+                agent_version=agent_version.as_json(),
+                model_configuration=self._model_configuration,
+            )
+        except Exception as exc:
+            raise BenchmarkRunError("infra_failed", "persistence_error") from exc
 
-        artifact = await self._adapter.run(
-            run_id=resolved_run_id,
-            scenario=scenario,
-            mcp_client=snapshot,
-        )
-        if artifact.scenario_id != scenario.id:
-            raise ValueError("Diagnostic adapter returned an artifact for a different scenario.")
-        if artifact.mode != "snapshot":
-            raise ValueError("Diagnostic adapter returned a non-Snapshot artifact.")
+        try:
+            artifact = await self._adapter.run(
+                run_id=resolved_run_id,
+                scenario=scenario,
+                mcp_client=snapshot,
+            )
+        except Exception as exc:
+            await self._record_failure(
+                run_id=resolved_run_id,
+                status="agent_failed",
+                category="adapter_error",
+            )
+            raise BenchmarkRunError("agent_failed", "adapter_error") from exc
 
-        oracle = load_scenario_oracle(scenario_dir)
-        result = score_run(artifact, oracle)
-        await self._persistence.complete_run(
-            run_id=resolved_run_id,
-            diagnostic_task_id=artifact.diagnostic_task_id,
-        )
-        await self._persistence.save_result(
-            result_id=f"result-{resolved_run_id}",
-            run_id=resolved_run_id,
-            result=result,
-        )
+        if artifact.scenario_id != scenario.id or artifact.mode != "snapshot":
+            await self._record_failure(
+                run_id=resolved_run_id,
+                status="agent_failed",
+                category="artifact_invalid",
+            )
+            raise BenchmarkRunError("agent_failed", "artifact_invalid")
+
+        try:
+            result = self._evaluator(artifact, scenario_dir)
+        except Exception as exc:
+            await self._record_failure(
+                run_id=resolved_run_id,
+                status="infra_failed",
+                category="evaluation_error",
+            )
+            raise BenchmarkRunError("infra_failed", "evaluation_error") from exc
+
+        try:
+            await self._persistence.finalize_run(
+                result_id=f"result-{resolved_run_id}",
+                run_id=resolved_run_id,
+                result=result,
+                diagnostic_task_id=artifact.diagnostic_task_id,
+            )
+        except Exception as exc:
+            await self._record_failure(
+                run_id=resolved_run_id,
+                status="infra_failed",
+                category="persistence_error",
+            )
+            raise BenchmarkRunError("infra_failed", "persistence_error") from exc
         return result
+
+    async def _record_failure(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        category: str,
+    ) -> None:
+        try:
+            await self._persistence.fail_run(
+                run_id=run_id,
+                status=status,
+                failure_category=category,
+            )
+        except Exception as exc:
+            raise BenchmarkRunError("infra_failed", "persistence_error") from exc
 
     def _scenario_directory(self, scenario_id: str) -> Path:
         if not scenario_id or any(character in scenario_id for character in ("/", "\\")):
@@ -219,3 +286,8 @@ class SnapshotBenchmarkRunner:
         if path.parent != self._scenario_root:
             raise ValueError("Scenario ID resolves outside the benchmark root.")
         return path
+
+
+def _evaluate_snapshot(artifact: RunArtifact, scenario_dir: Path) -> EvaluationResult:
+    oracle = load_scenario_oracle(scenario_dir)
+    return score_run(artifact, oracle)
