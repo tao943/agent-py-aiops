@@ -1,0 +1,19 @@
+id: APY-003
+title: Checkout upstream returns 502 while the process is unavailable
+symptom_family: nginx_upstream_5xx
+difficulty: medium
+modes: [snapshot]
+alert:
+  alertname: CheckoutUpstream5xxHigh
+  service: checkout-service
+  severity: critical
+  statusCode: 502
+  summary: Checkout requests through the gateway are returning HTTP 502.
+hypotheses:
+  - id: upstream_process_down
+    description: The checkout upstream process is unavailable.
+  - id: upstream_port_mismatch
+    description: Nginx targets a different port from the one used by checkout.
+  - id: dns_resolution_failure
+    description: The checkout upstream name cannot be resolved.
+snapshot_file: snapshot/tool_responses.yaml

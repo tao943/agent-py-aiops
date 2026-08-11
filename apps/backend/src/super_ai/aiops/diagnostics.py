@@ -16,6 +16,15 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
+from super_ai.aiops.reasoning import (
+    DiagnosticPlanStep,
+    HypothesisState,
+    ObservationDecision,
+    RootCauseDecision,
+    parse_observation_decision,
+    parse_plan,
+    parse_root_cause_decision,
+)
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
@@ -50,6 +59,13 @@ class AiopsDiagnosticState(TypedDict, total=False):
     plan: list[JsonDict]
     plan_origin: str
     plan_index: int
+    public_hypotheses: list[JsonDict]
+    hypothesis_states: list[JsonDict]
+    observation_decisions: Annotated[list[JsonDict], add]
+    root_cause_decision: JsonDict | None
+    current_evidence_id: str
+    current_evidence_summary: str
+    current_plan_step: JsonDict
     continue_execution: bool
     execution_failed: bool
     report_id: str
@@ -127,6 +143,11 @@ class AiopsDiagnosticService:
             "task_id": task.id,
             "query": task.query,
             "alert": alert,
+            "public_hypotheses": _json_list(task.input_payload.get("hypotheses")),
+            "hypothesis_states": _initial_hypothesis_states(
+                _json_list(task.input_payload.get("hypotheses"))
+            ),
+            "observation_decisions": [],
             "accessible_knowledge_base_ids": tuple(accessible_knowledge_base_ids),
             "plan_index": 0,
             "execution_failed": False,
@@ -182,16 +203,20 @@ class AiopsDiagnosticService:
         graph = StateGraph(AiopsDiagnosticState)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
+        graph.add_node("evidence_evaluator", self._evidence_evaluator)
         graph.add_node("replanner", self._replanner)
+        graph.add_node("decision", self._decision)
         graph.add_node("report", self._report)
         graph.add_edge(START, "planner")
         graph.add_edge("planner", "executor")
-        graph.add_edge("executor", "replanner")
+        graph.add_edge("executor", "evidence_evaluator")
+        graph.add_edge("evidence_evaluator", "replanner")
         graph.add_conditional_edges(
             "replanner",
             self._route_after_replanner,
-            {"executor": "executor", "report": "report"},
+            {"executor": "executor", "decision": "decision"},
         )
+        graph.add_edge("decision", "report")
         graph.add_edge("report", END)
         return graph.compile()
 
@@ -308,6 +333,11 @@ class AiopsDiagnosticService:
             sop_hits=sop_hits,
             no_sop_matched=no_sop_matched,
             available_tools=available_tools,
+            known_hypotheses=[
+                str(item.get("id"))
+                for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
+                if item.get("id")
+            ],
         )
         events.append(
             _task_status_event(
@@ -368,6 +398,9 @@ class AiopsDiagnosticService:
             "no_sop_matched": no_sop_matched,
             "plan": plan,
             "plan_origin": plan_origin,
+            "hypothesis_states": cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
             "evidence_ids": persisted_evidence_ids,
             "events": events,
         }
@@ -467,6 +500,9 @@ class AiopsDiagnosticService:
                 "execution_failed": True,
                 "evidence": [evidence],
                 "evidence_ids": [evidence_record.id],
+                "current_evidence_id": evidence_record.id,
+                "current_evidence_summary": safe_error,
+                "current_plan_step": step,
                 "events": events,
             }
 
@@ -526,7 +562,79 @@ class AiopsDiagnosticService:
             "plan_index": plan_index + 1,
             "evidence": [evidence],
             "evidence_ids": [evidence_record.id],
+            "current_evidence_id": evidence_record.id,
+            "current_evidence_summary": summary,
+            "current_plan_step": step,
             "events": events,
+        }
+
+    async def _evidence_evaluator(
+        self,
+        state: AiopsDiagnosticState,
+    ) -> dict[str, object]:
+        evidence_id = str(state.get("current_evidence_id") or "")
+        if not evidence_id:
+            return {"events": []}
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        plan_step = _json_dict(state.get("current_plan_step"))
+        public_hypotheses = cast(
+            list[JsonDict], state.get("public_hypotheses") or []
+        )
+        known_hypotheses = {
+            str(item.get("id")) for item in public_hypotheses if item.get("id")
+        }
+        summary = str(state.get("current_evidence_summary") or "")
+        prompt = (
+            "Return one JSON observation decision with purpose, supports, refutes, and "
+            "summary. Use only known hypothesis IDs. Do not include hidden reasoning. "
+            f"Known hypotheses: {json.dumps(public_hypotheses, ensure_ascii=False)}. "
+            f"Plan step: {json.dumps(plan_step, ensure_ascii=False)}. "
+            f"Persisted evidence ID: {evidence_id}. Observation: {summary}."
+        )
+        try:
+            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            decision = parse_observation_decision(
+                _model_text(response),
+                known_hypotheses=known_hypotheses,
+            )
+        except Exception:
+            decision = ObservationDecision(
+                purpose=str(plan_step.get("purpose") or "Evaluate persisted observation."),
+                supports=(),
+                refutes=(),
+                summary="The observation could not be mapped to a validated hypothesis update.",
+            )
+        decision_payload = _observation_decision_payload(decision, evidence_id=evidence_id)
+        hypothesis_states = _update_hypothesis_states(
+            cast(list[JsonDict], state.get("hypothesis_states") or []),
+            decision=decision,
+            evidence_id=evidence_id,
+        )
+        payload: JsonDict = {
+            "evidenceIds": [evidence_id],
+            "observationDecision": decision_payload,
+            "hypothesisStates": hypothesis_states,
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="evidence_evaluation",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "evidence_evaluation", payload)
+        return {
+            "hypothesis_states": hypothesis_states,
+            "observation_decisions": [decision_payload],
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Evidence Evaluator: updated public hypotheses from persisted evidence.",
+                    60,
+                )
+            ],
         }
 
     async def _replanner(self, state: AiopsDiagnosticState) -> dict[str, object]:
@@ -536,7 +644,9 @@ class AiopsDiagnosticService:
         execution_failed = bool(state.get("execution_failed"))
         continue_execution = plan_index < len(plan) and not execution_failed
         decision = (
-            "continuing with the next bounded step" if continue_execution else "moving to Report"
+            "continuing with the next bounded step"
+            if continue_execution
+            else "moving to Decision"
         )
         events = [
             _task_status_event(
@@ -555,7 +665,7 @@ class AiopsDiagnosticService:
                 "planIndex": plan_index,
                 "planLength": len(plan),
                 "executionFailed": execution_failed,
-                "decision": "executor" if continue_execution else "report",
+                "decision": "executor" if continue_execution else "decision",
             },
         )
         await self._save_checkpoint(
@@ -565,10 +675,66 @@ class AiopsDiagnosticService:
                 "planIndex": plan_index,
                 "planLength": len(plan),
                 "executionFailed": execution_failed,
-                "decision": "executor" if continue_execution else "report",
+                "decision": "executor" if continue_execution else "decision",
             },
         )
         return {"continue_execution": continue_execution, "events": events}
+
+    async def _decision(self, state: AiopsDiagnosticState) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        prompt = (
+            "Return JSON only for one root-cause decision with component, mechanism, trigger, "
+            "causalChain, evidenceIds, and confidence. This is a structured root-cause "
+            "decision, not private chain-of-thought. Use only persisted evidence IDs. "
+            f"Alert: {json.dumps(_json_dict(state.get('alert')), ensure_ascii=False)}. "
+            "Public hypotheses: "
+            f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
+            "Hypothesis states: "
+            f"{json.dumps(state.get('hypothesis_states') or [], ensure_ascii=False)}. "
+            "Structured observations: "
+            f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
+            f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
+        )
+        decision: RootCauseDecision | None = None
+        try:
+            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            decision = parse_root_cause_decision(
+                _model_text(response),
+                available_evidence_ids=set(evidence_ids),
+            )
+        except Exception:
+            decision = None
+        decision_payload = (
+            _root_cause_decision_payload(decision) if decision is not None else None
+        )
+        payload: JsonDict = {
+            "rootCauseDecision": decision_payload,
+            "evidenceIds": list(decision.evidence_ids) if decision is not None else [],
+            "status": "grounded" if decision is not None else "insufficient_evidence",
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="decision",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "decision", payload)
+        return {
+            "root_cause_decision": decision_payload,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Decision: persisted an evidence-grounded conclusion."
+                    if decision is not None
+                    else "Decision: evidence was insufficient for a grounded conclusion.",
+                    85,
+                )
+            ],
+        }
 
     async def _report(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -591,6 +757,7 @@ class AiopsDiagnosticService:
             "evidenceIds": evidence_ids,
             "reportGeneration": report_generation,
             "status": status,
+            "rootCauseDecision": state.get("root_cause_decision"),
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -685,7 +852,7 @@ class AiopsDiagnosticService:
         return (report, "llm") if report is not None else (fallback, "fallback")
 
     def _route_after_replanner(self, state: AiopsDiagnosticState) -> str:
-        return "executor" if state.get("continue_execution") else "report"
+        return "executor" if state.get("continue_execution") else "decision"
 
     async def _create_plan(
         self,
@@ -695,26 +862,33 @@ class AiopsDiagnosticService:
         sop_hits: Sequence[JsonDict],
         no_sop_matched: bool,
         available_tools: Sequence[str],
+        known_hypotheses: Sequence[str],
     ) -> tuple[list[JsonDict], str]:
-        generic_plan = [self._generic_search_log_step(query)]
+        generic_plan = (
+            [self._generic_search_log_step(query)] if "SearchLog" in available_tools else []
+        )
         prompt = (
-            "Return JSON only with a `steps` array. Each step has `id`, `tool`, `arguments`, and "
-            "`purpose`. Plan a bounded AIOps investigation using only these tools: "
+            "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
+            "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
+            "steps and only these tools: "
             f"{json.dumps(list(available_tools))}. User query: {query}. Alert: "
             f"{json.dumps(alert)}. SOP evidence: {json.dumps(list(sop_hits))}. "
-            f"No SOP matched: {str(no_sop_matched).lower()}. Prefer SearchLog for CLS evidence."
+            f"Known hypotheses: {json.dumps(list(known_hypotheses))}. "
+            f"No SOP matched: {str(no_sop_matched).lower()}."
         )
         try:
             response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-            plan = _validated_plan(_model_text(response), available_tools)
+            parsed_plan = parse_plan(
+                _model_text(response),
+                available_tools=set(available_tools),
+                known_hypotheses=set(known_hypotheses),
+            )
+            plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
-        search_log_steps = [step for step in plan if step.get("tool") == "SearchLog"]
-        if not search_log_steps:
+        if not plan:
             return generic_plan, "generic"
-        return [self._normalized_search_log_step(search_log_steps[0], query)], (
-            "SOP-backed" if sop_hits else "generic"
-        )
+        return plan, "SOP-backed" if sop_hits else "model"
 
     def _generic_search_log_step(self, query: str) -> JsonDict:
         now_ms = int(_now().timestamp() * 1000)
@@ -730,21 +904,7 @@ class AiopsDiagnosticService:
                 "Limit": 20,
             },
             "purpose": f"Gather real CLS evidence relevant to: {query}",
-        }
-
-    def _normalized_search_log_step(self, step: JsonDict, query: str) -> JsonDict:
-        """Keep model planning bounded to an executable real CLS search step."""
-        generic_step = self._generic_search_log_step(query)
-        model_arguments = _json_dict(step.get("arguments"))
-        limit_value = model_arguments.get("Limit")
-        arguments = _json_dict(generic_step["arguments"])
-        if isinstance(limit_value, int) and 1 <= limit_value <= 100:
-            arguments["Limit"] = limit_value
-        return {
-            "id": str(step.get("id") or generic_step["id"]),
-            "tool": "SearchLog",
-            "arguments": arguments,
-            "purpose": str(step.get("purpose") or generic_step["purpose"]),
+            "testsHypotheses": [],
         }
 
     async def _create_step(
@@ -827,39 +987,100 @@ class AiopsDiagnosticService:
         )
 
 
-def _validated_plan(text: str, available_tools: Sequence[str]) -> list[JsonDict]:
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if match is None:
-        return []
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, Mapping):
-        return []
-    raw_steps = parsed.get("steps")
-    if not isinstance(raw_steps, list):
-        return []
-    allowed_tools = set(available_tools) | {"knowledge_retrieval"}
-    steps: list[JsonDict] = []
-    for index, raw_step in enumerate(raw_steps):
-        if not isinstance(raw_step, Mapping):
-            continue
-        tool_name = raw_step.get("tool")
-        arguments = raw_step.get("arguments")
-        if not isinstance(tool_name, str) or tool_name not in allowed_tools:
-            continue
-        if not isinstance(arguments, Mapping):
-            continue
-        steps.append(
+def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
+    return {
+        "id": step.id,
+        "tool": step.tool,
+        "arguments": step.arguments,
+        "purpose": step.purpose,
+        "testsHypotheses": list(step.tests_hypotheses),
+    }
+
+
+def _initial_hypothesis_states(public_hypotheses: Sequence[JsonDict]) -> list[JsonDict]:
+    return [
+        {
+            "id": str(item["id"]),
+            "status": "open",
+            "confidence": 0.5,
+            "evidenceIds": [],
+        }
+        for item in public_hypotheses
+        if item.get("id")
+    ]
+
+
+def _observation_decision_payload(
+    decision: ObservationDecision,
+    *,
+    evidence_id: str,
+) -> JsonDict:
+    return {
+        "purpose": decision.purpose,
+        "supports": list(decision.supports),
+        "refutes": list(decision.refutes),
+        "summary": decision.summary,
+        "evidenceIds": [evidence_id],
+    }
+
+
+def _update_hypothesis_states(
+    current: Sequence[JsonDict],
+    *,
+    decision: ObservationDecision,
+    evidence_id: str,
+) -> list[JsonDict]:
+    updated: list[JsonDict] = []
+    for item in current:
+        hypothesis_id = str(item.get("id") or "")
+        raw_evidence_ids = item.get("evidenceIds")
+        existing_evidence_ids = _unique_strings(
+            [str(value) for value in raw_evidence_ids]
+            if isinstance(raw_evidence_ids, list)
+            else []
+        )
+        status = str(item.get("status") or "open")
+        confidence_value = item.get("confidence")
+        confidence = (
+            float(confidence_value)
+            if isinstance(confidence_value, (int, float))
+            and not isinstance(confidence_value, bool)
+            else 0.5
+        )
+        if hypothesis_id in decision.supports:
+            status = "supported"
+            confidence = min(1.0, confidence + 0.25)
+            existing_evidence_ids = _unique_strings(existing_evidence_ids + [evidence_id])
+        elif hypothesis_id in decision.refutes:
+            status = "refuted"
+            confidence = max(0.0, confidence - 0.4)
+            existing_evidence_ids = _unique_strings(existing_evidence_ids + [evidence_id])
+        hypothesis = HypothesisState(
+            id=hypothesis_id,
+            status=cast(Literal["open", "supported", "refuted"], status),
+            confidence=confidence,
+            evidence_ids=tuple(existing_evidence_ids),
+        )
+        updated.append(
             {
-                "id": str(raw_step.get("id") or f"step_{index + 1}"),
-                "tool": tool_name,
-                "arguments": _json_dict(arguments),
-                "purpose": str(raw_step.get("purpose") or "Collect diagnostic evidence."),
+                "id": hypothesis.id,
+                "status": hypothesis.status,
+                "confidence": hypothesis.confidence,
+                "evidenceIds": list(hypothesis.evidence_ids),
             }
         )
-    return steps
+    return updated
+
+
+def _root_cause_decision_payload(decision: RootCauseDecision) -> JsonDict:
+    return {
+        "component": decision.component,
+        "mechanism": decision.mechanism,
+        "trigger": decision.trigger,
+        "causalChain": list(decision.causal_chain),
+        "evidenceIds": list(decision.evidence_ids),
+        "confidence": decision.confidence,
+    }
 
 
 def _model_text(response: object) -> str:
@@ -1005,6 +1226,9 @@ def _report_prompt(state: AiopsDiagnosticState) -> str:
         "plan": _json_list(state.get("plan")),
         "executionFailed": bool(state.get("execution_failed")),
         "executionEvidence": _report_evidence_context(state.get("evidence")),
+        "hypothesisStates": state.get("hypothesis_states") or [],
+        "observationDecisions": state.get("observation_decisions") or [],
+        "rootCauseDecision": state.get("root_cause_decision"),
     }
     context_json = json.dumps(
         _safe_value(report_context),

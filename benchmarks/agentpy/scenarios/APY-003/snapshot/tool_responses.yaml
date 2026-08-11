@@ -1,0 +1,41 @@
+tools:
+  - name: InspectContainer
+    description: Inspect one benchmark container without changing it.
+    input_schema:
+      type: object
+      required: [service]
+      additionalProperties: false
+      properties:
+        service:
+          type: string
+    calls:
+      - arguments:
+          service: checkout-service
+        evidence_id: container-status-exited
+        result:
+          service: checkout-service
+          status: exited
+          exitCode: 137
+          health: unhealthy
+          configuredPorts: [8080]
+          listeningPorts: []
+  - name: InspectNginx
+    description: Inspect the frozen Nginx route and recent upstream error.
+    input_schema:
+      type: object
+      required: [route]
+      additionalProperties: false
+      properties:
+        route:
+          type: string
+    calls:
+      - arguments:
+          route: checkout
+        evidence_id: nginx-upstream-connection-refused
+        result:
+          route: checkout
+          upstreamHost: checkout-service
+          upstreamPort: 8080
+          resolvedAddresses: [172.30.0.12]
+          responseStatus: 502
+          error: connect() failed (111 Connection refused) while connecting to upstream

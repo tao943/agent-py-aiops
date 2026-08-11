@@ -6,6 +6,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,7 @@ def test_alembic_head_renders_offline_for_postgresql() -> None:
 
     command.upgrade(config, "head", sql=True)
 
-    assert "202607300001" in output_buffer.getvalue()
+    assert "202608100001" in output_buffer.getvalue()
 
 
 def test_chat_skill_metadata_backfill_matches_legacy_python_behavior(
@@ -190,6 +191,11 @@ async def test_alembic_head_exists_in_postgresql(migrated_database_url: str) -> 
         ("aiops_tool_call_audits", "result_payload"),
         ("aiops_graph_checkpoints", "checkpoint_payload"),
         ("aiops_graph_checkpoints", "metadata"),
+        ("aiops_evaluation_runs", "agent_version"),
+        ("aiops_evaluation_runs", "model_configuration"),
+        ("aiops_evaluation_results", "dimension_scores"),
+        ("aiops_evaluation_results", "failures"),
+        ("aiops_evaluation_results", "score_reasons"),
     ],
 )
 async def test_json_columns_use_jsonb(
@@ -210,3 +216,50 @@ async def test_json_columns_use_jsonb(
         )
     await engine.dispose()
     assert data_type == "jsonb"
+
+
+async def test_evaluation_run_identity_and_result_lifecycle(
+    migrated_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO aiops_evaluation_runs "
+                "(run_id, scenario_id, mode, suite_version, agent_version, "
+                "model_configuration, status, created_at) VALUES "
+                "('run-1', 'APY-003', 'snapshot', 'v1', '{}'::jsonb, "
+                "'{}'::jsonb, 'completed', now())"
+            )
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO aiops_evaluation_results "
+                "(result_id, run_id, dimension_scores, total, raw_total, validity, "
+                "passed, failures, score_reasons, created_at) VALUES "
+                "('result-1', 'run-1', '{}'::jsonb, 100, 100, 'valid', true, "
+                "'[]'::jsonb, '[]'::jsonb, now())"
+            )
+        )
+
+    with pytest.raises(IntegrityError, match="UniqueViolationError"):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO aiops_evaluation_results "
+                    "(result_id, run_id, dimension_scores, total, raw_total, validity, "
+                    "passed, failures, score_reasons, created_at) VALUES "
+                    "('result-2', 'run-1', '{}'::jsonb, 0, 0, 'valid', false, "
+                    "'[]'::jsonb, '[]'::jsonb, now())"
+                )
+            )
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("DELETE FROM aiops_evaluation_runs WHERE run_id = 'run-1'")
+        )
+        remaining = await connection.scalar(
+            text("SELECT count(*) FROM aiops_evaluation_results WHERE run_id = 'run-1'")
+        )
+    await engine.dispose()
+    assert remaining == 0
