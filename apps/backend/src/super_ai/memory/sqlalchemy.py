@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import Select, select
 from sqlalchemy import delete as sql_delete
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1606,38 +1607,41 @@ class SQLAlchemyEvaluationRepository:
         created_at: datetime | None = None,
     ) -> EvaluationRunRecord:
         async with self._session_factory() as session:
-            existing = await session.get(EvaluationRunModel, run_id)
-            if existing is not None:
-                identity = (
-                    existing.scenario_id,
-                    existing.mode,
-                    existing.suite_version,
-                    existing.agent_version,
-                    existing.model_configuration,
+            statement = (
+                postgresql_insert(EvaluationRunModel)
+                .values(
+                    run_id=run_id,
+                    scenario_id=scenario_id,
+                    mode=mode,
+                    suite_version=suite_version,
+                    agent_version=agent_version,
+                    model_configuration=model_configuration,
+                    status="pending",
+                    created_at=created_at or utc_now(),
                 )
-                requested = (
-                    scenario_id,
-                    mode,
-                    suite_version,
-                    agent_version,
-                    model_configuration,
-                )
-                if identity != requested:
-                    raise ValueError(f"Run {run_id} has a different evaluation identity.")
-                return _evaluation_run_record(existing)
-
-            row = EvaluationRunModel(
-                run_id=run_id,
-                scenario_id=scenario_id,
-                mode=mode,
-                suite_version=suite_version,
-                agent_version=agent_version,
-                model_configuration=model_configuration,
-                status="pending",
-                created_at=created_at or utc_now(),
+                .on_conflict_do_nothing(index_elements=[EvaluationRunModel.run_id])
             )
-            session.add(row)
+            await session.execute(statement)
             await session.commit()
+            row = await session.get(EvaluationRunModel, run_id)
+        if row is None:
+            raise ValueError(f"Evaluation run does not exist after creation: {run_id}")
+        identity = (
+            row.scenario_id,
+            row.mode,
+            row.suite_version,
+            row.agent_version,
+            row.model_configuration,
+        )
+        requested = (
+            scenario_id,
+            mode,
+            suite_version,
+            agent_version,
+            model_configuration,
+        )
+        if identity != requested:
+            raise ValueError(f"Run {run_id} has a different evaluation identity.")
         return _evaluation_run_record(row)
 
     async def fail_run(
@@ -1740,6 +1744,86 @@ class SQLAlchemyEvaluationRepository:
             session.add(row)
             await session.commit()
         return _evaluation_result_record(row)
+
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        result_id: str,
+        dimension_scores: JsonDict,
+        total: int,
+        raw_total: int,
+        validity: str,
+        passed: bool,
+        failures: list[str],
+        score_reasons: list[JsonDict],
+        hard_gate: str | None,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord]:
+        timestamp = completed_at or utc_now()
+        async with self._session_factory() as session:
+            async with session.begin():
+                run = (
+                    await session.scalars(
+                        select(EvaluationRunModel)
+                        .where(EvaluationRunModel.run_id == run_id)
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                if run is None:
+                    raise ValueError(f"Evaluation run does not exist: {run_id}")
+
+                existing = (
+                    await session.scalars(
+                        select(EvaluationResultModel).where(
+                            EvaluationResultModel.run_id == run_id
+                        )
+                    )
+                ).one_or_none()
+                if run.status == "completed":
+                    if existing is None or not _evaluation_result_matches(
+                        existing,
+                        result_id=result_id,
+                        dimension_scores=dimension_scores,
+                        total=total,
+                        raw_total=raw_total,
+                        validity=validity,
+                        passed=passed,
+                        failures=failures,
+                        score_reasons=score_reasons,
+                        hard_gate=hard_gate,
+                    ):
+                        raise ValueError(f"Evaluation run {run_id} has a different scorecard.")
+                    if run.diagnostic_task_id != diagnostic_task_id:
+                        raise ValueError(f"Evaluation run {run_id} has a different scorecard.")
+                    return _evaluation_run_record(run), _evaluation_result_record(existing)
+                if run.status != "pending":
+                    raise ValueError(f"Evaluation run {run_id} already has a terminal state.")
+                if existing is not None:
+                    raise ValueError(f"Evaluation run {run_id} has a different scorecard.")
+
+                result = EvaluationResultModel(
+                    result_id=result_id,
+                    run_id=run_id,
+                    dimension_scores=dimension_scores,
+                    total=total,
+                    raw_total=raw_total,
+                    validity=validity,
+                    passed=passed,
+                    failures=failures,
+                    score_reasons=score_reasons,
+                    hard_gate=hard_gate,
+                    created_at=created_at or utc_now(),
+                )
+                session.add(result)
+                run.status = "completed"
+                run.started_at = run.started_at or run.created_at
+                run.completed_at = timestamp
+                run.diagnostic_task_id = diagnostic_task_id
+                await session.flush()
+            return _evaluation_run_record(run), _evaluation_result_record(result)
 
     async def get_run_with_result(
         self, run_id: str
@@ -2234,6 +2318,32 @@ def _evaluation_result_record(row: EvaluationResultModel) -> EvaluationResultRec
         score_reasons=[_json_dict(item) for item in row.score_reasons],
         hard_gate=row.hard_gate,
         created_at=_ensure_utc(row.created_at),
+    )
+
+
+def _evaluation_result_matches(
+    row: EvaluationResultModel,
+    *,
+    result_id: str,
+    dimension_scores: JsonDict,
+    total: int,
+    raw_total: int,
+    validity: str,
+    passed: bool,
+    failures: list[str],
+    score_reasons: list[JsonDict],
+    hard_gate: str | None,
+) -> bool:
+    return (
+        row.result_id == result_id
+        and row.dimension_scores == dimension_scores
+        and row.total == total
+        and row.raw_total == raw_total
+        and row.validity == validity
+        and row.passed is passed
+        and row.failures == failures
+        and row.score_reasons == score_reasons
+        and row.hard_gate == hard_gate
     )
 
 

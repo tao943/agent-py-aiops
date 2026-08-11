@@ -131,6 +131,47 @@ class EvaluationRepository:
             created_at=created_at,
         )
 
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        result_id: str,
+        result: EvaluationResult,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord]:
+        return await self._repository.finalize_run(
+            run_id=run_id,
+            result_id=result_id,
+            dimension_scores={
+                "outcome": result.outcome,
+                "diagnosis": result.diagnosis,
+                "evidence": result.evidence,
+                "process": result.process,
+                "safety": result.safety,
+                "efficiency": result.efficiency,
+            },
+            total=result.total,
+            raw_total=result.raw_total,
+            validity=result.validity,
+            passed=result.passed,
+            failures=list(result.failures),
+            score_reasons=[
+                {
+                    "code": reason.code,
+                    "points": reason.points,
+                    "maximum": reason.maximum,
+                    "evidence_ids": list(reason.evidence_ids),
+                }
+                for reason in result.reasons
+            ],
+            hard_gate=result.hard_gate,
+            diagnostic_task_id=diagnostic_task_id,
+            completed_at=completed_at,
+            created_at=created_at,
+        )
+
     async def get_run_with_result(
         self, run_id: str
     ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None] | None:

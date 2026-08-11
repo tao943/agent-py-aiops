@@ -1308,6 +1308,24 @@ class EvaluationMemoryRepository(Protocol):
         created_at: datetime | None = None,
     ) -> EvaluationResultRecord: ...
 
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        result_id: str,
+        dimension_scores: JsonDict,
+        total: int,
+        raw_total: int,
+        validity: str,
+        passed: bool,
+        failures: list[str],
+        score_reasons: list[JsonDict],
+        hard_gate: str | None,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord]: ...
+
     async def get_run_with_result(
         self, run_id: str
     ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None] | None: ...

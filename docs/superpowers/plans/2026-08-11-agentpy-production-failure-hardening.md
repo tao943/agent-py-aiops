@@ -172,7 +172,7 @@ git commit -m "feat: persist benchmark failure terminal states"
 - Produces: `EvaluationRepository.finalize_run(*, run_id: str, result_id: str, result: EvaluationResult, diagnostic_task_id: str | None) -> tuple[EvaluationRunRecord, EvaluationResultRecord]`.
 - Consumes: failure states from Task 1 and existing `EvaluationResult` serialization.
 
-- [ ] **Step 1: Write failing concurrency and recovery tests**
+- [x] **Step 1: Write failing concurrency and recovery tests**
 
 Use two repository instances backed by the same engine:
 
@@ -188,7 +188,7 @@ Add a different-identity race using `asyncio.gather(..., return_exceptions=True)
 exactly one stable business conflict. Immediately create/read another run with the losing
 repository to prove the unique conflict did not poison its next session.
 
-- [ ] **Step 2: Write failing atomic finalize and duplicate-result tests**
+- [x] **Step 2: Write failing atomic finalize and duplicate-result tests**
 
 Test:
 
@@ -211,13 +211,13 @@ assert repeated == (run, result)
 Then pass a different result ID/content and assert rejection. Inject a non-JSON score reason into
 the raw SQLAlchemy method, assert flush fails, and verify the run remains `pending` with no result.
 
-- [ ] **Step 3: Run the focused tests and verify RED**
+- [x] **Step 3: Run the focused tests and verify RED**
 
 Run: `uv run pytest tests/test_evaluation_persistence.py -q`
 
 Expected: concurrent creation exposes an `IntegrityError` and `finalize_run` is missing.
 
-- [ ] **Step 4: Implement PostgreSQL conflict-safe creation**
+- [x] **Step 4: Implement PostgreSQL conflict-safe creation**
 
 Use the existing dependency only:
 
@@ -237,13 +237,13 @@ row = await session.get(EvaluationRunModel, run_id)
 Compare the complete immutable identity after selection. Never catch and expose the original
 database exception as the normal concurrency path.
 
-- [ ] **Step 5: Implement one-transaction finalize_run**
+- [x] **Step 5: Implement one-transaction finalize_run**
 
 Lock the run row, require `pending` or an equivalent already-completed result, add the scorecard,
 set status/diagnostic task/timestamps, flush, and commit once. Compare persisted score fields for
 idempotent repeats; reject any mismatch. Roll back automatically on flush/commit failure.
 
-- [ ] **Step 6: Verify GREEN and static checks**
+- [x] **Step 6: Verify GREEN and static checks**
 
 Run:
 
@@ -255,7 +255,7 @@ uv run pyright src/super_ai/evaluation/persistence.py src/super_ai/memory tests/
 
 Expected: PASS and zero static errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add apps/backend/src/super_ai/memory apps/backend/src/super_ai/evaluation/persistence.py apps/backend/tests/test_evaluation_persistence.py
