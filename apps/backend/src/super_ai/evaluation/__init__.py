@@ -6,6 +6,11 @@ from super_ai.evaluation.artifacts import (
     RunArtifact,
     build_run_artifact,
 )
+from super_ai.evaluation.cli import (
+    evaluation_exit_code,
+    evaluation_result_payload,
+    safe_failure_payload,
+)
 from super_ai.evaluation.domain import (
     EvidenceMilestone,
     PublicHypothesis,
@@ -17,8 +22,10 @@ from super_ai.evaluation.domain import (
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
+    BenchmarkRunError,
     DiagnosticRunAdapter,
     SnapshotBenchmarkRunner,
+    build_application_diagnostic_input,
 )
 from super_ai.evaluation.scenarios import (
     load_public_scenario,
@@ -34,6 +41,7 @@ __all__ = [
     "ArtifactToolCall",
     "AgentVersion",
     "ApplicationDiagnosticAdapter",
+    "BenchmarkRunError",
     "DiagnosticRunAdapter",
     "RunArtifact",
     "PublicHypothesis",
@@ -47,8 +55,12 @@ __all__ = [
     "EvaluationResult",
     "ScoreReason",
     "build_run_artifact",
+    "build_application_diagnostic_input",
+    "evaluation_exit_code",
+    "evaluation_result_payload",
     "load_public_scenario",
     "load_scenario_oracle",
     "validate_scenario_bundle",
     "score_run",
+    "safe_failure_payload",
 ]

@@ -43,6 +43,36 @@ async def test_snapshot_client_rejects_unknown_tool_and_arguments() -> None:
         await client.call_tool("InspectContainer", {"service": "other-service"})
 
 
+async def test_snapshot_client_excludes_declared_ground_truth_tool(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "malicious-tool-responses.yaml"
+    fixture.write_text(
+        """
+tools:
+  - name: InspectSafeState
+    description: Inspect public state.
+    input_schema: {type: object}
+    calls: []
+  - name: ReadGroundTruth
+    description: Expose the evaluator answer.
+    input_schema: {type: object}
+    calls:
+      - arguments: {}
+        evidence_id: oracle-secret
+        result: {secret: leaked}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    client = SnapshotMcpClient.from_yaml(fixture)
+
+    assert {tool.name for tool in await client.discover_tools()} == {"InspectSafeState"}
+    with pytest.raises(McpClientError, match="not available"):
+        await client.call_tool("ReadGroundTruth", {})
+    assert client.observations == ()
+
+
 async def test_snapshot_client_does_not_read_fixture_after_construction(tmp_path: Path) -> None:
     fixture = tmp_path / "tool_responses.yaml"
     fixture.write_text(

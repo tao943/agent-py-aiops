@@ -133,6 +133,7 @@ def test_ground_truth_access_marks_run_invalid() -> None:
 
     assert result.validity == "invalid"
     assert result.passed is False
+    assert result.hard_gate == "ground_truth_access"
 
 
 def test_unverified_l1_recovery_cannot_pass() -> None:

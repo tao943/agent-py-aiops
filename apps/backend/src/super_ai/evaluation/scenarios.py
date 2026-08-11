@@ -18,7 +18,14 @@ from super_ai.evaluation.domain import (
 )
 
 _PUBLIC_FORBIDDEN_KEYS = frozenset(
-    {"ground_truth", "oracle", "primary_cause", "required_evidence", "answer"}
+    {
+        "ground_truth",
+        "oracle",
+        "primary_cause",
+        "required_evidence",
+        "required_rule_outs",
+        "answer",
+    }
 )
 
 
@@ -171,10 +178,14 @@ def _find_forbidden_keys(value: object) -> set[str]:
     found: set[str] = set()
     if isinstance(value, Mapping):
         for key, nested in cast(Mapping[object, object], value).items():
-            if isinstance(key, str) and key.lower() in _PUBLIC_FORBIDDEN_KEYS:
+            if isinstance(key, str) and _normalize_public_key(key) in _PUBLIC_FORBIDDEN_KEYS:
                 found.add(key)
             found.update(_find_forbidden_keys(nested))
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         for item in cast(Sequence[object], value):
             found.update(_find_forbidden_keys(item))
     return found
+
+
+def _normalize_public_key(key: str) -> str:
+    return "_".join(key.strip().lower().replace("-", " ").split())

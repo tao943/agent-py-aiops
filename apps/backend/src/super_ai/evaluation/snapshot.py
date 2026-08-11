@@ -57,6 +57,8 @@ class SnapshotMcpClient:
             if name in names:
                 raise ValueError(f"Duplicate snapshot tool name: {name}.")
             names.add(name)
+            if _normalize_tool_name(name) == "readgroundtruth":
+                continue
             input_schema = dict(_required_mapping(tool, "input_schema"))
             definitions.append(
                 McpToolDefinition(
@@ -187,3 +189,7 @@ def _required_str(payload: Mapping[str, object], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"Snapshot field '{key}' must be a non-empty string.")
     return value.strip()
+
+
+def _normalize_tool_name(name: str) -> str:
+    return "".join(character for character in name.lower() if character.isalnum())

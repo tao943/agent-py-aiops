@@ -354,7 +354,7 @@ git commit -m "feat: classify benchmark runner failures"
 - Produces: `safe_failure_payload(error: BaseException) -> dict[str, object]`.
 - Consumes: `BenchmarkRunError` from Task 3.
 
-- [ ] **Step 1: Write failing pure CLI contract tests**
+- [x] **Step 1: Write failing pure CLI contract tests**
 
 Cover pass/fail/invalid as 0/1/2 and fixed safe serialization:
 
@@ -371,7 +371,7 @@ assert "C:\\private" not in serialized
 
 For `BenchmarkRunError`, assert its allowlisted category is preserved without its cause text.
 
-- [ ] **Step 2: Write failing path and nested-answer tests**
+- [x] **Step 2: Write failing path and nested-answer tests**
 
 Parametrize Runner inputs `../APY-003`, `..\\APY-003`, `/tmp/APY-003`, and
 `C:\\tmp\\APY-003`; assert rejection occurs before persistence `create_run`.
@@ -379,7 +379,7 @@ Parametrize Runner inputs `../APY-003`, `..\\APY-003`, `/tmp/APY-003`, and
 Parametrize deeply nested normalized variants of `oracle`, `primary_cause`,
 `required_evidence`, and `required-rule-outs`; assert `load_public_scenario` rejects all.
 
-- [ ] **Step 3: Write failing ReadGroundTruth/application boundary tests**
+- [x] **Step 3: Write failing ReadGroundTruth/application boundary tests**
 
 Assert Snapshot discovery excludes `ReadGroundTruth` and direct calls raise `McpClientError` without
 an observation. Assert the application diagnostic input serialized from `PublicScenario` excludes
@@ -387,7 +387,7 @@ an observation. Assert the application diagnostic input serialized from `PublicS
 persisted `ReadGroundTruth` audit yields `validity == "invalid"` and
 `hard_gate == "ground_truth_access"`.
 
-- [ ] **Step 4: Run tests and verify RED**
+- [x] **Step 4: Run tests and verify RED**
 
 Run:
 
@@ -397,20 +397,20 @@ uv run pytest tests/test_evaluation_cli.py tests/test_evaluation_scenarios.py te
 
 Expected: FAIL because `evaluation.cli` is absent and the complete isolation matrix is not covered.
 
-- [ ] **Step 5: Implement the pure CLI module and thin script delegation**
+- [x] **Step 5: Implement the pure CLI module and thin script delegation**
 
 Move result payload/exit-code logic to `super_ai.evaluation.cli`. Implement
 `safe_failure_payload` with fixed text and allowlisted `BenchmarkRunError.category`; all other
 exceptions map to `infrastructure_error`. Keep dependency construction and output writing in the
 script.
 
-- [ ] **Step 6: Harden normalized answer keys and application input construction**
+- [x] **Step 6: Harden normalized answer keys and application input construction**
 
 Normalize public YAML keys with lowercase plus hyphen/space-to-underscore conversion before the
 recursive forbidden-key check. Extract application diagnostic input construction into a focused
 function that consumes only `PublicScenario`; do not accept oracle or filesystem paths.
 
-- [ ] **Step 7: Verify GREEN and the focused suite**
+- [x] **Step 7: Verify GREEN and the focused suite**
 
 Run:
 
@@ -423,7 +423,7 @@ uv run pyright
 
 Expected: all focused tests pass, CLI help exits 0, and static checks report zero errors.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add apps/backend/src/super_ai/evaluation apps/backend/scripts/run_snapshot_benchmark.py apps/backend/tests

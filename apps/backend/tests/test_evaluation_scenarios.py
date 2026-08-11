@@ -87,6 +87,31 @@ def test_loader_rejects_public_file_with_answer_keys(tmp_path: Path) -> None:
         load_public_scenario(scenario_dir)
 
 
+@pytest.mark.parametrize(
+    "answer_key",
+    (
+        "oracle",
+        "Primary Cause",
+        "Primary   Cause",
+        "required-evidence",
+        "required-rule-outs",
+    ),
+)
+def test_loader_rejects_nested_normalized_answer_keys(
+    valid_scenario_dir: Path,
+    answer_key: str,
+) -> None:
+    scenario_file = valid_scenario_dir / "scenario.yaml"
+    scenario_file.write_text(
+        scenario_file.read_text(encoding="utf-8")
+        + f'extensions:\n  nested:\n    "{answer_key}": leaked\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ground-truth keys"):
+        load_public_scenario(valid_scenario_dir)
+
+
 def test_bundle_validation_rejects_missing_snapshot(
     valid_scenario_dir: Path,
 ) -> None:

@@ -87,6 +87,20 @@ class EvaluationPersistence(Protocol):
     ) -> object: ...
 
 
+def build_application_diagnostic_input(scenario: PublicScenario) -> JsonDict:
+    """Build the production diagnostic input exclusively from public scenario data."""
+    return {
+        "query": scenario.title,
+        "alert": dict(scenario.alert),
+        "hypotheses": [
+            {"id": item.id, "description": item.description}
+            for item in scenario.hypotheses
+        ],
+        "benchmarkScenarioId": scenario.id,
+        "benchmarkMode": "snapshot",
+    }
+
+
 class ApplicationDiagnosticAdapter:
     """Run a Snapshot scenario through the existing production diagnostic workflow."""
 
@@ -115,16 +129,7 @@ class ApplicationDiagnosticAdapter:
             task_id=task_id,
             status="accepted",
             query=scenario.title,
-            input_payload={
-                "query": scenario.title,
-                "alert": dict(scenario.alert),
-                "hypotheses": [
-                    {"id": item.id, "description": item.description}
-                    for item in scenario.hypotheses
-                ],
-                "benchmarkScenarioId": scenario.id,
-                "benchmarkMode": "snapshot",
-            },
+            input_payload=build_application_diagnostic_input(scenario),
             result_payload={},
         )
         service = AiopsDiagnosticService(

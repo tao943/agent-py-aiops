@@ -9,7 +9,13 @@ import pytest
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
 from super_ai.evaluation.domain import PublicScenario
-from super_ai.evaluation.runner import AgentVersion, BenchmarkRunError, SnapshotBenchmarkRunner
+from super_ai.evaluation.runner import (
+    AgentVersion,
+    BenchmarkRunError,
+    SnapshotBenchmarkRunner,
+    build_application_diagnostic_input,
+)
+from super_ai.evaluation.scenarios import load_public_scenario
 from super_ai.evaluation.scoring import EvaluationResult
 from super_ai.mcp.cached_client import RuntimeMcpClient
 
@@ -134,6 +140,19 @@ def process_down_artifact() -> RunArtifact:
         safety_events=(),
         diagnostic_task_id="diagnostic-benchmark",
     )
+
+
+def test_application_diagnostic_input_contains_only_public_scenario_fields() -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-003")
+
+    payload = build_application_diagnostic_input(scenario)
+    serialized = json.dumps(payload)
+
+    assert payload["benchmarkScenarioId"] == "APY-003"
+    assert payload["benchmarkMode"] == "snapshot"
+    assert "ground_truth" not in serialized
+    assert "process_unavailable" not in serialized
+    assert "benchmark_container_stopped" not in serialized
 
 
 @pytest.mark.asyncio
@@ -330,3 +349,29 @@ async def test_runner_reports_persistence_error_when_failure_state_cannot_be_sav
     assert captured.value.category == "persistence_error"
     assert "failure-persistence-secret-sentinel" not in str(captured.value)
     assert persistence.failed == []
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    ("../APY-003", "..\\APY-003", "/tmp/APY-003", "C:\\tmp\\APY-003"),
+)
+@pytest.mark.asyncio
+async def test_runner_rejects_scenario_path_traversal_before_persistence(
+    scenario_id: str,
+) -> None:
+    persistence = RecordingPersistence()
+    runner = SnapshotBenchmarkRunner(
+        scenario_root=SCENARIOS,
+        adapter=RecordingScriptedDiagnosticAdapter(process_down_artifact()),
+        persistence=persistence,
+        suite_version="v1",
+        model_configuration={"provider": "offline", "model": "scripted"},
+    )
+
+    with pytest.raises(ValueError, match="single directory name"):
+        await runner.run(
+            scenario_id,
+            agent_version=AgentVersion(git_sha="abc123", workflow_version="v1"),
+        )
+
+    assert persistence.created == []
