@@ -9,7 +9,13 @@ from typing import cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.evaluation.scoring import EvaluationResult
-from super_ai.memory.repositories import EvaluationResultRecord, EvaluationRunRecord, JsonDict
+from super_ai.memory.repositories import (
+    EVALUATION_FAILURE_CATEGORIES,
+    EvaluationFailureStatus,
+    EvaluationResultRecord,
+    EvaluationRunRecord,
+    JsonDict,
+)
 from super_ai.memory.sqlalchemy import SQLAlchemyEvaluationRepository
 
 _SECRET_KEYS = frozenset(
@@ -66,6 +72,25 @@ class EvaluationRepository:
         return await self._repository.complete_run(
             run_id=run_id,
             diagnostic_task_id=diagnostic_task_id,
+            completed_at=completed_at,
+        )
+
+    async def fail_run(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        failure_category: str,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord:
+        if status not in {"agent_failed", "infra_failed"}:
+            raise ValueError(f"Unsupported evaluation failure status: {status}")
+        if failure_category not in EVALUATION_FAILURE_CATEGORIES:
+            raise ValueError(f"Unsupported evaluation failure category: {failure_category}")
+        return await self._repository.fail_run(
+            run_id=run_id,
+            status=status,
+            failure_category=failure_category,
             completed_at=completed_at,
         )
 

@@ -36,6 +36,7 @@ from super_ai.memory.models import (
     utc_now,
 )
 from super_ai.memory.repositories import (
+    EVALUATION_FAILURE_CATEGORIES,
     AgentToolCallAuditRecord,
     ChatMessageRecord,
     ChatSessionRecord,
@@ -45,6 +46,7 @@ from super_ai.memory.repositories import (
     DiagnosticStepRecord,
     DiagnosticTaskRecord,
     DocumentIndexTaskRecord,
+    EvaluationFailureStatus,
     EvaluationResultRecord,
     EvaluationRunRecord,
     GraphCheckpointRecord,
@@ -1638,6 +1640,40 @@ class SQLAlchemyEvaluationRepository:
             await session.commit()
         return _evaluation_run_record(row)
 
+    async def fail_run(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        failure_category: str,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord:
+        if status not in {"agent_failed", "infra_failed"}:
+            raise ValueError(f"Unsupported evaluation failure status: {status}")
+        if failure_category not in EVALUATION_FAILURE_CATEGORIES:
+            raise ValueError(f"Unsupported evaluation failure category: {failure_category}")
+        timestamp = completed_at or utc_now()
+        async with self._session_factory() as session:
+            row = (
+                await session.scalars(
+                    select(EvaluationRunModel)
+                    .where(EvaluationRunModel.run_id == run_id)
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if row is None:
+                raise ValueError(f"Evaluation run does not exist: {run_id}")
+            if row.status == status and row.failure_category == failure_category:
+                return _evaluation_run_record(row)
+            if row.status != "pending":
+                raise ValueError(f"Evaluation run {run_id} already has a terminal state.")
+            row.status = status
+            row.failure_category = failure_category
+            row.started_at = row.started_at or row.created_at
+            row.completed_at = timestamp
+            await session.commit()
+        return _evaluation_run_record(row)
+
     async def complete_run(
         self,
         *,
@@ -1650,12 +1686,14 @@ class SQLAlchemyEvaluationRepository:
             row = await session.get(EvaluationRunModel, run_id)
             if row is None:
                 raise ValueError(f"Evaluation run does not exist: {run_id}")
-            if row.status != "completed":
+            if row.status == "pending":
                 row.status = "completed"
                 row.started_at = row.started_at or row.created_at
                 row.completed_at = timestamp
                 row.diagnostic_task_id = diagnostic_task_id
                 await session.commit()
+            elif row.status != "completed":
+                raise ValueError(f"Evaluation run {run_id} already has a terminal state.")
         return _evaluation_run_record(row)
 
     async def save_result(
@@ -2175,6 +2213,7 @@ def _evaluation_run_record(row: EvaluationRunModel) -> EvaluationRunRecord:
         agent_version=_json_dict(row.agent_version),
         model_configuration=_json_dict(row.model_configuration),
         status=row.status,
+        failure_category=row.failure_category,
         diagnostic_task_id=row.diagnostic_task_id,
         created_at=_ensure_utc(row.created_at),
         started_at=_ensure_utc_optional(row.started_at),

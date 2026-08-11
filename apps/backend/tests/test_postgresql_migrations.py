@@ -40,7 +40,7 @@ def test_alembic_head_renders_offline_for_postgresql() -> None:
 
     command.upgrade(config, "head", sql=True)
 
-    assert "202608100001" in output_buffer.getvalue()
+    assert "202608110001" in output_buffer.getvalue()
 
 
 def test_chat_skill_metadata_backfill_matches_legacy_python_behavior(
@@ -263,3 +263,20 @@ async def test_evaluation_run_identity_and_result_lifecycle(
         )
     await engine.dispose()
     assert remaining == 0
+
+
+async def test_evaluation_runs_have_safe_failure_category_column(
+    migrated_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    async with engine.connect() as connection:
+        data_type = await connection.scalar(
+            text(
+                "select data_type from information_schema.columns "
+                "where table_schema = 'public' "
+                "and table_name = 'aiops_evaluation_runs' "
+                "and column_name = 'failure_category'"
+            )
+        )
+    await engine.dispose()
+    assert data_type == "character varying"

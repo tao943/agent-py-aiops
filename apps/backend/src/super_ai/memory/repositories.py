@@ -5,11 +5,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 ChatMemoryMode = str
 
 JsonDict = dict[str, object]
+EvaluationFailureStatus = Literal["agent_failed", "infra_failed"]
+EVALUATION_FAILURE_CATEGORIES = frozenset(
+    {
+        "adapter_error",
+        "artifact_invalid",
+        "scenario_error",
+        "evaluation_error",
+        "persistence_error",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +255,7 @@ class EvaluationRunRecord:
     agent_version: JsonDict
     model_configuration: JsonDict
     status: str
+    failure_category: str | None
     diagnostic_task_id: str | None
     created_at: datetime
     started_at: datetime | None
@@ -1262,6 +1273,15 @@ class EvaluationMemoryRepository(Protocol):
         agent_version: JsonDict,
         model_configuration: JsonDict,
         created_at: datetime | None = None,
+    ) -> EvaluationRunRecord: ...
+
+    async def fail_run(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        failure_category: str,
+        completed_at: datetime | None = None,
     ) -> EvaluationRunRecord: ...
 
     async def complete_run(

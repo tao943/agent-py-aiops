@@ -539,6 +539,7 @@ class EvaluationRunModel(Base):
     agent_version: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     model_configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
+    failure_category: Mapped[str | None] = mapped_column(String(80), nullable=True)
     diagnostic_task_id: Mapped[str | None] = mapped_column(
         ForeignKey("aiops_diagnostic_tasks.id", ondelete="SET NULL"),
         nullable=True,

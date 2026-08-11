@@ -71,11 +71,11 @@ openspec/changes/add-agentpy-sre-benchmark/tasks.md
 - Produces: `EvaluationRepository.fail_run(*, run_id: str, status: Literal["agent_failed", "infra_failed"], failure_category: str) -> EvaluationRunRecord`.
 - Consumes: existing `EvaluationRunModel`, SQLAlchemy session factory, and Alembic head `202608100001`.
 
-- [ ] **Step 1: Add OpenSpec failure-state requirements and task checklist**
+- [x] **Step 1: Add OpenSpec failure-state requirements and task checklist**
 
 Add scenarios requiring `pending -> agent_failed|infra_failed`, allowlisted safe categories, idempotent repeated failure, and rejection of conflicting terminal transitions. Add implementation checklist entries for persistence, concurrency, Runner, CLI, isolation, and final verification.
 
-- [ ] **Step 2: Write failing migration and repository tests**
+- [x] **Step 2: Write failing migration and repository tests**
 
 Add JSON/schema assertions and tests shaped as:
 
@@ -105,7 +105,7 @@ async def test_failed_run_persists_only_safe_terminal_metadata(
 
 Also assert unknown categories, `pending`, and conflicting failure transitions raise `ValueError`.
 
-- [ ] **Step 3: Run the focused tests and verify RED**
+- [x] **Step 3: Run the focused tests and verify RED**
 
 Run:
 
@@ -116,7 +116,7 @@ uv run pytest tests/test_evaluation_persistence.py tests/test_postgresql_migrati
 
 Expected: FAIL because `failure_category`, the new migration, and `fail_run` do not exist.
 
-- [ ] **Step 4: Add the migration, model/record field, and fail_run contract**
+- [x] **Step 4: Add the migration, model/record field, and fail_run contract**
 
 Create revision `202608110001` with `down_revision = "202608100001"` and add nullable
 `failure_category VARCHAR(80)`. Map it through `EvaluationRunModel` and
@@ -138,7 +138,7 @@ FAILURE_CATEGORIES = frozenset({
 In SQLAlchemy lock the run with `SELECT ... FOR UPDATE`; update only `pending`, return an
 identical terminal transition, and reject a different terminal status/category.
 
-- [ ] **Step 5: Verify GREEN and static checks**
+- [x] **Step 5: Verify GREEN and static checks**
 
 Run:
 
@@ -150,7 +150,7 @@ uv run pyright src/super_ai/evaluation/persistence.py src/super_ai/memory tests/
 
 Expected: PASS and zero type errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add apps/backend/alembic apps/backend/src/super_ai/memory apps/backend/src/super_ai/evaluation/persistence.py apps/backend/tests/test_evaluation_persistence.py apps/backend/tests/test_postgresql_migrations.py openspec/changes/add-agentpy-sre-benchmark

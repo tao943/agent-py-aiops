@@ -141,3 +141,57 @@ async def test_model_configuration_rejects_secret_material(
             )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_run_persists_only_safe_terminal_metadata(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    repository = EvaluationRepository(create_memory_session_factory(engine))
+    try:
+        await repository.create_run(
+            run_id="run-failed",
+            scenario_id="APY-003",
+            mode="snapshot",
+            suite_version="v1",
+            agent_version={"git_sha": "abc123"},
+            model_configuration={"provider": "offline", "model": "scripted"},
+        )
+
+        failed = await repository.fail_run(
+            run_id="run-failed",
+            status="agent_failed",
+            failure_category="adapter_error",
+        )
+        repeated = await repository.fail_run(
+            run_id="run-failed",
+            status="agent_failed",
+            failure_category="adapter_error",
+        )
+
+        with pytest.raises(ValueError, match="failure category"):
+            await repository.fail_run(
+                run_id="run-failed",
+                status="agent_failed",
+                failure_category="secret=must-not-persist",
+            )
+        with pytest.raises(ValueError, match="failure status"):
+            await repository.fail_run(
+                run_id="run-failed",
+                status="pending",  # type: ignore[arg-type]
+                failure_category="adapter_error",
+            )
+        with pytest.raises(ValueError, match="terminal state"):
+            await repository.fail_run(
+                run_id="run-failed",
+                status="infra_failed",
+                failure_category="persistence_error",
+            )
+    finally:
+        await engine.dispose()
+
+    assert failed == repeated
+    assert failed.status == "agent_failed"
+    assert failed.failure_category == "adapter_error"
+    assert "must-not-persist" not in repr(failed)
