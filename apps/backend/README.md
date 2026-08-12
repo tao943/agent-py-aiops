@@ -274,3 +274,15 @@ uv run pytest
 pytest 默认排除 `live_llm`。只有需要显式验证本地 DashScope Chat、Embedding 和
 Rerank 配置时，才手动运行 `uv run pytest -m live_llm tests/test_live_llm.py -q`；
 该命令不属于普通 PR CI。
+
+## Manual retrieval benchmark
+
+六条经过审核的 Retrieval Eval 查询必须使用显式的文档 owner 和知识库边界：
+
+```powershell
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-v1.json
+```
+
+报告只保留排名、文档/Chunk/知识库标识、向量与重排分数以及聚合指标，不写入文档正文或
+凭据。该命令会真实调用 Embedding、Milvus 和 Rerank 并消耗对应额度，因此只允许手动执行，
+不属于普通 CI，也不调用 Agent Chat 模型。
