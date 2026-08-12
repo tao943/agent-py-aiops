@@ -94,7 +94,10 @@ async def test_document_index_task_api_creates_reads_and_retries_scoped_tasks(
     assert task["status"] == "pending"
     assert create_response.json()["data"]["scheduled"] is True
     assert read_response.status_code == 200
-    assert read_response.json()["data"]["id"] == task["id"]
+    read_payload = read_response.json()["data"]
+    assert read_payload["id"] == task["id"]
+    assert read_payload["status"] == "pending"
+    assert "task" not in read_payload
     assert retry_response.status_code == 202
     assert retry_response.json()["data"]["retriedFromTaskId"] == task["id"]
     assert retry_response.json()["data"]["task"]["retryOfTaskId"] == task["id"]
