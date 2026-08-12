@@ -1,0 +1,18 @@
+id: APY-002
+title: Application requests are timing out while waiting for a PostgreSQL connection.
+symptom_family: postgresql_connection_acquisition_timeout
+difficulty: medium
+modes: [snapshot]
+alert:
+  alertname: DatabaseConnectionAcquireTimeoutHigh
+  service: checkout-service
+  severity: critical
+  summary: Application requests are timing out while waiting for a PostgreSQL connection.
+hypotheses:
+  - id: slow_database_work
+    description: Database work holds pooled connections for an extended period.
+  - id: application_connection_lifecycle
+    description: The application does not return borrowed connections reliably.
+  - id: traffic_capacity
+    description: Legitimate concurrency exceeds the configured pool capacity.
+snapshot_file: snapshot/tool_responses.yaml

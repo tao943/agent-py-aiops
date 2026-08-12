@@ -1,0 +1,68 @@
+tools:
+  - name: InspectRedis
+    description: Inspect frozen Redis service health without changing it.
+    input_schema:
+      type: object
+      required: [instance]
+      additionalProperties: false
+      properties:
+        instance: {type: string}
+    calls:
+      - arguments: {instance: cache-primary}
+        evidence_id: redis-healthy-ping-success
+        result:
+          processStatus: running
+          listening: true
+          configuredPort: 6379
+          ping: PONG
+          networkReachableFromApplication: true
+          memoryUsedPercent: 72
+  - name: InspectRedisClientPool
+    description: Inspect frozen Redis client-pool state for one service.
+    input_schema:
+      type: object
+      required: [service]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+    calls:
+      - arguments: {service: checkout-service}
+        evidence_id: redis-client-stale-pool-waiters
+        result:
+          poolSize: 30
+          inUse: 30
+          waitingRequests: 26
+          staleConnections: 24
+          directNewConnectionPing: PONG
+          poolGenerationChangedAfterRecovery: false
+  - name: GetServiceMetrics
+    description: Read frozen bounded Redis dependency metrics.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 15}
+        evidence_id: redis-pool-wait-spike
+        result:
+          redisErrorRatePercent: 49
+          redisPoolWaiters: 26
+          redisServerLatencyMs: 2
+          redisMemoryUsedPercent: 72
+  - name: GetDeploymentChanges
+    description: Read frozen deployment changes for one service.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 60}
+        evidence_id: no-client-release
+        result:
+          changes: []

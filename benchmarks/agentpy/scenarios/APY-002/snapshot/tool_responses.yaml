@@ -1,0 +1,68 @@
+tools:
+  - name: InspectPostgres
+    description: Inspect frozen PostgreSQL sessions and lock waits without changing them.
+    input_schema:
+      type: object
+      required: [database]
+      additionalProperties: false
+      properties:
+        database: {type: string}
+    calls:
+      - arguments: {database: agent_py}
+        evidence_id: postgres-long-transaction-lock-wait
+        result:
+          activeConnections: 18
+          idleConnections: 4
+          oldestTransactionSeconds: 428
+          blockedSessions: 11
+          blockingSessionApplication: reporting-worker
+          dominantWaitEvent: transactionid
+  - name: InspectDatabasePool
+    description: Inspect the frozen application connection-pool state.
+    input_schema:
+      type: object
+      required: [service]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+    calls:
+      - arguments: {service: checkout-service}
+        evidence_id: pool-checked-out-database-waits
+        result:
+          poolSize: 20
+          checkedOut: 20
+          waitingRequests: 37
+          checkoutTotal: 8421
+          checkinTotal: 8419
+          retainedByApplication: 1
+          dominantBorrowerState: waiting_for_database_lock
+  - name: GetServiceMetrics
+    description: Read frozen bounded service traffic and database-pool metrics.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 15}
+        evidence_id: traffic-small-rise
+        result:
+          requestRateChangePercent: 8
+          poolAcquireTimeouts: 37
+          errorRatePercent: 21
+  - name: GetDeploymentChanges
+    description: Read frozen deployment changes for one service.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 60}
+        evidence_id: no-recent-checkout-deployment
+        result:
+          changes: []

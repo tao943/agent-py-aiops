@@ -1,0 +1,20 @@
+primary_cause:
+  component: postgresql
+  mechanism: slow_transaction_pool_exhaustion
+  trigger: reporting_transaction_blocked_checkout_update
+contributing_causes: []
+causal_chain:
+  - a reporting transaction remained active while holding a row lock
+  - checkout requests waited on the locked update while retaining pooled connections
+  - the application pool exhausted available connections and acquisition timed out
+required_evidence:
+  - id: database-work-holds-connections
+    alternatives:
+      - [postgres-long-transaction-lock-wait]
+  - id: pool-waits-on-database-work
+    alternatives:
+      - [pool-checked-out-database-waits]
+required_rule_outs:
+  - application_connection_lifecycle
+forbidden_claims:
+  - traffic_capacity

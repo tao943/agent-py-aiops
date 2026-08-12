@@ -1,0 +1,14 @@
+type: agentpy-original
+origin:
+  - Public PostgreSQL pool exhaustion and transaction troubleshooting mechanisms
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://www.postgresql.org/docs/current/monitoring-stats.html
+  - https://www.postgresql.org/docs/current/explicit-locking.html
+  - https://pigsty.io/docs/pgsql/tutorial/failure/
+license_notes:
+  - PostgreSQL documentation is distributed under the PostgreSQL License.
+  - Pigsty documentation license must be checked at the referenced source before reuse beyond citation.
+accessed: 2026-08-12
+created: 2026-08-12
