@@ -55,4 +55,3 @@
 - API 合约测试固定查询响应为 `data.status` 且无 `data.task`。
 - 批量导入单测覆盖路径约束、dry-run、顺序、fail-fast 和 continue-on-error。
 - 最终真实执行要求 PostgreSQL 任务/文档状态与 Milvus scoped chunks 同时有证据；CLS 不作为前置条件。
-

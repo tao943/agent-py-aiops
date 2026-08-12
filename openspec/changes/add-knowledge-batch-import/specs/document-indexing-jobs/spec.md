@@ -61,4 +61,3 @@
 
 - **WHEN** 候选路径是 symlink、非 Markdown 文件或解析后不在所选根目录内
 - **THEN** 命令 MUST 忽略或拒绝该候选，且 MUST NOT 上传其内容
-

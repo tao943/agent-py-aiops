@@ -21,4 +21,3 @@
 - [ ] 4.2 执行真实批量导入并确认七项 succeeded
 - [ ] 4.3 使用 PostgreSQL 与 Milvus 只读证据核验每个文档
 - [ ] 4.4 更新运行文档并验证全部 OpenSpec
-
