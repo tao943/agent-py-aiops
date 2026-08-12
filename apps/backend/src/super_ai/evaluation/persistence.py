@@ -9,7 +9,13 @@ from typing import cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.evaluation.scoring import EvaluationResult
-from super_ai.memory.repositories import EvaluationResultRecord, EvaluationRunRecord, JsonDict
+from super_ai.memory.repositories import (
+    EVALUATION_FAILURE_CATEGORIES,
+    EvaluationFailureStatus,
+    EvaluationResultRecord,
+    EvaluationRunRecord,
+    JsonDict,
+)
 from super_ai.memory.sqlalchemy import SQLAlchemyEvaluationRepository
 
 _SECRET_KEYS = frozenset(
@@ -69,6 +75,25 @@ class EvaluationRepository:
             completed_at=completed_at,
         )
 
+    async def fail_run(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        failure_category: str,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord:
+        if status not in {"agent_failed", "infra_failed"}:
+            raise ValueError(f"Unsupported evaluation failure status: {status}")
+        if failure_category not in EVALUATION_FAILURE_CATEGORIES:
+            raise ValueError(f"Unsupported evaluation failure category: {failure_category}")
+        return await self._repository.fail_run(
+            run_id=run_id,
+            status=status,
+            failure_category=failure_category,
+            completed_at=completed_at,
+        )
+
     async def save_result(
         self,
         *,
@@ -103,6 +128,47 @@ class EvaluationRepository:
                 for reason in result.reasons
             ],
             hard_gate=result.hard_gate,
+            created_at=created_at,
+        )
+
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        result_id: str,
+        result: EvaluationResult,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord]:
+        return await self._repository.finalize_run(
+            run_id=run_id,
+            result_id=result_id,
+            dimension_scores={
+                "outcome": result.outcome,
+                "diagnosis": result.diagnosis,
+                "evidence": result.evidence,
+                "process": result.process,
+                "safety": result.safety,
+                "efficiency": result.efficiency,
+            },
+            total=result.total,
+            raw_total=result.raw_total,
+            validity=result.validity,
+            passed=result.passed,
+            failures=list(result.failures),
+            score_reasons=[
+                {
+                    "code": reason.code,
+                    "points": reason.points,
+                    "maximum": reason.maximum,
+                    "evidence_ids": list(reason.evidence_ids),
+                }
+                for reason in result.reasons
+            ],
+            hard_gate=result.hard_gate,
+            diagnostic_task_id=diagnostic_task_id,
+            completed_at=completed_at,
             created_at=created_at,
         )
 

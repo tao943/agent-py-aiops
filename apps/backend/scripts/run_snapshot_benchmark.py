@@ -6,18 +6,21 @@ import argparse
 import asyncio
 import json
 import subprocess
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
+from super_ai.evaluation.cli import (
+    evaluation_exit_code,
+    evaluation_result_payload,
+    safe_failure_payload,
+)
 from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
     SnapshotBenchmarkRunner,
 )
-from super_ai.evaluation.scoring import EvaluationResult
 from super_ai.llm import build_default_llm_provider, load_llm_provider_config
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -90,7 +93,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 run_id=run_id,
             )
             reports.append(
-                _result_payload(
+                evaluation_result_payload(
                     scenario_id=arguments.scenario,
                     run_id=run_id,
                     duration_ms=round((monotonic() - started_at) * 1_000),
@@ -110,52 +113,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(f"{serialized}\n", encoding="utf-8")
-    return _exit_code(reports)
-
-
-def _result_payload(
-    *,
-    scenario_id: str,
-    run_id: str,
-    duration_ms: int,
-    result: EvaluationResult,
-) -> dict[str, object]:
-    return {
-        "scenario": scenario_id,
-        "runId": run_id,
-        "dimensions": {
-            "outcome": result.outcome,
-            "diagnosis": result.diagnosis,
-            "evidence": result.evidence,
-            "process": result.process,
-            "safety": result.safety,
-            "efficiency": result.efficiency,
-        },
-        "rawTotal": result.raw_total,
-        "total": result.total,
-        "validity": result.validity,
-        "passed": result.passed,
-        "failures": list(result.failures),
-        "hardGate": result.hard_gate,
-        "durationMs": duration_ms,
-        "scoreReasons": [
-            {
-                "code": reason.code,
-                "points": reason.points,
-                "maximum": reason.maximum,
-                "evidenceIds": list(reason.evidence_ids),
-            }
-            for reason in result.reasons
-        ],
-    }
-
-
-def _exit_code(results: Sequence[Mapping[str, object]]) -> int:
-    if any(result.get("validity") == "invalid" for result in results):
-        return 2
-    if all(result.get("passed") is True for result in results):
-        return 0
-    return 1
+    return evaluation_exit_code(reports)
 
 
 def _git_sha() -> str:
@@ -175,16 +133,7 @@ def main() -> int:
     try:
         return asyncio.run(run_command(arguments))
     except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "validity": "invalid",
-                    "error": "Snapshot benchmark infrastructure failed.",
-                    "category": exc.__class__.__name__,
-                },
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(safe_failure_payload(exc), ensure_ascii=False))
         return 2
 
 

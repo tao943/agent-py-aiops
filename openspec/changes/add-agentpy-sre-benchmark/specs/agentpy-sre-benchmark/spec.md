@@ -59,3 +59,36 @@ Evaluator SHALL 根据结构化运行产物计算 outcome、diagnosis、evidence
 
 - **WHEN** operator 按 run ID 读取已完成评测
 - **THEN** Repository MUST 返回完整版本信息和 scorecard，且记录 MUST NOT 包含 API key、token 或标准答案正文。
+
+### Requirement: Evaluation failures reach safe terminal states
+
+系统 SHALL 将已创建但未完成的评测明确终止为 `agent_failed` 或 `infra_failed`，并 SHALL 只保存 allowlist failure category，不保存异常原文或敏感信息。
+
+#### Scenario: Agent execution fails
+
+- **WHEN** diagnostic adapter 抛出异常或返回 scenario/mode 不匹配的 artifact
+- **THEN** run MUST 转为 `agent_failed`，category MUST 分别为 `adapter_error` 或 `artifact_invalid`，且 MUST NOT 保持 `pending`。
+
+#### Scenario: Evaluation infrastructure fails
+
+- **WHEN** oracle、scorer 或 scorecard persistence 失败
+- **THEN** run MUST 尽力转为 `infra_failed`，CLI MUST 返回安全错误分类且 MUST NOT 输出异常原文。
+
+#### Scenario: Failure transition is repeated
+
+- **WHEN** 相同 run 以相同终态和 category 重复写入
+- **THEN** Repository MUST 幂等返回已有记录；不同终态或 category MUST 被拒绝。
+
+### Requirement: Evaluation persistence is concurrent and atomic
+
+系统 SHALL 对相同 `run_id` 的并发创建提供确定性幂等语义，并 SHALL 在一个 PostgreSQL 事务中完成 run 与 scorecard。
+
+#### Scenario: Identical run identity is created concurrently
+
+- **WHEN** 两个调用以相同身份并发创建相同 `run_id`
+- **THEN** 二者 MUST 返回同一记录且 MUST NOT 向调用方暴露原始唯一键异常。
+
+#### Scenario: Scorecard finalization fails
+
+- **WHEN** scorecard flush 或 commit 失败
+- **THEN** run MUST NOT 变为 `completed`，且 MUST NOT 留下部分 scorecard。

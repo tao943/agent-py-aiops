@@ -5,11 +5,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 ChatMemoryMode = str
 
 JsonDict = dict[str, object]
+EvaluationFailureStatus = Literal["agent_failed", "infra_failed"]
+EVALUATION_FAILURE_CATEGORIES = frozenset(
+    {
+        "adapter_error",
+        "artifact_invalid",
+        "scenario_error",
+        "evaluation_error",
+        "persistence_error",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +255,7 @@ class EvaluationRunRecord:
     agent_version: JsonDict
     model_configuration: JsonDict
     status: str
+    failure_category: str | None
     diagnostic_task_id: str | None
     created_at: datetime
     started_at: datetime | None
@@ -1264,6 +1275,15 @@ class EvaluationMemoryRepository(Protocol):
         created_at: datetime | None = None,
     ) -> EvaluationRunRecord: ...
 
+    async def fail_run(
+        self,
+        *,
+        run_id: str,
+        status: EvaluationFailureStatus,
+        failure_category: str,
+        completed_at: datetime | None = None,
+    ) -> EvaluationRunRecord: ...
+
     async def complete_run(
         self,
         *,
@@ -1287,6 +1307,24 @@ class EvaluationMemoryRepository(Protocol):
         hard_gate: str | None,
         created_at: datetime | None = None,
     ) -> EvaluationResultRecord: ...
+
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        result_id: str,
+        dimension_scores: JsonDict,
+        total: int,
+        raw_total: int,
+        validity: str,
+        passed: bool,
+        failures: list[str],
+        score_reasons: list[JsonDict],
+        hard_gate: str | None,
+        diagnostic_task_id: str | None,
+        completed_at: datetime | None = None,
+        created_at: datetime | None = None,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord]: ...
 
     async def get_run_with_result(
         self, run_id: str

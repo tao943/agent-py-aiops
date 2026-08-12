@@ -21,3 +21,11 @@
 - [x] 4.1 实现 evaluator 隔离的 Snapshot runner 与 application CLI adapter
 - [x] 4.2 记录精确离线命令、评分解释与阶段边界
 - [x] 4.3 运行目标 pytest、Ruff、Pyright、后端 CI lane 与 OpenSpec validate
+
+## 5. 生产失败路径加固
+
+- [x] 5.1 新增 agent_failed/infra_failed 终态、allowlist category 与 Alembic revision
+- [x] 5.2 实现并发安全 create_run、重复结果幂等与原子 finalize_run
+- [x] 5.3 Runner 对 adapter、artifact、evaluator 和 persistence 失败分类并终止 run
+- [x] 5.4 补齐 CLI 安全错误合同、路径穿越、嵌套答案键与 ReadGroundTruth 测试
+- [x] 5.5 运行全量 pytest、Ruff、Pyright 与 OpenSpec strict validation
