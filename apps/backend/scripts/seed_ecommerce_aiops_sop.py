@@ -10,6 +10,11 @@ from typing import cast
 import httpx
 
 from super_ai.aiops.fixtures import build_java_ecommerce_sop_documents
+from super_ai.documents.index_client import (
+    IndexPollingError,
+    parse_created_task,
+    wait_for_index_task,
+)
 from super_ai.project_config import project_config_section, required_int, required_str
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -61,17 +66,22 @@ def main() -> None:
                 headers=headers,
             )
             task_response.raise_for_status()
-            task = _object(_object(task_response.json())["data"])["task"]
-            task_id = _string(_object(task)["id"])
-            _wait_for_index(
-                client,
-                headers=headers,
-                knowledge_base_id=knowledge_base_id,
-                document_id=document_id,
-                task_id=task_id,
-                poll_interval_seconds=poll_interval,
-                deadline=time.monotonic() + required_int(config, "indexWaitSeconds"),
+            task = parse_created_task(task_response.json())
+            task_id = _string(task["id"])
+            task_endpoint = (
+                f"/knowledge-bases/{knowledge_base_id}/documents/{document_id}"
+                f"/index-tasks/{task_id}"
             )
+            try:
+                wait_for_index_task(
+                    client,
+                    endpoint=task_endpoint,
+                    headers=headers,
+                    poll_interval_seconds=poll_interval,
+                    deadline=time.monotonic() + required_int(config, "indexWaitSeconds"),
+                )
+            except IndexPollingError as exc:
+                raise SystemExit(f"SOP indexing did not complete: {exc}") from exc
             indexed_document_ids.append(document_id)
     print(f"Indexed {len(indexed_document_ids)} {args.profile} SOP documents for {email}.")
 
@@ -92,32 +102,6 @@ def _register_or_login(
         response = client.post("/auth/login", json={"email": email, "password": password})
     response.raise_for_status()
     return _object(_object(response.json())["data"])
-
-
-def _wait_for_index(
-    client: httpx.Client,
-    *,
-    headers: dict[str, str],
-    knowledge_base_id: str,
-    document_id: str,
-    task_id: str,
-    poll_interval_seconds: int,
-    deadline: float,
-) -> None:
-    endpoint = (
-        f"/knowledge-bases/{knowledge_base_id}/documents/{document_id}/index-tasks/{task_id}"
-    )
-    while time.monotonic() < deadline:
-        response = client.get(endpoint, headers=headers)
-        response.raise_for_status()
-        task = _object(_object(response.json())["data"])
-        status = _string(task["status"])
-        if status == "succeeded":
-            return
-        if status == "failed":
-            raise SystemExit("SOP indexing failed; inspect the local backend logs.")
-        time.sleep(poll_interval_seconds)
-    raise SystemExit("Timed out while waiting for SOP indexing.")
 
 
 def _object(value: object) -> dict[str, object]:
