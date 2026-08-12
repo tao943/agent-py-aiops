@@ -1,0 +1,31 @@
+queries:
+  - id: RET-PG-001
+    query: 应用获取 PostgreSQL 连接持续超时，应该同时检查哪些数据库和连接池证据？
+    relevant_documents: [postgres-pool-exhaustion.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [redis-unavailable.md]
+  - id: RET-PG-002
+    query: 接口大量等待可用连接，但数据库仍能响应简单查询，如何判断问题在哪一侧？
+    relevant_documents: [postgres-pool-exhaustion.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [redis-unavailable.md]
+  - id: RET-PG-003
+    query: 数据库没有明显长查询，但连接池借出数量持续高于归还数量，应怎样继续收集证据？
+    relevant_documents: [postgres-pool-exhaustion.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [redis-unavailable.md]
+  - id: RET-REDIS-001
+    query: Redis 请求失败时如何区分服务端、网络路径和客户端连接问题？
+    relevant_documents: [redis-unavailable.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [postgres-pool-exhaustion.md]
+  - id: RET-REDIS-002
+    query: 缓存访问大量失败并开始回源数据库，应该按什么顺序检查？
+    relevant_documents: [redis-unavailable.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [postgres-pool-exhaustion.md]
+  - id: RET-REDIS-003
+    query: Redis 已经可以 PING 通，但应用仍在等待连接池，下一步应检查哪些恢复证据？
+    relevant_documents: [redis-unavailable.md]
+    acceptable_top_k: 3
+    forbidden_top_one: [postgres-pool-exhaustion.md]
