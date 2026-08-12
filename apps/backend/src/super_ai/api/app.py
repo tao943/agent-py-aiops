@@ -909,6 +909,7 @@ def create_app(
                 raise ApiErrorException("VALIDATION_INVALID_ARGUMENT", str(exc)) from exc
             chunking_configuration = _parse_chunking_configuration(chunking)
             content_hash = f"sha256:{sha256(content).hexdigest()}"
+            filename = file.filename or "document"
             repositories = _memory_repositories(request)
             duplicate = await repositories.documents.find_active_by_hash(
                 owner_user_id=user.id,
@@ -917,23 +918,33 @@ def create_app(
             )
             if duplicate is not None and not overwrite:
                 raise ApiErrorException("BUSINESS_CONFLICT")
-            if duplicate is not None:
+            same_filename = (
+                await repositories.documents.find_active_by_filename(
+                    owner_user_id=user.id,
+                    knowledge_base_id=knowledge_base_id,
+                    filename=filename,
+                )
+                if overwrite
+                else None
+            )
+            replacement = duplicate or same_filename
+            if replacement is not None:
                 _delete_document_vectors(
                     request,
                     tenant_id=user.id,
                     knowledge_base_id=knowledge_base_id,
-                    document_id=duplicate.id,
+                    document_id=replacement.id,
                 )
                 await repositories.documents.mark_document_deleted(
                     owner_user_id=user.id,
                     knowledge_base_id=knowledge_base_id,
-                    document_id=duplicate.id,
+                    document_id=replacement.id,
                 )
             document = await repositories.documents.create_document(
                 owner_user_id=user.id,
                 document_id=f"doc_{uuid4().hex}",
                 knowledge_base_id=knowledge_base_id,
-                filename=file.filename or "document",
+                filename=filename,
                 size_bytes=len(content),
                 mime_type=file.content_type or "application/octet-stream",
                 content_hash=content_hash,
@@ -949,7 +960,7 @@ def create_app(
             request,
             {
                 "document": _knowledge_document_payload(document),
-                "duplicateOfDocumentId": duplicate.id if duplicate is not None else None,
+                "duplicateOfDocumentId": replacement.id if replacement is not None else None,
                 "overwrite": overwrite,
             },
             status_code=201,

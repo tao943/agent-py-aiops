@@ -100,6 +100,7 @@ def test_run_reports_configuration_errors_without_traceback(
 def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> None:
     files = _markdown_files(tmp_path, ["b.md", "a.md"])
     requests: list[tuple[str, str]] = []
+    upload_bodies: list[bytes] = []
     responses = iter(
         [
             _upload_response("doc-a"),
@@ -113,6 +114,8 @@ def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> 
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/documents"):
+            upload_bodies.append(request.content)
         response = next(responses)
         response.request = request
         return response
@@ -145,6 +148,8 @@ def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> 
         ("POST", "/knowledge-bases/kb_user-a/documents/doc-b/index-tasks"),
         ("GET", "/knowledge-bases/kb_user-a/documents/doc-b/index-tasks/task-b"),
     ]
+    assert len(upload_bodies) == 2
+    assert all(b'name="overwrite"' in body and b"true" in body for body in upload_bodies)
 
 
 def test_import_batch_stops_after_first_failure_by_default(tmp_path: Path) -> None:

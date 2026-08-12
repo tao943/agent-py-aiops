@@ -133,6 +133,80 @@ async def test_document_upload_rejects_duplicate_without_overwrite_and_replaces_
 
 
 @pytest.mark.asyncio
+async def test_overwrite_replaces_changed_content_with_the_same_filename(
+    migrated_database_url: str,
+) -> None:
+    vector_store = FakeVectorStore()
+    transport = httpx.ASGITransport(
+        app=create_app(database_url=migrated_database_url, vector_store=vector_store)
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        user = await _register(client, "filename-overwrite@example.com", "Filename Overwrite")
+        headers = _auth_headers(user["accessToken"])
+        kb_id = f"kb_{user['user']['id']}"
+
+        first = await client.post(
+            f"/knowledge-bases/{kb_id}/documents",
+            headers=headers,
+            files={"file": ("runbook.md", b"version one", "text/markdown")},
+        )
+        replacement = await client.post(
+            f"/knowledge-bases/{kb_id}/documents",
+            headers=headers,
+            data={"overwrite": "true"},
+            files={"file": ("runbook.md", b"version two", "text/markdown")},
+        )
+        active = await client.get(f"/knowledge-bases/{kb_id}/documents", headers=headers)
+
+        first_id = first.json()["data"]["document"]["id"]
+        replacement_payload = replacement.json()["data"]
+        replacement_id = replacement_payload["document"]["id"]
+        assert first.status_code == 201
+        assert replacement.status_code == 201
+        assert replacement_id != first_id
+        assert replacement_payload["duplicateOfDocumentId"] == first_id
+        assert [item["id"] for item in active.json()["data"]["items"]] == [replacement_id]
+        assert vector_store.deleted_documents == [
+            {
+                "tenant_id": user["user"]["id"],
+                "knowledge_base_id": kb_id,
+                "document_id": first_id,
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_changed_content_with_a_different_filename_does_not_replace_active_document(
+    migrated_database_url: str,
+) -> None:
+    transport = httpx.ASGITransport(app=create_app(database_url=migrated_database_url))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        user = await _register(client, "different-filename@example.com", "Different Filename")
+        headers = _auth_headers(user["accessToken"])
+        kb_id = f"kb_{user['user']['id']}"
+        await client.post(
+            f"/knowledge-bases/{kb_id}/documents",
+            headers=headers,
+            files={"file": ("first.md", b"version one", "text/markdown")},
+        )
+
+        second = await client.post(
+            f"/knowledge-bases/{kb_id}/documents",
+            headers=headers,
+            data={"overwrite": "true"},
+            files={"file": ("second.md", b"version two", "text/markdown")},
+        )
+        active = await client.get(f"/knowledge-bases/{kb_id}/documents", headers=headers)
+
+        assert second.status_code == 201
+        assert second.json()["data"]["duplicateOfDocumentId"] is None
+        assert {item["filename"] for item in active.json()["data"]["items"]} == {
+            "first.md",
+            "second.md",
+        }
+
+
+@pytest.mark.asyncio
 async def test_document_upload_persists_chunking_configuration_and_returns_preview(
     migrated_database_url: str,
 ) -> None:
