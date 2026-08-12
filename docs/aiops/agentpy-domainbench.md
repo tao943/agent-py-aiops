@@ -182,6 +182,16 @@ Agent RAG before/after 对比要等真实两卡导入和 Retrieval Eval 通过�
 场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；当前阶段不运行这组 Agent
 调用，也不为了让检索通过而修改标签或分数。
 
+### 真实检索基线（2026-08-13）
+
+在本地测试 owner 的隔离知识库中，仅更新 PostgreSQL 与 Redis 两张综合卡后执行了一次
+六查询真实基线。Embedding 使用 `qwen3.7-text-embedding`，Rerank 使用
+`qwen3-vl-rerank`；结果为 `Recall@1=1.0`、`Recall@3=1.0`、`MRR=1.0`、
+`forbiddenTopOneRate=0.0`、`citationCompletenessRate=1.0`。PostgreSQL 中旧文档已
+soft-delete，新文档为 indexed；Milvus 中新文档各有两个 chunk，旧文档均无残留 chunk。
+原始安全报告保存在本地 Git 忽略的 `apps/backend/var/benchmarks/retrieval-v1.json`，
+不提交 owner、知识库和文档 ID。
+
 ## 当前阶段边界
 
 这个切片尚未实现 L1/L2 恢复、六个 Live 场景、可选 Judge、剩余八个 Snapshot、

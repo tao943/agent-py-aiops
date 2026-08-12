@@ -14,7 +14,7 @@
 
 - [x] 3.1 以失败测试固定变更内容同名文件的覆盖语义
 - [x] 3.2 实现 scoped filename 查询、向量删除、软删除和新文档创建
-- [ ] 3.3 仅更新两张知识卡并核验 PostgreSQL 与 Milvus
+- [x] 3.3 仅更新两张知识卡并核验 PostgreSQL 与 Milvus
 
 ## 4. 验证与文档
 
