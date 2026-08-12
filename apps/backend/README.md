@@ -25,6 +25,35 @@ uv run pytest -m live_llm tests/test_live_llm.py -q
 真实模型测试会读取被 Git 忽略的 `config/project.json` 和
 `config/user.project.json`，并消耗对应模型额度。
 
+## 审核后知识卡批量导入
+
+`scripts/import_knowledge_batch.py` 复用现有认证、文档上传和持久索引任务 API，
+按文件名顺序导入指定目录第一层的 Markdown。它不会直接查询 PostgreSQL：任务创建
+响应从 `data.task` 解析，后续任务查询从 `data.status` 解析。`pending` 和 `running`
+继续轮询，`succeeded` 才计为成功；`failed`、`cancelled`、协议错误和截止时间超时
+都会产生明确失败结果。HTTP timeout/network error 只在总截止时间内有限重试。
+
+先进行不认证、不发 HTTP 请求的预览：
+
+```powershell
+uv run python scripts/import_knowledge_batch.py --source-dir ../../docs/knowledge-candidates --dry-run
+```
+
+确认文件列表后再执行真实导入：
+
+```powershell
+uv run python scripts/import_knowledge_batch.py --source-dir ../../docs/knowledge-candidates
+```
+
+默认首项失败后停止；需要收集整个批次结果时增加 `--continue-on-error`，只要任一文件
+失败，最终退出码仍为非零。JSON 汇总只包含文件名、文档 ID、任务 ID、状态和安全错误，
+不会输出 token、密码、API Key 或正文。
+
+真实导入需要 PostgreSQL、Milvus、后端和 embedding 模型，会消耗模型额度，因此不属于
+普通 CI。CLS MCP 不可用或 `/ready` 因 CLS 返回 503 不会阻塞文档索引。成功验收必须
+同时确认 PostgreSQL 中 document 为 `indexed`、task 为 `succeeded`，并确认 Milvus 中
+每个 document ID 至少有一个带 owner、tenant 和 knowledge-base scope 的 chunk。
+
 ## AgentPy DomainBench
 
 首个评测切片包含 `APY-003` 与 `APY-006` 两个同为 Nginx 502、但根因不同的

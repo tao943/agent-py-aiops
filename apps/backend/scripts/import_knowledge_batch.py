@@ -17,7 +17,12 @@ if __package__:
 else:
     from knowledge_index_client import IndexPollingError, parse_created_task, wait_for_index_task
 
-from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.project_config import (
+    ProjectConfigurationError,
+    project_config_section,
+    required_int,
+    required_str,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _client_transport: httpx.BaseTransport | None = None
@@ -161,7 +166,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         source_dir = _resolve_source_dir(args.source_dir)
         files = discover_markdown_files(source_dir)
-    except (KeyError, ValueError) as exc:
+    except (KeyError, ProjectConfigurationError, ValueError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
 
@@ -207,7 +212,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 index_wait_seconds=settings.index_wait_seconds,
                 continue_on_error=bool(args.continue_on_error),
             )
-    except (httpx.HTTPError, ValueError) as exc:
+    except (httpx.HTTPError, ProjectConfigurationError, ValueError) as exc:
         print(json.dumps({"error": _safe_error(exc)}, ensure_ascii=False))
         return 2
 

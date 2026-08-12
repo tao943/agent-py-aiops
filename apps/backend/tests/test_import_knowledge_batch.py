@@ -8,6 +8,8 @@ import pytest
 from scripts import import_knowledge_batch
 from scripts.import_knowledge_batch import discover_markdown_files, import_batch, run
 
+from super_ai.project_config import ProjectConfigurationError
+
 
 def test_discover_markdown_files_is_sorted_non_recursive_and_markdown_only(
     tmp_path: Path,
@@ -75,6 +77,24 @@ def test_dry_run_rejects_empty_batch(tmp_path: Path, capsys: pytest.CaptureFixtu
     output = json.loads(capsys.readouterr().out)
     assert exit_code == 2
     assert output == {"dryRun": True, "error": "No Markdown files found.", "total": 0}
+
+
+def test_run_reports_configuration_errors_without_traceback(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_to_resolve(_source_dir: Path | None) -> Path:
+        raise ProjectConfigurationError(
+            "Project config section must be an object: knowledgeBatch"
+        )
+
+    monkeypatch.setattr(import_knowledge_batch, "_resolve_source_dir", fail_to_resolve)
+
+    exit_code = run([])
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert output == {"error": "Project config section must be an object: knowledgeBatch"}
 
 
 def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> None:
