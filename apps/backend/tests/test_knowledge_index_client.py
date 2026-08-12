@@ -4,7 +4,8 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
-from scripts.knowledge_index_client import (
+
+from super_ai.documents.index_client import (
     IndexPollingTimeout,
     IndexProtocolError,
     IndexTaskFailed,

@@ -5,9 +5,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from scripts import import_knowledge_batch
-from scripts.import_knowledge_batch import discover_markdown_files, import_batch, run
 
+from super_ai.documents import batch_import as import_knowledge_batch
+from super_ai.documents.batch_import import discover_markdown_files, import_batch, run
 from super_ai.project_config import ProjectConfigurationError
 
 

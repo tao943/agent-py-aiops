@@ -8,9 +8,13 @@ from pathlib import Path
 from typing import cast
 
 import httpx
-from knowledge_index_client import IndexPollingError, parse_created_task, wait_for_index_task
 
 from super_ai.aiops.fixtures import build_java_ecommerce_sop_documents
+from super_ai.documents.index_client import (
+    IndexPollingError,
+    parse_created_task,
+    wait_for_index_task,
+)
 from super_ai.project_config import project_config_section, required_int, required_str
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]

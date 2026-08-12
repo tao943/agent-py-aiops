@@ -15,7 +15,8 @@ def test_sop_seeder_reuses_shared_index_task_client() -> None:
     imported_names = {
         alias.name
         for node in tree.body
-        if isinstance(node, ast.ImportFrom) and node.module == "knowledge_index_client"
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "super_ai.documents.index_client"
         for alias in node.names
     }
     called_names = {
