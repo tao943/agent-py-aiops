@@ -132,9 +132,16 @@ def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
     )
 
     required = [
+        "APY-002",
         "APY-003",
         "APY-006",
+        "APY-007",
+        "APY-011",
+        "APY-012",
         "uv run python scripts/run_snapshot_benchmark.py",
+        "run_retrieval_benchmark.py",
+        "Recall@3",
+        "Retrieval Eval 不评价诊断正确性",
         "ground_truth.yaml",
         "deterministic_score",
         "Snapshot 不启动故障容器",

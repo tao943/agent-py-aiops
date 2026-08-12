@@ -4,7 +4,22 @@
 确定性评分 → PostgreSQL 留档”的最小闭环。它用于比较 Agent 版本，不是
 OpenSRE 官方 Benchmark，也不使用 OpenSRE 的评分体系。
 
-## 当前两个差分场景
+## 当前六个 Snapshot 场景
+
+当前目录包含 `APY-002`、`APY-003`、`APY-006`、`APY-007`、`APY-011` 和
+`APY-012`。其中 PostgreSQL 和 Redis 各有一对公开输入相同、真实原因不同的差分
+案例：
+
+| 场景对 | 公开现象 | 需要通过证据区分的方向 |
+|---|---|---|
+| APY-002 / APY-011 | 请求等待 PostgreSQL 连接超时 | 数据库事务/锁占用，或应用连接生命周期异常 |
+| APY-007 / APY-012 | 应用 Redis 请求失败 | Redis 服务不可用，或服务恢复后客户端池未恢复 |
+
+四个新场景均为 `agentpy-original` Snapshot，只冻结本项目综合公开资料后构造的观测，
+不声明为博客原样复现，也没有对应 Live 故障注入。每个 oracle 至少要求两个来自不同
+工具的证据里程碑，并要求排除一个最强替代原因；无关弱干扰项不得进入正确因果链。
+
+### Nginx 首个差分切片
 
 `APY-003` 和 `APY-006` 都表现为 Nginx checkout upstream 返回 HTTP 502，
 但正确根因不同：
@@ -32,6 +47,11 @@ Snapshot 不启动故障容器，也不访问 CLS、Alertmanager、Docker、Milv
 直接失败。Runner 先把 `PublicScenario` 和 Snapshot MCP 交给 Agent，Agent 返回
 `RunArtifact` 后 evaluator 才读取 `ground_truth.yaml`。该文件不得进入 Prompt、
 RAG、MCP、诊断报告或业务 API。
+
+公开 RAG 只允许收录通用差分排查卡。`scenario.yaml`、Snapshot 响应、
+`ground_truth.yaml`、provenance、Retrieval 查询标签和评分规则都不得导入知识库。
+PostgreSQL 与 Redis 各使用一张综合卡，让 Agent 根据收集到的证据区分多个原因，
+而不是为每个场景提供一张答案卡。
 
 默认 pytest 使用脚本化 adapter 验证整个隔离和评分合同，不调用真实 DashScope：
 
@@ -125,6 +145,42 @@ FROM aiops_graph_checkpoints WHERE task_id = '<diagnostic-task-id>' ORDER BY cre
 一次只修改 Workflow、Prompt、Tool 或 RAG 中的一个主要变量；先重跑目标场景，再跑
 另一个同症状场景检查回退。比较时同时记录 Git SHA、模型配置、suite version、分项
 得分、失败分类与工具调用数，不能只比较最终总分。
+
+## Retrieval Eval
+
+`benchmarks/agentpy/retrieval/queries.yaml` 保存六条经过审核、无场景答案的查询，覆盖
+PostgreSQL 与 Redis 的明确症状、模糊操作员描述和“强替代原因看似健康”的表达。
+纯评分器计算：
+
+- `Recall@1` 与 `Recall@3`：目标综合排查卡是否进入前 1/3；
+- `MRR`：第一条相关文档的平均倒数排名；
+- `forbiddenTopOneRate`：明确不应第一名的异类卡是否错误占据 Top-1；
+- `citationCompletenessRate`：每个返回结果是否具有 Chunk、文档、知识库、向量分和重排分。
+
+Retrieval Eval 不评价诊断正确性。它只验证问题能否在严格 owner/知识库范围内检索到
+合适的通用知识，以及引用信息是否可审计；根因、证据链和恢复安全仍由 Snapshot 的
+`deterministic_score` 评价。
+
+真实检索必须显式提供 owner 和知识库，按顺序执行六条查询以控制额度：
+
+```powershell
+cd apps/backend
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-v1.json
+```
+
+该命令调用真实 Embedding、Milvus 和 Rerank，消耗对应额度但不调用 Agent Chat，且不
+属于普通 CI。JSON 只保存排名来源、Chunk/文档/知识库 ID、分数、模型名称和耗时；
+正文、excerpt、API key 与原始配置不会写入报告。任一 hit 越过 owner/tenant/KB 边界会
+在评分前失败。
+
+更新两张知识卡时，batch importer 仍使用 `overwrite=true`。同 owner、同知识库、同
+文件名即使正文改变，也会先删除被替换文档的 Milvus chunks，再 soft-delete 旧记录并
+创建新文档；不同文件名不会互相替换。若历史数据已经有多个同名 active 记录，应先
+人工审计，不允许 importer 静默批量删除。
+
+Agent RAG before/after 对比要等真实两卡导入和 Retrieval Eval 通过后再做。届时固定
+场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；当前阶段不运行这组 Agent
+调用，也不为了让检索通过而修改标签或分数。
 
 ## 当前阶段边界
 
