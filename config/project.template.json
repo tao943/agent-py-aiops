@@ -115,6 +115,9 @@
     "pollIntervalSeconds": 2,
     "indexWaitSeconds": 90
   },
+  "knowledgeBatch": {
+    "sourceDir": "docs/knowledge-candidates"
+  },
   "rateLimits": {
     "diagnostic.create": {"capacity": 5, "refillTokens": 1, "refillPeriodSeconds": 30, "failureMode": "local_fallback"},
     "chat.stream": {"capacity": 10, "refillTokens": 1, "refillPeriodSeconds": 6, "failureMode": "local_fallback"},

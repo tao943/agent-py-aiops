@@ -373,7 +373,7 @@ Expected: Pytest, Ruff, and Pyright exit 0. If Ruff cannot lint JSON, remove onl
 Run from `apps/backend`:
 
 ```powershell
-uv run python scripts/import_knowledge_batch.py --source-dir ../../../docs/knowledge-candidates --dry-run
+uv run python scripts/import_knowledge_batch.py --source-dir ../../docs/knowledge-candidates --dry-run
 ```
 
 Expected: exactly the seven currently reviewed Markdown filenames are listed in deterministic order, total `7`, and no credential or document body appears.
@@ -429,7 +429,7 @@ Expected: the backend responds, PostgreSQL and Milvus are healthy, and no secret
 From `apps/backend`:
 
 ```powershell
-uv run python scripts/import_knowledge_batch.py --source-dir ../../../docs/knowledge-candidates
+uv run python scripts/import_knowledge_batch.py --source-dir ../../docs/knowledge-candidates
 ```
 
 Expected: exit 0; the JSON summary reports `succeeded: 7`, `failed: 0`, and seven items with final status `succeeded`. Do not re-run automatically if the command response is ambiguous; inspect persisted state first to avoid duplicates.
