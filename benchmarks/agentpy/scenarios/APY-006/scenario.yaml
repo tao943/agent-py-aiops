@@ -1,5 +1,5 @@
 id: APY-006
-title: Checkout upstream returns 502 after an upstream port change
+title: Checkout requests through the gateway are returning HTTP 502.
 symptom_family: nginx_upstream_5xx
 difficulty: medium
 modes: [snapshot]

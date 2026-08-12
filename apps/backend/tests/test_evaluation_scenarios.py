@@ -133,6 +133,10 @@ def test_paired_502_cases_have_same_symptom_and_different_mechanisms() -> None:
 
     assert process_down.symptom_family == port_mismatch.symptom_family
     assert process_down.alert["alertname"] == port_mismatch.alert["alertname"]
+    assert process_down.title == port_mismatch.title
+    assert process_down.title == "Checkout requests through the gateway are returning HTTP 502."
+    assert process_down.title == process_down.alert["summary"]
+    assert port_mismatch.title == port_mismatch.alert["summary"]
     assert process_oracle.primary_cause.mechanism == "process_unavailable"
     assert port_oracle.primary_cause.mechanism == "upstream_port_mismatch"
 
