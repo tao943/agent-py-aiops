@@ -2824,12 +2824,14 @@ def _parse_chunking_configuration(raw: str) -> dict[str, object]:
     if strategy != "fixed-character":
         result: dict[str, object] = {"strategy": strategy}
         excluded = mapping.get("excludedHeadings", [])
-        if not isinstance(excluded, list) or any(
-            not isinstance(item, str) or not item.strip() for item in excluded
-        ):
+        if not isinstance(excluded, list):
             raise ApiErrorException("VALIDATION_INVALID_ARGUMENT")
-        if excluded:
-            result["excludedHeadings"] = list(dict.fromkeys(excluded))
+        excluded_items = cast(list[object], excluded)
+        if any(not isinstance(item, str) or not item.strip() for item in excluded_items):
+            raise ApiErrorException("VALIDATION_INVALID_ARGUMENT")
+        typed_excluded = [item for item in excluded_items if isinstance(item, str)]
+        if typed_excluded:
+            result["excludedHeadings"] = list(dict.fromkeys(typed_excluded))
         return result
     size = mapping.get("maxCharacters")
     overlap = mapping.get("overlapCharacters")
@@ -2864,7 +2866,8 @@ def _runtime_excluded_headings(configuration: dict[str, object]) -> tuple[str, .
     value = configuration.get("excludedHeadings")
     if not isinstance(value, list):
         return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
+    items = cast(list[object], value)
+    return tuple(item for item in items if isinstance(item, str) and item)
 
 
 def _decode_indexable_document(record: KnowledgeDocumentRecord) -> str:

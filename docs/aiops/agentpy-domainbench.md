@@ -204,6 +204,27 @@ soft-delete，新文档为 indexed；Milvus 中新文档各有两个 chunk，旧
 `forbiddenTopOneRate <= 0.05`、`citationCompletenessRate = 1.00`。30 卡真实导入与
 60 查询真实结果必须在离线回归后另行执行，失败时保留 bad cases，不修改标签送分。
 
+### 30 卡真实 Retrieval 基线（2026-08-13）
+
+30 张卡已导入隔离知识库：PostgreSQL 中 30 个批准文件各有且仅有一个 active indexed
+记录；Milvus 共 180 个 scoped Chunk，每文档 6 个，owner/tenant/KB 越界为 0，来源与
+验证状态 Chunk 为 0。Embedding 使用 `qwen3.7-text-embedding`，Rerank 使用
+`qwen3-vl-rerank`。一次 60 查询真实运行得到：
+
+- `Document Recall@1 = 0.9259`；
+- `Document Recall@3 = 1.0000`；
+- `MRR = 0.9599`；
+- `forbiddenTopOneRate = 0.0185`；
+- `citationCompletenessRate = 0.9833`。
+
+前四项通过，citation 门禁失败。三个返回 hit 是 RRF 中合法的 BM25-only 候选：具有
+BM25、RRF 与 rerank 证据，但不在 vector Top-20，因此 `vectorScore` 为空；其中两个来自
+有答案查询，一个来自无答案探针。这不是 citation 映射丢失。当前不填充伪造的 0 分、
+不过滤 lexical-only hit，也不放宽门禁；后续单独决定 provenance 合同按“实际参与通道”
+审计，还是为 BM25-only 候选补算可比向量分。原始报告位于 Git 忽略的
+`apps/backend/var/benchmarks/retrieval-30-card-v1.json`。本阶段未运行 Docker 故障实验，
+全部知识卡继续保持 `docker_validation: pending`。
+
 ## 当前阶段边界
 
 这个切片尚未实现 L1/L2 恢复、六个 Live 场景、可选 Judge、剩余八个 Snapshot、
