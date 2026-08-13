@@ -76,6 +76,18 @@ class PostgresConnectionConfig:
         )
 
 
+async def rollback_transaction_if_connection_open(
+    connection: Any,
+    transaction: Any,
+) -> None:
+    if connection.is_closed():
+        return
+    try:
+        await transaction.rollback()
+    except (asyncpg.PostgresError, ConnectionError):
+        pass
+
+
 @dataclass(slots=True)
 class _RunConnections:
     blocker: asyncpg.Connection
@@ -289,10 +301,10 @@ class PostgresLockScenarioDriver:
         if state is not None:
             if not state.waiter_task.done():
                 state.waiter_task.cancel()
-            try:
-                await state.blocker_transaction.rollback()
-            except (asyncpg.PostgresError, ConnectionError):
-                pass
+            await rollback_transaction_if_connection_open(
+                state.blocker,
+                state.blocker_transaction,
+            )
             for connection in (state.blocker, state.waiter):
                 if not connection.is_closed():
                     await connection.close()

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
+    rollback_transaction_if_connection_open,
     safe_postgres_evidence,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
@@ -44,3 +47,22 @@ def test_safe_evidence_contains_no_credentials_sql_or_raw_logs() -> None:
     assert "secret-sentinel" not in serialized
     assert "UPDATE" not in serialized
     assert "raw statement" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_rollback_after_backend_termination() -> None:
+    class ClosedConnection:
+        def is_closed(self) -> bool:
+            return True
+
+    class Transaction:
+        rollback_called = False
+
+        async def rollback(self) -> None:
+            self.rollback_called = True
+
+    transaction = Transaction()
+
+    await rollback_transaction_if_connection_open(ClosedConnection(), transaction)
+
+    assert transaction.rollback_called is False
