@@ -230,7 +230,7 @@ expected_no_answer: false
 
 ### 9.2 Citation 完整率
 
-每一个返回 hit 都是 citation 完整率的一个分母。缺 citation、citation 指向其他 hit、缺 chunk/document/KB ID、缺 vector score 或 rerank score，均计为不完整；不能因为缺 citation 就跳过该 hit。
+每一个返回 hit 都是 citation 完整率的一个分母。缺 citation、citation 指向其他 hit或缺 chunk/document/KB ID，均计为不完整；不能因为缺 citation 就跳过该 hit。vector 与 BM25 通道按实际参与情况审计：各通道 rank/score 必须同时存在或同时为空，至少一个召回通道参与；每条最终 hit 还必须具有 RRF score、rerank rank 和 rerank score。合法 BM25-only 或 vector-only hit 不要求伪造另一通道的分数。
 
 tenant/knowledge-base 越界仍是硬失败，不进入评分。
 

@@ -29,12 +29,31 @@ Recall@1、Recall@3、MRR 和禁止 Top-1 SHALL 按 source basename 首次出现
 
 ### Requirement: Citation completeness audits every hit
 
-每一个返回 hit SHALL 对应一个 citation audit 分母项。citation 缺失、错配或缺少 chunk/document/knowledge-base/vector/rerank 字段 SHALL 计为不完整，且 MUST NOT 被静默跳过。
+每一个返回 hit SHALL 对应一个 citation audit 分母项。完整 citation MUST 具有非空 chunk/document/knowledge-base ID，vector 与 BM25 通道各自的 rank/score MUST 同时存在或同时为空，且至少一个召回通道 MUST 参与。每个完整 citation 还 MUST 具有 RRF score、rerank rank 和 rerank score。citation 缺失、错配或上述溯源不一致 SHALL 计为不完整，且 MUST NOT 被静默跳过。
 
 #### Scenario: One of two hits has no citation
 
 - **WHEN** retriever 返回两个 hit 但只返回一个完整 citation
 - **THEN** citation completeness MUST 为 0.5
+
+#### Scenario: A BM25-only hit has consistent provenance
+
+- **WHEN** 一个最终 hit 只有 BM25 rank/score，并具有 RRF score、rerank rank/score 和稳定 ID
+- **THEN** citation MUST 计为完整，且 runner MUST 将其检索通道报告为 BM25，不得伪造 vector score
+
+#### Scenario: Channel rank and score disagree
+
+- **WHEN** citation 具有 vector rank 但缺少 vector score，或具有 BM25 score 但缺少 BM25 rank
+- **THEN** citation MUST 计为不完整
+
+### Requirement: Retrieval channel coverage is diagnostic
+
+runner SHALL 报告 vector、BM25 和同时参与两个通道的 hit 覆盖率。覆盖率 MUST 按全部返回 hit 计算，但 MUST NOT 参与 CLI pass/fail 门槛。
+
+#### Scenario: Single-channel and hybrid hits coexist
+
+- **WHEN** 一次评测包含 vector-only、BM25-only 和 hybrid hits
+- **THEN** runner MUST 分别报告三类通道覆盖率，且 citation completeness MUST 继续按每条 hit 的溯源一致性计算
 
 ### Requirement: Real expanded retrieval remains manual and isolated
 

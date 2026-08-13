@@ -38,7 +38,7 @@
 
 ### 每个 hit 都审计 citation
 
-缺 citation 的 hit 不再从审计列表消失，而是产生不完整 audit，占 citation completeness 分母。任何 owner/tenant/KB 越界仍为硬失败。
+缺 citation 的 hit 不再从审计列表消失，而是产生不完整 audit，占 citation completeness 分母。完整性按实际参与通道审计：vector 与 BM25 的 rank/score 各自成对，至少一个召回通道参与，并要求 RRF score 与 rerank rank/score。合法 BM25-only 和 vector-only hit 不因另一通道为空而失败；rank/score 矛盾则失败。runner 额外输出 vector、BM25 与 hybrid 覆盖率作为诊断，不改变退出门禁。任何 owner/tenant/KB 越界仍为硬失败。
 
 ### 标题感知 Chunk 与治理章节隔离
 
