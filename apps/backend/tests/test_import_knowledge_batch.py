@@ -150,6 +150,10 @@ def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> 
     ]
     assert len(upload_bodies) == 2
     assert all(b'name="overwrite"' in body and b"true" in body for body in upload_bodies)
+    assert all(b'name="chunking"' in body for body in upload_bodies)
+    assert all(b'markdown-heading' in body for body in upload_bodies)
+    assert all(b'excludedHeadings' in body for body in upload_bodies)
+    assert all("来源".encode() in body and "验证状态".encode() in body for body in upload_bodies)
 
 
 def test_import_batch_stops_after_first_failure_by_default(tmp_path: Path) -> None:

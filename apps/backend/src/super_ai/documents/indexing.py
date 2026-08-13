@@ -130,6 +130,7 @@ class DocumentIndexingService:
                 strategy=strategy,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                excluded_headings=_excluded_headings(document),
             )
             if not chunks:
                 raise DocumentIndexingError("Document has no indexable text.")
@@ -226,6 +227,7 @@ def chunk_document_text(
     strategy: str = "legacy-word",
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
+    excluded_headings: Sequence[str] = (),
 ) -> list[DocumentChunk]:
     """Split text deterministically using the document's persisted strategy."""
     effective_chunk_size = DEFAULT_CHUNK_SIZE if chunk_size is None else chunk_size
@@ -239,7 +241,7 @@ def chunk_document_text(
     if not normalized:
         return []
     if strategy == "markdown-heading":
-        return _heading_chunks(normalized, effective_chunk_size)
+        return _heading_chunks(normalized, effective_chunk_size, excluded_headings)
     if strategy == "paragraph":
         return _paragraph_chunks(normalized, effective_chunk_size)
     if strategy == "legacy-word":
@@ -293,7 +295,11 @@ def _paragraph_chunks(text: str, chunk_size: int) -> list[DocumentChunk]:
     return _group_units(paragraphs, text, chunk_size, None)
 
 
-def _heading_chunks(text: str, chunk_size: int) -> list[DocumentChunk]:
+def _heading_chunks(
+    text: str,
+    chunk_size: int,
+    excluded_headings: Sequence[str],
+) -> list[DocumentChunk]:
     splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=[
             ("#", "h1"),
@@ -311,6 +317,8 @@ def _heading_chunks(text: str, chunk_size: int) -> list[DocumentChunk]:
     for document in documents:
         content = document.page_content.strip()
         if not content:
+            continue
+        if _has_excluded_heading(document.metadata, excluded_headings):
             continue
         heading_path = _heading_path(document.metadata)
         start = text.find(content, cursor)
@@ -341,6 +349,11 @@ def _heading_chunks(text: str, chunk_size: int) -> list[DocumentChunk]:
     if chunks:
         return chunks
     return _group_units([text], text, chunk_size, "heading")
+
+
+def _has_excluded_heading(metadata: Mapping[str, object], headings: Sequence[str]) -> bool:
+    excluded = {heading.strip() for heading in headings if heading.strip()}
+    return any(value in excluded for value in metadata.values() if isinstance(value, str))
 
 
 def _chunks_from_contents(
@@ -458,7 +471,22 @@ def _chunking_parameters(document: KnowledgeDocumentRecord) -> dict[str, object]
             "maxCharacters": chunk_size,
             "overlapCharacters": chunk_overlap,
         }
-    return {"strategy": strategy}
+    parameters: dict[str, object] = {"strategy": strategy}
+    excluded_headings = _excluded_headings(document)
+    if excluded_headings:
+        parameters["excludedHeadings"] = list(excluded_headings)
+    return parameters
+
+
+def _excluded_headings(document: KnowledgeDocumentRecord) -> tuple[str, ...]:
+    value = document.metadata.get("chunking")
+    if not isinstance(value, dict):
+        return ()
+    raw = cast(dict[str, object], value).get("excludedHeadings")
+    if not isinstance(raw, list):
+        return ()
+    items = cast(list[object], raw)
+    return tuple(item for item in items if isinstance(item, str) and item)
 
 
 def _vector_chunk_record(

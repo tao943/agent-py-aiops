@@ -47,3 +47,9 @@
 - OpenSRE Redis reference：https://github.com/tracer-cloud/opensre/blob/fbec9fe6f3b51f2b845fa8868856d65908b66ccd/docs/redis.mdx
 
 许可证说明：Redis 与 OpenSRE 内容的适用许可证以各源站为准；AWS re:Post 和 Honeycomb 页面仅作来源引用，未复制原文。本卡片为 AgentPy 原创摘要，访问日期：2026-08-12。
+
+## 验证状态
+
+content_type: agentpy-original-summary
+docker_validation: pending
+reviewed_on: 2026-08-13

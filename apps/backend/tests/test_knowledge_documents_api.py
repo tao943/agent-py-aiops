@@ -217,6 +217,7 @@ async def test_document_upload_persists_chunking_configuration_and_returns_previ
         kb_id = f"kb_{user['user']['id']}"
         configuration = {
             "strategy": "markdown-heading",
+            "excludedHeadings": ["来源", "验证状态"],
         }
         upload = await client.post(
             f"/knowledge-bases/{kb_id}/documents",
@@ -225,7 +226,12 @@ async def test_document_upload_persists_chunking_configuration_and_returns_previ
             files={
                 "file": (
                     "runbook.md",
-                    b"# Restart\nRestart the API.\n\n## Verify\nCheck readiness.",
+                    (
+                        "# Restart\nRestart the API.\n\n"
+                        "## Verify\nCheck readiness.\n\n"
+                        "## 来源\nMust stay out of vector chunks.\n\n"
+                        "## 验证状态\ndocker_validation: pending"
+                    ).encode(),
                     "text/markdown",
                 )
             },
@@ -253,6 +259,9 @@ async def test_document_upload_persists_chunking_configuration_and_returns_previ
     assert preview.status_code == 200
     assert preview.json()["data"]["preview"]["configuration"] == configuration
     assert preview.json()["data"]["preview"]["items"][0]["headingPath"] == "Restart"
+    preview_payload = json.dumps(preview.json(), ensure_ascii=False)
+    assert "Must stay out of vector chunks" not in preview_payload
+    assert "docker_validation" not in preview_payload
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "VALIDATION_INVALID_ARGUMENT"
     assert invalid_fixed.status_code == 400

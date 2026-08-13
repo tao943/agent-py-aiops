@@ -48,3 +48,9 @@
 - 公开事故参考：https://postmortems.app/postmortem/34b4a47b-a3d6-4bda-acc9-57b621f53468
 
 许可证说明：PostgreSQL 文档使用 PostgreSQL License；SQLAlchemy 文档使用 MIT License。其他页面仅作来源引用，未复制原文，进一步复用前应在源站核对许可。本卡片为 AgentPy 原创摘要，访问日期：2026-08-12。
+
+## 验证状态
+
+content_type: agentpy-original-summary
+docker_validation: pending
+reviewed_on: 2026-08-13

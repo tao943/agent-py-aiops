@@ -94,6 +94,40 @@ def test_chunk_document_text_supports_fixed_heading_and_paragraph_strategies() -
     assert [chunk.content for chunk in paragraphs] == ["第一段落内容。", "第二段落内容。"]
 
 
+def test_markdown_heading_chunking_excludes_governance_sections() -> None:
+    text = """# PostgreSQL 排障卡
+
+## 适用现象
+连接等待上升。
+
+## 候选原因
+连接池耗尽。
+
+## 来源
+不得进入向量库的来源说明。
+
+### 许可证
+同样不得进入向量库。
+
+## 验证状态
+docker_validation: pending
+"""
+
+    chunks = chunk_document_text(
+        text,
+        strategy="markdown-heading",
+        excluded_headings=("来源", "验证状态"),
+    )
+
+    assert [chunk.heading_path for chunk in chunks] == [
+        "PostgreSQL 排障卡 / 适用现象",
+        "PostgreSQL 排障卡 / 候选原因",
+    ]
+    indexed = "\n".join(chunk.content for chunk in chunks)
+    assert "不得进入向量库" not in indexed
+    assert "docker_validation" not in indexed
+
+
 @pytest.mark.asyncio
 async def test_document_indexing_service_writes_scoped_chunks_and_marks_success(
     migrated_database_url: str,

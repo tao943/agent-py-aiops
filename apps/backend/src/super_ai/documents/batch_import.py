@@ -26,6 +26,10 @@ from super_ai.project_config import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 _client_transport: httpx.BaseTransport | None = None
+KNOWLEDGE_CARD_CHUNKING = {
+    "strategy": "markdown-heading",
+    "excludedHeadings": ["来源", "验证状态"],
+}
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,10 @@ def import_batch(
             upload = client.post(
                 f"/knowledge-bases/{knowledge_base_id}/documents",
                 headers=headers,
-                data={"overwrite": "true"},
+                data={
+                    "overwrite": "true",
+                    "chunking": json.dumps(KNOWLEDGE_CARD_CHUNKING, ensure_ascii=False),
+                },
                 files={"file": (path.name, path.read_bytes(), "text/markdown")},
             )
             upload.raise_for_status()

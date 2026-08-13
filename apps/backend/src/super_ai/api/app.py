@@ -1002,6 +1002,7 @@ def create_app(
             strategy=cast(str, configuration["strategy"]),
             chunk_size=_runtime_chunk_size(configuration),
             chunk_overlap=_runtime_chunk_overlap(configuration),
+            excluded_headings=_runtime_excluded_headings(configuration),
         )
         return success_response(
             request,
@@ -2821,7 +2822,15 @@ def _parse_chunking_configuration(raw: str) -> dict[str, object]:
             "分片策略只能是 fixed-character、markdown-heading 或 paragraph。",
         )
     if strategy != "fixed-character":
-        return {"strategy": strategy}
+        result: dict[str, object] = {"strategy": strategy}
+        excluded = mapping.get("excludedHeadings", [])
+        if not isinstance(excluded, list) or any(
+            not isinstance(item, str) or not item.strip() for item in excluded
+        ):
+            raise ApiErrorException("VALIDATION_INVALID_ARGUMENT")
+        if excluded:
+            result["excludedHeadings"] = list(dict.fromkeys(excluded))
+        return result
     size = mapping.get("maxCharacters")
     overlap = mapping.get("overlapCharacters")
     if (
@@ -2849,6 +2858,13 @@ def _runtime_chunk_overlap(configuration: dict[str, object]) -> int:
     if configuration.get("strategy") == "fixed-character":
         return cast(int, configuration["overlapCharacters"])
     return 0
+
+
+def _runtime_excluded_headings(configuration: dict[str, object]) -> tuple[str, ...]:
+    value = configuration.get("excludedHeadings")
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
 
 
 def _decode_indexable_document(record: KnowledgeDocumentRecord) -> str:
