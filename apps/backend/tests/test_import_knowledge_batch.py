@@ -180,6 +180,37 @@ def test_import_batch_stops_after_first_failure_by_default(tmp_path: Path) -> No
     assert requests == ["/knowledge-bases/kb_user-a/documents"]
 
 
+def test_duplicate_preflight_stops_before_any_upload(tmp_path: Path) -> None:
+    files = _markdown_files(tmp_path, ["a.md", "b.md"])
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "items": [
+                        {"filename": "a.md", "status": "active"},
+                        {"filename": "a.md", "status": "active"},
+                    ]
+                }
+            },
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+        with pytest.raises(ValueError, match="duplicate active.*a.md"):
+            import_knowledge_batch.assert_no_active_filename_duplicates(
+                client,
+                files=files,
+                user_id="user-a",
+                token="redacted",
+            )
+
+    assert requests == [("GET", "/knowledge-bases/kb_user-a/documents")]
+
+
 def test_import_batch_continues_after_failure_when_requested(tmp_path: Path) -> None:
     files = _markdown_files(tmp_path, ["a.md", "b.md"])
     responses = iter(
@@ -235,8 +266,9 @@ def test_live_run_authenticates_once_and_prints_safe_summary(
                         "accessToken": "server-token",
                     }
                 },
-            ),
-            _upload_response("doc-a"),
+                ),
+                httpx.Response(200, json={"data": {"items": []}}),
+                _upload_response("doc-a"),
             _create_task_response("task-a"),
             _query_task_response("task-a", "succeeded"),
         ]
@@ -279,6 +311,7 @@ def test_live_run_authenticates_once_and_prints_safe_summary(
     assert requests == [
         "/auth/register",
         "/auth/login",
+        "/knowledge-bases/kb_user-a/documents",
         "/knowledge-bases/kb_user-a/documents",
         "/knowledge-bases/kb_user-a/documents/doc-a/index-tasks",
         "/knowledge-bases/kb_user-a/documents/doc-a/index-tasks/task-a",
