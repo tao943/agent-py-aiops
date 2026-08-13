@@ -80,6 +80,26 @@ def test_infrastructure_directory_excludes_application_runtime_assets() -> None:
     assert not (REPO_ROOT / "config" / "project.compose.json").exists()
 
 
+def test_postgres_live_eval_is_isolated_and_does_not_mount_docker_socket() -> None:
+    compose = _read("compose.yaml")
+    initialization = (INFRA_DIR / "postgres" / "init" / "001-create-test-database.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE DATABASE agent_py_live_eval OWNER agent_py;" in initialization
+    assert "docker.sock" not in compose.lower()
+    assert "./postgres/init:/docker-entrypoint-initdb.d:ro" in compose
+
+
+def test_infra_docs_define_manual_docker_live_operation_and_defer_cls() -> None:
+    documentation = _read("README.md")
+
+    assert "APY-LIVE-PG-LOCK-001" in documentation
+    assert "-m live_docker" in documentation
+    assert "agent_py_live_eval" in documentation
+    assert "CLS" in documentation and "延后" in documentation
+
+
 def test_infra_docs_describe_infrastructure_and_local_application_services() -> None:
     infra_readme = _read("README.md")
     root_readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

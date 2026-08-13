@@ -65,6 +65,46 @@ Compose 报告 `healthy` 后再执行 Alembic。开发凭据为数据库 `agent_
 `infra/postgres/init/` 中的 SQL 只会在新的 `postgres-data` 卷初始化时执行。
 项目采用 fresh-database 策略，不提供旧数据库导入或双写路径。
 
+## PostgreSQL Docker Live Eval
+
+首个手动 Live 场景 `APY-LIVE-PG-LOCK-001` 只使用隔离数据库
+`agent_py_live_eval`。它构造确定性的行锁等待，采集 `pg_stat_activity` 与
+`pg_blocking_pids` 两类真实信号，只允许终止当前 run 的 synthetic blocker，随后验证
+业务探针恢复并执行幂等清理。它不会访问开发库 `agent_py` 或测试库 `agent_py_test`，
+也不会挂载 Docker Socket。
+
+首次创建新 volume 时，初始化 SQL 会自动创建该数据库。既有 volume 不会重放 init
+脚本，可安全地只补建缺失数据库：
+
+```powershell
+docker compose -f infra/compose.yaml up -d postgres
+docker compose -f infra/compose.yaml exec -T postgres createdb -U agent_py -O agent_py agent_py_live_eval
+```
+
+如果 `createdb` 报告数据库已存在，可继续运行。先执行不调用 LLM 的真实 driver 合同：
+
+```powershell
+cd apps/backend
+uv run pytest -m live_docker tests/test_live_postgres_docker.py -q
+```
+
+预期耗时约 10 秒。普通 `pytest` 和 GitHub Actions 默认排除 `live_docker`，不会启动或
+修改 Docker。异常退出后可审计当前 run 是否仍有会话或表：
+
+```powershell
+docker compose -f infra/compose.yaml exec -T postgres psql -U agent_py -d agent_py_live_eval -c "SELECT pid, application_name FROM pg_stat_activity WHERE application_name LIKE 'agentpy-live:%';"
+docker compose -f infra/compose.yaml exec -T postgres psql -U agent_py -d agent_py_live_eval -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'live_eval';"
+```
+
+应返回零条 Live 会话和零张 `lock_target_*` 表。只停止 PostgreSQL 且保留数据：
+
+```powershell
+docker compose -f infra/compose.yaml stop postgres
+```
+
+第一版 collector 使用本地 PostgreSQL 结构化证据；腾讯云 CLS 接入延后，通过相同的
+只读 collector 边界实现，不是该场景的运行前提。
+
 ## Redis 可恢复运行时
 
 ```bash

@@ -231,3 +231,21 @@ BM25、RRF 与 rerank 证据，但不在 vector Top-20，因此 `vectorScore` �
 这个切片尚未实现 L1/L2 恢复、六个 Live 场景、可选 Judge、剩余八个 Snapshot、
 故障注入/清理以及 before/after 聚合看板。当前的“闭环”止于诊断、证据、评分和留档；
 自动恢复、人工审批、真实 Docker 故障验证将在后续独立计划中实现。
+
+## 首个 Docker Live 场景
+
+`APY-LIVE-PG-LOCK-001` 将 Snapshot 评测扩展为真实 PostgreSQL 行锁实验：注入器在
+`agent_py_live_eval` 创建当前 run 独占表和 blocker/waiter 会话；collector 向 Agent
+仅暴露等待事件、阻塞边和健康探针，不暴露 DSN、SQL、application name、PID 所有权或
+oracle。Agent 仍运行生产 `AiopsDiagnosticService` 与现有 30 卡 RAG。
+
+恢复边界只允许 `terminate_postgres_backend`，并在执行前重新校验数据库、当前 run 的
+application name、注入记录 PID、waiter 阻塞边、executor/waiter/system 排除项。大范围
+或非 synthetic 会话只能生成审批方案。恢复后必须验证 blocker 消失、waiter 解锁、锁图
+清空、业务探针成功、PostgreSQL 健康且无关会话未受影响；所有路径最终进行 scoped、
+幂等清理。
+
+Live 满分 100：故障确认 10、必要证据 20、多候选差分排查 15、主根因 20、Citation/
+工具审计 10、恢复策略 10、恢复验证 15。ground truth 访问、非白名单动作、跨 run 终止、
+未验证恢复、残留 blocker、cleanup 失败或 scope 隔离失败均为硬门禁。普通 CI 默认排除
+`live_docker`，CLS collector 延后，真实模型 Live Eval 只能手动触发。
