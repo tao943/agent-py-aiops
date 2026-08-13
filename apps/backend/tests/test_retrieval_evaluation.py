@@ -1,3 +1,4 @@
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from super_ai.evaluation.retrieval import (
     RetrievalCitationAudit,
     RetrievalQueryResult,
+    deduplicate_ranked_documents,
     evaluate_retrieval,
     load_retrieval_queries,
 )
@@ -16,22 +18,42 @@ QUERIES = (
     / "retrieval"
     / "queries.yaml"
 )
+KNOWLEDGE = Path(__file__).resolve().parents[3] / "docs" / "knowledge-candidates"
 
 
-def test_loads_six_answer_free_reviewed_queries() -> None:
+def test_loads_sixty_answer_free_reviewed_queries_with_approved_distribution() -> None:
     queries = load_retrieval_queries(QUERIES)
 
-    assert [query.id for query in queries] == [
-        "RET-PG-001",
-        "RET-PG-002",
-        "RET-PG-003",
-        "RET-REDIS-001",
-        "RET-REDIS-002",
-        "RET-REDIS-003",
-    ]
-    assert all(query.relevant_documents for query in queries)
+    assert len(queries) == 60
+    assert sum(not query.expected_no_answer for query in queries) == 54
+    assert sum(query.expected_no_answer for query in queries) == 6
+    distribution = Counter(query.query_type for query in queries)
+    assert distribution == {
+        "explicit_component": 12,
+        "ambiguous_symptom": 14,
+        "log_signal": 12,
+        "operator_perturbation": 8,
+        "cross_component_distractor": 8,
+        "no_answer_probe": 6,
+    }
+    assert all(query.relevant_documents or query.expected_no_answer for query in queries)
     assert all(1 <= query.acceptable_top_k <= 5 for query in queries)
     assert not any("APY-" in query.query for query in queries)
+
+
+def test_answerable_queries_cover_all_cards_with_exactly_twenty_four_second_queries() -> None:
+    queries = load_retrieval_queries(QUERIES)
+    approved_cards = {path.name for path in KNOWLEDGE.glob("*.md")}
+    coverage = Counter(
+        document
+        for query in queries
+        if not query.expected_no_answer
+        for document in query.relevant_documents
+    )
+
+    assert set(coverage) == approved_cards
+    assert set(coverage.values()) <= {1, 2}
+    assert sum(count == 2 for count in coverage.values()) == 24
 
 
 @pytest.mark.parametrize(
@@ -40,7 +62,11 @@ def test_loads_six_answer_free_reviewed_queries() -> None:
         (
             "queries:\n- id: RET-1\n  query: q\n"
             "  relevant_documents: [a.md]\n  acceptable_top_k: 3\n"
-            "- id: RET-1\n  query: q2\n  relevant_documents: [b.md]\n  acceptable_top_k: 3\n",
+            "  type: explicit_component\n  source_type: project-synthesized\n"
+            "  review_status: reviewed\n  expected_no_answer: false\n"
+            "- id: RET-1\n  query: q2\n  relevant_documents: [b.md]\n  acceptable_top_k: 3\n"
+            "  type: explicit_component\n  source_type: project-synthesized\n"
+            "  review_status: reviewed\n  expected_no_answer: false\n",
             "unique",
         ),
         (
@@ -65,6 +91,15 @@ def test_loader_rejects_invalid_or_answer_bearing_labels(
     message: str,
 ) -> None:
     path = tmp_path / "queries.yaml"
+    if "type:" not in yaml_text:
+        yaml_text = yaml_text.replace(
+            "  acceptable_top_k:",
+            "  type: explicit_component\n"
+            "  source_type: project-synthesized\n"
+            "  review_status: reviewed\n"
+            "  expected_no_answer: false\n"
+            "  acceptable_top_k:",
+        )
     path.write_text(yaml_text, encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
@@ -151,3 +186,62 @@ def test_perfect_retrieval_result_scores_one_without_forbidden_top_one() -> None
 def test_evaluate_retrieval_rejects_empty_results() -> None:
     with pytest.raises(ValueError, match="at least one"):
         evaluate_retrieval(())
+
+
+def test_deduplicates_chunk_hits_before_document_ranking() -> None:
+    assert deduplicate_ranked_documents(
+        ("target.md", "target.md", "wrong.md", "target.md")
+    ) == ("target.md", "wrong.md")
+
+
+def test_no_answer_probes_do_not_enter_ranking_metric_denominators() -> None:
+    complete = RetrievalCitationAudit("chunk", "doc", "kb", 0.8, 0.9)
+    report = evaluate_retrieval(
+        (
+            RetrievalQueryResult(
+                query_id="answerable",
+                relevant_documents=("target.md",),
+                forbidden_top_one=(),
+                ranked_documents=("target.md", "target.md", "wrong.md"),
+                citations=(complete, complete, complete),
+                expected_no_answer=False,
+            ),
+            RetrievalQueryResult(
+                query_id="probe",
+                relevant_documents=(),
+                forbidden_top_one=(),
+                ranked_documents=("wrong.md",),
+                citations=(complete,),
+                expected_no_answer=True,
+            ),
+        )
+    )
+
+    assert report.query_count == 2
+    assert report.answerable_query_count == 1
+    assert report.no_answer_probe_count == 1
+    assert report.recall_at_1 == 1.0
+    assert report.recall_at_3 == 1.0
+    assert report.mrr == 1.0
+
+
+def test_loader_accepts_reviewed_no_answer_probe(tmp_path: Path) -> None:
+    path = tmp_path / "queries.yaml"
+    path.write_text(
+        "queries:\n"
+        "- id: RET-NONE-1\n"
+        "  type: no_answer_probe\n"
+        "  query: 未覆盖组件出现冷门告警\n"
+        "  relevant_documents: []\n"
+        "  acceptable_top_k: 3\n"
+        "  forbidden_top_one: []\n"
+        "  source_type: project-synthesized\n"
+        "  review_status: reviewed\n"
+        "  expected_no_answer: true\n",
+        encoding="utf-8",
+    )
+
+    query = load_retrieval_queries(path)[0]
+
+    assert query.expected_no_answer is True
+    assert query.relevant_documents == ()

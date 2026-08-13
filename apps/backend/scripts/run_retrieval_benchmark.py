@@ -70,15 +70,16 @@ async def run_queries(
         citations_by_chunk = {citation.chunk_id: citation for citation in result.citations}
         audits = tuple(
             RetrievalCitationAudit(
-                chunk_id=citation.chunk_id,
-                document_id=citation.document_id,
-                knowledge_base_id=citation.knowledge_base_id,
-                vector_score=citation.vector_score,
-                rerank_score=citation.rerank_score,
+                chunk_id=hit.chunk_id,
+                document_id=citation.document_id if citation is not None else hit.document_id,
+                knowledge_base_id=(
+                    citation.knowledge_base_id if citation is not None else hit.knowledge_base_id
+                ),
+                vector_score=citation.vector_score if citation is not None else None,
+                rerank_score=citation.rerank_score if citation is not None else None,
             )
             for hit in result.results
             for citation in (citations_by_chunk.get(hit.chunk_id),)
-            if citation is not None
         )
         ranked_documents = tuple(Path(hit.source).name for hit in result.results)
         scored.append(
@@ -88,12 +89,16 @@ async def run_queries(
                 forbidden_top_one=label.forbidden_top_one,
                 ranked_documents=ranked_documents,
                 citations=audits,
+                expected_no_answer=label.expected_no_answer,
             )
         )
         runs.append(
             {
                 "queryId": label.id,
+                "expectedNoAnswer": label.expected_no_answer,
                 "durationMs": round((monotonic() - started_at) * 1_000),
+                "topOneScore": _rerank_score_at(result.results, 0),
+                "topTwoMargin": _top_two_margin(result.results),
                 "hits": [
                     {
                         "source": Path(hit.source).name,
@@ -115,6 +120,8 @@ async def run_queries(
         "runs": runs,
         "metrics": {
             "queryCount": metrics.query_count,
+            "answerableQueryCount": metrics.answerable_query_count,
+            "noAnswerProbeCount": metrics.no_answer_probe_count,
             "recallAt1": metrics.recall_at_1,
             "recallAt3": metrics.recall_at_3,
             "mrr": metrics.mrr,
@@ -153,10 +160,34 @@ def _passes(payload: Mapping[str, object]) -> bool:
         return False
     typed_metrics = cast(Mapping[str, object], metrics)
     return (
-        typed_metrics.get("recallAt3") == 1.0
-        and typed_metrics.get("forbiddenTopOneRate") == 0.0
+        _number_at_least(typed_metrics.get("recallAt1"), 0.80)
+        and _number_at_least(typed_metrics.get("recallAt3"), 0.95)
+        and _number_at_least(typed_metrics.get("mrr"), 0.85)
+        and _number_at_most(typed_metrics.get("forbiddenTopOneRate"), 0.05)
         and typed_metrics.get("citationCompletenessRate") == 1.0
     )
+
+
+def _number_at_least(value: object, minimum: float) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= minimum
+
+
+def _number_at_most(value: object, maximum: float) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value <= maximum
+
+
+def _rerank_score_at(hits: list[KnowledgeRetrievalHit], index: int) -> float | None:
+    if index >= len(hits):
+        return None
+    return hits[index].rerank_score
+
+
+def _top_two_margin(hits: list[KnowledgeRetrievalHit]) -> float | None:
+    first = _rerank_score_at(hits, 0)
+    second = _rerank_score_at(hits, 1)
+    if first is None or second is None:
+        return None
+    return first - second
 
 
 async def run_command(arguments: argparse.Namespace) -> int:

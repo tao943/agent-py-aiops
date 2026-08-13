@@ -277,12 +277,16 @@ Rerank 配置时，才手动运行 `uv run pytest -m live_llm tests/test_live_ll
 
 ## Manual retrieval benchmark
 
-六条经过审核的 Retrieval Eval 查询必须使用显式的文档 owner 和知识库边界：
+当前 Retrieval Eval 使用 30 张知识卡和 60 条查询，其中 54 条有答案、6 条无答案探针。
+知识卡保持 `docker_validation: pending`，本阶段不声明已完成 Docker 故障复现。检索必须
+使用显式的文档 owner 和知识库边界：
 
 ```powershell
-uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-v1.json
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-30-card-v1.json
 ```
 
 报告只保留排名、文档/Chunk/知识库标识、向量与重排分数以及聚合指标，不写入文档正文或
 凭据。该命令会真实调用 Embedding、Milvus 和 Rerank 并消耗对应额度，因此只允许手动执行，
 不属于普通 CI，也不调用 Agent Chat 模型。
+有答案查询使用 Document Recall@1、Document Recall@3、MRR、forbidden Top-1 和 citation
+完整率门禁。无答案探针只记录 Top-1 与 margin，不进入排名分母，也不影响退出码。

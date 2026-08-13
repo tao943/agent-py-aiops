@@ -22,9 +22,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FakeRetrievalTool:
-    def __init__(self, *, wrong_owner: bool = False) -> None:
+    def __init__(self, *, wrong_owner: bool = False, omit_citation: bool = False) -> None:
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
         self._wrong_owner = wrong_owner
+        self._omit_citation = omit_citation
 
     async def run(
         self,
@@ -72,7 +73,7 @@ class FakeRetrievalTool:
             query=input.query,
             top_k=cast(int, input.top_k),
             results=[hit],
-            citations=[citation],
+            citations=[] if self._omit_citation else [citation],
         )
 
 
@@ -88,9 +89,11 @@ async def test_run_queries_uses_explicit_scope_and_returns_safe_report() -> None
         model_configuration={"embeddingModel": "embed", "rerankModel": "rerank"},
     )
 
-    assert len(tool.calls) == 6
+    assert len(tool.calls) == 60
     assert all(call[1:] == ("owner-a", ("kb-owner-a",)) for call in tool.calls)
-    assert payload["metrics"]["recallAt3"] == 1.0
+    assert payload["metrics"]["queryCount"] == 60
+    assert payload["metrics"]["answerableQueryCount"] == 54
+    assert payload["metrics"]["noAnswerProbeCount"] == 6
     serialized = json.dumps(payload)
     assert "secret chunk content" not in serialized
     assert "apiKey" not in serialized
@@ -121,3 +124,56 @@ def test_parser_requires_explicit_owner_and_knowledge_base() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args([])
+
+
+def test_exit_gate_uses_approved_answerable_thresholds() -> None:
+    passing = {
+        "metrics": {
+            "recallAt1": 0.80,
+            "recallAt3": 0.95,
+            "mrr": 0.85,
+            "forbiddenTopOneRate": 0.05,
+            "citationCompletenessRate": 1.0,
+        }
+    }
+
+    assert MODULE._passes(passing) is True
+    for metric, failing_value in (
+        ("recallAt1", 0.79),
+        ("recallAt3", 0.94),
+        ("mrr", 0.84),
+        ("forbiddenTopOneRate", 0.06),
+        ("citationCompletenessRate", 0.99),
+    ):
+        failing = json.loads(json.dumps(passing))
+        failing["metrics"][metric] = failing_value
+        assert MODULE._passes(failing) is False
+
+
+@pytest.mark.asyncio
+async def test_no_answer_probe_reports_top_one_score_and_margin() -> None:
+    payload = await MODULE.run_queries(
+        FakeRetrievalTool(),
+        owner_user_id="owner-a",
+        knowledge_base_id="kb-owner-a",
+        queries_path=MODULE.DEFAULT_QUERIES,
+        model_configuration={},
+    )
+
+    probe = next(run for run in payload["runs"] if run["queryId"] == "RET-N-001")
+    assert probe["expectedNoAnswer"] is True
+    assert probe["topOneScore"] == 0.9
+    assert probe["topTwoMargin"] is None
+
+
+@pytest.mark.asyncio
+async def test_missing_citation_counts_as_incomplete_instead_of_disappearing() -> None:
+    payload = await MODULE.run_queries(
+        FakeRetrievalTool(omit_citation=True),
+        owner_user_id="owner-a",
+        knowledge_base_id="kb-owner-a",
+        queries_path=MODULE.DEFAULT_QUERIES,
+        model_configuration={},
+    )
+
+    assert payload["metrics"]["citationCompletenessRate"] == 0.0

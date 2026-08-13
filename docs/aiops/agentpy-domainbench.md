@@ -148,11 +148,18 @@ FROM aiops_graph_checkpoints WHERE task_id = '<diagnostic-task-id>' ORDER BY cre
 
 ## Retrieval Eval
 
-`benchmarks/agentpy/retrieval/queries.yaml` 保存六条经过审核、无场景答案的查询，覆盖
-PostgreSQL 与 Redis 的明确症状、模糊操作员描述和“强替代原因看似健康”的表达。
+`docs/knowledge-candidates` 当前包含 30 张原创差分排障卡；每张卡的
+`docker_validation: pending` 表示完成了来源与结构审核，但尚未在下一阶段 Docker 故障
+实验中验证。六个运维章节进入向量索引，来源和验证状态仅保留在 PostgreSQL 完整原文与
+metadata 中。当前 audit 预期共 180 个 Chunk。
+
+`benchmarks/agentpy/retrieval/queries.yaml` 保存 60 条经过审核且不含场景答案的查询：
+54 条有答案查询覆盖全部 30 张卡，6 条无答案探针用于观察知识域外查询的 Top-1 分数与
+Top-2 margin。探针不进入 Recall/MRR 分母，也不影响退出码，只有得到独立校准集后才设置
+拒答阈值。
 纯评分器计算：
 
-- `Recall@1` 与 `Recall@3`：目标综合排查卡是否进入前 1/3；
+- `Document Recall@1` 与 `Document Recall@3`：Chunk hits 按来源文档首次出现去重后，目标卡是否进入前 1/3；
 - `MRR`：第一条相关文档的平均倒数排名；
 - `forbiddenTopOneRate`：明确不应第一名的异类卡是否错误占据 Top-1；
 - `citationCompletenessRate`：每个返回结果是否具有 Chunk、文档、知识库、向量分和重排分。
@@ -161,11 +168,11 @@ Retrieval Eval 不评价诊断正确性。它只验证问题能否在严格 owne
 合适的通用知识，以及引用信息是否可审计；根因、证据链和恢复安全仍由 Snapshot 的
 `deterministic_score` 评价。
 
-真实检索必须显式提供 owner 和知识库，按顺序执行六条查询以控制额度：
+真实检索必须显式提供 owner 和知识库，按顺序执行 60 条查询以控制额度：
 
 ```powershell
 cd apps/backend
-uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-v1.json
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-30-card-v1.json
 ```
 
 该命令调用真实 Embedding、Milvus 和 Rerank，消耗对应额度但不调用 Agent Chat，且不
@@ -182,7 +189,7 @@ Agent RAG before/after 对比要等真实两卡导入和 Retrieval Eval 通过�
 场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；当前阶段不运行这组 Agent
 调用，也不为了让检索通过而修改标签或分数。
 
-### 真实检索基线（2026-08-13）
+### 历史两卡 smoke 基线（2026-08-13）
 
 在本地测试 owner 的隔离知识库中，仅更新 PostgreSQL 与 Redis 两张综合卡后执行了一次
 六查询真实基线。Embedding 使用 `qwen3.7-text-embedding`，Rerank 使用
@@ -191,6 +198,11 @@ Agent RAG before/after 对比要等真实两卡导入和 Retrieval Eval 通过�
 soft-delete，新文档为 indexed；Milvus 中新文档各有两个 chunk，旧文档均无残留 chunk。
 原始安全报告保存在本地 Git 忽略的 `apps/backend/var/benchmarks/retrieval-v1.json`，
 不提交 owner、知识库和文档 ID。
+
+该结果仅证明真实服务链路可用，不代表 30 卡难度下的正式基线。新版门禁为有答案查询
+`Document Recall@1 >= 0.80`、`Document Recall@3 >= 0.95`、`MRR >= 0.85`、
+`forbiddenTopOneRate <= 0.05`、`citationCompletenessRate = 1.00`。30 卡真实导入与
+60 查询真实结果必须在离线回归后另行执行，失败时保留 bad cases，不修改标签送分。
 
 ## 当前阶段边界
 
