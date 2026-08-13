@@ -1,0 +1,20 @@
+primary_cause:
+  component: checkout-service
+  mechanism: borrowed_connection_not_returned
+  trigger: exception_path_skipped_connection_cleanup
+contributing_causes: []
+causal_chain:
+  - an exception path borrowed connections without completing cleanup
+  - checked-out connections accumulated while database work remained short and unblocked
+  - pool waiters grew until connection acquisition timed out
+required_evidence:
+  - id: checkout-checkin-divergence
+    alternatives:
+      - [pool-borrow-return-divergence]
+  - id: database-is-not-holding-connections
+    alternatives:
+      - [postgres-no-long-work-or-locks]
+required_rule_outs:
+  - slow_database_work
+forbidden_claims:
+  - traffic_capacity

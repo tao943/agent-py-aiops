@@ -1,9 +1,56 @@
-# PostgreSQL连接池耗尽：区分泄漏、慢事务和容量不足
+# PostgreSQL 连接获取超时：区分慢事务、连接生命周期和容量问题
 
-典型症状是请求等待连接超时、延迟上升、连接数接近上限。检查应用池参数、活跃和空闲连接、pg_stat_activity、长事务、锁等待、慢查询、泄漏迹象以及发布和流量变化。
+## 适用现象
 
-长事务占用连接时调查事务边界和锁；空闲连接持续增长时调查连接未归还；活跃请求和连接数同步增长时判断容量与并发配置是否失配。不要仅增大max_connections，高风险终止事务和修改池参数必须审批。
+应用从连接池获取 PostgreSQL 连接持续超时，请求延迟和错误率上升，池内可用连接接近零。连接数接近池上限只是共同表象，不能单独说明是数据库慢、应用未归还连接或容量不足。
 
-来源：https://postmortems.app/postmortem/34b4a47b-a3d6-4bda-acc9-57b621f53468
-来源：https://pigsty.io/docs/pgsql/tutorial/failure/
-本卡片为AgentPy原创摘要，访问日期：2026-08-12
+## 候选原因
+
+- 慢事务或锁等待：连接已经借出，但长期等待查询、事务或数据库锁完成。
+- 应用连接生命周期异常：某些请求路径借出连接后没有可靠归还，连接逐步从池中消失。
+- 容量与并发失配：有效请求并发真实超过池容量，连接借出和归还总体仍保持平衡。
+- 数据库不可达：网络、认证或数据库服务故障也可能表现为连接等待，但错误类型和服务端会话状态通常不同。
+
+## 建议证据
+
+同时收集数据库侧和应用侧证据：
+
+1. `pg_stat_activity` 中会话状态、事务年龄、查询持续时间和 wait event。
+2. 锁等待关系、阻塞者、被阻塞会话数量和对应业务操作。
+3. 连接池大小、已借出、空闲、等待请求以及累计借出/归还计数。
+4. 借出连接的请求路径、持有时间分布和异常/取消路径的清理记录。
+5. 请求并发、连接获取耗时、数据库查询耗时与错误率的同时间窗口变化。
+6. 最近应用发布、池配置变化、数据库变更和流量变化。
+
+## 如何区分
+
+- 数据库存在持续长事务或明确锁等待，同时池中多数连接正在等待数据库工作：优先调查事务边界、阻塞链和慢查询。
+- 数据库查询短且没有明显阻塞，但累计借出与归还长期背离，连接集中在少数请求路径：优先调查连接生命周期和异常清理。
+- 借出与归还保持平衡，连接使用量随有效并发同步上升且数据库处理正常：再评估池容量、服务实例数和并发预算。
+- 数据库没有对应会话且客户端报告连接建立、认证或网络错误：先排查可达性，不要误判为池耗尽。
+
+这些信号需要组合解释。连接数高可能是结果而不是原因；一次流量上涨或一次发布也只能作为时间关联，不能替代数据库和连接池证据。
+
+## 安全恢复边界
+
+先保存会话、锁、池和流量证据。不要直接扩大 `max_connections`，因为它可能把资源压力转移到数据库；终止事务、修改池参数或回滚发布属于需要审批的动作。测试环境可以先停止单一阻塞工作或修复一个可复现的连接清理路径，并保留回滚方式。
+
+## 恢复后验证
+
+验证连接获取超时归零或明显下降、池等待者持续减少、借出/归还重新平衡、长事务与锁等待消失、数据库 CPU/内存保持安全，并通过端到端业务请求确认恢复。短暂恢复后再次恶化说明根因仍存在。
+
+## 来源
+
+- PostgreSQL Monitoring Database Activity：https://www.postgresql.org/docs/current/monitoring-stats.html
+- PostgreSQL Explicit Locking：https://www.postgresql.org/docs/current/explicit-locking.html
+- SQLAlchemy Connection Pooling：https://docs.sqlalchemy.org/en/20/core/pooling.html
+- Pigsty PostgreSQL Failure Tutorial：https://pigsty.io/docs/pgsql/tutorial/failure/
+- 公开事故参考：https://postmortems.app/postmortem/34b4a47b-a3d6-4bda-acc9-57b621f53468
+
+许可证说明：PostgreSQL 文档使用 PostgreSQL License；SQLAlchemy 文档使用 MIT License。其他页面仅作来源引用，未复制原文，进一步复用前应在源站核对许可。本卡片为 AgentPy 原创摘要，访问日期：2026-08-12。
+
+## 验证状态
+
+content_type: agentpy-original-summary
+docker_validation: pending
+reviewed_on: 2026-08-13

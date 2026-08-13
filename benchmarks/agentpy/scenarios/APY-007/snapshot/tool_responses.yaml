@@ -1,0 +1,69 @@
+tools:
+  - name: InspectRedis
+    description: Inspect frozen Redis service health without changing it.
+    input_schema:
+      type: object
+      required: [instance]
+      additionalProperties: false
+      properties:
+        instance: {type: string}
+    calls:
+      - arguments: {instance: cache-primary}
+        evidence_id: redis-stopped-no-listener
+        result:
+          processStatus: stopped
+          listening: false
+          configuredPort: 6379
+          ping: unavailable
+          memoryUsedPercent: null
+  - name: InspectRedisClientPool
+    description: Inspect frozen Redis client-pool state for one service.
+    input_schema:
+      type: object
+      required: [service]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+    calls:
+      - arguments: {service: checkout-service}
+        evidence_id: redis-client-connection-refused
+        result:
+          poolSize: 30
+          inUse: 4
+          waitingRequests: 0
+          staleConnections: 0
+          lastError: connection refused
+          reconnectAttempts: 6
+  - name: GetServiceMetrics
+    description: Read frozen bounded Redis dependency metrics.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 15}
+        evidence_id: redis-failure-spike
+        result:
+          redisErrorRatePercent: 74
+          redisPoolWaiters: 0
+          fallbackDatabaseQueriesPerSecond: 42
+  - name: GetDeploymentChanges
+    description: Read frozen deployment changes for one service.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: checkout-service, windowMinutes: 60}
+        evidence_id: unrelated-ui-release
+        result:
+          changes:
+            - component: storefront-ui
+              kind: application-release
+              summary: product card styling update

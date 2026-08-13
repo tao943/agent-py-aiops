@@ -1,0 +1,20 @@
+primary_cause:
+  component: checkout-service
+  mechanism: stale_connections_retained_after_recovery
+  trigger: client_pool_did_not_rebuild_after_redis_restart
+contributing_causes: []
+causal_chain:
+  - Redis recovered and accepted direct PING requests
+  - the application pool retained unusable pre-recovery connections
+  - borrowers waited on the client pool and Redis-backed requests failed
+required_evidence:
+  - id: redis-server-is-healthy
+    alternatives:
+      - [redis-healthy-ping-success]
+  - id: client-pool-retains-stale-connections
+    alternatives:
+      - [redis-client-stale-pool-waiters]
+required_rule_outs:
+  - redis_server_availability
+forbidden_claims:
+  - redis_network_path

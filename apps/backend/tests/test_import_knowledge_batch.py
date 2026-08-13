@@ -100,6 +100,7 @@ def test_run_reports_configuration_errors_without_traceback(
 def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> None:
     files = _markdown_files(tmp_path, ["b.md", "a.md"])
     requests: list[tuple[str, str]] = []
+    upload_bodies: list[bytes] = []
     responses = iter(
         [
             _upload_response("doc-a"),
@@ -113,6 +114,8 @@ def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> 
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/documents"):
+            upload_bodies.append(request.content)
         response = next(responses)
         response.request = request
         return response
@@ -145,6 +148,12 @@ def test_import_batch_uploads_and_indexes_files_sequentially(tmp_path: Path) -> 
         ("POST", "/knowledge-bases/kb_user-a/documents/doc-b/index-tasks"),
         ("GET", "/knowledge-bases/kb_user-a/documents/doc-b/index-tasks/task-b"),
     ]
+    assert len(upload_bodies) == 2
+    assert all(b'name="overwrite"' in body and b"true" in body for body in upload_bodies)
+    assert all(b'name="chunking"' in body for body in upload_bodies)
+    assert all(b'markdown-heading' in body for body in upload_bodies)
+    assert all(b'excludedHeadings' in body for body in upload_bodies)
+    assert all("来源".encode() in body and "验证状态".encode() in body for body in upload_bodies)
 
 
 def test_import_batch_stops_after_first_failure_by_default(tmp_path: Path) -> None:
@@ -169,6 +178,37 @@ def test_import_batch_stops_after_first_failure_by_default(tmp_path: Path) -> No
     assert summary.failed == 1
     assert [result.filename for result in summary.results] == ["a.md"]
     assert requests == ["/knowledge-bases/kb_user-a/documents"]
+
+
+def test_duplicate_preflight_stops_before_any_upload(tmp_path: Path) -> None:
+    files = _markdown_files(tmp_path, ["a.md", "b.md"])
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "items": [
+                        {"filename": "a.md", "status": "active"},
+                        {"filename": "a.md", "status": "active"},
+                    ]
+                }
+            },
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+        with pytest.raises(ValueError, match="duplicate active.*a.md"):
+            import_knowledge_batch.assert_no_active_filename_duplicates(
+                client,
+                files=files,
+                user_id="user-a",
+                token="redacted",
+            )
+
+    assert requests == [("GET", "/knowledge-bases/kb_user-a/documents")]
 
 
 def test_import_batch_continues_after_failure_when_requested(tmp_path: Path) -> None:
@@ -226,8 +266,9 @@ def test_live_run_authenticates_once_and_prints_safe_summary(
                         "accessToken": "server-token",
                     }
                 },
-            ),
-            _upload_response("doc-a"),
+                ),
+                httpx.Response(200, json={"data": {"items": []}}),
+                _upload_response("doc-a"),
             _create_task_response("task-a"),
             _query_task_response("task-a", "succeeded"),
         ]
@@ -270,6 +311,7 @@ def test_live_run_authenticates_once_and_prints_safe_summary(
     assert requests == [
         "/auth/register",
         "/auth/login",
+        "/knowledge-bases/kb_user-a/documents",
         "/knowledge-bases/kb_user-a/documents",
         "/knowledge-bases/kb_user-a/documents/doc-a/index-tasks",
         "/knowledge-bases/kb_user-a/documents/doc-a/index-tasks/task-a",

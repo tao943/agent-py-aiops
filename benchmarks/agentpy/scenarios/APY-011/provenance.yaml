@@ -1,0 +1,15 @@
+type: agentpy-original
+origin:
+  - Public connection-pool lifecycle and PostgreSQL monitoring mechanisms
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://www.postgresql.org/docs/current/monitoring-stats.html
+  - https://docs.sqlalchemy.org/en/20/core/pooling.html
+  - https://postmortems.app/postmortem/34b4a47b-a3d6-4bda-acc9-57b621f53468
+license_notes:
+  - PostgreSQL documentation uses the PostgreSQL License.
+  - SQLAlchemy documentation uses the MIT License.
+  - The postmortem is cited as a public reference and is not copied.
+accessed: 2026-08-12
+created: 2026-08-12

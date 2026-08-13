@@ -636,6 +636,16 @@ class KnowledgeDocumentRepository(Protocol):
         """Find an active document by scoped content hash."""
         ...
 
+    async def find_active_by_filename(
+        self,
+        *,
+        owner_user_id: str,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocumentRecord | None:
+        """Find the newest active document by exact scoped filename."""
+        ...
+
     async def mark_document_deleted(
         self,
         *,

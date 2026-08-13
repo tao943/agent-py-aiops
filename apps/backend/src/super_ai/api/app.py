@@ -909,6 +909,7 @@ def create_app(
                 raise ApiErrorException("VALIDATION_INVALID_ARGUMENT", str(exc)) from exc
             chunking_configuration = _parse_chunking_configuration(chunking)
             content_hash = f"sha256:{sha256(content).hexdigest()}"
+            filename = file.filename or "document"
             repositories = _memory_repositories(request)
             duplicate = await repositories.documents.find_active_by_hash(
                 owner_user_id=user.id,
@@ -917,23 +918,33 @@ def create_app(
             )
             if duplicate is not None and not overwrite:
                 raise ApiErrorException("BUSINESS_CONFLICT")
-            if duplicate is not None:
+            same_filename = (
+                await repositories.documents.find_active_by_filename(
+                    owner_user_id=user.id,
+                    knowledge_base_id=knowledge_base_id,
+                    filename=filename,
+                )
+                if overwrite
+                else None
+            )
+            replacement = duplicate or same_filename
+            if replacement is not None:
                 _delete_document_vectors(
                     request,
                     tenant_id=user.id,
                     knowledge_base_id=knowledge_base_id,
-                    document_id=duplicate.id,
+                    document_id=replacement.id,
                 )
                 await repositories.documents.mark_document_deleted(
                     owner_user_id=user.id,
                     knowledge_base_id=knowledge_base_id,
-                    document_id=duplicate.id,
+                    document_id=replacement.id,
                 )
             document = await repositories.documents.create_document(
                 owner_user_id=user.id,
                 document_id=f"doc_{uuid4().hex}",
                 knowledge_base_id=knowledge_base_id,
-                filename=file.filename or "document",
+                filename=filename,
                 size_bytes=len(content),
                 mime_type=file.content_type or "application/octet-stream",
                 content_hash=content_hash,
@@ -949,7 +960,7 @@ def create_app(
             request,
             {
                 "document": _knowledge_document_payload(document),
-                "duplicateOfDocumentId": duplicate.id if duplicate is not None else None,
+                "duplicateOfDocumentId": replacement.id if replacement is not None else None,
                 "overwrite": overwrite,
             },
             status_code=201,
@@ -991,6 +1002,7 @@ def create_app(
             strategy=cast(str, configuration["strategy"]),
             chunk_size=_runtime_chunk_size(configuration),
             chunk_overlap=_runtime_chunk_overlap(configuration),
+            excluded_headings=_runtime_excluded_headings(configuration),
         )
         return success_response(
             request,
@@ -2810,7 +2822,17 @@ def _parse_chunking_configuration(raw: str) -> dict[str, object]:
             "分片策略只能是 fixed-character、markdown-heading 或 paragraph。",
         )
     if strategy != "fixed-character":
-        return {"strategy": strategy}
+        result: dict[str, object] = {"strategy": strategy}
+        excluded = mapping.get("excludedHeadings", [])
+        if not isinstance(excluded, list):
+            raise ApiErrorException("VALIDATION_INVALID_ARGUMENT")
+        excluded_items = cast(list[object], excluded)
+        if any(not isinstance(item, str) or not item.strip() for item in excluded_items):
+            raise ApiErrorException("VALIDATION_INVALID_ARGUMENT")
+        typed_excluded = [item for item in excluded_items if isinstance(item, str)]
+        if typed_excluded:
+            result["excludedHeadings"] = list(dict.fromkeys(typed_excluded))
+        return result
     size = mapping.get("maxCharacters")
     overlap = mapping.get("overlapCharacters")
     if (
@@ -2838,6 +2860,14 @@ def _runtime_chunk_overlap(configuration: dict[str, object]) -> int:
     if configuration.get("strategy") == "fixed-character":
         return cast(int, configuration["overlapCharacters"])
     return 0
+
+
+def _runtime_excluded_headings(configuration: dict[str, object]) -> tuple[str, ...]:
+    value = configuration.get("excludedHeadings")
+    if not isinstance(value, list):
+        return ()
+    items = cast(list[object], value)
+    return tuple(item for item in items if isinstance(item, str) and item)
 
 
 def _decode_indexable_document(record: KnowledgeDocumentRecord) -> str:

@@ -1,0 +1,14 @@
+type: agentpy-original
+origin:
+  - Public Redis client recovery and connection-pool troubleshooting mechanisms
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://redis.io/docs/latest/develop/clients/
+  - https://repost.aws/knowledge-center/elasticache-redis-client-error-messages
+  - https://www.honeycomb.io/blog/using-honeycomb-to-investigate-a-redis-connection-leak
+license_notes:
+  - Redis documentation license applies to the referenced page.
+  - AWS re:Post and Honeycomb materials are cited and not copied.
+accessed: 2026-08-12
+created: 2026-08-12

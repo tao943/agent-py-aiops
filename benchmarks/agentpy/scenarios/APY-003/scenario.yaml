@@ -1,5 +1,5 @@
 id: APY-003
-title: Checkout upstream returns 502 while the process is unavailable
+title: Checkout requests through the gateway are returning HTTP 502.
 symptom_family: nginx_upstream_5xx
 difficulty: medium
 modes: [snapshot]

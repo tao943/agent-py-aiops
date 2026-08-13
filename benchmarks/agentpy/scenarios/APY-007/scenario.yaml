@@ -1,0 +1,18 @@
+id: APY-007
+title: Application requests to Redis are failing.
+symptom_family: redis_request_failure
+difficulty: medium
+modes: [snapshot]
+alert:
+  alertname: RedisRequestFailureHigh
+  service: checkout-service
+  severity: critical
+  summary: Application requests to Redis are failing.
+hypotheses:
+  - id: redis_server_availability
+    description: The Redis server is not accepting client connections.
+  - id: redis_client_connection_lifecycle
+    description: The application client pool cannot recover usable connections.
+  - id: redis_network_path
+    description: The network path between the application and Redis is failing.
+snapshot_file: snapshot/tool_responses.yaml

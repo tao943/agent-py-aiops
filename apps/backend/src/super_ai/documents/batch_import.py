@@ -26,6 +26,10 @@ from super_ai.project_config import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 _client_transport: httpx.BaseTransport | None = None
+KNOWLEDGE_CARD_CHUNKING = {
+    "strategy": "markdown-heading",
+    "excludedHeadings": ["来源", "验证状态"],
+}
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,10 @@ def import_batch(
             upload = client.post(
                 f"/knowledge-bases/{knowledge_base_id}/documents",
                 headers=headers,
-                data={"overwrite": "true"},
+                data={
+                    "overwrite": "true",
+                    "chunking": json.dumps(KNOWLEDGE_CARD_CHUNKING, ensure_ascii=False),
+                },
                 files={"file": (path.name, path.read_bytes(), "text/markdown")},
             )
             upload.raise_for_status()
@@ -139,6 +146,38 @@ def import_batch(
         else:
             results.append(ImportResult(path.name, document_id, task_id, "succeeded"))
     return BatchSummary(tuple(results))
+
+
+def assert_no_active_filename_duplicates(
+    client: httpx.Client,
+    *,
+    files: Sequence[Path],
+    user_id: str,
+    token: str,
+) -> None:
+    """Stop before mutation when a target filename has multiple active records."""
+    knowledge_base_id = f"kb_{user_id}"
+    response = client.get(
+        f"/knowledge-bases/{knowledge_base_id}/documents",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    response.raise_for_status()
+    envelope = _object(response.json(), "response")
+    data = _object(envelope.get("data"), "data")
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("Expected a list at data.items.")
+    targets = {path.name for path in files}
+    active_counts: dict[str, int] = {}
+    for raw_item in cast(list[object], raw_items):
+        item = _object(raw_item, "data.items[]")
+        filename = item.get("filename")
+        if filename in targets and item.get("status", "active") == "active":
+            typed_filename = cast(str, filename)
+            active_counts[typed_filename] = active_counts.get(typed_filename, 0) + 1
+    duplicates = sorted(name for name, count in active_counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"duplicate active knowledge documents: {', '.join(duplicates)}")
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -182,6 +221,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             user = _object(auth.get("user"), "data.user")
             user_id = _required_string(user.get("id"), "data.user.id")
             token = _required_string(auth.get("accessToken"), "data.accessToken")
+            assert_no_active_filename_duplicates(
+                client,
+                files=files,
+                user_id=user_id,
+                token=token,
+            )
             summary = import_batch(
                 client,
                 files=files,

@@ -19,6 +19,14 @@ from super_ai.evaluation.domain import (
     ScenarioBundle,
     ScenarioOracle,
 )
+from super_ai.evaluation.retrieval import (
+    RetrievalCitationAudit,
+    RetrievalEvaluationResult,
+    RetrievalQuery,
+    RetrievalQueryResult,
+    evaluate_retrieval,
+    load_retrieval_queries,
+)
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
@@ -46,6 +54,10 @@ __all__ = [
     "RunArtifact",
     "PublicHypothesis",
     "PublicScenario",
+    "RetrievalCitationAudit",
+    "RetrievalEvaluationResult",
+    "RetrievalQuery",
+    "RetrievalQueryResult",
     "RootCause",
     "ScenarioBundle",
     "ScenarioOracle",
@@ -58,7 +70,9 @@ __all__ = [
     "build_application_diagnostic_input",
     "evaluation_exit_code",
     "evaluation_result_payload",
+    "evaluate_retrieval",
     "load_public_scenario",
+    "load_retrieval_queries",
     "load_scenario_oracle",
     "validate_scenario_bundle",
     "score_run",

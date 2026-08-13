@@ -132,9 +132,16 @@ def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
     )
 
     required = [
+        "APY-002",
         "APY-003",
         "APY-006",
+        "APY-007",
+        "APY-011",
+        "APY-012",
         "uv run python scripts/run_snapshot_benchmark.py",
+        "run_retrieval_benchmark.py",
+        "Recall@3",
+        "Retrieval Eval 不评价诊断正确性",
         "ground_truth.yaml",
         "deterministic_score",
         "Snapshot 不启动故障容器",
@@ -144,3 +151,22 @@ def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
     ]
     for expected in required:
         assert expected in guide
+
+
+def test_retrieval_docs_describe_expanded_catalog_and_probe_boundaries() -> None:
+    guide = (REPO_ROOT / "docs" / "aiops" / "agentpy-domainbench.md").read_text(
+        encoding="utf-8"
+    )
+    readme = (REPO_ROOT / "apps" / "backend" / "README.md").read_text(encoding="utf-8")
+    combined = guide + readme
+
+    for phrase in (
+        "30 张",
+        "60 条",
+        "54 条有答案",
+        "6 条无答案探针",
+        "Document Recall@3",
+        "docker_validation: pending",
+        "不影响退出码",
+    ):
+        assert phrase in combined

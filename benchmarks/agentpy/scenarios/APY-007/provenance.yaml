@@ -1,0 +1,15 @@
+type: agentpy-original
+origin:
+  - Public Redis availability and client error troubleshooting mechanisms
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://redis.io/docs/latest/operate/oss_and_stack/management/debugging/
+  - https://repost.aws/knowledge-center/elasticache-redis-client-error-messages
+  - https://github.com/tracer-cloud/opensre/blob/fbec9fe6f3b51f2b845fa8868856d65908b66ccd/docs/redis.mdx
+license_notes:
+  - Redis documentation license applies to the referenced page.
+  - AWS re:Post material is cited and not copied.
+  - OpenSRE is referenced only for general mechanism context; this scenario is not derived from an OpenSRE case.
+accessed: 2026-08-12
+created: 2026-08-12

@@ -1,0 +1,20 @@
+primary_cause:
+  component: redis
+  mechanism: service_process_stopped
+  trigger: benchmark_redis_service_stopped
+contributing_causes: []
+causal_chain:
+  - the Redis service process stopped and no listener remained on its configured port
+  - application connection attempts were refused before a Redis command could run
+  - Redis-backed operations failed and the application entered degraded behavior
+required_evidence:
+  - id: redis-server-not-listening
+    alternatives:
+      - [redis-stopped-no-listener]
+  - id: client-observed-refusal-not-pool-wait
+    alternatives:
+      - [redis-client-connection-refused]
+required_rule_outs:
+  - redis_client_connection_lifecycle
+forbidden_claims:
+  - redis_network_path

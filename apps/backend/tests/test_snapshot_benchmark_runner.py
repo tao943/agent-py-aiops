@@ -150,6 +150,7 @@ def test_application_diagnostic_input_contains_only_public_scenario_fields() -> 
 
     assert payload["benchmarkScenarioId"] == "APY-003"
     assert payload["benchmarkMode"] == "snapshot"
+    assert payload["query"] == "Checkout requests through the gateway are returning HTTP 502."
     assert "ground_truth" not in serialized
     assert "process_unavailable" not in serialized
     assert "benchmark_container_stopped" not in serialized

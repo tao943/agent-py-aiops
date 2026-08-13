@@ -810,6 +810,28 @@ class SQLAlchemyKnowledgeDocumentRepository:
             row = (await session.scalars(stmt)).first()
         return _knowledge_document_record(row) if row is not None else None
 
+    async def find_active_by_filename(
+        self,
+        *,
+        owner_user_id: str,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocumentRecord | None:
+        stmt = (
+            select(KnowledgeDocumentModel)
+            .where(
+                KnowledgeDocumentModel.owner_user_id == owner_user_id,
+                KnowledgeDocumentModel.knowledge_base_id == knowledge_base_id,
+                KnowledgeDocumentModel.filename == filename,
+                KnowledgeDocumentModel.deleted_at.is_(None),
+                KnowledgeDocumentModel.status != "deleted",
+            )
+            .order_by(KnowledgeDocumentModel.uploaded_at.desc(), KnowledgeDocumentModel.id.asc())
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(stmt)).first()
+        return _knowledge_document_record(row) if row is not None else None
+
     async def mark_document_deleted(
         self,
         *,

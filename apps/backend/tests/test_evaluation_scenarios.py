@@ -1,15 +1,21 @@
+import asyncio
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+import yaml
 
 from super_ai.evaluation import (
     ScenarioBundle,
+    SnapshotMcpClient,
     load_public_scenario,
     load_scenario_oracle,
     validate_scenario_bundle,
 )
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+NEW_PAIRS = (("APY-002", "APY-011"), ("APY-007", "APY-012"))
+NEW_SCENARIOS = tuple(item for pair in NEW_PAIRS for item in pair)
 
 
 @pytest.fixture
@@ -133,6 +139,10 @@ def test_paired_502_cases_have_same_symptom_and_different_mechanisms() -> None:
 
     assert process_down.symptom_family == port_mismatch.symptom_family
     assert process_down.alert["alertname"] == port_mismatch.alert["alertname"]
+    assert process_down.title == port_mismatch.title
+    assert process_down.title == "Checkout requests through the gateway are returning HTTP 502."
+    assert process_down.title == process_down.alert["summary"]
+    assert port_mismatch.title == port_mismatch.alert["summary"]
     assert process_oracle.primary_cause.mechanism == "process_unavailable"
     assert port_oracle.primary_cause.mechanism == "upstream_port_mismatch"
 
@@ -149,4 +159,59 @@ def test_paired_502_cases_have_same_symptom_and_different_mechanisms() -> None:
             oracle=port_oracle,
             root=SCENARIOS / "APY-006",
         )
+    )
+
+
+@pytest.mark.parametrize(("left_id", "right_id"), NEW_PAIRS)
+def test_new_pairs_share_public_inputs_and_differ_in_oracle(
+    left_id: str,
+    right_id: str,
+) -> None:
+    left = load_public_scenario(SCENARIOS / left_id)
+    right = load_public_scenario(SCENARIOS / right_id)
+    left_oracle = load_scenario_oracle(SCENARIOS / left_id)
+    right_oracle = load_scenario_oracle(SCENARIOS / right_id)
+
+    assert left.title == right.title == left.alert["summary"] == right.alert["summary"]
+    assert left.alert == right.alert
+    assert left.hypotheses == right.hypotheses
+    assert left_oracle.primary_cause.mechanism != right_oracle.primary_cause.mechanism
+
+
+@pytest.mark.parametrize("scenario_id", NEW_SCENARIOS)
+def test_new_scenario_has_isolated_evidence_rule_out_and_four_tools(
+    scenario_id: str,
+) -> None:
+    root = SCENARIOS / scenario_id
+    public = load_public_scenario(root)
+    oracle = load_scenario_oracle(root)
+    client = SnapshotMcpClient.from_yaml(root / public.snapshot_file)
+    serialized_public = repr(asdict(public))
+
+    assert len(oracle.required_evidence) >= 2
+    assert len(oracle.required_rule_outs) == 1
+    assert len(asyncio.run(client.discover_tools())) == 4
+    assert oracle.primary_cause.mechanism not in serialized_public
+    assert oracle.primary_cause.trigger not in serialized_public
+    assert all(item.id not in serialized_public for item in oracle.required_evidence)
+    validate_scenario_bundle(
+        ScenarioBundle(
+            public=public,
+            oracle=oracle,
+            root=root,
+        )
+    )
+
+
+@pytest.mark.parametrize("scenario_id", NEW_SCENARIOS)
+def test_new_scenario_records_agentpy_synthetic_provenance(scenario_id: str) -> None:
+    path = SCENARIOS / scenario_id / "provenance.yaml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert payload["type"] == "agentpy-original"
+    assert "project-synthesized" in payload["transformation"]
+    assert str(payload["accessed"]) == "2026-08-12"
+    assert payload["license_notes"]
+    assert all(
+        reference.startswith("https://") for reference in payload["validation_references"]
     )
