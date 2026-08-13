@@ -40,6 +40,10 @@
 
 缺 citation 的 hit 不再从审计列表消失，而是产生不完整 audit，占 citation completeness 分母。任何 owner/tenant/KB 越界仍为硬失败。
 
+### 标题感知 Chunk 与治理章节隔离
+
+知识卡目标为每张 6 至 10 个 Chunk，硬上限 12，30 张卡预期 180 至 300 个 Chunk。六个运维章节进入向量检索；`来源` 与 `验证状态` 保留在 PostgreSQL 的完整 Markdown/metadata 中，但不形成独立 Milvus Chunk。batch importer 显式提交持久化的 `markdown-heading` 与排除标题配置，离线 audit 和真实索引调用同一共享 chunker，避免审计与入库策略漂移。
+
 ## Risks / Trade-offs
 
 - 23 张卡尚未 Docker 验证，因此只能声明资料审核基线，不能声明真实故障已复现。

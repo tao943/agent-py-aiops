@@ -18,6 +18,9 @@
 - 每张卡必须标记 `docker_validation: pending`；本阶段不得宣称已在本项目复现。
 - 不增加依赖，不更换向量库、chunker 或评测框架。
 - 普通 CI 必须离线；真实 Embedding/Rerank 和批量导入只能显式手动运行。
+- 每张卡目标 6..10 个 Chunk、硬上限 12；30 卡预期 180..300 个 Chunk。
+- 六个运维章节进入向量索引；来源与验证状态只保留在 PostgreSQL 完整原文/metadata，不形成独立 Milvus Chunk。
+- catalog audit 与 batch import 必须共享同一 heading-aware 配置；importer 必须显式上传该配置，不能依赖旧默认值。
 - 真实报告不得包含正文、excerpt、凭据、原始配置、owner/KB 的秘密映射或 Diagnosis 答案。
 - 任一 filename 在目标 owner/KB 中出现多个 active 文档、chunk 预览超界、来源审核不完整或模型服务失败时，停止真实导入/评测，不自动清理或伪造结果。
 
@@ -61,7 +64,7 @@ Use schema `spec-driven`. State exact requirements:
 5. Document ranking de-duplicates sources by first appearance before Recall/MRR.
 6. Every returned hit contributes one citation completeness denominator entry, including missing citations.
 7. Benchmark labels and Diagnosis answers never enter RAG.
-8. Real import stops on legacy duplicates or invalid chunk previews.
+8. Real import stops on legacy duplicates, strategy drift or invalid chunk previews.
 ```
 
 - [ ] **Step 2: 创建 capability specs 与任务清单**
@@ -97,7 +100,7 @@ git commit -m "spec: define expanded retrieval benchmark"
 **Interfaces:**
 - Produces: `EXPECTED_CARD_FILENAMES: frozenset[str]` test constant.
 - Produces: `audit_catalog(root: Path) -> dict[str, object]` safe report with filename, chunk count and heading paths only.
-- Consumes: `chunk_document_text(text, strategy="markdown-heading")`.
+- Consumes: `chunk_document_text(text, strategy="markdown-heading", excluded_headings=GOVERNANCE_HEADINGS)`.
 
 - [ ] **Step 1: 写 30 卡目录与结构失败测试**
 
@@ -144,14 +147,18 @@ assert report["documents"][0].keys() == {"filename", "chunkCount", "headingPaths
 assert "secret body" not in json.dumps(report)
 ```
 
-Also assert `ValueError` for zero chunks or more than six chunks.
+Also assert `ValueError` for zero chunks or more than twelve chunks, and reject a card whose six operational headings are not represented.
 
 - [ ] **Step 4: 实现安全 Chunk audit**
 
 The script loads Markdown, calls:
 
 ```python
-chunks = chunk_document_text(text, strategy="markdown-heading")
+chunks = chunk_document_text(
+    text,
+    strategy="markdown-heading",
+    excluded_headings=("来源", "验证状态"),
+)
 ```
 
 It emits filename, `len(chunks)` and non-empty unique `heading_path`; it never serializes `chunk.content`. CLI args:
@@ -161,7 +168,7 @@ It emits filename, `len(chunks)` and non-empty unique `heading_path`; it never s
 --output optional
 ```
 
-Exit 0 only when every file has 1..6 chunks.
+Exit 0 only when every file has 1..12 chunks, all six operational headings are represented, and the two governance headings are absent. The target review band is 6..10 chunks; 11..12 is allowed but reported for review.
 
 - [ ] **Step 5: 验证 audit 单测和静态检查**
 
@@ -371,7 +378,7 @@ Expected: PASS and exactly 30 Markdown cards.
 .venv\Scripts\python.exe scripts/audit_knowledge_catalog.py --source-dir ../../docs/knowledge-candidates --output var/knowledge-import/catalog-audit.json
 ```
 
-Expected: exit 0; `totalDocuments=30`; every chunk count in 1..6; output contains no card body.
+Expected: exit 0; `totalDocuments=30`; every chunk count in 1..12 (target 6..10); all six operational headings and no governance-only heading are present; output contains no card body.
 
 - [ ] **Step 4: 静态检查**
 
@@ -636,7 +643,7 @@ cd apps/backend
 .venv\Scripts\python.exe scripts/audit_knowledge_catalog.py --source-dir var/knowledge-import/thirty-card --output var/knowledge-import/evidence/catalog-audit.json
 ```
 
-Expected: exactly 30 filenames; every chunk count 1..6.
+Expected: exactly 30 filenames; every chunk count 1..12 (target 6..10), with no governance-only Chunk.
 
 - [ ] **Step 3: 认证并记录 owner/KB 的导入前状态**
 
@@ -656,7 +663,7 @@ For every filename assert exactly one active document, `index_status=indexed`, a
 
 - [ ] **Step 6: 核验 Milvus**
 
-List chunks for the explicit owner/KB. Assert every active document ID has 1..6 chunks with matching owner/tenant/KB scope and every replaced document ID has zero chunks. Save only counts/IDs, never content.
+List chunks for the explicit owner/KB. Assert every active document ID has 1..12 chunks (target 6..10), governance headings are absent, owner/tenant/KB scope matches, and every replaced document ID has zero chunks. Save only counts/IDs, never content.
 
 - [ ] **Step 7: 不提交 runtime evidence**
 

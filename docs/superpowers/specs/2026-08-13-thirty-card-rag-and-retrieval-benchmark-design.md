@@ -159,11 +159,13 @@ benchmarks/agentpy/scenarios/**/{snapshot,ground_truth,provenance}
 
 Markdown 继续复用现有 heading-aware chunker，不引入新向量库或 chunk 框架。目标预算：
 
-- 每张卡约 2 至 4 个 chunk；
-- 30 张卡总计约 60 至 120 个 chunk；
+- 每张卡目标 6 至 10 个 chunk，硬上限为 12 个；
+- 30 张卡总计预期约 180 至 300 个 chunk；
 - 单张卡不得因重复来源或模板文本产生大量近重复 chunk。
 
-真实导入前必须生成 chunk 预览，记录文档级 chunk 数和标题路径。若任一文档为 0 chunk、超过 6 chunk 或出现明显断句/模板重复，则先修卡或 chunk 配置，不直接导入。
+八个统一章节中，`适用现象`、`候选原因`、`建议证据`、`如何区分`、`安全恢复边界`、`恢复后验证` 六个运维章节进入向量索引；`来源` 与 `验证状态` 属于治理信息，保留在 PostgreSQL 的完整 Markdown/metadata 中，但不得形成独立 Milvus chunk。标题过滤必须由共享 chunking 实现执行，离线 audit 与真实导入必须使用同一份持久化配置，不能在 audit 脚本中另写一套近似逻辑。
+
+批量 importer 必须显式上传 `markdown-heading` 及治理标题排除配置；不得依赖 API 的旧默认 fixed-character 配置。真实导入前必须生成 chunk 预览，记录文档级 chunk 数和标题路径。若任一文档为 0 chunk、超过 12 chunk、未覆盖六个运维章节或出现明显断句/模板重复，则先修卡或 chunk 配置，不直接导入。
 
 批量导入顺序：dry-run、导入前 active/duplicate 审计、一次 `overwrite=true` 批量导入、PostgreSQL 状态核验、Milvus owner/tenant/KB/document scope 核验。历史重复 active 文档仍不允许静默批量清理。
 
@@ -278,7 +280,7 @@ Citation Completeness   == 1.00
 - 知识候选目录恰好 30 张卡，7 张现有卡保留，23 张新增卡符合分类清单。
 - 每张卡具有统一章节、至少两个独立证据维度、来源/许可和 `docker_validation: pending`。
 - 所有卡通过答案泄漏、敏感信息和 Benchmark contamination 检查。
-- chunk 预览显示每张卡 1 至 6 个可用 chunk，总体无明显模板重复。
+- chunk 预览显示每张卡 6 至 10 个目标 chunk、最多 12 个，治理章节未形成独立向量块，总体无明显模板重复。
 - `queries.yaml` 恰好 60 条，分类数量与设计一致，54 条有答案查询覆盖全部 30 张卡。
 - 6 条无答案探针不进入 Recall/MRR 分母，也不使用未经校准的通过阈值。
 - 文档级指标按首次出现去重，缺失 citation 的 hit 明确计为不完整。

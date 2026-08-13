@@ -7,7 +7,16 @@
 #### Scenario: Catalog is audited before import
 
 - **WHEN** operator 对 `docs/knowledge-candidates` 执行离线 catalog audit
-- **THEN** 文件集合 MUST 与批准目录完全相等，且每张卡 MUST 产生 1 至 6 个 heading-aware Chunk
+- **THEN** 文件集合 MUST 与批准目录完全相等，且每张卡 SHOULD 产生 6 至 10 个、MUST NOT 超过 12 个 heading-aware Chunk
+
+### Requirement: Operational chunks exclude governance-only sections
+
+系统 SHALL 将六个运维章节用于向量检索，并 SHALL 将来源与验证状态保留在 PostgreSQL 完整原文和 metadata 中而不生成独立 Milvus Chunk。离线 audit 与真实索引 MUST 使用同一共享 chunking 实现和同一持久化配置。
+
+#### Scenario: Reviewed card is audited and imported
+
+- **WHEN** operator audit 后通过 batch importer 上传一张知识卡
+- **THEN** importer MUST 显式保存 `markdown-heading` 与治理标题排除配置，audit 和索引结果 MUST 具有相同的 Chunk 数及 heading paths
 
 ### Requirement: Knowledge cards are sourced summaries with pending Docker validation
 
@@ -29,7 +38,7 @@
 
 ### Requirement: Real catalog import stops on unsafe state
 
-真实导入前 SHALL 执行 dry-run、Chunk audit 和 owner/KB/filename active-count 审计。任一 filename 存在多个 active 文档或任一卡 Chunk 数越界时 MUST 停止，且 MUST NOT 自动清理历史记录。
+真实导入前 SHALL 执行 dry-run、Chunk audit 和 owner/KB/filename active-count 审计。任一 filename 存在多个 active 文档、任一卡为 0 Chunk、超过 12 Chunk 或未产生六个运维章节的 Chunk 时 MUST 停止，且 MUST NOT 自动清理历史记录。
 
 #### Scenario: Legacy duplicate filename exists
 
