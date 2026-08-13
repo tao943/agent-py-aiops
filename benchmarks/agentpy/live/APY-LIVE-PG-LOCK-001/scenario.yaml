@@ -1,0 +1,18 @@
+id: APY-LIVE-PG-LOCK-001
+title: PostgreSQL-backed order status updates are timing out while the database remains reachable.
+symptom_family: postgresql-lock-wait
+difficulty: medium
+modes:
+  - live
+driver: postgres_lock_wait
+alert:
+  name: PostgresOrderUpdateLatencyHigh
+  severity: warning
+  summary: Order status updates exceed the bounded request timeout.
+hypotheses:
+  - id: postgres_lock_blocking
+    description: A transaction is holding a row lock required by order status updates.
+  - id: postgres_slow_query_without_lock
+    description: The update itself is slow without a blocking lock relationship.
+  - id: postgres_connectivity_failure
+    description: The database cannot be reached or authenticated.

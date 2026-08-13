@@ -16,6 +16,8 @@ def test_backend_test_runtime_is_reproducible() -> None:
     assert 'cache-dir = "var/uv-cache"' in pyproject
     assert "--basetemp=var/pytest" in pyproject
     assert "not live_llm" in pyproject
+    assert "not live_docker" in pyproject
+    assert "live_docker: mutates the isolated local Docker Live Eval environment" in pyproject
     assert "live_llm: calls the configured real DashScope models" in pyproject
 
 
