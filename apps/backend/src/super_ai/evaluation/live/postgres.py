@@ -52,6 +52,29 @@ class SafePostgresEvidence(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
+class PostgresLiveRunAudit:
+    postgres_healthy: bool
+    residual_session_count: int
+    residual_table_count: int
+
+    @property
+    def clean(self) -> bool:
+        return (
+            self.postgres_healthy
+            and self.residual_session_count == 0
+            and self.residual_table_count == 0
+        )
+
+    def safe_payload(self) -> dict[str, object]:
+        return {
+            "postgresHealthy": self.postgres_healthy,
+            "residualSessionCount": self.residual_session_count,
+            "residualTableCount": self.residual_table_count,
+            "clean": self.clean,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PostgresConnectionConfig:
     """Explicit Live database connection values with a redacted password."""
 
@@ -321,6 +344,28 @@ class PostgresLockScenarioDriver:
         finally:
             await connection.close()
 
+    async def audit(self, identity: LiveRunIdentity) -> PostgresLiveRunAudit:
+        connection = await self._config.connect(application_name="agentpy-live:audit")
+        try:
+            healthy = await connection.fetchval("SELECT 1") == 1
+            session_count = _required_nonnegative_count(
+                await connection.fetchval(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = 'agent_py_live_eval' AND application_name LIKE $1",
+                    f"agentpy-live:{identity.run_id}:%",
+                )
+            )
+            table_count = _required_nonnegative_count(
+                await connection.fetchval(
+                    "SELECT count(*) FROM pg_tables "
+                    "WHERE schemaname = 'live_eval' AND tablename = $1",
+                    identity.table_name,
+                )
+            )
+            return PostgresLiveRunAudit(healthy, session_count, table_count)
+        finally:
+            await connection.close()
+
 
 class PostgresLiveRecoveryService:
     """Plan, revalidate and execute one synthetic backend termination."""
@@ -413,4 +458,10 @@ def safe_postgres_evidence(
 def _required_pid(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise RuntimeError("PostgreSQL did not return a valid backend PID.")
+    return value
+
+
+def _required_nonnegative_count(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise RuntimeError("PostgreSQL did not return a valid count.")
     return value

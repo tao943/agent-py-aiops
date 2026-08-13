@@ -50,8 +50,14 @@ class LivePostgresEvidenceMcpClient:
         schema: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
         return (
             McpToolDefinition(
-                "InspectPostgres",
-                "Inspect safe PostgreSQL session and blocking-graph facts.",
+                "InspectPostgresSessions",
+                "Inspect safe PostgreSQL session wait-event facts.",
+                schema,
+                "docker-live-postgres",
+            ),
+            McpToolDefinition(
+                "InspectPostgresLockGraph",
+                "Inspect safe PostgreSQL blocking-graph facts.",
                 schema,
                 "docker-live-postgres",
             ),
@@ -66,19 +72,19 @@ class LivePostgresEvidenceMcpClient:
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
         if arguments:
             raise McpClientError("Docker Live evidence tool arguments are invalid.")
-        if name == "InspectPostgres":
+        if name == "InspectPostgresSessions":
             return {
-                "sessions": {
-                    "waitingSession": "waiter",
-                    "waitEventType": (
-                        "Lock" if self._observation.waiter_has_lock_event else None
-                    ),
-                },
-                "lockGraph": {
-                    "edge": "blocker->waiter",
-                    "blockerEdgeConfirmed": self._observation.blocker_edge_confirmed,
-                },
-                "benchmarkEvidenceId": "live-postgres-lock-graph",
+                "waitingSession": "waiter",
+                "waitEventType": (
+                    "Lock" if self._observation.waiter_has_lock_event else None
+                ),
+                "benchmarkEvidenceId": "postgres-wait-event-lock",
+            }
+        if name == "InspectPostgresLockGraph":
+            return {
+                "edge": "blocker->waiter",
+                "blockerEdgeConfirmed": self._observation.blocker_edge_confirmed,
+                "benchmarkEvidenceId": "postgres-blocking-pid-edge",
             }
         if name == "VerifyServiceHealth":
             return {
@@ -118,11 +124,13 @@ class ApplicationLiveDiagnosticAdapter:
         llm_provider: LlmProvider,
         retrieval_tool: KnowledgeRetrievalToolRunner,
         accessible_knowledge_base_ids: Sequence[str] = (),
+        owner_user_id: str | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
+        self._owner_user_id = owner_user_id
 
     async def diagnose(
         self,
@@ -131,7 +139,7 @@ class ApplicationLiveDiagnosticAdapter:
         scenario: LiveScenario,
         observation: LiveFaultObservation,
     ) -> RunArtifact:
-        owner_user_id = f"benchmark:{run_id}"
+        owner_user_id = self._owner_user_id or f"benchmark:{run_id}"
         task_id = f"diagnostic_{uuid4().hex}"
         task = await self._repositories.diagnostics.create_task(
             owner_user_id=owner_user_id,

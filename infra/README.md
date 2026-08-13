@@ -91,6 +91,24 @@ uv run pytest -m live_docker tests/test_live_postgres_docker.py -q
 预期耗时约 10 秒。普通 `pytest` 和 GitHub Actions 默认排除 `live_docker`，不会启动或
 修改 Docker。异常退出后可审计当前 run 是否仍有会话或表：
 
+完整 Agent + 30 卡 RAG Live Eval 必须显式指定知识库 owner 与知识库 ID，防止跨租户
+检索；该命令会调用真实 Chat、Embedding、Rerank 与 Milvus，并消耗模型额度：
+
+```powershell
+uv run python scripts/run_live_benchmark.py run --scenario APY-LIVE-PG-LOCK-001 --run-id live-pg-lock-001 --owner-user-id <owner-id> --knowledge-base-id <kb-id>
+uv run python scripts/run_live_benchmark.py report --scenario APY-LIVE-PG-LOCK-001 --run-id live-pg-lock-001
+```
+
+若进程中断，可在新进程执行 scoped cleanup 与事后残留审计：
+
+```powershell
+uv run python scripts/run_live_benchmark.py cleanup --scenario APY-LIVE-PG-LOCK-001 --run-id live-pg-lock-001
+uv run python scripts/run_live_benchmark.py verify --scenario APY-LIVE-PG-LOCK-001 --run-id live-pg-lock-001
+```
+
+独立 `verify` 只证明当前 run 无残留；完整的 waiter 解锁与业务探针恢复验证只能由同一次
+`run` 生命周期记录。安全报告保存于 Git 忽略的 `apps/backend/var/benchmarks/live/`。
+
 ```powershell
 docker compose -f infra/compose.yaml exec -T postgres psql -U agent_py -d agent_py_live_eval -c "SELECT pid, application_name FROM pg_stat_activity WHERE application_name LIKE 'agentpy-live:%';"
 docker compose -f infra/compose.yaml exec -T postgres psql -U agent_py -d agent_py_live_eval -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'live_eval';"

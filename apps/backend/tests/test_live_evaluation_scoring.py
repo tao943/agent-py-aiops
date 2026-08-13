@@ -65,7 +65,8 @@ def passing_artifact() -> RunArtifact:
             ),
         ),
         tool_calls=(
-            ArtifactToolCall("InspectPostgres", "completed", "L0"),
+            ArtifactToolCall("InspectPostgresSessions", "completed", "L0"),
+            ArtifactToolCall("InspectPostgresLockGraph", "completed", "L0"),
             ArtifactToolCall("VerifyServiceHealth", "completed", "L0"),
         ),
         plan_step_count=2,

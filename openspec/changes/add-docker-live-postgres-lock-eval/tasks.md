@@ -15,4 +15,4 @@
 - [x] 3.1 Add deterministic 100-point Live scoring and hard gates
 - [x] 3.2 Add safe CLI parsing/output contracts and manual-only pytest marker
 - [x] 3.3 Add isolated database initialization and operator documentation
-- [ ] 3.4 Complete packaged CLI runtime composition and final full regression
+- [x] 3.4 Complete packaged CLI runtime composition and final full regression

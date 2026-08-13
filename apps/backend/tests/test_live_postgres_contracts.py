@@ -66,3 +66,21 @@ async def test_cleanup_skips_rollback_after_backend_termination() -> None:
     await rollback_transaction_if_connection_open(ClosedConnection(), transaction)
 
     assert transaction.rollback_called is False
+
+
+def test_post_run_audit_contract_reports_only_safe_residual_counts() -> None:
+    from super_ai.evaluation.live.postgres import PostgresLiveRunAudit
+
+    audit = PostgresLiveRunAudit(
+        postgres_healthy=True,
+        residual_session_count=0,
+        residual_table_count=0,
+    )
+
+    assert audit.clean is True
+    assert audit.safe_payload() == {
+        "postgresHealthy": True,
+        "residualSessionCount": 0,
+        "residualTableCount": 0,
+        "clean": True,
+    }

@@ -67,3 +67,4 @@ async def test_real_postgres_lock_injection_recovery_and_idempotent_cleanup() ->
     finally:
         await driver.cleanup(identity)
         await driver.cleanup(identity)
+    assert (await driver.audit(identity)).clean is True

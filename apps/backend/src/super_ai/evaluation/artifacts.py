@@ -269,6 +269,8 @@ def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
         "InspectContainer",
         "InspectNginx",
         "InspectPostgres",
+        "InspectPostgresSessions",
+        "InspectPostgresLockGraph",
         "InspectRedis",
         "GetServiceTopology",
         "GetDeploymentChanges",

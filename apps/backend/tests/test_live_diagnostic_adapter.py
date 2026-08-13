@@ -72,15 +72,21 @@ async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
     client = LivePostgresEvidenceMcpClient(_observation())
 
     assert {item.name for item in await client.discover_tools()} == {
-        "InspectPostgres",
+        "InspectPostgresSessions",
+        "InspectPostgresLockGraph",
         "VerifyServiceHealth",
     }
-    evidence = await client.call_tool("InspectPostgres", {})
-    assert isinstance(evidence, dict)
-    safe_evidence = cast(dict[str, Any], evidence)
-    serialized = json.dumps(evidence)
-    assert safe_evidence["sessions"]["waitEventType"] == "Lock"
-    assert safe_evidence["lockGraph"]["blockerEdgeConfirmed"] is True
+    sessions = await client.call_tool("InspectPostgresSessions", {})
+    lock_graph = await client.call_tool("InspectPostgresLockGraph", {})
+    assert isinstance(sessions, dict)
+    assert isinstance(lock_graph, dict)
+    safe_sessions = cast(dict[str, Any], sessions)
+    safe_lock_graph = cast(dict[str, Any], lock_graph)
+    serialized = json.dumps((sessions, lock_graph))
+    assert safe_sessions["waitEventType"] == "Lock"
+    assert safe_sessions["benchmarkEvidenceId"] == "postgres-wait-event-lock"
+    assert safe_lock_graph["blockerEdgeConfirmed"] is True
+    assert safe_lock_graph["benchmarkEvidenceId"] == "postgres-blocking-pid-edge"
     assert "password" not in serialized.lower()
     assert "dsn" not in serialized.lower()
     assert "sql" not in serialized.lower()
