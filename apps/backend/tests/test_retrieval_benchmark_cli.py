@@ -22,10 +22,17 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FakeRetrievalTool:
-    def __init__(self, *, wrong_owner: bool = False, omit_citation: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        wrong_owner: bool = False,
+        omit_citation: bool = False,
+        bm25_only: bool = False,
+    ) -> None:
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
         self._wrong_owner = wrong_owner
         self._omit_citation = omit_citation
+        self._bm25_only = bm25_only
 
     async def run(
         self,
@@ -51,7 +58,12 @@ class FakeRetrievalTool:
             source=source,
             metadata={},
             score=0.9,
-            vector_score=0.8,
+            vector_rank=None if self._bm25_only else 1,
+            bm25_rank=1,
+            rerank_rank=1,
+            vector_score=None if self._bm25_only else 0.8,
+            bm25_score=2.1,
+            rrf_score=0.016,
             rerank_score=0.9,
         )
         citation = KnowledgeRetrievalCitationSource(
@@ -66,7 +78,12 @@ class FakeRetrievalTool:
             score=0.9,
             excerpt="secret chunk content",
             knowledge_type="document",
-            vector_score=0.8,
+            vector_rank=hit.vector_rank,
+            bm25_rank=hit.bm25_rank,
+            rerank_rank=hit.rerank_rank,
+            vector_score=hit.vector_score,
+            bm25_score=hit.bm25_score,
+            rrf_score=hit.rrf_score,
             rerank_score=0.9,
         )
         return KnowledgeRetrievalToolResult(
@@ -102,9 +119,35 @@ async def test_run_queries_uses_explicit_scope_and_returns_safe_report() -> None
         "chunkId": "chunk-1",
         "documentId": "doc-1",
         "knowledgeBaseId": "kb-owner-a",
+        "vectorRank": 1,
+        "bm25Rank": 1,
+        "rerankRank": 1,
         "vectorScore": 0.8,
+        "bm25Score": 2.1,
+        "rrfScore": 0.016,
         "rerankScore": 0.9,
+        "retrievalChannels": ["vector", "bm25"],
     }
+    assert payload["metrics"]["vectorChannelCoverageRate"] == 1.0
+    assert payload["metrics"]["bm25ChannelCoverageRate"] == 1.0
+    assert payload["metrics"]["hybridChannelCoverageRate"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_bm25_only_hit_has_complete_channel_aware_citation() -> None:
+    payload = await MODULE.run_queries(
+        FakeRetrievalTool(bm25_only=True),
+        owner_user_id="owner-a",
+        knowledge_base_id="kb-owner-a",
+        queries_path=MODULE.DEFAULT_QUERIES,
+        model_configuration={},
+    )
+
+    hit = payload["runs"][0]["hits"][0]
+    assert hit["vectorRank"] is None
+    assert hit["vectorScore"] is None
+    assert hit["retrievalChannels"] == ["bm25"]
+    assert payload["metrics"]["citationCompletenessRate"] == 1.0
 
 
 @pytest.mark.asyncio

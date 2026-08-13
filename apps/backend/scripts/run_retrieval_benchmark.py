@@ -77,6 +77,11 @@ async def run_queries(
                 ),
                 vector_score=citation.vector_score if citation is not None else None,
                 rerank_score=citation.rerank_score if citation is not None else None,
+                vector_rank=citation.vector_rank if citation is not None else None,
+                bm25_rank=citation.bm25_rank if citation is not None else None,
+                rerank_rank=citation.rerank_rank if citation is not None else None,
+                bm25_score=citation.bm25_score if citation is not None else None,
+                rrf_score=citation.rrf_score if citation is not None else None,
             )
             for hit in result.results
             for citation in (citations_by_chunk.get(hit.chunk_id),)
@@ -105,8 +110,14 @@ async def run_queries(
                         "chunkId": hit.chunk_id,
                         "documentId": hit.document_id,
                         "knowledgeBaseId": hit.knowledge_base_id,
+                        "vectorRank": hit.vector_rank,
+                        "bm25Rank": hit.bm25_rank,
+                        "rerankRank": hit.rerank_rank,
                         "vectorScore": hit.vector_score,
+                        "bm25Score": hit.bm25_score,
+                        "rrfScore": hit.rrf_score,
                         "rerankScore": hit.rerank_score,
+                        "retrievalChannels": _retrieval_channels(hit),
                     }
                     for hit in result.results
                 ],
@@ -127,8 +138,20 @@ async def run_queries(
             "mrr": metrics.mrr,
             "forbiddenTopOneRate": metrics.forbidden_top_one_rate,
             "citationCompletenessRate": metrics.citation_completeness_rate,
+            "vectorChannelCoverageRate": metrics.vector_channel_coverage_rate,
+            "bm25ChannelCoverageRate": metrics.bm25_channel_coverage_rate,
+            "hybridChannelCoverageRate": metrics.hybrid_channel_coverage_rate,
         },
     }
+
+
+def _retrieval_channels(hit: KnowledgeRetrievalHit) -> list[str]:
+    channels: list[str] = []
+    if hit.vector_rank is not None:
+        channels.append("vector")
+    if hit.bm25_rank is not None:
+        channels.append("bm25")
+    return channels
 
 
 def _validate_scope(
