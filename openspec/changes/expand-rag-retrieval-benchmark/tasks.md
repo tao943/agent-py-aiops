@@ -19,5 +19,5 @@
 ## 4. 文档与回归
 
 - [x] 4.1 更新运行文档并明确 Docker validation 仍 pending
-- [ ] 4.2 运行聚焦 Pytest、Ruff、Pyright 和 OpenSpec
+- [x] 4.2 运行聚焦 Pytest、Ruff、Pyright 和 OpenSpec
 - [ ] 4.3 运行有界普通后端回归或要求 GitHub Actions 门禁
