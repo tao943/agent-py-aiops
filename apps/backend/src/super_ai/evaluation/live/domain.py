@@ -39,3 +39,53 @@ class LiveRunIdentity:
     @property
     def table_name(self) -> str:
         return f"lock_target_{self.run_token}"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveFaultObservation:
+    """Safe facts proving whether the synthetic fault exists."""
+
+    blocker_pid: int
+    waiter_pid: int
+    waiter_has_lock_event: bool
+    blocker_edge_confirmed: bool
+
+    @property
+    def confirmed(self) -> bool:
+        return self.waiter_has_lock_event and self.blocker_edge_confirmed
+
+
+@dataclass(frozen=True, slots=True)
+class LiveRecoveryRecord:
+    """Auditable result of the bounded recovery boundary."""
+
+    action: str
+    target_pid: int
+    authorized: bool
+    executed: bool
+    authorization_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class LiveVerification:
+    """Independent post-recovery checks."""
+
+    blocker_gone: bool
+    waiter_unblocked: bool
+    lock_graph_clear: bool
+    probe_succeeded: bool
+    postgres_healthy: bool
+    unrelated_sessions_untouched: bool
+
+    @property
+    def passed(self) -> bool:
+        return all(
+            (
+                self.blocker_gone,
+                self.waiter_unblocked,
+                self.lock_graph_clear,
+                self.probe_succeeded,
+                self.postgres_healthy,
+                self.unrelated_sessions_untouched,
+            )
+        )

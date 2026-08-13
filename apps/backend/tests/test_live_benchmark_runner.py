@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from super_ai.evaluation.live.domain import (
+    LiveFaultObservation,
+    LiveRecoveryRecord,
+    LiveVerification,
+)
+from super_ai.evaluation.live.runner import LiveBenchmarkError, LiveBenchmarkRunner
+
+LIVE_ROOT = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
+
+
+class RecordingDriver:
+    def __init__(self, *, confirmed: bool = True, fail_at: str | None = None) -> None:
+        self.events: list[str] = []
+        self.fail_at = fail_at
+        self.observation = LiveFaultObservation(101, 102, confirmed, confirmed)
+
+    async def _step(self, name: str) -> None:
+        self.events.append(name)
+        if self.fail_at == name:
+            raise RuntimeError(f"secret-{name}")
+
+    async def preflight(self, identity: object) -> None:
+        del identity
+        await self._step("preflight")
+
+    async def baseline(self, identity: object) -> None:
+        del identity
+        await self._step("baseline")
+
+    async def inject(self, identity: object) -> LiveFaultObservation:
+        del identity
+        await self._step("inject")
+        return self.observation
+
+    async def verify(self, identity: object) -> LiveVerification:
+        del identity
+        await self._step("verify")
+        return LiveVerification(True, True, True, True, True, True)
+
+    async def cleanup(self, identity: object) -> None:
+        del identity
+        await self._step("cleanup")
+
+
+class RecordingDiagnostic:
+    def __init__(self, events: list[str], *, cancelled: bool = False) -> None:
+        self.events = events
+        self.cancelled = cancelled
+
+    async def diagnose(self, **values: object) -> object:
+        del values
+        self.events.append("diagnose")
+        if self.cancelled:
+            raise asyncio.CancelledError
+        return {"decision": "row_lock_blocking"}
+
+
+class RecordingRecovery:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def recover(self, **values: object) -> LiveRecoveryRecord:
+        del values
+        self.events.append("recover")
+        return LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
+
+
+class RecordingEvaluator:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def evaluate(self, **values: object) -> str:
+        del values
+        self.events.append("evaluate")
+        return "passed"
+
+
+@pytest.mark.asyncio
+async def test_runner_executes_live_phases_and_always_cleans_up() -> None:
+    driver = RecordingDriver()
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    result = await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert result == "passed"
+    assert driver.events == [
+        "preflight",
+        "baseline",
+        "inject",
+        "diagnose",
+        "recover",
+        "verify",
+        "evaluate",
+        "cleanup",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_stops_before_diagnosis_when_fault_is_not_confirmed() -> None:
+    driver = RecordingDriver(confirmed=False)
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "fault_injection_failed"
+    assert driver.events == ["preflight", "baseline", "inject", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_runner_cleans_up_and_redacts_driver_failure() -> None:
+    driver = RecordingDriver(fail_at="inject")
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "fault_injection_failed"
+    assert "secret" not in str(captured.value)
+    assert driver.events[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_runner_re_raises_cancellation_after_cleanup() -> None:
+    driver = RecordingDriver()
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events, cancelled=True),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert driver.events[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_is_a_hard_failure() -> None:
+    driver = RecordingDriver(fail_at="cleanup")
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "cleanup_failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_post_recovery_verification_does_not_reach_evaluator() -> None:
+    driver = RecordingDriver()
+
+    async def failed_verify(identity: object) -> LiveVerification:
+        del identity
+        driver.events.append("verify")
+        return replace(LiveVerification(True, True, True, True, True, True), probe_succeeded=False)
+
+    driver.verify = failed_verify  # type: ignore[method-assign]
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "recovery_verification_failed"
+    assert "evaluate" not in driver.events
+    assert driver.events[-1] == "cleanup"
