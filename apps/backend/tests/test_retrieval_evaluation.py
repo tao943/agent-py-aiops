@@ -21,6 +21,99 @@ QUERIES = (
 KNOWLEDGE = Path(__file__).resolve().parents[3] / "docs" / "knowledge-candidates"
 
 
+def _citation_audit(
+    *,
+    vector_rank: int | None = 1,
+    bm25_rank: int | None = 1,
+    rerank_rank: int | None = 1,
+    vector_score: float | None = 0.8,
+    bm25_score: float | None = 2.1,
+    rrf_score: float | None = 0.016,
+    rerank_score: float | None = 0.9,
+) -> RetrievalCitationAudit:
+    return RetrievalCitationAudit(
+        chunk_id="chunk-1",
+        document_id="doc-1",
+        knowledge_base_id="kb-1",
+        vector_rank=vector_rank,
+        bm25_rank=bm25_rank,
+        rerank_rank=rerank_rank,
+        vector_score=vector_score,
+        bm25_score=bm25_score,
+        rrf_score=rrf_score,
+        rerank_score=rerank_score,
+    )
+
+
+@pytest.mark.parametrize(
+    "audit, channels",
+    [
+        (
+            _citation_audit(vector_rank=None, vector_score=None),
+            ("bm25",),
+        ),
+        (
+            _citation_audit(bm25_rank=None, bm25_score=None),
+            ("vector",),
+        ),
+        (_citation_audit(), ("vector", "bm25")),
+    ],
+)
+def test_complete_citation_tracks_actual_retrieval_channels(
+    audit: RetrievalCitationAudit,
+    channels: tuple[str, ...],
+) -> None:
+    assert audit.complete is True
+    assert audit.retrieval_channels == channels
+
+
+@pytest.mark.parametrize(
+    "audit",
+    [
+        _citation_audit(vector_score=None),
+        _citation_audit(vector_rank=None),
+        _citation_audit(bm25_score=None),
+        _citation_audit(bm25_rank=None),
+        _citation_audit(
+            vector_rank=None,
+            vector_score=None,
+            bm25_rank=None,
+            bm25_score=None,
+        ),
+        _citation_audit(rrf_score=None),
+        _citation_audit(rerank_rank=None),
+        _citation_audit(rerank_score=None),
+    ],
+)
+def test_incomplete_citation_rejects_inconsistent_or_missing_provenance(
+    audit: RetrievalCitationAudit,
+) -> None:
+    assert audit.complete is False
+
+
+def test_evaluation_reports_retrieval_channel_coverage() -> None:
+    vector_only = _citation_audit(bm25_rank=None, bm25_score=None)
+    bm25_only = _citation_audit(vector_rank=None, vector_score=None)
+    hybrid = _citation_audit()
+
+    report = evaluate_retrieval(
+        (
+            RetrievalQueryResult(
+                query_id="q1",
+                relevant_documents=("target.md",),
+                forbidden_top_one=(),
+                ranked_documents=("target.md",),
+                citations=(vector_only, bm25_only, hybrid),
+            ),
+        )
+    )
+
+    assert report.citation_completeness_rate == 1.0
+    assert report.vector_channel_coverage_rate == pytest.approx(2 / 3)
+    assert report.bm25_channel_coverage_rate == pytest.approx(2 / 3)
+    assert report.hybrid_channel_coverage_rate == pytest.approx(1 / 3)
+
+
 def test_loads_sixty_answer_free_reviewed_queries_with_approved_distribution() -> None:
     queries = load_retrieval_queries(QUERIES)
 
@@ -113,6 +206,9 @@ def test_evaluate_retrieval_calculates_ranking_and_citation_metrics() -> None:
         knowledge_base_id="kb-1",
         vector_score=0.8,
         rerank_score=0.9,
+        vector_rank=1,
+        rerank_rank=1,
+        rrf_score=0.016,
     )
     incomplete = RetrievalCitationAudit(
         chunk_id="chunk-2",
@@ -120,6 +216,9 @@ def test_evaluate_retrieval_calculates_ranking_and_citation_metrics() -> None:
         knowledge_base_id="kb-1",
         vector_score=0.7,
         rerank_score=None,
+        vector_rank=1,
+        rerank_rank=1,
+        rrf_score=0.016,
     )
     report = evaluate_retrieval(
         (
@@ -170,6 +269,9 @@ def test_perfect_retrieval_result_scores_one_without_forbidden_top_one() -> None
                         knowledge_base_id="kb-1",
                         vector_score=0.8,
                         rerank_score=0.9,
+                        vector_rank=1,
+                        rerank_rank=1,
+                        rrf_score=0.016,
                     ),
                 ),
             ),
@@ -195,7 +297,16 @@ def test_deduplicates_chunk_hits_before_document_ranking() -> None:
 
 
 def test_no_answer_probes_do_not_enter_ranking_metric_denominators() -> None:
-    complete = RetrievalCitationAudit("chunk", "doc", "kb", 0.8, 0.9)
+    complete = RetrievalCitationAudit(
+        "chunk",
+        "doc",
+        "kb",
+        0.8,
+        0.9,
+        vector_rank=1,
+        rerank_rank=1,
+        rrf_score=0.016,
+    )
     report = evaluate_retrieval(
         (
             RetrievalQueryResult(

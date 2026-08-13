@@ -56,14 +56,35 @@ class RetrievalCitationAudit:
     knowledge_base_id: str
     vector_score: float | None
     rerank_score: float | None
+    vector_rank: int | None = None
+    bm25_rank: int | None = None
+    rerank_rank: int | None = None
+    bm25_score: float | None = None
+    rrf_score: float | None = None
+
+    @property
+    def retrieval_channels(self) -> tuple[str, ...]:
+        """Return recall channels recorded by rank provenance."""
+        channels: list[str] = []
+        if self.vector_rank is not None:
+            channels.append("vector")
+        if self.bm25_rank is not None:
+            channels.append("bm25")
+        return tuple(channels)
 
     @property
     def complete(self) -> bool:
+        vector_consistent = (self.vector_rank is None) == (self.vector_score is None)
+        bm25_consistent = (self.bm25_rank is None) == (self.bm25_score is None)
         return bool(
             self.chunk_id
             and self.document_id
             and self.knowledge_base_id
-            and self.vector_score is not None
+            and vector_consistent
+            and bm25_consistent
+            and self.retrieval_channels
+            and self.rrf_score is not None
+            and self.rerank_rank is not None
             and self.rerank_score is not None
         )
 
@@ -92,6 +113,9 @@ class RetrievalEvaluationResult:
     mrr: float
     forbidden_top_one_rate: float
     citation_completeness_rate: float
+    vector_channel_coverage_rate: float
+    bm25_channel_coverage_rate: float
+    hybrid_channel_coverage_rate: float
 
 
 def load_retrieval_queries(path: Path) -> tuple[RetrievalQuery, ...]:
@@ -204,6 +228,21 @@ def evaluate_retrieval(
     citation_rate = (
         sum(citation.complete for citation in citations) / len(citations) if citations else 0.0
     )
+    vector_coverage = (
+        sum("vector" in citation.retrieval_channels for citation in citations) / len(citations)
+        if citations
+        else 0.0
+    )
+    bm25_coverage = (
+        sum("bm25" in citation.retrieval_channels for citation in citations) / len(citations)
+        if citations
+        else 0.0
+    )
+    hybrid_coverage = (
+        sum(len(citation.retrieval_channels) == 2 for citation in citations) / len(citations)
+        if citations
+        else 0.0
+    )
     return RetrievalEvaluationResult(
         query_count=count,
         answerable_query_count=answerable_count,
@@ -213,6 +252,9 @@ def evaluate_retrieval(
         mrr=reciprocal_rank / answerable_count,
         forbidden_top_one_rate=forbidden_top_one / answerable_count,
         citation_completeness_rate=citation_rate,
+        vector_channel_coverage_rate=vector_coverage,
+        bm25_channel_coverage_rate=bm25_coverage,
+        hybrid_channel_coverage_rate=hybrid_coverage,
     )
 
 
