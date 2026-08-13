@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from scripts.audit_knowledge_catalog import audit_catalog
+
+from super_ai.evaluation.knowledge_catalog import audit_catalog
 
 KNOWLEDGE = Path(__file__).resolve().parents[3] / "docs" / "knowledge-candidates"
 EXPECTED_CARD_FILENAMES = frozenset(
