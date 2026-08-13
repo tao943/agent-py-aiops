@@ -1,0 +1,22 @@
+primary_cause:
+  component: postgresql
+  mechanism: row_lock_blocking
+  trigger: synthetic_transaction_holds_order_row_lock
+contributing_causes: []
+causal_chain:
+  - synthetic transaction acquires the order row lock
+  - order status update waits for the held row lock
+  - the bounded business probe times out
+required_evidence:
+  - id: postgres-lock-wait-event
+    alternatives:
+      - [postgres-wait-event-lock]
+  - id: postgres-blocking-graph
+    alternatives:
+      - [postgres-blocking-pid-edge]
+required_rule_outs:
+  - postgres_slow_query_without_lock
+  - postgres_connectivity_failure
+forbidden_claims:
+  - PostgreSQL is unreachable
+  - the update is CPU-bound without a blocker
