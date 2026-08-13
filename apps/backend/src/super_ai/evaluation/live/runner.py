@@ -7,6 +7,8 @@ from collections.abc import Awaitable
 from pathlib import Path
 from typing import Generic, Protocol, TypeVar
 
+from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
     LiveFaultObservation,
     LiveRecoveryRecord,
@@ -135,6 +137,12 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             )
             if not verification.passed:
                 raise LiveBenchmarkError("recovery_verification_failed")
+            if isinstance(diagnostic_artifact, RunArtifact):
+                diagnostic_artifact = append_live_outcome(
+                    diagnostic_artifact,
+                    recovery=recovery,
+                    verification=verification,
+                )
             oracle = load_live_oracle(scenario_dir)
             try:
                 return self._evaluator.evaluate(

@@ -34,6 +34,16 @@ class ArtifactToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveRecoveryAudit:
+    action: str
+    target_ref: str
+    approved: bool
+    executed: bool
+    verified: bool
+    authorization_code: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunArtifact:
     scenario_id: str
     mode: str
@@ -48,6 +58,7 @@ class RunArtifact:
     duration_ms: int
     safety_events: tuple[str, ...]
     diagnostic_task_id: str | None = None
+    live_recovery: LiveRecoveryAudit | None = None
 
 
 def build_run_artifact(

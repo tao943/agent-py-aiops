@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+from super_ai.aiops import RootCauseDecision
+from super_ai.evaluation import RunArtifact
+from super_ai.evaluation.live.diagnostics import (
+    LivePostgresEvidenceMcpClient,
+    append_live_outcome,
+    build_live_diagnostic_input,
+)
+from super_ai.evaluation.live.domain import (
+    LiveFaultObservation,
+    LiveRecoveryRecord,
+    LiveVerification,
+)
+from super_ai.evaluation.live.scenarios import load_live_scenario
+from super_ai.mcp_client import McpClientError
+
+LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
+
+
+def _artifact() -> RunArtifact:
+    return RunArtifact(
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        mode="live",
+        completed=True,
+        report_produced=True,
+        decision=RootCauseDecision(
+            component="postgresql",
+            mechanism="row_lock_blocking",
+            trigger="concurrent_transaction",
+            causal_chain=("request waits", "row lock blocks update"),
+            evidence_ids=("ev-session", "ev-lock-graph"),
+            confidence=0.95,
+        ),
+        evidence=(),
+        hypothesis_states=(),
+        observation_decisions=(),
+        tool_calls=(),
+        plan_step_count=2,
+        duration_ms=10,
+        safety_events=(),
+    )
+
+
+def _observation() -> LiveFaultObservation:
+    return LiveFaultObservation(101, 102, True, True)
+
+
+def test_live_input_contains_only_answer_free_public_fields() -> None:
+    scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+
+    payload = build_live_diagnostic_input(scenario)
+    serialized = json.dumps(payload)
+
+    assert payload["benchmarkMode"] == "live"
+    assert payload["benchmarkScenarioId"] == scenario.id
+    assert "ground_truth" not in serialized
+    assert "row_lock_blocking" not in serialized
+    assert "agent_py_live_eval" not in serialized
+    assert "run_id" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
+    client = LivePostgresEvidenceMcpClient(_observation())
+
+    assert {item.name for item in await client.discover_tools()} == {
+        "InspectPostgres",
+        "VerifyServiceHealth",
+    }
+    evidence = await client.call_tool("InspectPostgres", {})
+    assert isinstance(evidence, dict)
+    safe_evidence = cast(dict[str, Any], evidence)
+    serialized = json.dumps(evidence)
+    assert safe_evidence["sessions"]["waitEventType"] == "Lock"
+    assert safe_evidence["lockGraph"]["blockerEdgeConfirmed"] is True
+    assert "password" not in serialized.lower()
+    assert "dsn" not in serialized.lower()
+    assert "sql" not in serialized.lower()
+    assert "application_name" not in serialized
+    with pytest.raises(McpClientError, match="not available"):
+        await client.call_tool("ReadGroundTruth", {})
+
+
+def test_runner_boundary_appends_authorized_and_verified_recovery_facts() -> None:
+    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "allowed")
+    verification = LiveVerification(True, True, True, True, True, True)
+
+    enriched = append_live_outcome(_artifact(), recovery=recovery, verification=verification)
+
+    assert enriched.live_recovery is not None
+    assert enriched.live_recovery.action == "terminate_postgres_backend"
+    assert enriched.live_recovery.approved is True
+    assert enriched.live_recovery.verified is True
+    assert enriched.live_recovery.target_ref == "synthetic_blocker"
+    assert "101" not in json.dumps(asdict(enriched.live_recovery))
