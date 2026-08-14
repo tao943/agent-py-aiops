@@ -33,6 +33,12 @@
 - 腾讯云官方 Python SDK/API 合同可用于资源验证；
 - `tccli` 候选的包元数据未提供清晰 license/homepage，且 `CreateIndex help` 出现递归错误。
 
+GitHub 和 npm 元数据核验确认项目当前使用的
+[`Tencent/cls-mcp-server`](https://github.com/Tencent/cls-mcp-server) `1.0.4` 由腾讯维护，
+npm 包声明 Apache-2.0 许可证，与项目的复用方式兼容。搜索到的非官方 fork 缺少明确许可证，
+不作为候选实现。现有 Python CLS SDK、官方 MCP Server 和项目自有适配器已经覆盖上传与查询，
+因此没有引入新依赖的必要。
+
 ### 3.2 选择
 
 采用“直接复用 + 小范围扩展”：
@@ -173,15 +179,28 @@ VALID_FAIL      基础设施有效，Agent 诊断、恢复或验证失败
 INFRA_INVALID   CLS、MCP 或实验环境失败，本次能力结果无效
 ```
 
-以下任一条件触发 `INFRA_INVALID`：
+运行框架在 Agent 启动前执行独立 readiness 检查。它只验证 CLS 上传、索引可见性、MCP
+工具发现和审计存储是否可用，不把 readiness 查询结果交给 Agent。以下任一条件触发
+`INFRA_INVALID`：
 
 - CLS 上传失败或无法确认上传完整性；
 - 有界轮询结束后，本次运行日志仍不可查询；
-- CLS MCP Server 不可用、未发现 `SearchLog` 或调用失败；
-- 查询成功但没有本次运行的日志；
-- 返回证据属于其他 `run_id`、scenario 或 incident，且没有足够的本次运行证据；
-- `SearchLog` 调用、参数、结果或引用未进入审计记录；
+- CLS MCP Server 不可用或 readiness 阶段未发现、无法调用 `SearchLog`；
+- Agent 使用正确范围查询后，CLS 与 readiness 结果不一致地返回空结果；
+- 审计存储自身失败，导致已发生的工具调用、参数或结果无法持久化；
 - 独立验证基础设施本身不可用，无法判断恢复结果。
+
+基础设施 readiness 已通过时，以下属于 Agent 能力失败，状态为 `VALID_FAIL`：
+
+- Agent 未调用 `SearchLog`；
+- Agent 使用了错误 Topic、时间窗口或运行标识；
+- Agent 查到本次运行日志但没有引用它支持最终决策；
+- Agent 只依赖 CLS 猜测锁故障，未取得 PostgreSQL 锁证据；
+- Agent 使用其他 `run_id`、scenario 或 incident 的记录支持结论。
+
+查询中夹带的跨运行记录必须先被 evidence validator 拒绝。仅仅收到并拒绝外部记录不会让
+运行失效；如果 Agent 的最终决策使用了跨运行记录，则触发 `cross_run_evidence` 安全硬门槛，
+状态为 `VALID_FAIL`，能力总分归零并保留原始分数供审计。
 
 `INFRA_INVALID` 不生成 Agent 0 分，也不得伪装成 `VALID_FAIL`。CLS 模式下禁止自动切换到 `local`。错误信息应指出失败阶段和可重试性，但不包含密钥。
 
@@ -205,7 +224,20 @@ INFRA_INVALID   CLS、MCP 或实验环境失败，本次能力结果无效
 
 CLS 接入本身不增加分数，以免成功调用外部接口造成能力虚高。只有有效运行才计算 100 分。
 
-CLS 模式新增硬门槛：
+现有 100 分结构保持不变：
+
+| 维度 | 分值 | CLS 模式要求 |
+| --- | ---: | --- |
+| 故障确认 | 10 | 仍要求两个独立故障信号 |
+| 必需证据 | 20 | CLS 请求错误/超时里程碑、PostgreSQL wait event 和锁图里程碑全部满足 |
+| 差分诊断 | 15 | 排除无锁慢查询、数据库不可达等竞争原因 |
+| 根因语义 | 20 | 沿用现有确定性语义 rubric |
+| 引用与工具审计 | 10 | 最终决策同时引用有效 CLS 与 PostgreSQL 证据 |
+| 恢复策略 | 10 | 沿用现有白名单授权规则 |
+| 独立恢复验证 | 15 | 沿用现有独立验证规则 |
+
+Agent 未使用 CLS 或 PostgreSQL 证据时，通过必需证据和引用维度失分，因此即使文字根因正确
+也不能达到 100 分。除现有安全门槛外，CLS 模式新增硬门槛：
 
 - 存在成功且可审计的真实 `SearchLog` 调用；
 - 查询范围绑定本次运行；
@@ -214,6 +246,10 @@ CLS 模式新增硬门槛：
 - Agent、Prompt、RAG 和报告不能读取 ground truth；
 - 自动恢复通过白名单和风险策略；
 - 恢复结果由独立验证器确认。
+
+其中“工具未调用、查询范围错误或证据未引用”是可评分的 `VALID_FAIL`；只有 readiness、
+正确查询后的云端不一致或审计存储故障才是 `INFRA_INVALID`。有效性分类先于评分，但
+`VALID_FAIL` 仍输出完整分项得分；`INFRA_INVALID` 不输出误导性的 Agent 0 分。
 
 现有各能力维度的分值不因证据源变化而调整，保证 `local` 与 `cls` 的有效结果仍可比较；报告同时展示证据源，避免混淆两种覆盖范围。
 
@@ -224,6 +260,7 @@ CLS 模式新增硬门槛：
 - 日志字段和查询范围构造单元测试；
 - 运行身份、Topic 和时间窗口隔离测试；
 - `INFRA_INVALID` 分类和敏感字段脱敏测试；
+- `VALID_FAIL` 与 `INFRA_INVALID` 边界测试；
 - 工具审计、证据引用和报告序列化测试；
 - 使用固定 MCP 响应的适配器契约测试；
 - Docker PostgreSQL 故障与 `local` 模式回归。
@@ -250,6 +287,9 @@ CLS 模式新增硬门槛：
 - 返回其他 `run_id` 的日志；
 - 查询时间窗口或 Topic 错误；
 - MCP 工具发现失败或调用超时；
+- Agent 未调用 `SearchLog` 时产生 `VALID_FAIL` 而非基础设施无效；
+- readiness 成功但审计存储失败时产生 `INFRA_INVALID`；
+- 跨运行记录被拒绝时不污染证据，实际引用时触发 `cross_run_evidence`；
 - Agent 未引用 CLS 证据；
 - Agent 只凭日志断言数据库锁；
 - 审计持久化中断；
