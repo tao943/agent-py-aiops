@@ -21,6 +21,7 @@ from super_ai.aiops.reasoning import (
     HypothesisState,
     ObservationDecision,
     RootCauseDecision,
+    normalize_root_cause_decision,
     parse_observation_decision,
     parse_plan,
     parse_root_cause_decision,
@@ -60,6 +61,7 @@ class AiopsDiagnosticState(TypedDict, total=False):
     plan_origin: str
     plan_index: int
     public_hypotheses: list[JsonDict]
+    decision_vocabulary: JsonDict
     hypothesis_states: list[JsonDict]
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
@@ -82,6 +84,50 @@ AIOPS_REPORT_REQUIRED_HEADINGS = (
     "## 📋 活跃告警清单",
     "## 📊 结论",
 )
+
+
+def build_generic_live_plan(
+    *,
+    available_tools: Sequence[str],
+    known_hypotheses: Sequence[str],
+) -> list[JsonDict]:
+    """Build a safe evidence-gathering fallback from public Live contracts."""
+    available = set(available_tools)
+    known = set(known_hypotheses)
+    definitions: tuple[tuple[str, str, JsonDict, tuple[str, ...]], ...] = (
+        (
+            "VerifyServiceHealth",
+            "Check database reachability and service health.",
+            {"target": "postgres_cluster", "check_connection_pool": True},
+            ("postgres_connectivity_failure",),
+        ),
+        (
+            "InspectPostgresSessions",
+            "Inspect session states and wait events.",
+            {
+                "state_filter": ["active", "idle in transaction"],
+                "include_wait_events": True,
+            },
+            ("postgres_slow_query_without_lock", "postgres_lock_blocking"),
+        ),
+        (
+            "InspectPostgresLockGraph",
+            "Inspect current blocking chains and deadlock signals.",
+            {"detect_deadlocks": True, "analyze_blocking_chains": True},
+            ("postgres_lock_blocking",),
+        ),
+    )
+    return [
+        {
+            "id": f"live-evidence-{index}",
+            "tool": tool,
+            "arguments": dict(arguments),
+            "purpose": purpose,
+            "testsHypotheses": [item for item in hypotheses if item in known],
+        }
+        for index, (tool, purpose, arguments, hypotheses) in enumerate(definitions, start=1)
+        if tool in available
+    ]
 
 
 class AiopsDiagnosticService:
@@ -144,6 +190,9 @@ class AiopsDiagnosticService:
             "query": task.query,
             "alert": alert,
             "public_hypotheses": _json_list(task.input_payload.get("hypotheses")),
+            "decision_vocabulary": _json_dict(
+                task.input_payload.get("decisionVocabulary")
+            ),
             "hypothesis_states": _initial_hypothesis_states(
                 _json_list(task.input_payload.get("hypotheses"))
             ),
@@ -684,6 +733,7 @@ class AiopsDiagnosticService:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
         prompt = (
             "Return JSON only for one root-cause decision with component, mechanism, trigger, "
             "causalChain, evidenceIds, and confidence. This is a structured root-cause "
@@ -695,6 +745,9 @@ class AiopsDiagnosticService:
             f"{json.dumps(state.get('hypothesis_states') or [], ensure_ascii=False)}. "
             "Structured observations: "
             f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
+            "Use the canonical component and mechanism labels declared by this public "
+            "decision vocabulary when it contains a matching alias: "
+            f"{json.dumps(decision_vocabulary, ensure_ascii=False)}. "
             f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
         )
         decision: RootCauseDecision | None = None
@@ -703,6 +756,15 @@ class AiopsDiagnosticService:
             decision = parse_root_cause_decision(
                 _model_text(response),
                 available_evidence_ids=set(evidence_ids),
+            )
+            decision = normalize_root_cause_decision(
+                decision,
+                component_aliases=_string_mapping(
+                    decision_vocabulary.get("componentAliases")
+                ),
+                mechanism_aliases=_string_mapping(
+                    decision_vocabulary.get("mechanismAliases")
+                ),
             )
         except Exception:
             decision = None
@@ -864,9 +926,12 @@ class AiopsDiagnosticService:
         available_tools: Sequence[str],
         known_hypotheses: Sequence[str],
     ) -> tuple[list[JsonDict], str]:
-        generic_plan = (
-            [self._generic_search_log_step(query)] if "SearchLog" in available_tools else []
+        generic_plan = build_generic_live_plan(
+            available_tools=available_tools,
+            known_hypotheses=known_hypotheses,
         )
+        if not generic_plan and "SearchLog" in available_tools:
+            generic_plan = [self._generic_search_log_step(query)]
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
@@ -1008,6 +1073,16 @@ def _initial_hypothesis_states(public_hypotheses: Sequence[JsonDict]) -> list[Js
         for item in public_hypotheses
         if item.get("id")
     ]
+
+
+def _string_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: item
+        for key, item in cast(Mapping[object, object], value).items()
+        if isinstance(key, str) and isinstance(item, str)
+    }
 
 
 def _observation_decision_payload(

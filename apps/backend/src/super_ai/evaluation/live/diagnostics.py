@@ -37,6 +37,20 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "live",
+        "decisionVocabulary": {
+            "componentAliases": {
+                "postgres": "postgresql",
+                "postgresql": "postgresql",
+            },
+            "mechanismAliases": {
+                "postgres_lock_blocking": "row_lock_blocking",
+                "row_lock_blocking": "row_lock_blocking",
+                "postgres_slow_query_without_lock": "slow_query_without_lock",
+                "slow_query_without_lock": "slow_query_without_lock",
+                "postgres_connectivity_failure": "connectivity_failure",
+                "connectivity_failure": "connectivity_failure",
+            },
+        },
     }
 
 
