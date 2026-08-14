@@ -22,6 +22,10 @@ from super_ai.evaluation.live.domain import (
     LiveScenario,
     LiveVerification,
 )
+from super_ai.evaluation.live.evidence_client import (
+    LiveCompositeEvidenceMcpClient,
+    LiveMcpClient,
+)
 from super_ai.llm import LlmProvider
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.memory.repositories import JsonDict, MemoryRepositories
@@ -175,6 +179,20 @@ class LivePostgresEvidenceMcpClient:
         return tools
 
 
+def build_live_evidence_client(
+    *,
+    observation: LiveFaultObservation,
+    evidence_context: LiveEvidenceContext,
+    cls_client: LiveMcpClient | None,
+) -> LiveCompositeEvidenceMcpClient:
+    """Compose the production tool boundary selected by prepared evidence mode."""
+    return LiveCompositeEvidenceMcpClient(
+        postgres_client=LivePostgresEvidenceMcpClient(observation),
+        cls_client=cls_client if evidence_context.source == "cls" else None,
+        context=evidence_context,
+    )
+
+
 def _validate_live_evidence_arguments(
     name: str,
     arguments: Mapping[str, object],
@@ -221,12 +239,14 @@ class ApplicationLiveDiagnosticAdapter:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
+        cls_mcp_client: LiveMcpClient | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
+        self._cls_mcp_client = cls_mcp_client
 
     async def diagnose(
         self,
@@ -236,7 +256,6 @@ class ApplicationLiveDiagnosticAdapter:
         observation: LiveFaultObservation,
         evidence_context: LiveEvidenceContext,
     ) -> RunArtifact:
-        del evidence_context
         owner_user_id = self._owner_user_id or f"benchmark:{run_id}"
         task_id = f"diagnostic_{uuid4().hex}"
         task = await self._repositories.diagnostics.create_task(
@@ -247,13 +266,18 @@ class ApplicationLiveDiagnosticAdapter:
             input_payload=build_live_diagnostic_input(scenario),
             result_payload={},
         )
+        scope = evidence_context.cls_scope
         service = AiopsDiagnosticService(
             repositories=self._repositories,
             llm_provider=self._llm_provider,
             retrieval_tool=self._retrieval_tool,
-            mcp_client=LivePostgresEvidenceMcpClient(observation),
-            cls_region="docker-live",
-            cls_topic_id="local-postgres",
+            mcp_client=build_live_evidence_client(
+                observation=observation,
+                evidence_context=evidence_context,
+                cls_client=self._cls_mcp_client,
+            ),
+            cls_region=scope.region if scope is not None else "docker-live",
+            cls_topic_id=scope.topic_id if scope is not None else "local-postgres",
         )
         async for _ in service.stream(
             task=task,
