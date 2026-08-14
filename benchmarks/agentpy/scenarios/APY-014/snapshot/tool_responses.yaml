@@ -1,0 +1,65 @@
+tools:
+  - name: InspectRedisServer
+    description: Read frozen Redis server capacity and rejection counters.
+    input_schema:
+      type: object
+      required: [instance]
+      additionalProperties: false
+      properties:
+        instance: {type: string}
+    calls:
+      - arguments: {instance: live-eval-cache}
+        evidence_id: redis-connected-equals-maxclients
+        result:
+          processStatus: running
+          pingOnEstablishedConnection: PONG
+          connectedClients: 16
+          maxclients: 16
+  - name: GetRedisConnectionMetrics
+    description: Read frozen bounded Redis connection counters.
+    input_schema:
+      type: object
+      required: [instance, windowMinutes]
+      additionalProperties: false
+      properties:
+        instance: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {instance: live-eval-cache, windowMinutes: 15}
+        evidence_id: redis-rejections-increased
+        result:
+          rejectedConnectionsDelta: 83
+          successfulExistingOperations: 4201
+          connectionRefusedAtNetworkLayer: 0
+  - name: ListRedisClients
+    description: Read a frozen sanitized Redis client-name summary.
+    input_schema:
+      type: object
+      required: [instance, clientPrefix]
+      additionalProperties: false
+      properties:
+        instance: {type: string}
+        clientPrefix: {type: string}
+    calls:
+      - arguments: {instance: live-eval-cache, clientPrefix: agentpy-live}
+        evidence_id: redis-run-scoped-clients
+        result:
+          matchedClients: 14
+          unknownClients: 1
+          controlClients: 1
+          allMatchedNamesUseRequestedPrefix: true
+  - name: InspectHostLimits
+    description: Read frozen host file-descriptor capacity without changing limits.
+    input_schema:
+      type: object
+      required: [host]
+      additionalProperties: false
+      properties:
+        host: {type: string}
+    calls:
+      - arguments: {host: live-eval-redis-host}
+        evidence_id: redis-host-fd-healthy
+        result:
+          openFileDescriptors: 42
+          softLimit: 1024
+          allocationFailures: 0

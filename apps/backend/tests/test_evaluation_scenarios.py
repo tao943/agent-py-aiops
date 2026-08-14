@@ -16,6 +16,7 @@ from super_ai.evaluation import (
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
 NEW_PAIRS = (("APY-002", "APY-011"), ("APY-007", "APY-012"))
 NEW_SCENARIOS = tuple(item for pair in NEW_PAIRS for item in pair)
+EXPANSION_SCENARIOS = ("APY-013", "APY-014", "APY-015", "APY-016")
 
 
 def test_repository_contains_exactly_ten_snapshot_scenarios() -> None:
@@ -37,6 +38,47 @@ def test_repository_contains_exactly_ten_snapshot_scenarios() -> None:
     assert all((path / "ground_truth.yaml").is_file() for path in scenario_dirs)
     assert all((path / "provenance.yaml").is_file() for path in scenario_dirs)
     assert all((path / "snapshot" / "tool_responses.yaml").is_file() for path in scenario_dirs)
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "mechanism", "required_ids"),
+    [
+        ("APY-013", "opposite_order_transaction_deadlock", {"deadlock-error", "wait-cycle"}),
+        (
+            "APY-014",
+            "benchmark_clients_exhausted_maxclients",
+            {"maxclients-capacity", "scoped-client-set"},
+        ),
+        (
+            "APY-015",
+            "upstream_response_exceeded_proxy_read_timeout",
+            {"connect-succeeded", "response-timeout"},
+        ),
+        (
+            "APY-016",
+            "retry_after_ignored_without_backoff",
+            {"retry-amplification", "missing-backoff"},
+        ),
+    ],
+)
+def test_expansion_scenarios_require_discriminating_evidence(
+    scenario_id: str,
+    mechanism: str,
+    required_ids: set[str],
+) -> None:
+    root = SCENARIOS / scenario_id
+    public = load_public_scenario(root)
+    oracle = load_scenario_oracle(root)
+    client = SnapshotMcpClient.from_yaml(root / public.snapshot_file)
+
+    assert public.id == scenario_id
+    assert oracle.primary_cause.mechanism == mechanism
+    assert required_ids <= {milestone.id for milestone in oracle.required_evidence}
+    assert len(asyncio.run(client.discover_tools())) >= 3
+    public_text = (root / "scenario.yaml").read_text(encoding="utf-8").casefold()
+    assert mechanism.casefold() not in public_text
+    assert "primary_cause" not in public_text
+    validate_scenario_bundle(ScenarioBundle(public=public, oracle=oracle, root=root))
 
 
 @pytest.fixture

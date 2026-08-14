@@ -1,0 +1,20 @@
+primary_cause:
+  component: order-service
+  mechanism: opposite_order_transaction_deadlock
+  trigger: concurrent_updates_acquired_order_and_inventory_rows_in_reverse_order
+contributing_causes: []
+causal_chain:
+  - two concurrent order transactions acquired shared resources in opposite order
+  - each transaction waited for a resource held by the other transaction
+  - PostgreSQL detected the cycle and aborted one transaction with SQLSTATE 40P01
+required_evidence:
+  - id: deadlock-error
+    alternatives:
+      - [postgres-40p01-deadlock-record]
+  - id: wait-cycle
+    alternatives:
+      - [postgres-opposite-resource-order, postgres-deadlock-cycle]
+required_rule_outs:
+  - postgres_lock_wait
+forbidden_claims:
+  - postgres_slow_query

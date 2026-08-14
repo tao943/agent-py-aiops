@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - Public Nginx proxy timeout and upstream timing documentation
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://nginx.org/en/docs/http/ngx_http_proxy_module.html
+  - https://nginx.org/en/docs/http/ngx_http_log_module.html
+license_notes:
+  - Nginx documentation terms apply to the referenced pages.
+  - Scenario text and frozen observations are original AgentPy material.
+accessed: 2026-08-14
+created: 2026-08-14

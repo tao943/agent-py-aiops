@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - Public HTTP Retry-After and rate-limit retry guidance
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://www.rfc-editor.org/rfc/rfc9110.html
+  - https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+license_notes:
+  - RFC publication terms apply to the referenced standard.
+  - AWS Builders Library material is cited and not copied.
+accessed: 2026-08-14
+created: 2026-08-14

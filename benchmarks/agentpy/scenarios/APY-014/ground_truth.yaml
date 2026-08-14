@@ -1,0 +1,21 @@
+primary_cause:
+  component: live-eval-redis
+  mechanism: benchmark_clients_exhausted_maxclients
+  trigger: run_scoped_clients_filled_the_connection_limit
+contributing_causes: []
+causal_chain:
+  - scoped clients occupied every configured Redis client slot
+  - Redis continued serving established connections but rejected new connections
+  - application requests requiring a new connection failed
+required_evidence:
+  - id: maxclients-capacity
+    alternatives:
+      - [redis-connected-equals-maxclients, redis-rejections-increased]
+  - id: scoped-client-set
+    alternatives:
+      - [redis-run-scoped-clients]
+required_rule_outs:
+  - redis_process_unavailable
+  - host_file_descriptor_exhaustion
+forbidden_claims:
+  - redis_stale_client_pool

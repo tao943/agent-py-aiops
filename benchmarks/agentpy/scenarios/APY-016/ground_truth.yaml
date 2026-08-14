@@ -1,0 +1,21 @@
+primary_cause:
+  component: checkout-client
+  mechanism: retry_after_ignored_without_backoff
+  trigger: immediate_retry_policy_amplified_rate_limited_requests
+contributing_causes: []
+causal_chain:
+  - clients received HTTP 429 responses with a bounded Retry-After value
+  - the client policy retried immediately instead of delaying or stopping
+  - attempts per logical request and total gateway traffic rose together
+required_evidence:
+  - id: retry-amplification
+    alternatives:
+      - [http-attempts-per-request-rise, http-429-and-volume-rise]
+  - id: missing-backoff
+    alternatives:
+      - [http-retry-after-ignored, http-zero-backoff-timeline]
+required_rule_outs:
+  - expected_rate_limiting
+  - malicious_traffic
+forbidden_claims:
+  - downstream_saturation

@@ -1,0 +1,73 @@
+tools:
+  - name: InspectGatewayRequestTimeline
+    description: Read frozen bounded gateway timing fields for one route.
+    input_schema:
+      type: object
+      required: [route, windowMinutes]
+      additionalProperties: false
+      properties:
+        route: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {route: checkout, windowMinutes: 15}
+        evidence_id: nginx-upstream-connect-fast
+        result:
+          status: 504
+          upstreamConnectTimeMs: 4
+          requestTimeMs: 752
+          upstreamAddressMatchedRoute: true
+  - name: InspectGatewayErrors
+    description: Read frozen normalized gateway error events without raw logs.
+    input_schema:
+      type: object
+      required: [route, windowMinutes]
+      additionalProperties: false
+      properties:
+        route: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {route: checkout, windowMinutes: 15}
+        evidence_id: nginx-504-read-timeout
+        result:
+          status: 504
+          phase: reading_response_header
+          connectErrors: 0
+          nameResolutionErrors: 0
+  - name: ProbeUpstreamHealth
+    description: Read a frozen independent upstream health probe result.
+    input_schema:
+      type: object
+      required: [service]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+    calls:
+      - arguments: {service: checkout-upstream}
+        evidence_id: upstream-health-passed
+        result:
+          tcpConnect: success
+          healthStatus: 200
+          healthLatencyMs: 8
+      - arguments: {service: checkout-slow-endpoint}
+        evidence_id: upstream-response-time-exceeded
+        result:
+          tcpConnect: success
+          firstByteMs: 1500
+          gatewayReadDeadlineMs: 750
+  - name: GetGatewayMetrics
+    description: Read frozen gateway capacity metrics for the same window.
+    input_schema:
+      type: object
+      required: [gateway, windowMinutes]
+      additionalProperties: false
+      properties:
+        gateway: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {gateway: api-gateway, windowMinutes: 15}
+        evidence_id: nginx-capacity-distractor
+        result:
+          cpuPercent: 21
+          memoryPercent: 34
+          workerConnectionsPercent: 18
+          eventLoopLagMs: 2
