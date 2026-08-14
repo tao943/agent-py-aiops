@@ -332,7 +332,7 @@ async def test_live_collector_rejects_unknown_or_mutating_arguments() -> None:
 
 
 def test_runner_boundary_appends_authorized_and_verified_recovery_facts() -> None:
-    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "allowed")
+    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
     verification = LiveVerification(True, True, True, True, True, True)
 
     enriched = append_live_outcome(_artifact(), recovery=recovery, verification=verification)
