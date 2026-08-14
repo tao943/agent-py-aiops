@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
     build_live_evidence_runtime,
@@ -16,6 +18,7 @@ from super_ai.evaluation.live.cli import (
     safe_output,
     write_safe_report,
 )
+from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutScenarioDriver,
@@ -234,6 +237,95 @@ def test_live_failure_classification_separates_infrastructure_from_agent() -> No
         "VALID_FAIL",
         1,
     )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_command_resolves_the_scenario_driver_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleaned_run_ids: list[str] = []
+
+    class RecordingDriver:
+        async def cleanup(self, identity: object) -> LiveCleanupResult:
+            cleaned_run_ids.append(identity.run_id)  # type: ignore[attr-defined]
+            return LiveCleanupResult((LiveCheck("scoped_cleanup", True),))
+
+    driver = RecordingDriver()
+
+    class RecordingRegistry:
+        def resolve(self, scenario_id: str) -> object:
+            assert scenario_id == "APY-LIVE-REDIS-MAXCLIENTS-001"
+            return SimpleNamespace(driver=driver)
+
+    monkeypatch.setattr(
+        live_cli,
+        "build_live_scenario_registry",
+        RecordingRegistry,
+    )
+
+    payload, exit_code = await live_cli._run_infrastructure_command(  # pyright: ignore[reportPrivateUsage]
+        "cleanup",
+        "APY-LIVE-REDIS-MAXCLIENTS-001",
+        "live-run-1",
+    )
+
+    assert cleaned_run_ids == ["live-run-1"]
+    assert exit_code == 0
+    assert payload["result"] == {
+        "verificationPassed": True,
+        "cleanupSucceeded": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_verify_command_reads_the_matching_completed_run_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario_id = "APY-LIVE-NGINX-TIMEOUT-001"
+    run_id = "live-run-2"
+    resolved_scenarios: list[str] = []
+
+    def resolve(value: str) -> object:
+        resolved_scenarios.append(value)
+        return SimpleNamespace(driver=object())
+
+    monkeypatch.setattr(live_cli, "LIVE_REPORT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        live_cli,
+        "build_live_scenario_registry",
+        lambda: SimpleNamespace(resolve=resolve),
+    )
+    write_safe_report(
+        tmp_path / f"{run_id}.json",
+        safe_output(
+            command="run",
+            scenario_id=scenario_id,
+            run_id=run_id,
+            status="failed",
+            result={
+                "passed": False,
+                "verificationPassed": True,
+                "cleanupSucceeded": True,
+                "validity": "VALID_FAIL",
+            },
+        ),
+    )
+
+    payload, exit_code = await live_cli._run_infrastructure_command(  # pyright: ignore[reportPrivateUsage]
+        "verify",
+        scenario_id,
+        run_id,
+    )
+
+    assert exit_code == 0
+    assert resolved_scenarios == [scenario_id]
+    assert payload["scenarioId"] == scenario_id
+    assert payload["runId"] == run_id
+    assert payload["result"] == {
+        "verificationPassed": True,
+        "cleanupSucceeded": None,
+    }
 
 
 def test_safe_json_output_drops_sensitive_and_oracle_fields() -> None:

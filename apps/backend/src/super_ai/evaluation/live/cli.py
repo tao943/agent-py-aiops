@@ -398,21 +398,40 @@ async def _run_infrastructure_command(
     run_id: str,
 ) -> tuple[dict[str, object], int]:
     identity = validate_run_id(run_id)
-    driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+    components = build_live_scenario_registry().resolve(scenario_id)
     if command == "cleanup":
-        await driver.cleanup(identity)
-    audit = await driver.audit(identity)
+        cleanup = await components.driver.cleanup(identity)
+        verification_passed = cleanup.passed
+        cleanup_succeeded: bool | None = cleanup.passed
+    else:
+        report = read_safe_report(LIVE_REPORT_ROOT / f"{identity.run_id}.json")
+        result = report.get("result")
+        typed_result: Mapping[str, object]
+        if isinstance(result, Mapping):
+            typed_result = cast(Mapping[str, object], result)
+        else:
+            typed_result = cast(Mapping[str, object], {})
+        report_matches = (
+            report.get("scenarioId") == scenario_id
+            and report.get("runId") == identity.run_id
+        )
+        verification_passed = (
+            report_matches
+            and typed_result.get("verificationPassed") is True
+            and typed_result.get("cleanupSucceeded") is True
+        )
+        cleanup_succeeded = None
     payload = safe_output(
         command=command,
         scenario_id=scenario_id,
         run_id=run_id,
-        status="clean" if audit.clean else "residual_detected",
+        status="clean" if verification_passed else "residual_detected",
         result={
-            "verificationPassed": audit.clean,
-            "cleanupSucceeded": audit.clean if command == "cleanup" else None,
+            "verificationPassed": verification_passed,
+            "cleanupSucceeded": cleanup_succeeded,
         },
     )
-    return payload, 0 if audit.clean else 1
+    return payload, 0 if verification_passed else 1
 
 
 def _postgres_config_from_environment() -> PostgresConnectionConfig:
