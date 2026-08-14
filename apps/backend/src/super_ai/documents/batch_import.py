@@ -24,6 +24,8 @@ from super_ai.project_config import (
     required_str,
 )
 
+_CURRENT_DOCUMENT_STATUSES = frozenset({"active", "ready"})
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 _client_transport: httpx.BaseTransport | None = None
 KNOWLEDGE_CARD_CHUNKING = {
@@ -155,7 +157,7 @@ def assert_no_active_filename_duplicates(
     user_id: str,
     token: str,
 ) -> None:
-    """Stop before mutation when a target filename has multiple active records."""
+    """Stop before mutation when a target filename has multiple current records."""
     knowledge_base_id = f"kb_{user_id}"
     response = client.get(
         f"/knowledge-bases/{knowledge_base_id}/documents",
@@ -172,7 +174,7 @@ def assert_no_active_filename_duplicates(
     for raw_item in cast(list[object], raw_items):
         item = _object(raw_item, "data.items[]")
         filename = item.get("filename")
-        if filename in targets and item.get("status", "active") == "active":
+        if filename in targets and item.get("status", "active") in _CURRENT_DOCUMENT_STATUSES:
             typed_filename = cast(str, filename)
             active_counts[typed_filename] = active_counts.get(typed_filename, 0) + 1
     duplicates = sorted(name for name, count in active_counts.items() if count > 1)

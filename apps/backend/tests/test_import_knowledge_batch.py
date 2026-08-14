@@ -211,6 +211,33 @@ def test_duplicate_preflight_stops_before_any_upload(tmp_path: Path) -> None:
     assert requests == [("GET", "/knowledge-bases/kb_user-a/documents")]
 
 
+def test_duplicate_preflight_treats_ready_documents_as_current(tmp_path: Path) -> None:
+    files = _markdown_files(tmp_path, ["a.md"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "items": [
+                        {"filename": "a.md", "status": "ready"},
+                        {"filename": "a.md", "status": "ready"},
+                    ]
+                }
+            },
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test") as client:
+        with pytest.raises(ValueError, match="duplicate active.*a.md"):
+            import_knowledge_batch.assert_no_active_filename_duplicates(
+                client,
+                files=files,
+                user_id="user-a",
+                token="redacted",
+            )
+
+
 def test_import_batch_continues_after_failure_when_requested(tmp_path: Path) -> None:
     files = _markdown_files(tmp_path, ["a.md", "b.md"])
     responses = iter(
