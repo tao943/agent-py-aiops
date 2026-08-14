@@ -1,0 +1,11 @@
+coverage:
+  APY-002: [postgres-pool-exhaustion.md]
+  APY-003: [nginx-upstream-502.md]
+  APY-006: [nginx-upstream-502.md, nginx-routing-service-discovery.md]
+  APY-007: [redis-unavailable.md]
+  APY-011: [postgres-pool-exhaustion.md]
+  APY-012: [redis-unavailable.md, redis-failover-reconnect.md]
+  APY-013: [postgres-deadlock.md]
+  APY-014: [redis-maxclients-pressure.md]
+  APY-015: [nginx-upstream-timeout.md]
+  APY-016: [http-rate-limit-retry-storm.md]
