@@ -46,7 +46,7 @@ class RecordingUploader:
     async def put(
         self, records: Sequence[Mapping[str, str]], *, filename: str
     ) -> int:
-        assert filename == "agentpy-live-postgres.log"
+        assert filename == "agentpy-live-evidence.log"
         if self.error is not None:
             raise self.error
         self.records = tuple(records)
@@ -112,20 +112,44 @@ def _preparer(
     )
 
 
-def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
+@pytest.mark.parametrize(
+    ("scenario_id", "events"),
+    (
+        (
+            "APY-LIVE-PG-LOCK-001",
+            {"request_received", "database_contention", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-PG-DEADLOCK-001",
+            {"request_received", "database_contention", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            {"request_received", "connection_rejected", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-NGINX-TIMEOUT-001",
+            {"request_received", "upstream_timeout", "alert_fired"},
+        ),
+    ),
+)
+def test_live_cls_records_are_scenario_scoped_without_revealing_oracle(
+    scenario_id: str, events: set[str]
+) -> None:
     records = build_live_cls_records(
         run_id=IDENTITY.run_id,
-        scenario_id=SCENARIO.id,
-        incident_id=f"{SCENARIO.id}-{IDENTITY.run_id}",
+        scenario_id=scenario_id,
+        incident_id=f"{scenario_id}-{IDENTITY.run_id}",
         now=NOW,
     )
 
     assert len(records) == 3
     assert {record["run_id"] for record in records} == {"run-1"}
-    assert {record["scenario_id"] for record in records} == {SCENARIO.id}
+    assert {record["scenario_id"] for record in records} == {scenario_id}
     assert {record["incident_id"] for record in records} == {
-        f"{SCENARIO.id}-run-1"
+        f"{scenario_id}-run-1"
     }
+    assert {record["event"] for record in records} == events
     assert all(
         {
             "run_id",
@@ -135,9 +159,8 @@ def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
             "environment",
             "event",
             "level",
-            "trace_id",
+            "trace",
             "component",
-            "message",
             "timestamp",
         }
         <= set(record)
@@ -146,6 +169,8 @@ def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
     serialized = json.dumps(records)
     assert "row_lock_blocking" not in serialized
     assert "blocker" not in serialized
+    assert "benchmark_clients_exhausted_maxclients" not in serialized
+    assert "upstream_response_exceeded_proxy_read_timeout" not in serialized
 
 
 @pytest.mark.asyncio

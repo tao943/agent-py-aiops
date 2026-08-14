@@ -315,6 +315,48 @@ def test_live_input_contains_candidate_wide_vocabulary_without_oracle() -> None:
     assert "run_id" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("scenario_id", "hypothesis_id", "component", "mechanism"),
+    (
+        (
+            "APY-LIVE-PG-DEADLOCK-001",
+            "postgres_deadlock",
+            "postgresql",
+            "opposite_order_transaction_deadlock",
+        ),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            "redis_maxclients",
+            "live-eval-redis",
+            "benchmark_clients_exhausted_maxclients",
+        ),
+        (
+            "APY-LIVE-NGINX-TIMEOUT-001",
+            "nginx_upstream_response_timeout",
+            "live-eval-upstream",
+            "upstream_response_exceeded_proxy_read_timeout",
+        ),
+    ),
+)
+def test_live_input_uses_candidate_wide_vocabulary_for_every_driver(
+    scenario_id: str,
+    hypothesis_id: str,
+    component: str,
+    mechanism: str,
+) -> None:
+    scenario = load_live_scenario(LIVE_SCENARIOS / scenario_id)
+
+    payload = build_live_diagnostic_input(scenario)
+    vocabulary = cast(dict[str, Any], payload["decisionVocabulary"])
+    labels = cast(dict[str, dict[str, str]], vocabulary["labelsByHypothesis"])
+
+    assert labels[hypothesis_id] == {
+        "component": component,
+        "mechanism": mechanism,
+    }
+    assert set(labels) == {item.id for item in scenario.hypotheses}
+
+
 @pytest.mark.asyncio
 async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
     client = LivePostgresEvidenceMcpClient(_observation())

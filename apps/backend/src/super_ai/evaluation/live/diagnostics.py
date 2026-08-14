@@ -43,33 +43,81 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "live",
-        "decisionVocabulary": {
-            "componentAliases": {
-                "postgres": "postgresql",
-                "postgresql": "postgresql",
-            },
-            "mechanismAliases": {
-                "postgres_lock_blocking": "row_lock_blocking",
-                "row_lock_blocking": "row_lock_blocking",
-                "postgres_slow_query_without_lock": "slow_query_without_lock",
-                "slow_query_without_lock": "slow_query_without_lock",
-                "postgres_connectivity_failure": "connectivity_failure",
-                "connectivity_failure": "connectivity_failure",
-            },
-            "labelsByHypothesis": {
-                "postgres_lock_blocking": {
-                    "component": "postgresql",
-                    "mechanism": "row_lock_blocking",
-                },
-                "postgres_slow_query_without_lock": {
-                    "component": "postgresql",
-                    "mechanism": "slow_query_without_lock",
-                },
-                "postgres_connectivity_failure": {
-                    "component": "postgresql",
-                    "mechanism": "connectivity_failure",
-                },
-            },
+        "decisionVocabulary": _decision_vocabulary(scenario),
+    }
+
+
+def _decision_vocabulary(scenario: LiveScenario) -> JsonDict:
+    labels_by_driver: dict[str, dict[str, tuple[str, str]]] = {
+        "postgres_lock_wait": {
+            "postgres_lock_blocking": ("postgresql", "row_lock_blocking"),
+            "postgres_slow_query_without_lock": (
+                "postgresql",
+                "slow_query_without_lock",
+            ),
+            "postgres_connectivity_failure": ("postgresql", "connectivity_failure"),
+        },
+        "postgres_deadlock": {
+            "postgres_deadlock": (
+                "postgresql",
+                "opposite_order_transaction_deadlock",
+            ),
+            "postgres_long_lock_wait": ("postgresql", "row_lock_blocking"),
+            "postgres_slow_statement": ("postgresql", "slow_query_without_lock"),
+        },
+        "redis_maxclients": {
+            "redis_maxclients": (
+                "live-eval-redis",
+                "benchmark_clients_exhausted_maxclients",
+            ),
+            "redis_process_unavailable": (
+                "live-eval-redis",
+                "connectivity_failure",
+            ),
+            "host_file_descriptor_exhaustion": (
+                "host",
+                "file_descriptor_exhaustion",
+            ),
+            "redis_stale_client_pool": ("application", "stale_client_pool"),
+        },
+        "nginx_timeout": {
+            "nginx_upstream_response_timeout": (
+                "live-eval-upstream",
+                "upstream_response_exceeded_proxy_read_timeout",
+            ),
+            "nginx_upstream_unavailable": (
+                "live-eval-upstream",
+                "upstream_unavailable",
+            ),
+            "nginx_route_mismatch": ("nginx", "route_mismatch"),
+            "nginx_gateway_pressure": ("nginx", "gateway_resource_pressure"),
+        },
+    }
+    labels = labels_by_driver.get(scenario.driver)
+    if labels is None or set(labels) != {item.id for item in scenario.hypotheses}:
+        raise ValueError("Live scenario decision vocabulary is incomplete.")
+    component_aliases = {
+        alias: canonical
+        for canonical in {component for component, _ in labels.values()}
+        for alias in (canonical,)
+    }
+    if scenario.driver.startswith("postgres"):
+        component_aliases["postgres"] = "postgresql"
+    if scenario.driver == "redis_maxclients":
+        component_aliases["redis"] = "live-eval-redis"
+    if scenario.driver == "nginx_timeout":
+        component_aliases["upstream"] = "live-eval-upstream"
+    mechanism_aliases = {
+        alias: mechanism
+        for hypothesis, (_, mechanism) in labels.items()
+        for alias in (hypothesis, mechanism)
+    }
+    return {
+        "componentAliases": component_aliases,
+        "mechanismAliases": mechanism_aliases,
+        "labelsByHypothesis": {
+            hypothesis: {"component": component, "mechanism": mechanism}
+            for hypothesis, (component, mechanism) in labels.items()
         },
     }
 
@@ -365,7 +413,7 @@ def append_live_outcome(
         artifact,
         live_recovery=LiveRecoveryAudit(
             action=recovery.action,
-            target_ref="synthetic_blocker",
+            target_ref=recovery.target_ref,
             approved=recovery.authorized,
             executed=recovery.executed,
             verified=verification.passed,
