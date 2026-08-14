@@ -28,5 +28,8 @@ connect time 高偏向网络或监听积压；header/response time 高且上游 
 
 ## 验证状态
 content_type: agentpy-original-summary
-docker_validation: pending
+docker_validation: verified
+docker_validation_date: 2026-08-14
+docker_validation_scope: isolated_live_eval_fixture
+已在隔离容器中验证上游连接成功但响应超过代理读取期限会产生 504，并可用请求时间线、直接上游健康探测和配置不变性进行交叉检查。
 reviewed_on: 2026-08-13

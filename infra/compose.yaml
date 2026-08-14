@@ -149,13 +149,21 @@ services:
       retries: 15
 
   live-eval-upstream:
-    image: python:3.12-alpine
+    image: python:3.12-slim
     profiles: ["live-eval"]
     command: ["python", "/opt/live-eval/upstream.py"]
+    ports:
+      - "127.0.0.1:18081:8080"
     volumes:
       - ./live-eval/upstream.py:/opt/live-eval/upstream.py:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1).read()",
+        ]
       interval: 2s
       timeout: 2s
       retries: 15

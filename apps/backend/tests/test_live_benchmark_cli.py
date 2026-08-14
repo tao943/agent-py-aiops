@@ -16,6 +16,10 @@ from super_ai.evaluation.live.cli import (
     safe_output,
     write_safe_report,
 )
+from super_ai.evaluation.live.nginx_timeout import (
+    NginxProposalRecoveryService,
+    NginxTimeoutScenarioDriver,
+)
 from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
@@ -60,6 +64,16 @@ def test_cli_builds_redis_maxclients_runtime_through_registry() -> None:
     assert components.driver_name == "redis_maxclients"
     assert isinstance(components.driver, RedisMaxclientsScenarioDriver)
     assert isinstance(components.recovery, RedisMaxclientsRecoveryService)
+
+
+def test_cli_builds_nginx_timeout_runtime_through_registry() -> None:
+    components = build_live_scenario_registry().resolve(
+        "APY-LIVE-NGINX-TIMEOUT-001"
+    )
+
+    assert components.driver_name == "nginx_timeout"
+    assert isinstance(components.driver, NginxTimeoutScenarioDriver)
+    assert isinstance(components.recovery, NginxProposalRecoveryService)
 
 
 @pytest.mark.parametrize("command", ("run", "verify", "cleanup", "report"))

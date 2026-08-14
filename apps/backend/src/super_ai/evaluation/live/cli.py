@@ -22,6 +22,12 @@ from super_ai.evaluation.live.diagnostics import (
 )
 from super_ai.evaluation.live.domain import EvidenceSource
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
+from super_ai.evaluation.live.nginx_timeout import (
+    NginxProposalRecoveryService,
+    NginxTimeoutEvidenceMcpClient,
+    NginxTimeoutLiveConfig,
+    NginxTimeoutScenarioDriver,
+)
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
@@ -372,6 +378,17 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
         )
 
     registry.register("APY-LIVE-REDIS-MAXCLIENTS-001", redis_maxclients_components)
+
+    def nginx_timeout_components() -> LiveScenarioComponents:
+        driver = NginxTimeoutScenarioDriver(_nginx_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="nginx_timeout",
+            driver=driver,
+            recovery=NginxProposalRecoveryService(),
+            component_evidence_factory=NginxTimeoutEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-NGINX-TIMEOUT-001", nginx_timeout_components)
     return registry
 
 
@@ -411,6 +428,17 @@ def _postgres_config_from_environment() -> PostgresConnectionConfig:
 def _redis_config_from_environment() -> RedisLiveConfig:
     return RedisLiveConfig(
         url=os.getenv("LIVE_REDIS_URL", "redis://127.0.0.1:16379/0")
+    )
+
+
+def _nginx_config_from_environment() -> NginxTimeoutLiveConfig:
+    return NginxTimeoutLiveConfig(
+        gateway_url=os.getenv(
+            "LIVE_NGINX_GATEWAY_URL", "http://127.0.0.1:18080"
+        ),
+        upstream_url=os.getenv(
+            "LIVE_NGINX_UPSTREAM_URL", "http://127.0.0.1:18081"
+        ),
     )
 
 
