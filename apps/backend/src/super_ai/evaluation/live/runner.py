@@ -10,7 +10,9 @@ from typing import Generic, Protocol, TypeVar
 from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
+    LiveEvidenceContext,
     LiveFaultObservation,
+    LiveInfrastructureError,
     LiveRecoveryRecord,
     LiveRunIdentity,
     LiveScenario,
@@ -55,7 +57,32 @@ class LiveDiagnosticAdapter(Protocol):
         run_id: str,
         scenario: LiveScenario,
         observation: LiveFaultObservation,
+        evidence_context: LiveEvidenceContext,
     ) -> object: ...
+
+
+class LiveEvidencePreparer(Protocol):
+    async def prepare(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+    ) -> LiveEvidenceContext: ...
+
+
+class LocalLiveEvidencePreparer:
+    """Prepare the explicit no-network evidence context."""
+
+    async def prepare(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+    ) -> LiveEvidenceContext:
+        del observation
+        return LiveEvidenceContext.local(incident_id=f"{scenario.id}-{identity.run_id}")
 
 
 class LiveRecoveryService(Protocol):
@@ -88,12 +115,14 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
         *,
         scenario_root: Path,
         driver: LiveScenarioDriver,
+        evidence_preparer: LiveEvidencePreparer,
         diagnostic: LiveDiagnosticAdapter,
         recovery: LiveRecoveryService,
         evaluator: LiveEvaluator[EvaluationT],
     ) -> None:
         self._scenario_root = scenario_root.resolve()
         self._driver = driver
+        self._evidence_preparer = evidence_preparer
         self._diagnostic = diagnostic
         self._recovery = recovery
         self._evaluator = evaluator
@@ -114,11 +143,20 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             )
             if not observation.confirmed:
                 raise LiveBenchmarkError("fault_injection_failed")
+            evidence_context = await self._classified(
+                self._evidence_preparer.prepare(
+                    identity=identity,
+                    scenario=scenario,
+                    observation=observation,
+                ),
+                "evidence_preparation_failed",
+            )
             diagnostic_artifact = await self._classified(
                 self._diagnostic.diagnose(
                     run_id=identity.run_id,
                     scenario=scenario,
                     observation=observation,
+                    evidence_context=evidence_context,
                 ),
                 "diagnostic_failed",
             )
@@ -175,5 +213,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             raise
         except LiveBenchmarkError:
             raise
+        except LiveInfrastructureError as exc:
+            raise LiveBenchmarkError(exc.category) from exc
         except Exception as exc:
             raise LiveBenchmarkError(category) from exc

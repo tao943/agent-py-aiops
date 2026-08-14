@@ -17,7 +17,7 @@ from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
 )
-from super_ai.evaluation.live.runner import LiveBenchmarkRunner
+from super_ai.evaluation.live.runner import LiveBenchmarkRunner, LocalLiveEvidencePreparer
 from super_ai.evaluation.live.scenarios import validate_run_id
 from super_ai.evaluation.live.scoring import LiveEvaluationResult, score_live_run
 from super_ai.llm import build_default_llm_provider
@@ -126,6 +126,7 @@ async def _run_live_command(
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
             driver=driver,
+            evidence_preparer=LocalLiveEvidencePreparer(),
             diagnostic=diagnostic,
             recovery=PostgresLiveRecoveryService(driver),
             evaluator=_LiveScoringEvaluator(),

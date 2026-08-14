@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from super_ai.evaluation.domain import PublicHypothesis
 
@@ -39,6 +40,55 @@ class LiveRunIdentity:
     @property
     def table_name(self) -> str:
         return f"lock_target_{self.run_token}"
+
+
+EvidenceSource = Literal["local", "cls"]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveClsScope:
+    """Run-scoped CLS query boundary prepared before Agent diagnosis."""
+
+    region: str
+    topic_id: str
+    from_ms: int
+    to_ms: int
+    run_id: str
+    scenario_id: str
+    incident_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LiveEvidenceReadiness:
+    """Non-secret audit proving that prepared evidence became searchable."""
+
+    expected_log_count: int
+    indexed_log_count: int
+    attempts: int
+    uploaded_at_ms: int
+    searchable_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class LiveEvidenceContext:
+    """Immutable evidence source and scope passed into Live diagnosis."""
+
+    source: EvidenceSource
+    incident_id: str
+    cls_scope: LiveClsScope | None = None
+    readiness: LiveEvidenceReadiness | None = None
+
+    @classmethod
+    def local(cls, *, incident_id: str) -> LiveEvidenceContext:
+        return cls(source="local", incident_id=incident_id)
+
+
+class LiveInfrastructureError(RuntimeError):
+    """Classified infrastructure invalidity with a credential-safe message."""
+
+    def __init__(self, category: str) -> None:
+        super().__init__("Live evidence infrastructure failed at a classified boundary.")
+        self.category = category
 
 
 @dataclass(frozen=True, slots=True)

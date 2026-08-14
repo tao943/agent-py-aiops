@@ -16,6 +16,7 @@ from super_ai.evaluation.artifacts import (
     build_run_artifact,
 )
 from super_ai.evaluation.live.domain import (
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveScenario,
@@ -233,7 +234,9 @@ class ApplicationLiveDiagnosticAdapter:
         run_id: str,
         scenario: LiveScenario,
         observation: LiveFaultObservation,
+        evidence_context: LiveEvidenceContext,
     ) -> RunArtifact:
+        del evidence_context
         owner_user_id = self._owner_user_id or f"benchmark:{run_id}"
         task_id = f"diagnostic_{uuid4().hex}"
         task = await self._repositories.diagnostics.create_task(
