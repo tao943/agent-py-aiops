@@ -136,6 +136,46 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  live-eval-redis:
+    image: redis:7-alpine
+    profiles: ["live-eval"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxclients", "16"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  live-eval-upstream:
+    image: python:3.12-alpine
+    profiles: ["live-eval"]
+    command: ["python", "/opt/live-eval/upstream.py"]
+    volumes:
+      - ./live-eval/upstream.py:/opt/live-eval/upstream.py:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  live-eval-nginx:
+    image: nginx:1.30-alpine
+    profiles: ["live-eval"]
+    ports:
+      - "127.0.0.1:18080:80"
+    volumes:
+      - ./live-eval/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      live-eval-upstream:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
 volumes:
   redis-data:
   postgres-data:
