@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from langchain_core.tools import StructuredTool
@@ -47,31 +47,59 @@ class LivePostgresEvidenceMcpClient:
         self._observation = observation
 
     async def discover_tools(self) -> Sequence[McpToolDefinition]:
-        schema: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
         return (
             McpToolDefinition(
                 "InspectPostgresSessions",
                 "Inspect safe PostgreSQL session wait-event facts.",
-                schema,
+                {
+                    "type": "object",
+                    "properties": {
+                        "state_filter": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["active", "idle in transaction"],
+                            },
+                        },
+                        "include_wait_events": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
                 "docker-live-postgres",
             ),
             McpToolDefinition(
                 "InspectPostgresLockGraph",
                 "Inspect safe PostgreSQL blocking-graph facts.",
-                schema,
+                {
+                    "type": "object",
+                    "properties": {
+                        "detect_deadlocks": {"type": "boolean"},
+                        "analyze_blocking_chains": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
                 "docker-live-postgres",
             ),
             McpToolDefinition(
                 "VerifyServiceHealth",
                 "Inspect the current synthetic service health probe.",
-                schema,
+                {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["postgres_cluster"],
+                        },
+                        "check_connection_pool": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
                 "docker-live-postgres",
             ),
         )
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
-        if arguments:
-            raise McpClientError("Docker Live evidence tool arguments are invalid.")
+        _validate_live_evidence_arguments(name, arguments)
         if name == "InspectPostgresSessions":
             return {
                 "waitingSession": "waiter",
@@ -112,6 +140,41 @@ class LivePostgresEvidenceMcpClient:
                 )
             )
         return tools
+
+
+def _validate_live_evidence_arguments(
+    name: str,
+    arguments: Mapping[str, object],
+) -> None:
+    if name == "VerifyServiceHealth":
+        allowed = {"target", "check_connection_pool"}
+        valid = (
+            set(arguments) <= allowed
+            and arguments.get("target", "postgres_cluster") == "postgres_cluster"
+            and isinstance(arguments.get("check_connection_pool", True), bool)
+        )
+    elif name == "InspectPostgresSessions":
+        allowed = {"state_filter", "include_wait_events"}
+        raw_states = arguments.get("state_filter", [])
+        valid = (
+            set(arguments) <= allowed
+            and isinstance(raw_states, list)
+            and all(
+                isinstance(item, str)
+                and item in {"active", "idle in transaction"}
+                for item in cast(list[object], raw_states)
+            )
+            and isinstance(arguments.get("include_wait_events", True), bool)
+        )
+    elif name == "InspectPostgresLockGraph":
+        allowed = {"detect_deadlocks", "analyze_blocking_chains"}
+        valid = set(arguments) <= allowed and all(
+            isinstance(arguments.get(key, True), bool) for key in allowed
+        )
+    else:
+        return
+    if not valid:
+        raise McpClientError("Docker Live evidence tool arguments are invalid.")
 
 
 class ApplicationLiveDiagnosticAdapter:

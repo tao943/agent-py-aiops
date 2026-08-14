@@ -95,6 +95,41 @@ async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
         await client.call_tool("ReadGroundTruth", {})
 
 
+@pytest.mark.asyncio
+async def test_live_collector_accepts_declared_read_only_filters() -> None:
+    client = LivePostgresEvidenceMcpClient(_observation())
+
+    health = await client.call_tool(
+        "VerifyServiceHealth",
+        {"target": "postgres_cluster", "check_connection_pool": True},
+    )
+    sessions = await client.call_tool(
+        "InspectPostgresSessions",
+        {
+            "state_filter": ["active", "idle in transaction"],
+            "include_wait_events": True,
+        },
+    )
+    graph = await client.call_tool(
+        "InspectPostgresLockGraph",
+        {"detect_deadlocks": True, "analyze_blocking_chains": True},
+    )
+
+    assert isinstance(health, dict)
+    assert isinstance(sessions, dict)
+    assert isinstance(graph, dict)
+
+
+@pytest.mark.asyncio
+async def test_live_collector_rejects_unknown_or_mutating_arguments() -> None:
+    client = LivePostgresEvidenceMcpClient(_observation())
+
+    with pytest.raises(McpClientError, match="arguments are invalid"):
+        await client.call_tool("InspectPostgresSessions", {"raw_sql": "SELECT 1"})
+    with pytest.raises(McpClientError, match="arguments are invalid"):
+        await client.call_tool("VerifyServiceHealth", {"restart": True})
+
+
 def test_runner_boundary_appends_authorized_and_verified_recovery_facts() -> None:
     recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "allowed")
     verification = LiveVerification(True, True, True, True, True, True)
