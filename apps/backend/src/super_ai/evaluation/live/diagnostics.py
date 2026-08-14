@@ -11,6 +11,7 @@ from langchain_core.tools import StructuredTool
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.evaluation.artifacts import (
+    LiveEvidenceAudit,
     LiveRecoveryAudit,
     RunArtifact,
     build_run_artifact,
@@ -307,7 +308,40 @@ class ApplicationLiveDiagnosticAdapter:
             if self._repositories.tool_call_audits is not None
             else []
         )
-        return build_run_artifact(completed, steps, evidence, audits, reports)
+        return append_live_evidence_context(
+            build_run_artifact(completed, steps, evidence, audits, reports),
+            context=evidence_context,
+        )
+
+
+def append_live_evidence_context(
+    artifact: RunArtifact,
+    *,
+    context: LiveEvidenceContext,
+) -> RunArtifact:
+    """Append trusted, non-secret evidence scope after artifact assembly."""
+    scope = context.cls_scope
+    readiness = context.readiness
+    return replace(
+        artifact,
+        live_evidence=LiveEvidenceAudit(
+            source=context.source,
+            region=scope.region if scope is not None else None,
+            topic_id=scope.topic_id if scope is not None else None,
+            from_ms=scope.from_ms if scope is not None else None,
+            to_ms=scope.to_ms if scope is not None else None,
+            run_id=scope.run_id if scope is not None else None,
+            scenario_id=scope.scenario_id if scope is not None else artifact.scenario_id,
+            incident_id=context.incident_id,
+            expected_log_count=(
+                readiness.expected_log_count if readiness is not None else None
+            ),
+            indexed_log_count=(
+                readiness.indexed_log_count if readiness is not None else None
+            ),
+            attempts=readiness.attempts if readiness is not None else None,
+        ),
+    )
 
 
 def append_live_outcome(

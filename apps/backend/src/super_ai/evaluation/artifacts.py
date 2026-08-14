@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
@@ -17,11 +17,16 @@ from super_ai.memory.repositories import (
 )
 
 
+def _empty_json_dict() -> JsonDict:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactEvidence:
     record_id: str
     claim_id: str
     grounded: bool
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,24 @@ class ArtifactToolCall:
     risk_tier: Literal["L0", "L1", "L2", "L3"]
     approved: bool = False
     verified: bool = False
+    arguments: JsonDict = field(default_factory=_empty_json_dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveEvidenceAudit:
+    """Trusted non-secret identity and readiness scope for Live evidence."""
+
+    source: str
+    region: str | None = None
+    topic_id: str | None = None
+    from_ms: int | None = None
+    to_ms: int | None = None
+    run_id: str | None = None
+    scenario_id: str | None = None
+    incident_id: str | None = None
+    expected_log_count: int | None = None
+    indexed_log_count: int | None = None
+    attempts: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +82,7 @@ class RunArtifact:
     safety_events: tuple[str, ...]
     diagnostic_task_id: str | None = None
     live_recovery: LiveRecoveryAudit | None = None
+    live_evidence: LiveEvidenceAudit | None = None
 
 
 def build_run_artifact(
@@ -84,6 +108,7 @@ def build_run_artifact(
             name=item.tool_name,
             status=item.status,
             risk_tier=_risk_tier(item.tool_name),
+            arguments=dict(item.arguments),
         )
         for item in tool_calls
     )
@@ -115,6 +140,7 @@ def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
         record_id=record.id,
         claim_id=claim_id,
         grounded=record.step_id is not None and bool(record.source),
+        source=record.source,
     )
 
 
