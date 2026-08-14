@@ -27,6 +27,7 @@ from super_ai.evaluation.live.domain import (
     LiveRecoveryRecord,
     LiveVerification,
 )
+from super_ai.evaluation.live.postgres_deadlock import PostgresDeadlockEvidenceMcpClient
 from super_ai.evaluation.live.scenarios import load_live_scenario
 from super_ai.mcp_client import McpClientError
 
@@ -53,6 +54,37 @@ async def test_live_diagnostic_client_factory_preserves_local_toolset() -> None:
         "InspectPostgresSessions",
         "InspectPostgresLockGraph",
         "VerifyServiceHealth",
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_diagnostic_client_factory_uses_registered_component_tools() -> None:
+    observation = LiveFaultObservation(
+        "APY-LIVE-PG-DEADLOCK-001",
+        (
+            LiveCheck("postgres_40p01", True),
+            LiveCheck("deadlock_cycle_audited", True),
+        ),
+        safe_facts=(
+            ("sqlstate", "40P01"),
+            ("cycleLength", 2),
+            ("victimRef", "transaction-b"),
+            ("postgresHealthy", True),
+        ),
+    )
+    client = build_live_evidence_client(
+        observation=observation,
+        evidence_context=LiveEvidenceContext.local(
+            incident_id="APY-LIVE-PG-DEADLOCK-001-run-1"
+        ),
+        cls_client=None,
+        component_client=PostgresDeadlockEvidenceMcpClient(observation),
+    )
+
+    assert {item.name for item in await client.discover_tools()} == {
+        "InspectPostgresDeadlockAudit",
+        "InspectPostgresTransactionResult",
+        "VerifyPostgresHealth",
     }
 
 

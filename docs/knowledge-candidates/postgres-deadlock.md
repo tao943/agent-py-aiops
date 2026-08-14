@@ -27,5 +27,8 @@
 
 ## 验证状态
 content_type: agentpy-original-summary
-docker_validation: pending
+docker_validation: verified
+docker_validation_date: 2026-08-14
+docker_validation_scope: isolated_live_eval_fixture
+已在隔离容器中验证相反资源访问顺序可形成等待环、触发数据库回滚，并可通过事务结果与独立健康检查确认恢复结果。
 reviewed_on: 2026-08-13

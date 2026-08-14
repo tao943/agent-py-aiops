@@ -27,6 +27,11 @@ from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
 )
+from super_ai.evaluation.live.postgres_deadlock import (
+    PostgresDeadlockEvidenceMcpClient,
+    PostgresDeadlockRecoveryService,
+    PostgresDeadlockScenarioDriver,
+)
 from super_ai.evaluation.live.registry import (
     LiveScenarioComponents,
     LiveScenarioRegistry,
@@ -167,6 +172,7 @@ async def _run_live_command(
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
             cls_mcp_client=cls_mcp_client,
+            component_evidence_factory=components.component_evidence_factory,
         )
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
@@ -338,6 +344,17 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
         )
 
     registry.register("APY-LIVE-PG-LOCK-001", postgres_lock_components)
+
+    def postgres_deadlock_components() -> LiveScenarioComponents:
+        driver = PostgresDeadlockScenarioDriver(_postgres_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="postgres_deadlock",
+            driver=driver,
+            recovery=PostgresDeadlockRecoveryService(driver),
+            component_evidence_factory=PostgresDeadlockEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-PG-DEADLOCK-001", postgres_deadlock_components)
     return registry
 
 

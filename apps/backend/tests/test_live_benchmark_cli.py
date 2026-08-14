@@ -20,6 +20,10 @@ from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
 )
+from super_ai.evaluation.live.postgres_deadlock import (
+    PostgresDeadlockRecoveryService,
+    PostgresDeadlockScenarioDriver,
+)
 from super_ai.evaluation.live.runner import LocalLiveEvidencePreparer
 from super_ai.project_config import ProjectConfigurationError
 
@@ -34,6 +38,14 @@ def test_cli_builds_existing_postgres_runtime_through_registry() -> None:
     assert components.driver_name == "postgres_lock_wait"
     assert isinstance(components.driver, PostgresLockScenarioDriver)
     assert isinstance(components.recovery, PostgresLiveRecoveryService)
+
+
+def test_cli_builds_postgres_deadlock_runtime_through_registry() -> None:
+    components = build_live_scenario_registry().resolve("APY-LIVE-PG-DEADLOCK-001")
+
+    assert components.driver_name == "postgres_deadlock"
+    assert isinstance(components.driver, PostgresDeadlockScenarioDriver)
+    assert isinstance(components.recovery, PostgresDeadlockRecoveryService)
 
 
 @pytest.mark.parametrize("command", ("run", "verify", "cleanup", "report"))

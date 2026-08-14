@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 from uuid import uuid4
@@ -189,10 +189,11 @@ def build_live_evidence_client(
     observation: LiveFaultObservation,
     evidence_context: LiveEvidenceContext,
     cls_client: LiveMcpClient | None,
+    component_client: LiveMcpClient | None = None,
 ) -> LiveCompositeEvidenceMcpClient:
     """Compose the production tool boundary selected by prepared evidence mode."""
     return LiveCompositeEvidenceMcpClient(
-        postgres_client=LivePostgresEvidenceMcpClient(observation),
+        postgres_client=component_client or LivePostgresEvidenceMcpClient(observation),
         cls_client=cls_client if evidence_context.source == "cls" else None,
         context=evidence_context,
     )
@@ -245,6 +246,9 @@ class ApplicationLiveDiagnosticAdapter:
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
         cls_mcp_client: LiveMcpClient | None = None,
+        component_evidence_factory: Callable[
+            [LiveFaultObservation], LiveMcpClient
+        ] = LivePostgresEvidenceMcpClient,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
@@ -252,6 +256,7 @@ class ApplicationLiveDiagnosticAdapter:
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
         self._cls_mcp_client = cls_mcp_client
+        self._component_evidence_factory = component_evidence_factory
 
     async def diagnose(
         self,
@@ -280,6 +285,7 @@ class ApplicationLiveDiagnosticAdapter:
                 observation=observation,
                 evidence_context=evidence_context,
                 cls_client=self._cls_mcp_client,
+                component_client=self._component_evidence_factory(observation),
             ),
             cls_region=scope.region if scope is not None else "docker-live",
             cls_topic_id=scope.topic_id if scope is not None else "local-postgres",
