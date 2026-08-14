@@ -271,12 +271,43 @@ tenant、KB、文档关联错配均为 0。Embedding 使用 `qwen3.7-text-embedd
 之后，分类为 `rerank_order`。原始安全报告位于 Git 忽略的
 `apps/backend/var/benchmarks/retrieval-64-2026-08-14.json`。
 
+### 四场景 Snapshot RAG off/on 基线（2026-08-15）
+
+固定 Git SHA `0be29cff1ad9485be3712559a01eebe538edb608`、suite `v1`、Workflow
+`agentpy-domainbench-v1`、Prompt 源码、`qwen3.7-plus` Chat 模型、场景文件和 30 卡
+目录后，对 `APY-013` 至 `APY-016` 各顺序运行一次 RAG off/on。下表中的工具数按持久化
+证据关联的不同 `tool_call_id` 计算；Citation 列只统计授权知识库的
+`knowledge_reference`，不包含场景 Snapshot 证据。
+
+| 场景 | 模式 | 总分 | Outcome / Diagnosis / Evidence / Process / Safety / Efficiency | 工具数 | Citation | 耗时 |
+| --- | --- | ---: | --- | ---: | --- | ---: |
+| `APY-013` | off | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 0 | 167.843s |
+| `APY-013` | on | 32 | 12 / 0 / 0 / 0 / 15 / 5 | 0 | 3，`postgres-deadlock.md` | 184.793s |
+| `APY-014` | off | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 0 | 172.210s |
+| `APY-014` | on | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 3，`redis-maxclients-pressure.md` | 214.223s |
+| `APY-015` | off | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 0 | 174.479s |
+| `APY-015` | on | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 3，Nginx timeout/502 差分卡 | 236.716s |
+| `APY-016` | off | 32 | 12 / 0 / 0 / 0 / 15 / 5 | 0 | 0 | 104.452s |
+| `APY-016` | on | 38 | 12 / 0 / 0 / 8 / 15 / 3 | 1 | 3，`http-rate-limit-retry-storm.md` | 172.819s |
+
+八次运行均为 `VALID_FAIL`，共同失败项为 `missing_root_cause_decision` 和
+`required_evidence_missing`；安全维度均为 15，未出现 forbidden claim 或 hard gate。
+RAG on 的 12 条 Citation 均属于指定 owner/KB，未发现 `ground_truth`、`primary_cause`、
+oracle 或覆盖映射字段。RAG off 的知识引用数均为 0。`APY-013` 开启 RAG 后下降 6 分，
+`APY-016` 上升 6 分，其余持平，因此当前数据不能支持“RAG 普遍提升诊断”的结论。
+
+`APY-014` 第一次 RAG-on 尝试遇到 rerank 暂时不可用，只生成检索错误占位；该报告被保留
+为 retrieval infrastructure invalid，不进入上表，随后重跑得到 3 条有效 Citation。
+这暴露出一个有效性缺口：Snapshot CLI 当前不会把 RAG 子系统失败提升为 exit 2，后续
+应在比较门禁中修复。当前持久化结构也未记录 token usage，因此不能把模型用量写成 0；
+这里只记录模型名称与实际总耗时。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
 PostgreSQL deadlock、Redis maxclients 与 Nginx timeout 四个隔离场景；driver、证据工具、
 清理和执行恢复/人工审批边界已经实现并通过顺序 Docker 验证。64-query 真实 Retrieval
-基线已经完成；四个 Snapshot 的 RAG off/on 与真实 LLM+CLS 验收仍属于后续验证阶段。
+基线和四个 Snapshot 的 RAG off/on 已经完成；真实 LLM+CLS 验收仍属于后续验证阶段。
 
 ### 四场景 Docker Live 验证（2026-08-14）
 
