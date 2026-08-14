@@ -36,7 +36,12 @@ from super_ai.llm import build_default_llm_provider
 from super_ai.mcp_client import LocalMcpClient
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
-from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.project_config import (
+    load_project_config,
+    project_config_section,
+    required_int,
+    required_str,
+)
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import build_default_milvus_vector_store
 
@@ -278,7 +283,16 @@ def build_live_evidence_runtime(
     upload = project_config_section("clsLogUpload", config_path=config_path)
     credentials = project_config_section("clsMcpServer", config_path=config_path)
     mcp = project_config_section("mcp", config_path=config_path)
-    live = project_config_section("liveClsEvidence", config_path=config_path)
+    project_config = load_project_config(config_path)
+    live: Mapping[str, object]
+    if "liveClsEvidence" in project_config:
+        live = project_config_section("liveClsEvidence", config_path=config_path)
+    else:
+        live = {
+            "pollIntervalSeconds": 2,
+            "indexWaitSeconds": 90,
+            "queryLimit": 20,
+        }
     cls_client = LocalMcpClient(
         required_str(mcp, "clsSseUrl"),
         timeout_seconds=required_int(mcp, "timeoutSeconds"),

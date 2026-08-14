@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -109,6 +110,64 @@ def test_cls_runtime_fails_closed_when_project_config_is_missing(tmp_path: Path)
             evidence_source="cls",
             config_path=tmp_path / "missing.json",
         )
+
+
+def test_cls_runtime_uses_safe_poll_defaults_for_older_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "project.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "clsLogUpload": {
+                    "region": "ap-guangzhou",
+                    "endpoint": "https://ap-guangzhou.cls.tencentcs.com",
+                    "topicId": "topic-live",
+                },
+                "clsMcpServer": {
+                    "secretId": "test-secret-id",
+                    "secretKey": "test-secret-key",
+                },
+                "mcp": {
+                    "clsSseUrl": "http://127.0.0.1:3000/sse",
+                    "timeoutSeconds": 15,
+                    "retries": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("super_ai.evaluation.live.cli.McpClsSearcher") as searcher_factory,
+        patch("super_ai.evaluation.live.cli.LiveClsEvidencePreparer") as preparer_factory,
+    ):
+        preparer, cls_client = build_live_evidence_runtime(
+            evidence_source="cls",
+            config_path=config_path,
+        )
+
+    assert preparer is preparer_factory.return_value
+    assert cls_client is not None
+    assert searcher_factory.call_args.kwargs["limit"] == 20
+    assert preparer_factory.call_args.kwargs["poll_interval_seconds"] == 2.0
+    assert preparer_factory.call_args.kwargs["timeout_seconds"] == 90.0
+
+
+def test_cls_runtime_rejects_malformed_present_live_evidence_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "project.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "clsLogUpload": {},
+                "clsMcpServer": {},
+                "mcp": {},
+                "liveClsEvidence": "invalid",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProjectConfigurationError):
+        build_live_evidence_runtime(evidence_source="cls", config_path=config_path)
 
 
 def test_live_failure_classification_separates_infrastructure_from_agent() -> None:
