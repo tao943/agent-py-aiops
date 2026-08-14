@@ -10,6 +10,7 @@ import pytest
 
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
+    McpClsSearcher,
     build_live_cls_records,
 )
 from super_ai.evaluation.live.domain import (
@@ -18,6 +19,7 @@ from super_ai.evaluation.live.domain import (
     LiveInfrastructureError,
 )
 from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
+from super_ai.mcp_client import McpToolDefinition
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 SCENARIO = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
@@ -233,3 +235,47 @@ async def test_preparer_preserves_cancellation() -> None:
             searcher=SequenceSearcher(([_record()],)),
             clock=clock,
         ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+
+@pytest.mark.asyncio
+async def test_mcp_searcher_builds_exact_run_scoped_query() -> None:
+    class FakeMcpClient:
+        def __init__(self) -> None:
+            self.arguments: Mapping[str, object] = {}
+
+        async def discover_tools(self) -> Sequence[McpToolDefinition]:
+            return (McpToolDefinition("SearchLog", "Search logs", {}),)
+
+        async def call_tool(
+            self, name: str, arguments: Mapping[str, object]
+        ) -> object:
+            assert name == "SearchLog"
+            self.arguments = arguments
+            return {
+                "records": [_record()],
+                "benchmarkEvidenceId": "readiness-only",
+            }
+
+    mcp = FakeMcpClient()
+    records = await McpClsSearcher(mcp, limit=20).search(
+        LiveClsScope(
+            region="ap-guangzhou",
+            topic_id="topic-live",
+            from_ms=1_000,
+            to_ms=10_000,
+            run_id="run-1",
+            scenario_id=SCENARIO.id,
+            incident_id=f"{SCENARIO.id}-run-1",
+        )
+    )
+
+    assert records == (_record(),)
+    assert mcp.arguments["Region"] == "ap-guangzhou"
+    assert mcp.arguments["TopicId"] == "topic-live"
+    assert mcp.arguments["From"] == 1_000
+    assert mcp.arguments["To"] == 10_000
+    assert mcp.arguments["Limit"] == 20
+    assert mcp.arguments["Query"] == (
+        f'run_id:"run-1" AND scenario_id:"{SCENARIO.id}" '
+        f'AND incident_id:"{SCENARIO.id}-run-1"'
+    )

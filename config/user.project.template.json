@@ -17,5 +17,10 @@
     "region": "ap-guangzhou",
     "logsetId": "",
     "topicId": ""
+  },
+  "liveClsEvidence": {
+    "pollIntervalSeconds": 2,
+    "indexWaitSeconds": 90,
+    "queryLimit": 20
   }
 }

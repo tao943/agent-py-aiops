@@ -18,6 +18,10 @@ from super_ai.evaluation.live.domain import (
     LiveRunIdentity,
     LiveScenario,
 )
+from super_ai.evaluation.live.evidence_client import (
+    LiveMcpClient,
+    parse_cls_search_records,
+)
 
 
 class ClsUploadBoundary(Protocol):
@@ -31,6 +35,33 @@ class ClsUploadBoundary(Protocol):
 
 class ClsSearchBoundary(Protocol):
     async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]: ...
+
+
+class McpClsSearcher:
+    """Query readiness through the same official MCP boundary used by the Agent."""
+
+    def __init__(self, client: LiveMcpClient, *, limit: int = 20) -> None:
+        if not 1 <= limit <= 100:
+            raise ValueError("CLS search limit must be between 1 and 100.")
+        self._client = client
+        self._limit = limit
+
+    async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]:
+        output = await self._client.call_tool(
+            "SearchLog",
+            {
+                "Region": scope.region,
+                "TopicId": scope.topic_id,
+                "From": scope.from_ms,
+                "To": scope.to_ms,
+                "Query": (
+                    f'run_id:"{scope.run_id}" AND scenario_id:"{scope.scenario_id}" '
+                    f'AND incident_id:"{scope.incident_id}"'
+                ),
+                "Limit": self._limit,
+            },
+        )
+        return parse_cls_search_records(output)
 
 
 def build_live_cls_records(
