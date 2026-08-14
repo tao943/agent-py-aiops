@@ -75,6 +75,10 @@ def load_scenario_oracle(path: Path) -> ScenarioOracle:
             _evidence_milestone(_as_mapping(item, "evidence milestone"))
             for item in _required_sequence(payload, "required_evidence")
         ),
+        cls_required_evidence=tuple(
+            _evidence_milestone(_as_mapping(item, "CLS evidence milestone"))
+            for item in _optional_sequence(payload, "cls_required_evidence")
+        ),
         required_rule_outs=_string_tuple(payload, "required_rule_outs"),
         forbidden_claims=_string_tuple(payload, "forbidden_claims"),
     )

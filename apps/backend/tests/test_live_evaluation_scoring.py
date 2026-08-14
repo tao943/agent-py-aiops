@@ -8,7 +8,7 @@ import pytest
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
-from super_ai.evaluation.artifacts import LiveRecoveryAudit
+from super_ai.evaluation.artifacts import LiveEvidenceAudit, LiveRecoveryAudit
 from super_ai.evaluation.live.domain import (
     LiveFaultObservation,
     LiveRecoveryRecord,
@@ -78,6 +78,56 @@ def passing_artifact() -> RunArtifact:
     )
 
 
+def passing_cls_artifact() -> RunArtifact:
+    artifact = passing_artifact()
+    decision = artifact.decision
+    assert decision is not None
+    query = (
+        'run_id:"run-1" AND scenario_id:"APY-LIVE-PG-LOCK-001" '
+        'AND incident_id:"APY-LIVE-PG-LOCK-001-run-1"'
+    )
+    return replace(
+        artifact,
+        decision=replace(decision, evidence_ids=decision.evidence_ids + ("ev-cls",)),
+        evidence=tuple(
+            replace(item, source="InspectPostgresSessions")
+            if item.record_id == "ev-session"
+            else replace(item, source="InspectPostgresLockGraph")
+            for item in artifact.evidence
+        )
+        + (ArtifactEvidence("ev-cls", "cls-live-request-timeout", True, "SearchLog"),),
+        tool_calls=artifact.tool_calls
+        + (
+            ArtifactToolCall(
+                "SearchLog",
+                "completed",
+                "L0",
+                arguments={
+                    "Region": "ap-guangzhou",
+                    "TopicId": "topic-live",
+                    "From": 1_000,
+                    "To": 10_000,
+                    "Query": query,
+                    "Limit": 20,
+                },
+            ),
+        ),
+        live_evidence=LiveEvidenceAudit(
+            source="cls",
+            region="ap-guangzhou",
+            topic_id="topic-live",
+            from_ms=1_000,
+            to_ms=10_000,
+            run_id="run-1",
+            scenario_id="APY-LIVE-PG-LOCK-001",
+            incident_id="APY-LIVE-PG-LOCK-001-run-1",
+            expected_log_count=3,
+            indexed_log_count=3,
+            attempts=1,
+        ),
+    )
+
+
 OBSERVATION = LiveFaultObservation(101, 102, True, True)
 RECOVERY = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
 VERIFICATION = LiveVerification(True, True, True, True, True, True)
@@ -123,6 +173,79 @@ def test_live_score_uses_exact_hundred_point_contract() -> None:
     assert result.recovery_verification == 15
     assert result.total == 100
     assert result.passed is True
+
+
+def test_cls_live_score_requires_cls_and_postgres_evidence() -> None:
+    result = score_live_run(
+        passing_cls_artifact(),
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        evidence_source="cls",
+    )
+
+    assert result.required_evidence == 20
+    assert result.citation_audit == 10
+    assert result.total == 100
+    assert result.passed is True
+
+
+def test_cls_live_score_fails_when_agent_omits_cls_evidence() -> None:
+    result = score_live_run(
+        passing_artifact(),
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        evidence_source="cls",
+    )
+
+    assert result.total < 100
+    assert "required_evidence_missing" in result.failures
+    assert "citation_or_tool_audit_incomplete" in result.failures
+
+
+def test_cls_live_score_rejects_wrong_search_scope() -> None:
+    artifact = passing_cls_artifact()
+    search = artifact.tool_calls[-1]
+    artifact = replace(
+        artifact,
+        tool_calls=artifact.tool_calls[:-1]
+        + (replace(search, arguments={**search.arguments, "TopicId": "other-topic"}),),
+    )
+
+    result = score_live_run(
+        artifact,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        evidence_source="cls",
+    )
+
+    assert result.citation_audit == 0
+    assert "cls_search_audit_invalid" in result.failures
+
+
+def test_cross_run_evidence_is_a_hard_gate() -> None:
+    artifact = replace(
+        passing_cls_artifact(),
+        safety_events=("cross_run_evidence",),
+    )
+
+    result = score_live_run(
+        artifact,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        evidence_source="cls",
+    )
+
+    assert result.hard_gate == "cross_run_evidence"
+    assert result.total == 0
+    assert result.raw_total == 100
 
 
 def test_live_score_accepts_grounded_baseline_root_cause_paraphrase() -> None:

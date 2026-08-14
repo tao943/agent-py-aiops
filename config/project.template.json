@@ -107,6 +107,11 @@
     "defaultCount": 12,
     "maxCount": 100
   },
+  "liveClsEvidence": {
+    "pollIntervalSeconds": 2,
+    "indexWaitSeconds": 90,
+    "queryLimit": 20
+  },
   "aiopsDemo": {
     "backendBaseUrl": "http://127.0.0.1:8080",
     "email": "aiops-demo@agent-py.local",

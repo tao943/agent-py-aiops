@@ -53,13 +53,14 @@ build-backend = "hatchling.build"
 packages = ["src/super_ai"]
 
 [tool.pytest.ini_options]
-addopts = "-q --basetemp=var/pytest -m 'not live_llm and not live_docker'"
+addopts = "-q --basetemp=var/pytest -m 'not live_llm and not live_docker and not live_cls'"
 asyncio_mode = "auto"
 pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
   "live_llm: calls the configured real DashScope models",
   "live_docker: mutates the isolated local Docker Live Eval environment",
+  "live_cls: uploads and queries the configured real Tencent CLS topic",
 ]
 
 [tool.ruff]

@@ -18,8 +18,10 @@ from super_ai.evaluation.live.diagnostics import (
     LivePostgresEvidenceMcpClient,
     append_live_outcome,
     build_live_diagnostic_input,
+    build_live_evidence_client,
 )
 from super_ai.evaluation.live.domain import (
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveVerification,
@@ -28,6 +30,23 @@ from super_ai.evaluation.live.scenarios import load_live_scenario
 from super_ai.mcp_client import McpClientError
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
+
+
+@pytest.mark.asyncio
+async def test_live_diagnostic_client_factory_preserves_local_toolset() -> None:
+    client = build_live_evidence_client(
+        observation=LiveFaultObservation(101, 102, True, True),
+        evidence_context=LiveEvidenceContext.local(
+            incident_id="APY-LIVE-PG-LOCK-001-run-1"
+        ),
+        cls_client=None,
+    )
+
+    assert {item.name for item in await client.discover_tools()} == {
+        "InspectPostgresSessions",
+        "InspectPostgresLockGraph",
+        "VerifyServiceHealth",
+    }
 
 
 def _artifact() -> RunArtifact:

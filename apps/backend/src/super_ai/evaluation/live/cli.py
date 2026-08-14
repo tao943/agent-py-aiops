@@ -11,18 +11,37 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import cast
 
+from super_ai.evaluation.live.cls_evidence import (
+    LiveClsEvidencePreparer,
+    LiveClsLogUploader,
+    McpClsSearcher,
+)
 from super_ai.evaluation.live.diagnostics import ApplicationLiveDiagnosticAdapter
+from super_ai.evaluation.live.domain import EvidenceSource
+from super_ai.evaluation.live.evidence_client import LiveMcpClient
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
 )
-from super_ai.evaluation.live.runner import LiveBenchmarkRunner
+from super_ai.evaluation.live.runner import (
+    LiveBenchmarkError,
+    LiveBenchmarkRunner,
+    LiveEvidencePreparer,
+    LocalLiveEvidencePreparer,
+)
 from super_ai.evaluation.live.scenarios import validate_run_id
 from super_ai.evaluation.live.scoring import LiveEvaluationResult, score_live_run
 from super_ai.llm import build_default_llm_provider
+from super_ai.mcp_client import LocalMcpClient
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
+from super_ai.project_config import (
+    load_project_config,
+    project_config_section,
+    required_int,
+    required_str,
+)
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import build_default_milvus_vector_store
 
@@ -39,6 +58,9 @@ _SAFE_RESULT_FIELDS = frozenset(
         "failures",
         "verificationPassed",
         "cleanupSucceeded",
+        "evidenceSource",
+        "validity",
+        "failureCategory",
     }
 )
 
@@ -56,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--owner-user-id", required=True)
             command.add_argument("--knowledge-base-id", required=True)
             command.add_argument("--config")
+            command.add_argument(
+                "--evidence-source",
+                choices=("local", "cls"),
+                default="local",
+            )
     return parser
 
 
@@ -95,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         report_path = LIVE_REPORT_ROOT / f"{identity.run_id}.json"
         payload = read_safe_report(report_path)
         payload["command"] = "report"
-        exit_code = 0 if payload.get("status") == "passed" else 1
+        exit_code = 0 if payload.get("status") == "passed" else (
+            2 if payload.get("status") == "infra_invalid" else 1
+        )
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     return exit_code
 
@@ -104,6 +133,11 @@ async def _run_live_command(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, object], int]:
     config_path = cast(str | None, arguments.config)
+    evidence_source = cast(EvidenceSource, arguments.evidence_source)
+    evidence_preparer, cls_mcp_client = build_live_evidence_runtime(
+        evidence_source=evidence_source,
+        config_path=config_path,
+    )
     engine = create_memory_engine(config_path=config_path)
     driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
     try:
@@ -122,21 +156,42 @@ async def _run_live_command(
             retrieval_tool=retrieval_tool,
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
+            cls_mcp_client=cls_mcp_client,
         )
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
             driver=driver,
+            evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
             recovery=PostgresLiveRecoveryService(driver),
-            evaluator=_LiveScoringEvaluator(),
+            evaluator=_LiveScoringEvaluator(evidence_source),
         )
-        result = await runner.run(
-            cast(str, arguments.scenario),
-            run_id=cast(str, arguments.run_id),
-        )
+        try:
+            result = await runner.run(
+                cast(str, arguments.scenario),
+                run_id=cast(str, arguments.run_id),
+            )
+        except LiveBenchmarkError as exc:
+            status, validity, exit_code = classify_live_failure(
+                exc.category,
+                evidence_source=evidence_source,
+            )
+            payload = safe_output(
+                command="run",
+                scenario_id=cast(str, arguments.scenario),
+                run_id=cast(str, arguments.run_id),
+                status=status,
+                result={
+                    "evidenceSource": evidence_source,
+                    "validity": validity,
+                    "failureCategory": exc.category,
+                },
+            )
+            write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
+            return payload, exit_code
     finally:
         await engine.dispose()
-    result_payload = _live_result_payload(result)
+    result_payload = _live_result_payload(result, evidence_source=evidence_source)
     payload = safe_output(
         command="run",
         scenario_id=cast(str, arguments.scenario),
@@ -149,6 +204,9 @@ async def _run_live_command(
 
 
 class _LiveScoringEvaluator:
+    def __init__(self, evidence_source: EvidenceSource) -> None:
+        self._evidence_source: EvidenceSource = evidence_source
+
     def evaluate(self, **values: object) -> LiveEvaluationResult:
         from super_ai.evaluation.artifacts import RunArtifact
         from super_ai.evaluation.domain import ScenarioOracle
@@ -179,10 +237,15 @@ class _LiveScoringEvaluator:
             observation=observation,
             recovery=recovery,
             verification=verification,
+            evidence_source=self._evidence_source,
         )
 
 
-def _live_result_payload(result: LiveEvaluationResult) -> dict[str, object]:
+def _live_result_payload(
+    result: LiveEvaluationResult,
+    *,
+    evidence_source: EvidenceSource,
+) -> dict[str, object]:
     raw = asdict(result)
     return {
         "total": raw["total"],
@@ -192,7 +255,63 @@ def _live_result_payload(result: LiveEvaluationResult) -> dict[str, object]:
         "failures": raw["failures"],
         "verificationPassed": result.recovery_verification == 15,
         "cleanupSucceeded": True,
+        "evidenceSource": evidence_source,
+        "validity": "VALID_PASS" if result.passed else "VALID_FAIL",
     }
+
+
+def classify_live_failure(
+    category: str,
+    *,
+    evidence_source: EvidenceSource,
+) -> tuple[str, str, int]:
+    infrastructure = category.startswith("cls_") or (
+        evidence_source == "cls" and category == "evidence_preparation_failed"
+    )
+    if infrastructure:
+        return "infra_invalid", "INFRA_INVALID", 2
+    return "failed", "VALID_FAIL", 1
+
+
+def build_live_evidence_runtime(
+    *,
+    evidence_source: EvidenceSource,
+    config_path: str | Path | None,
+) -> tuple[LiveEvidencePreparer, LiveMcpClient | None]:
+    if evidence_source == "local":
+        return LocalLiveEvidencePreparer(), None
+    upload = project_config_section("clsLogUpload", config_path=config_path)
+    credentials = project_config_section("clsMcpServer", config_path=config_path)
+    mcp = project_config_section("mcp", config_path=config_path)
+    project_config = load_project_config(config_path)
+    live: Mapping[str, object]
+    if "liveClsEvidence" in project_config:
+        live = project_config_section("liveClsEvidence", config_path=config_path)
+    else:
+        live = {
+            "pollIntervalSeconds": 2,
+            "indexWaitSeconds": 90,
+            "queryLimit": 20,
+        }
+    cls_client = LocalMcpClient(
+        required_str(mcp, "clsSseUrl"),
+        timeout_seconds=required_int(mcp, "timeoutSeconds"),
+        retries=required_int(mcp, "retries"),
+    )
+    preparer = LiveClsEvidencePreparer(
+        region=required_str(upload, "region"),
+        topic_id=required_str(upload, "topicId"),
+        uploader=LiveClsLogUploader(
+            endpoint=required_str(upload, "endpoint"),
+            topic_id=required_str(upload, "topicId"),
+            secret_id=required_str(credentials, "secretId"),
+            secret_key=required_str(credentials, "secretKey"),
+        ),
+        searcher=McpClsSearcher(cls_client, limit=required_int(live, "queryLimit")),
+        timeout_seconds=float(required_int(live, "indexWaitSeconds")),
+        poll_interval_seconds=float(required_int(live, "pollIntervalSeconds")),
+    )
+    return preparer, cls_client
 
 
 async def _run_infrastructure_command(

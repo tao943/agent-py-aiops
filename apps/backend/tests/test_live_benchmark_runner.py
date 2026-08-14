@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from super_ai.evaluation.live.domain import (
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveVerification,
@@ -63,6 +64,19 @@ class RecordingDiagnostic:
         return {"decision": "row_lock_blocking"}
 
 
+class RecordingEvidencePreparer:
+    def __init__(self, events: list[str], *, fail: bool = False) -> None:
+        self.events = events
+        self.fail = fail
+
+    async def prepare(self, **values: object) -> LiveEvidenceContext:
+        del values
+        self.events.append("prepare")
+        if self.fail:
+            raise RuntimeError("secret-evidence-readiness")
+        return LiveEvidenceContext.local(incident_id="APY-LIVE-PG-LOCK-001-run-1")
+
+
 class RecordingRecovery:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -89,6 +103,7 @@ async def test_runner_executes_live_phases_and_always_cleans_up() -> None:
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -101,6 +116,7 @@ async def test_runner_executes_live_phases_and_always_cleans_up() -> None:
         "preflight",
         "baseline",
         "inject",
+        "prepare",
         "diagnose",
         "recover",
         "verify",
@@ -115,6 +131,7 @@ async def test_runner_stops_before_diagnosis_when_fault_is_not_confirmed() -> No
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -133,6 +150,7 @@ async def test_runner_cleans_up_and_redacts_driver_failure() -> None:
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -152,6 +170,7 @@ async def test_runner_re_raises_cancellation_after_cleanup() -> None:
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events, cancelled=True),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -169,6 +188,7 @@ async def test_cleanup_failure_is_a_hard_failure() -> None:
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -193,6 +213,7 @@ async def test_failed_post_recovery_verification_does_not_reach_evaluator() -> N
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
         diagnostic=RecordingDiagnostic(driver.events),
         recovery=RecordingRecovery(driver.events),
         evaluator=RecordingEvaluator(driver.events),
@@ -204,3 +225,23 @@ async def test_failed_post_recovery_verification_does_not_reach_evaluator() -> N
     assert captured.value.category == "recovery_verification_failed"
     assert "evaluate" not in driver.events
     assert driver.events[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_evidence_preparation_failure_is_classified_and_cleanup_still_runs() -> None:
+    driver = RecordingDriver()
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events, fail=True),
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "evidence_preparation_failed"
+    assert "secret" not in str(captured.value)
+    assert driver.events == ["preflight", "baseline", "inject", "prepare", "cleanup"]

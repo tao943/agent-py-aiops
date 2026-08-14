@@ -11,15 +11,21 @@ from langchain_core.tools import StructuredTool
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.evaluation.artifacts import (
+    LiveEvidenceAudit,
     LiveRecoveryAudit,
     RunArtifact,
     build_run_artifact,
 )
 from super_ai.evaluation.live.domain import (
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveScenario,
     LiveVerification,
+)
+from super_ai.evaluation.live.evidence_client import (
+    LiveCompositeEvidenceMcpClient,
+    LiveMcpClient,
 )
 from super_ai.llm import LlmProvider
 from super_ai.mcp_client import McpClientError, McpToolDefinition
@@ -174,6 +180,20 @@ class LivePostgresEvidenceMcpClient:
         return tools
 
 
+def build_live_evidence_client(
+    *,
+    observation: LiveFaultObservation,
+    evidence_context: LiveEvidenceContext,
+    cls_client: LiveMcpClient | None,
+) -> LiveCompositeEvidenceMcpClient:
+    """Compose the production tool boundary selected by prepared evidence mode."""
+    return LiveCompositeEvidenceMcpClient(
+        postgres_client=LivePostgresEvidenceMcpClient(observation),
+        cls_client=cls_client if evidence_context.source == "cls" else None,
+        context=evidence_context,
+    )
+
+
 def _validate_live_evidence_arguments(
     name: str,
     arguments: Mapping[str, object],
@@ -220,12 +240,14 @@ class ApplicationLiveDiagnosticAdapter:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
+        cls_mcp_client: LiveMcpClient | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
+        self._cls_mcp_client = cls_mcp_client
 
     async def diagnose(
         self,
@@ -233,6 +255,7 @@ class ApplicationLiveDiagnosticAdapter:
         run_id: str,
         scenario: LiveScenario,
         observation: LiveFaultObservation,
+        evidence_context: LiveEvidenceContext,
     ) -> RunArtifact:
         owner_user_id = self._owner_user_id or f"benchmark:{run_id}"
         task_id = f"diagnostic_{uuid4().hex}"
@@ -244,13 +267,18 @@ class ApplicationLiveDiagnosticAdapter:
             input_payload=build_live_diagnostic_input(scenario),
             result_payload={},
         )
+        scope = evidence_context.cls_scope
         service = AiopsDiagnosticService(
             repositories=self._repositories,
             llm_provider=self._llm_provider,
             retrieval_tool=self._retrieval_tool,
-            mcp_client=LivePostgresEvidenceMcpClient(observation),
-            cls_region="docker-live",
-            cls_topic_id="local-postgres",
+            mcp_client=build_live_evidence_client(
+                observation=observation,
+                evidence_context=evidence_context,
+                cls_client=self._cls_mcp_client,
+            ),
+            cls_region=scope.region if scope is not None else "docker-live",
+            cls_topic_id=scope.topic_id if scope is not None else "local-postgres",
         )
         async for _ in service.stream(
             task=task,
@@ -280,7 +308,40 @@ class ApplicationLiveDiagnosticAdapter:
             if self._repositories.tool_call_audits is not None
             else []
         )
-        return build_run_artifact(completed, steps, evidence, audits, reports)
+        return append_live_evidence_context(
+            build_run_artifact(completed, steps, evidence, audits, reports),
+            context=evidence_context,
+        )
+
+
+def append_live_evidence_context(
+    artifact: RunArtifact,
+    *,
+    context: LiveEvidenceContext,
+) -> RunArtifact:
+    """Append trusted, non-secret evidence scope after artifact assembly."""
+    scope = context.cls_scope
+    readiness = context.readiness
+    return replace(
+        artifact,
+        live_evidence=LiveEvidenceAudit(
+            source=context.source,
+            region=scope.region if scope is not None else None,
+            topic_id=scope.topic_id if scope is not None else None,
+            from_ms=scope.from_ms if scope is not None else None,
+            to_ms=scope.to_ms if scope is not None else None,
+            run_id=scope.run_id if scope is not None else None,
+            scenario_id=scope.scenario_id if scope is not None else artifact.scenario_id,
+            incident_id=context.incident_id,
+            expected_log_count=(
+                readiness.expected_log_count if readiness is not None else None
+            ),
+            indexed_log_count=(
+                readiness.indexed_log_count if readiness is not None else None
+            ),
+            attempts=readiness.attempts if readiness is not None else None,
+        ),
+    )
 
 
 def append_live_outcome(

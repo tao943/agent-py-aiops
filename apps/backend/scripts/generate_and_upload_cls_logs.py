@@ -5,13 +5,11 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-from tencentcloud.log.cls_pb2 import LogGroupList
-from tencentcloud.log.logclient import LogClient
-
 from super_ai.aiops.fixtures import (
     generate_java_ecommerce_incident_logs,
     generate_quant_incident_logs,
 )
+from super_ai.evaluation.live.cls_evidence import put_cls_records
 from super_ai.project_config import project_config_section, required_int, required_str
 
 
@@ -44,27 +42,18 @@ def main() -> None:
         )
         filename = "ecommerce-quant-risk-service.log"
 
-    groups = LogGroupList()
-    group = groups.logGroupList.add()
-    group.filename = filename
-    group.source = "127.0.0.1"
-    now = datetime.now(timezone.utc)
     for fields in generated_logs:
         fields["region"] = required_str(target, "region")
         fields.setdefault("host", f"{fields['service']}-01")
-        log = group.logs.add()
-        log.time = int(now.timestamp() * 1_000_000)
-        for key, value in fields.items():
-            content = log.contents.add()
-            content.key = key
-            content.value = value
 
-    client = LogClient(
-        required_str(target, "endpoint"),
-        required_str(credentials, "secretId"),
-        required_str(credentials, "secretKey"),
+    put_cls_records(
+        endpoint=required_str(target, "endpoint"),
+        topic_id=required_str(target, "topicId"),
+        secret_id=required_str(credentials, "secretId"),
+        secret_key=required_str(credentials, "secretKey"),
+        records=generated_logs,
+        filename=filename,
     )
-    client.put_log_raw(required_str(target, "topicId"), groups)
     print(f"Uploaded {len(generated_logs)} {args.profile} CLS logs.")
 
 

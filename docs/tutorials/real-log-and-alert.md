@@ -52,6 +52,41 @@ uv run python scripts/seed_java_ecommerce_aiops_sops.py --profile java-ecommerce
 
 - Milvus 未就绪：确认 `etcd`、`minio` 和 `milvus` 容器健康。
 - MCP 失败：确认 `cls-mcp-server` 本机进程监听 `3000` 端口。
+
+## Docker Live 的真实 CLS 证据模式
+
+普通 CI 和本地快速回归默认使用 `--evidence-source local`，不会读取腾讯云密钥、上传日志或
+消耗 CLS 额度。完整证据链必须显式选择 `cls`，并确保以下服务可用：
+
+- Docker PostgreSQL Live Eval 数据库；
+- 已索引的 30 卡知识库和 Milvus；
+- 本机官方 `cls-mcp-server@1.0.4`；
+- 被 Git 忽略的真实项目配置，其中包含 CLS Topic 和凭据；
+- 可用的 DashScope 模型配置（仅完整 Agent 运行需要）。
+
+先验证真实 CLS 上传和查询边界。PowerShell 示例使用主仓库中被忽略的配置，不复制或打印
+密钥：
+
+```powershell
+cd apps/backend
+$env:LIVE_CLS_CONFIG='D:\桌面\后端\agent_py-release-2026-07-25\agent_py-release-2026-07-25\config\project.json'
+uv run pytest -m live_cls tests/test_live_cls_acceptance.py -q
+```
+
+边界通过后执行完整场景：
+
+```powershell
+uv run python -m super_ai.evaluation.live.cli run --scenario APY-LIVE-PG-LOCK-001 --run-id live-cls-pg-lock-001 --owner-user-id eval-user --knowledge-base-id kb-30-cards --evidence-source cls --config $env:LIVE_CLS_CONFIG
+```
+
+命令返回三种稳定状态：
+
+- `VALID_PASS` / 退出码 `0`：基础设施有效，Agent 得到 100 分；
+- `VALID_FAIL` / 退出码 `1`：基础设施有效，但 Agent 的诊断、引用、恢复或验证未通过；
+- `INFRA_INVALID` / 退出码 `2`：CLS 上传、索引、MCP 或审计基础设施失败，本次不产生误导性的 Agent 0 分。
+
+真实模式会消耗 CLS 请求额度；完整 Agent 命令还会消耗 LLM、Embedding 和 Rerank 额度。
+报告只保存非密钥的 Topic、范围、计数和分类结果。
 - CLS 查询无新日志：核对地域、主题 ID 与凭据，等待短暂写入延迟后按 trace ID 重试。
 - 没有活动告警：再次运行 `publish_java_ecommerce_alerts.py --profile java-ecommerce`。
 - SOP 未命中：确认 10 个索引任务均为 `succeeded`，并使用告警 annotations 中的 SOP ID 检索。

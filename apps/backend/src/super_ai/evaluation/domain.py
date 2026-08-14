@@ -81,6 +81,7 @@ class ScenarioOracle:
     required_rule_outs: tuple[str, ...]
     forbidden_claims: tuple[str, ...]
     root_cause_semantics: RootCauseSemantics | None = None
+    cls_required_evidence: tuple[EvidenceMilestone, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

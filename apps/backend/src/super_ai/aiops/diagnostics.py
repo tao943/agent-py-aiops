@@ -1698,6 +1698,15 @@ def _tool_result_summary(tool_name: str, output: object) -> str:
 
 
 def _search_log_records(output: object) -> list[JsonDict]:
+    if isinstance(output, Mapping):
+        raw_records = output.get("records")
+        if not isinstance(raw_records, Sequence) or isinstance(raw_records, str | bytes):
+            return []
+        return [
+            _bounded_search_log_record(record)
+            for record in raw_records
+            if isinstance(record, Mapping)
+        ]
     if not isinstance(output, Sequence) or isinstance(output, str | bytes):
         return []
     records: list[JsonDict] = []
@@ -1723,24 +1732,31 @@ def _search_log_records(output: object) -> list[JsonDict]:
                 payload = {}
             if not isinstance(payload, Mapping):
                 continue
-            records.append(
-                {
-                    key: _safe_value(payload[key])
-                    for key in (
-                        "timestamp",
-                        "level",
-                        "service",
-                        "host",
-                        "event",
-                        "message",
-                        "latency_ms",
-                        "exception",
-                        "request_id",
-                    )
-                    if key in payload
-                }
-            )
+            records.append(_bounded_search_log_record(payload))
     return records
+
+
+def _bounded_search_log_record(payload: Mapping[object, object]) -> JsonDict:
+    return {
+        key: _safe_value(payload[key])
+        for key in (
+            "timestamp",
+            "level",
+            "service",
+            "host",
+            "event",
+            "message",
+            "latency_ms",
+            "exception",
+            "request_id",
+            "run_id",
+            "scenario_id",
+            "incident_id",
+            "trace_id",
+            "component",
+        )
+        if key in payload
+    }
 
 
 def _search_log_detail_lines(records: Sequence[object]) -> list[str]:

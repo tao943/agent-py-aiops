@@ -14,6 +14,10 @@ required_evidence:
   - id: postgres-blocking-graph
     alternatives:
       - [postgres-blocking-pid-edge]
+cls_required_evidence:
+  - id: cls-request-timeout
+    alternatives:
+      - [cls-live-request-timeout]
 required_rule_outs:
   - postgres_slow_query_without_lock
   - postgres_connectivity_failure

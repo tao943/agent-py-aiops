@@ -249,3 +249,13 @@ Live 满分 100：故障确认 10、必要证据 20、多候选差分排查 15�
 工具审计 10、恢复策略 10、恢复验证 15。ground truth 访问、非白名单动作、跨 run 终止、
 未验证恢复、残留 blocker、cleanup 失败或 scope 隔离失败均为硬门禁。普通 CI 默认排除
 `live_docker`，CLS collector 延后，真实模型 Live Eval 只能手动触发。
+## Live CLS 证据覆盖
+
+`APY-LIVE-PG-LOCK-001` 支持两种显式证据源。`local` 用于离线开发和 CI；`cls` 将本次运行的
+结构化业务日志上传到真实腾讯云 CLS，并要求 Agent 通过官方 MCP `SearchLog` 使用相同
+`run_id`、`scenario_id` 和 `incident_id` 的日志。CLS 只证明请求错误和时间线，PostgreSQL
+会话与锁图仍负责证明等待事件和阻塞关系。
+
+CLS 接入不增加分数。有效的 CLS 运行继续使用相同 100 分模型，但必需证据和引用审计必须
+同时包含 CLS 与 PostgreSQL 来源。云端或审计基础设施失败标记为 `INFRA_INVALID`；Agent
+未调用工具、查询范围错误或未引用证据标记为 `VALID_FAIL`。
