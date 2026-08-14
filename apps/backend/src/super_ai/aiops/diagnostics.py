@@ -13,6 +13,8 @@ from time import monotonic
 from typing import Annotated, Any, Literal, TypedDict, cast
 from uuid import uuid4
 
+from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
@@ -29,7 +31,7 @@ from super_ai.aiops.reasoning import (
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
-from super_ai.mcp_client import McpClientError
+from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
     DiagnosticReportRecord,
@@ -128,6 +130,30 @@ def build_generic_live_plan(
         for index, (tool, purpose, arguments, hypotheses) in enumerate(definitions, start=1)
         if tool in available
     ]
+
+
+def plan_matches_tool_contracts(
+    plan: Sequence[JsonDict],
+    tool_definitions: Sequence[McpToolDefinition],
+) -> bool:
+    """Validate every planned argument object against its discovered MCP schema."""
+    definitions = {item.name: item for item in tool_definitions}
+    for step in plan:
+        tool_name = step.get("tool")
+        arguments = step.get("arguments")
+        if not isinstance(tool_name, str) or not isinstance(arguments, Mapping):
+            return False
+        definition = definitions.get(tool_name)
+        if definition is None:
+            return False
+        schema = definition.input_schema
+        try:
+            validator_class = validator_for(schema)
+            validator_class.check_schema(schema)
+            validator_class(schema).validate(dict(arguments))
+        except (SchemaError, ValidationError):
+            return False
+    return bool(plan)
 
 
 class AiopsDiagnosticService:
@@ -363,9 +389,8 @@ class AiopsDiagnosticService:
         try:
             mcp_client = await self._mcp_client_for(owner_user_id)
             discovered_tools = await mcp_client.discover_tools()
-            available_tools = [definition.name for definition in discovered_tools]
         except McpClientError:
-            available_tools = []
+            discovered_tools = []
             events.append(
                 _task_status_event(
                     task_id,
@@ -381,7 +406,7 @@ class AiopsDiagnosticService:
             alert=_json_dict(state.get("alert")),
             sop_hits=sop_hits,
             no_sop_matched=no_sop_matched,
-            available_tools=available_tools,
+            tool_definitions=discovered_tools,
             known_hypotheses=[
                 str(item.get("id"))
                 for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
@@ -923,9 +948,10 @@ class AiopsDiagnosticService:
         alert: JsonDict,
         sop_hits: Sequence[JsonDict],
         no_sop_matched: bool,
-        available_tools: Sequence[str],
+        tool_definitions: Sequence[McpToolDefinition],
         known_hypotheses: Sequence[str],
     ) -> tuple[list[JsonDict], str]:
+        available_tools = [definition.name for definition in tool_definitions]
         generic_plan = build_generic_live_plan(
             available_tools=available_tools,
             known_hypotheses=known_hypotheses,
@@ -935,8 +961,9 @@ class AiopsDiagnosticService:
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
-            "steps and only these tools: "
-            f"{json.dumps(list(available_tools))}. User query: {query}. Alert: "
+            "steps and only the tools and argument schemas in these discovered contracts: "
+            f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
+            f"User query: {query}. Alert: "
             f"{json.dumps(alert)}. SOP evidence: {json.dumps(list(sop_hits))}. "
             f"Known hypotheses: {json.dumps(list(known_hypotheses))}. "
             f"No SOP matched: {str(no_sop_matched).lower()}."
@@ -951,7 +978,7 @@ class AiopsDiagnosticService:
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
-        if not plan:
+        if not plan or not plan_matches_tool_contracts(plan, tool_definitions):
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"
 
@@ -1083,6 +1110,19 @@ def _string_mapping(value: object) -> dict[str, str]:
         for key, item in cast(Mapping[object, object], value).items()
         if isinstance(key, str) and isinstance(item, str)
     }
+
+
+def _tool_contracts_payload(
+    tool_definitions: Sequence[McpToolDefinition],
+) -> list[JsonDict]:
+    return [
+        {
+            "name": item.name,
+            "description": item.description,
+            "inputSchema": item.input_schema,
+        }
+        for item in tool_definitions
+    ]
 
 
 def _observation_decision_payload(

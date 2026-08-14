@@ -8,7 +8,10 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import RootCauseDecision
-from super_ai.aiops.diagnostics import build_generic_live_plan
+from super_ai.aiops.diagnostics import (
+    build_generic_live_plan,
+    plan_matches_tool_contracts,
+)
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import (
     LivePostgresEvidenceMcpClient,
@@ -79,6 +82,36 @@ def test_generic_fallback_uses_all_live_evidence_tools() -> None:
         "postgres_lock_blocking",
     ]
     assert plan[2]["testsHypotheses"] == ["postgres_lock_blocking"]
+
+
+@pytest.mark.asyncio
+async def test_model_plan_arguments_are_checked_against_discovered_tool_contracts() -> None:
+    definitions = await LivePostgresEvidenceMcpClient(_observation()).discover_tools()
+    valid_plan = build_generic_live_plan(
+        available_tools=tuple(item.name for item in definitions),
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+    invalid_model_plan: list[dict[str, object]] = [
+        {
+            "id": "step_1",
+            "tool": "InspectPostgresSessions",
+            "purpose": "Inspect waiting sessions.",
+            "arguments": {
+                "filters": {
+                    "state": ["active", "idle in transaction"],
+                    "include_wait_events": True,
+                }
+            },
+            "testsHypotheses": ["postgres_lock_blocking"],
+        }
+    ]
+
+    assert plan_matches_tool_contracts(valid_plan, definitions) is True
+    assert plan_matches_tool_contracts(invalid_model_plan, definitions) is False
 
 
 def test_live_input_contains_candidate_wide_vocabulary_without_oracle() -> None:
