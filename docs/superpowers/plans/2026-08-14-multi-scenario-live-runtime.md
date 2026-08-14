@@ -643,4 +643,3 @@ Do not stage `apps/backend/var`, runtime reports, environment files, credentials
 - Placeholder scan: each implementation boundary, denial condition, command, and expected result is explicit.
 - Type consistency: every driver returns the generic contracts defined in Task 1; registry components use the existing runner/evidence protocols; `RecoveryExpectation` drives runner and scoring decisions.
 - Safety: PostgreSQL retry and Redis cleanup are exact-run scoped; Nginx has no write tool; cleanup is audited independently and cannot earn recovery points.
-

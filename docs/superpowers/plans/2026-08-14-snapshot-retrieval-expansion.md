@@ -435,4 +435,3 @@ Expected: `git diff --check` emits no output; no runtime report, secret, cache, 
 - Placeholder scan: the plan contains no deferred implementation markers or undefined error-handling work.
 - Type consistency: the coverage loader signature and dataclass names match in Tasks 3 and 5; Retrieval types remain the existing `RetrievalQuery` contracts.
 - Isolation: the only Snapshot-to-card linkage is evaluator-only; no plan step imports it into RAG or exposes it to the Agent.
-
