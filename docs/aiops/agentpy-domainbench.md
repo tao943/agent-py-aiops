@@ -4,18 +4,22 @@
 确定性评分 → PostgreSQL 留档”的最小闭环。它用于比较 Agent 版本，不是
 OpenSRE 官方 Benchmark，也不使用 OpenSRE 的评分体系。
 
-## 当前六个 Snapshot 场景
+## 当前十个 Snapshot 场景
 
 当前目录包含 `APY-002`、`APY-003`、`APY-006`、`APY-007`、`APY-011` 和
-`APY-012`。其中 PostgreSQL 和 Redis 各有一对公开输入相同、真实原因不同的差分
-案例：
+`APY-012`，以及本轮新增的 `APY-013` 至 `APY-016`。其中 PostgreSQL 和 Redis
+各有一对公开输入相同、真实原因不同的差分案例：
 
 | 场景对 | 公开现象 | 需要通过证据区分的方向 |
 |---|---|---|
 | APY-002 / APY-011 | 请求等待 PostgreSQL 连接超时 | 数据库事务/锁占用，或应用连接生命周期异常 |
 | APY-007 / APY-012 | 应用 Redis 请求失败 | Redis 服务不可用，或服务恢复后客户端池未恢复 |
 
-四个新场景均为 `agentpy-original` Snapshot，只冻结本项目综合公开资料后构造的观测，
+新增的四个场景分别覆盖 PostgreSQL deadlock、Redis maxclients、Nginx upstream
+response timeout 和 HTTP 429 retry storm。它们复用通用知识卡，但不向 RAG 导入
+Snapshot、oracle 或覆盖映射。
+
+所有扩展场景均为 `agentpy-original` Snapshot，只冻结本项目综合公开资料后构造的观测，
 不声明为博客原样复现，也没有对应 Live 故障注入。每个 oracle 至少要求两个来自不同
 工具的证据里程碑，并要求排除一个最强替代原因；无关弱干扰项不得进入正确因果链。
 
@@ -226,11 +230,23 @@ BM25、RRF 与 rerank 证据，但不在 vector Top-20，因此 `vectorScore` �
 `apps/backend/var/benchmarks/retrieval-30-card-v1.json`。本阶段未运行 Docker 故障实验，
 全部知识卡继续保持 `docker_validation: pending`。
 
+### 2026-08-14 Snapshot/Retrieval corpus expansion
+
+- Snapshot fixtures：10 个（`APY-002`、`APY-003`、`APY-006`、`APY-007`、
+  `APY-011` 至 `APY-016`）。
+- 通用知识卡：保持 30 张，没有增加与场景一一对应的答案卡。
+- Retrieval queries：64 条，其中 58 条有答案、6 条 no-answer probe。
+- `snapshot_knowledge_coverage.yaml` 仅供 evaluator 校验覆盖完整性，不进入 importer、
+  Prompt、Agent Artifact、报告或 Milvus。
+- 60 问真实 Retrieval 结果仍是当前已测历史基线；64 问真实基线要等知识库恢复并在
+  独立真实验收阶段执行，不能用离线合同测试冒充真实指标。
+
 ## 当前阶段边界
 
-这个切片尚未实现 L1/L2 恢复、六个 Live 场景、可选 Judge、剩余八个 Snapshot、
-故障注入/清理以及 before/after 聚合看板。当前的“闭环”止于诊断、证据、评分和留档；
-自动恢复、人工审批、真实 Docker 故障验证将在后续独立计划中实现。
+Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。当前仍只有一个 PostgreSQL
+行锁 Live 场景；PostgreSQL deadlock、Redis maxclients、Nginx timeout 的故障注入、
+清理、恢复/审批边界，以及四场景的 RAG before/after 与真实 LLM+CLS 验收将在后续
+独立阶段实现。
 
 ## 首个 Docker Live 场景
 
