@@ -11,6 +11,7 @@ from super_ai.evaluation.live.domain import (
     LiveRecoveryRecord,
     LiveVerification,
 )
+from super_ai.evaluation.live.semantic_scoring import score_root_cause_semantics
 from super_ai.evaluation.scoring import ScoreReason
 
 
@@ -172,17 +173,29 @@ def _score_root_cause(
     reasons: list[ScoreReason],
     failures: list[str],
 ) -> int:
-    decision = artifact.decision
-    exact = bool(
-        decision is not None
-        and decision.component == oracle.primary_cause.component
-        and decision.mechanism == oracle.primary_cause.mechanism
-        and decision.trigger == oracle.primary_cause.trigger
-        and decision.causal_chain == oracle.causal_chain
+    semantic = score_root_cause_semantics(artifact.decision, oracle)
+    reasons.extend(
+        (
+            ScoreReason("primary_component_canonical", semantic.component, 4),
+            ScoreReason("primary_mechanism_canonical", semantic.mechanism, 6),
+            ScoreReason("primary_trigger_semantic", semantic.trigger, 4),
+            *(
+                ScoreReason(f"causal_milestone_{identifier}", points, 2)
+                for identifier, points in semantic.milestones
+            ),
+        )
     )
-    if not exact:
+    if semantic.component < 4:
+        failures.append("primary_component_wrong")
+    if semantic.mechanism < 6:
+        failures.append("primary_mechanism_wrong")
+    if semantic.trigger < 4:
+        failures.append("primary_trigger_unsupported")
+    if any(points < 2 for _, points in semantic.milestones):
+        failures.append("causal_chain_incomplete")
+    if semantic.total < 20:
         failures.append("primary_root_cause_wrong")
-    return _award(reasons, "primary_root_cause_exact", 20, exact)
+    return semantic.total
 
 
 def _score_citations(
