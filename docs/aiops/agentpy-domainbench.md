@@ -243,10 +243,24 @@ BM25、RRF 与 rerank 证据，但不在 vector Top-20，因此 `vectorScore` �
 
 ## 当前阶段边界
 
-Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。当前仍只有一个 PostgreSQL
-行锁 Live 场景；PostgreSQL deadlock、Redis maxclients、Nginx timeout 的故障注入、
-清理、恢复/审批边界，以及四场景的 RAG before/after 与真实 LLM+CLS 验收将在后续
-独立阶段实现。
+Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
+PostgreSQL deadlock、Redis maxclients 与 Nginx timeout 四个隔离场景；driver、证据工具、
+清理和执行恢复/人工审批边界已经实现并通过顺序 Docker 验证。四场景的 RAG before/after、
+64 问真实 Retrieval 基线与真实 LLM+CLS 验收仍属于后续独立验证阶段。
+
+### 四场景 Docker Live 验证（2026-08-14）
+
+| 场景 | 恢复合同 | 已验证的安全检查 |
+| --- | --- | --- |
+| PostgreSQL 行锁 | `executed_recovery` | 真实阻塞、作用域恢复、业务探针、幂等清理 |
+| PostgreSQL 死锁 | `executed_recovery` | 等待环、数据库回滚、仅重试受害事务、幂等清理 |
+| Redis maxclients | `executed_recovery` | 新连接拒绝、既有连接健康、当前运行连接清理、无关连接保留 |
+| Nginx upstream timeout | `proposal_only` | 真实 504、直接上游健康、零写执行、配置不变、幂等清理 |
+
+最终隔离审计为 PostgreSQL 当前运行会话 0、fixture 表 0、Redis 当前运行命名连接 0、
+Nginx 配置变化 0，四个依赖均健康。`postgres-deadlock.md`、
+`redis-maxclients-pressure.md` 和 `nginx-upstream-timeout.md` 已据此标记为
+`docker_validation: verified`；未实际复现的知识卡继续保持 `pending`。
 
 ## 首个 Docker Live 场景
 

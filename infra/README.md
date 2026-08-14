@@ -132,7 +132,8 @@ docker compose -f infra/compose.yaml --profile live-eval up -d live-eval-redis l
 docker compose -f infra/compose.yaml --profile live-eval ps
 ```
 
-该 profile 只监听本机 `16379`（Redis）和 `18080`（Nginx）。`live-eval-redis` 使用独立
+该 profile 只监听本机 `16379`（Redis）、`18080`（Nginx）和 `18081`（直接上游健康
+探测）。`live-eval-redis` 使用独立
 的低 `maxclients` 配置；`live-eval-upstream` 只提供即时 `/health` 与最大 5 秒的有界
 `/slow?delay_ms=` 响应；`live-eval-nginx` 的 read deadline 为 750ms。普通
 `docker compose up`、本地开发和 CI 均不会启动这些服务，也不会把开发 Redis 或默认
@@ -151,6 +152,20 @@ docker compose -f infra/compose.yaml --profile live-eval config --services
 ```powershell
 docker compose -f infra/compose.yaml --profile live-eval stop live-eval-nginx live-eval-upstream live-eval-redis
 ```
+
+四个 Live driver 合同必须顺序运行，避免并发故障互相污染：
+
+```powershell
+cd apps/backend
+uv run pytest tests/test_live_postgres_docker.py -m live_docker -q
+uv run pytest tests/test_live_postgres_deadlock_docker.py -m live_docker -q
+uv run pytest tests/test_live_redis_maxclients_docker.py -m live_docker -q
+uv run pytest tests/test_live_nginx_timeout_docker.py -m live_docker -q
+```
+
+2026-08-14 的顺序验证中四项均通过。审计结果为：当前运行 PostgreSQL 会话 0、fixture
+表 0、Redis 命名连接 0、Nginx 配置未变化，四个依赖服务均健康。该验证只证明 driver、
+作用域恢复/提案边界与清理合同；不等同于真实 LLM、RAG 或 CLS 评分通过。
 
 ## Redis 可恢复运行时
 
