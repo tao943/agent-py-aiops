@@ -14,6 +14,7 @@ from super_ai.evaluation.live.cls_evidence import (
     build_live_cls_records,
 )
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveClsScope,
     LiveFaultObservation,
     LiveInfrastructureError,
@@ -24,7 +25,10 @@ from super_ai.mcp_client import McpToolDefinition
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 SCENARIO = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
 IDENTITY = validate_run_id("run-1")
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
 NOW = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
 
 

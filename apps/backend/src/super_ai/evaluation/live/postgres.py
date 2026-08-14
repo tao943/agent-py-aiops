@@ -13,6 +13,8 @@ import asyncpg
 from super_ai.aiops import RootCauseDecision
 from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
+    LiveCleanupResult,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveRunIdentity,
@@ -221,10 +223,19 @@ class PostgresLockScenarioDriver:
                 state.waiter_pid,
             )
             return LiveFaultObservation(
-                state.blocker_pid,
-                state.waiter_pid,
-                row is not None and row["wait_event_type"] == "Lock",
-                row is not None and bool(row["edge"]),
+                scenario_id="APY-LIVE-PG-LOCK-001",
+                checks=(
+                    LiveCheck(
+                        "waiter_has_lock_event",
+                        row is not None and row["wait_event_type"] == "Lock",
+                        "InspectPostgresSessions",
+                    ),
+                    LiveCheck(
+                        "blocker_edge_confirmed",
+                        row is not None and bool(row["edge"]),
+                        "InspectPostgresLockGraph",
+                    ),
+                ),
             )
         finally:
             await connection.close()
@@ -259,6 +270,11 @@ class PostgresLockScenarioDriver:
             )
         finally:
             await connection.close()
+
+    def run_pids(self, identity: LiveRunIdentity) -> tuple[int, int]:
+        """Return private injector identities only to the scoped recovery service."""
+        state = self._runs[identity.run_id]
+        return state.blocker_pid, state.waiter_pid
 
     async def terminate(self, identity: LiveRunIdentity, target_pid: int) -> bool:
         connection = await self._config.connect(application_name="agentpy-live:executor")
@@ -309,17 +325,22 @@ class PostgresLockScenarioDriver:
                 )
             )
             return LiveVerification(
-                not blocker_exists,
-                not waiter_locking,
-                not waiter_locking,
-                True,
-                True,
-                state.unrelated_pids <= current_unrelated,
+                checks=(
+                    LiveCheck("blocker_gone", not blocker_exists),
+                    LiveCheck("waiter_unblocked", not waiter_locking),
+                    LiveCheck("lock_graph_clear", not waiter_locking),
+                    LiveCheck("probe_succeeded", True),
+                    LiveCheck("postgres_healthy", True),
+                    LiveCheck(
+                        "unrelated_sessions_untouched",
+                        state.unrelated_pids <= current_unrelated,
+                    ),
+                )
             )
         finally:
             await connection.close()
 
-    async def cleanup(self, identity: LiveRunIdentity) -> None:
+    async def cleanup(self, identity: LiveRunIdentity) -> LiveCleanupResult:
         state = self._runs.pop(identity.run_id, None)
         if state is not None:
             if not state.waiter_task.done():
@@ -343,6 +364,22 @@ class PostgresLockScenarioDriver:
             await connection.execute(f"DROP TABLE IF EXISTS live_eval.{identity.table_name}")
         finally:
             await connection.close()
+        audit = await self.audit(identity)
+        return LiveCleanupResult(
+            checks=(
+                LiveCheck("postgres_healthy", audit.postgres_healthy, "cleanup_audit"),
+                LiveCheck(
+                    "scoped_sessions_removed",
+                    audit.residual_session_count == 0,
+                    "cleanup_audit",
+                ),
+                LiveCheck(
+                    "scoped_fixture_removed",
+                    audit.residual_table_count == 0,
+                    "cleanup_audit",
+                ),
+            )
+        )
 
     async def audit(self, identity: LiveRunIdentity) -> PostgresLiveRunAudit:
         connection = await self._config.connect(application_name="agentpy-live:audit")
@@ -387,19 +424,29 @@ class PostgresLiveRecoveryService:
             if isinstance(diagnostic_artifact, RunArtifact)
             else None
         )
+        blocker_pid, waiter_pid = self._driver.run_pids(identity)
         intent = self._planner.plan(
             decision=decision,
-            blocker_pids=(observation.blocker_pid,) if observation.blocker_edge_confirmed else (),
+            blocker_pids=(blocker_pid,)
+            if observation.check_passed("blocker_edge_confirmed")
+            else (),
         )
         if intent is None:
-            return LiveRecoveryRecord("none", 0, False, False, "intent_missing")
+            return LiveRecoveryRecord(
+                "none",
+                "none",
+                "executed_recovery",
+                False,
+                False,
+                "intent_missing",
+            )
         state, executor_pid = await self._driver.session_state(identity, intent.target_pid)
         authorization = self._policy.authorize(
             identity=identity,
             intent=intent,
             state=state,
-            injected_blocker_pid=observation.blocker_pid,
-            waiter_pid=observation.waiter_pid,
+            injected_blocker_pid=blocker_pid,
+            waiter_pid=waiter_pid,
             executor_pid=executor_pid,
         )
         executed = (
@@ -409,7 +456,8 @@ class PostgresLiveRecoveryService:
         )
         return LiveRecoveryRecord(
             intent.action,
-            intent.target_pid,
+            "synthetic_blocker",
+            "executed_recovery",
             authorization.allowed,
             executed,
             authorization.code,

@@ -43,6 +43,7 @@ class LiveRunIdentity:
 
 
 EvidenceSource = Literal["local", "cls"]
+RecoveryExpectation = Literal["executed_recovery", "proposal_only"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,17 +93,33 @@ class LiveInfrastructureError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class LiveFaultObservation:
-    """Safe facts proving whether the synthetic fault exists."""
+class LiveCheck:
+    """One named, auditable lifecycle assertion."""
 
-    blocker_pid: int
-    waiter_pid: int
-    waiter_has_lock_event: bool
-    blocker_edge_confirmed: bool
+    name: str
+    passed: bool
+    source: str = "driver"
+
+
+@dataclass(frozen=True, slots=True)
+class LiveFaultObservation:
+    """Scenario-neutral safe facts proving whether the synthetic fault exists."""
+
+    scenario_id: str
+    checks: tuple[LiveCheck, ...]
+    safe_facts: tuple[tuple[str, str | int | float | bool], ...] = ()
 
     @property
     def confirmed(self) -> bool:
-        return self.waiter_has_lock_event and self.blocker_edge_confirmed
+        return bool(self.checks) and all(check.passed for check in self.checks)
+
+    def check_passed(self, name: str) -> bool:
+        """Return one named check without relying on scenario-specific fields."""
+        return any(check.name == name and check.passed for check in self.checks)
+
+    def safe_fact(self, name: str) -> str | int | float | bool | None:
+        """Return one explicitly safe fact exposed by the driver."""
+        return next((value for key, value in self.safe_facts if key == name), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,32 +127,34 @@ class LiveRecoveryRecord:
     """Auditable result of the bounded recovery boundary."""
 
     action: str
-    target_pid: int
+    target_ref: str
+    expectation: RecoveryExpectation
     authorized: bool
     executed: bool
     authorization_code: str
+    proposal_checks: tuple[LiveCheck, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class LiveVerification:
-    """Independent post-recovery checks."""
+    """Scenario-neutral independent post-recovery checks."""
 
-    blocker_gone: bool
-    waiter_unblocked: bool
-    lock_graph_clear: bool
-    probe_succeeded: bool
-    postgres_healthy: bool
-    unrelated_sessions_untouched: bool
+    checks: tuple[LiveCheck, ...]
 
     @property
     def passed(self) -> bool:
-        return all(
-            (
-                self.blocker_gone,
-                self.waiter_unblocked,
-                self.lock_graph_clear,
-                self.probe_succeeded,
-                self.postgres_healthy,
-                self.unrelated_sessions_untouched,
-            )
-        )
+        return bool(self.checks) and all(check.passed for check in self.checks)
+
+    def check_passed(self, name: str) -> bool:
+        return any(check.name == name and check.passed for check in self.checks)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCleanupResult:
+    """Fixture cleanup audit kept separate from Agent recovery credit."""
+
+    checks: tuple[LiveCheck, ...]
+
+    @property
+    def passed(self) -> bool:
+        return bool(self.checks) and all(check.passed for check in self.checks)

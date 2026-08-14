@@ -21,6 +21,7 @@ from super_ai.evaluation.live.diagnostics import (
     build_live_evidence_client,
 )
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
@@ -35,7 +36,13 @@ LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" 
 @pytest.mark.asyncio
 async def test_live_diagnostic_client_factory_preserves_local_toolset() -> None:
     client = build_live_evidence_client(
-        observation=LiveFaultObservation(101, 102, True, True),
+        observation=LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (
+                LiveCheck("waiter_has_lock_event", True),
+                LiveCheck("blocker_edge_confirmed", True),
+            ),
+        ),
         evidence_context=LiveEvidenceContext.local(
             incident_id="APY-LIVE-PG-LOCK-001-run-1"
         ),
@@ -74,7 +81,10 @@ def _artifact() -> RunArtifact:
 
 
 def _observation() -> LiveFaultObservation:
-    return LiveFaultObservation(101, 102, True, True)
+    return LiveFaultObservation(
+        "APY-LIVE-PG-LOCK-001",
+        (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+    )
 
 
 def test_generic_fallback_uses_all_live_evidence_tools() -> None:
@@ -351,8 +361,24 @@ async def test_live_collector_rejects_unknown_or_mutating_arguments() -> None:
 
 
 def test_runner_boundary_appends_authorized_and_verified_recovery_facts() -> None:
-    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
-    verification = LiveVerification(True, True, True, True, True, True)
+    recovery = LiveRecoveryRecord(
+        "terminate_postgres_backend",
+        "synthetic_blocker",
+        "executed_recovery",
+        True,
+        True,
+        "authorized",
+    )
+    verification = LiveVerification(
+        (
+            LiveCheck("blocker_gone", True),
+            LiveCheck("waiter_unblocked", True),
+            LiveCheck("lock_graph_clear", True),
+            LiveCheck("probe_succeeded", True),
+            LiveCheck("postgres_healthy", True),
+            LiveCheck("unrelated_sessions_untouched", True),
+        )
+    )
 
     enriched = append_live_outcome(_artifact(), recovery=recovery, verification=verification)
 

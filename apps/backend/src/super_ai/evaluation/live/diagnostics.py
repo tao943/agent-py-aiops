@@ -138,14 +138,18 @@ class LivePostgresEvidenceMcpClient:
             return {
                 "waitingSession": "waiter",
                 "waitEventType": (
-                    "Lock" if self._observation.waiter_has_lock_event else None
+                    "Lock"
+                    if self._observation.check_passed("waiter_has_lock_event")
+                    else None
                 ),
                 "benchmarkEvidenceId": "postgres-wait-event-lock",
             }
         if name == "InspectPostgresLockGraph":
             return {
                 "edge": "blocker->waiter",
-                "blockerEdgeConfirmed": self._observation.blocker_edge_confirmed,
+                "blockerEdgeConfirmed": self._observation.check_passed(
+                    "blocker_edge_confirmed"
+                ),
                 "benchmarkEvidenceId": "postgres-blocking-pid-edge",
             }
         if name == "VerifyServiceHealth":

@@ -10,6 +10,7 @@ from typing import Generic, Protocol, TypeVar
 from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
+    LiveCleanupResult,
     LiveEvidenceContext,
     LiveFaultObservation,
     LiveInfrastructureError,
@@ -47,7 +48,7 @@ class LiveScenarioDriver(Protocol):
 
     async def verify(self, identity: LiveRunIdentity) -> LiveVerification: ...
 
-    async def cleanup(self, identity: LiveRunIdentity) -> None: ...
+    async def cleanup(self, identity: LiveRunIdentity) -> LiveCleanupResult: ...
 
 
 class LiveDiagnosticAdapter(Protocol):
@@ -168,7 +169,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 ),
                 "recovery_failed",
             )
-            if not (recovery.authorized and recovery.executed):
+            if not _recovery_contract_satisfied(recovery):
                 raise LiveBenchmarkError("recovery_denied")
             verification = await self._classified(
                 self._driver.verify(identity), "recovery_verification_failed"
@@ -197,10 +198,14 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             raise
         finally:
             try:
-                await self._driver.cleanup(identity)
+                cleanup = await self._driver.cleanup(identity)
+                if not cleanup.passed:
+                    raise LiveBenchmarkError("cleanup_failed")
             except BaseException as cleanup_exc:
                 if isinstance(cleanup_exc, (KeyboardInterrupt, SystemExit)):
                     raise
+                if isinstance(cleanup_exc, LiveBenchmarkError):
+                    raise cleanup_exc from active_error
                 raise LiveBenchmarkError("cleanup_failed") from (
                     cleanup_exc if active_error is None else active_error
                 )
@@ -217,3 +222,15 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             raise LiveBenchmarkError(exc.category) from exc
         except Exception as exc:
             raise LiveBenchmarkError(category) from exc
+
+
+def _recovery_contract_satisfied(record: LiveRecoveryRecord) -> bool:
+    if not record.authorized:
+        return False
+    if record.expectation == "executed_recovery":
+        return record.executed
+    return (
+        not record.executed
+        and bool(record.proposal_checks)
+        and all(check.passed for check in record.proposal_checks)
+    )

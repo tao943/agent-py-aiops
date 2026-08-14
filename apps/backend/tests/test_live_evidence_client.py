@@ -7,6 +7,7 @@ import pytest
 
 from super_ai.evaluation.live.diagnostics import LivePostgresEvidenceMcpClient
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveClsScope,
     LiveEvidenceContext,
     LiveEvidenceReadiness,
@@ -31,7 +32,10 @@ CLS_CONTEXT = LiveEvidenceContext(
     readiness=LiveEvidenceReadiness(3, 3, 1, 2_000, 3_000),
 )
 LOCAL_CONTEXT = LiveEvidenceContext.local(incident_id=SCOPE.incident_id)
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
 
 
 def _record(*, run_id: str = "run-1") -> dict[str, object]:

@@ -10,6 +10,7 @@ from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecisi
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
 from super_ai.evaluation.artifacts import LiveEvidenceAudit, LiveRecoveryAudit
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveVerification,
@@ -128,9 +129,28 @@ def passing_cls_artifact() -> RunArtifact:
     )
 
 
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
-RECOVERY = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
-VERIFICATION = LiveVerification(True, True, True, True, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
+RECOVERY = LiveRecoveryRecord(
+    "terminate_postgres_backend",
+    "synthetic_blocker",
+    "executed_recovery",
+    True,
+    True,
+    "authorized",
+)
+VERIFICATION = LiveVerification(
+    (
+        LiveCheck("blocker_gone", True),
+        LiveCheck("waiter_unblocked", True),
+        LiveCheck("lock_graph_clear", True),
+        LiveCheck("probe_succeeded", True),
+        LiveCheck("postgres_healthy", True),
+        LiveCheck("unrelated_sessions_untouched", True),
+    )
+)
 
 
 class GateOptions(TypedDict, total=False):
@@ -367,7 +387,14 @@ def test_unverified_recovery_is_a_hard_gate() -> None:
         load_live_oracle(SCENARIO),
         observation=OBSERVATION,
         recovery=RECOVERY,
-        verification=replace(VERIFICATION, probe_succeeded=False),
+        verification=LiveVerification(
+            tuple(
+                replace(check, passed=False)
+                if check.name == "probe_succeeded"
+                else check
+                for check in VERIFICATION.checks
+            )
+        ),
     )
 
     assert result.hard_gate == "recovery_unverified"
