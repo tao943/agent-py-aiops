@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from typing import cast
 
 import pytest
+import yaml
 
 from super_ai.evaluation.live.scenarios import (
     load_live_oracle,
@@ -36,6 +39,120 @@ def test_oracle_is_loaded_only_by_the_evaluator_boundary() -> None:
         "postgres-lock-wait-event",
         "postgres-blocking-graph",
     }
+    assert oracle.root_cause_semantics is not None
+    assert oracle.root_cause_semantics.trigger.all_of == ("lock_holder", "row_lock")
+    assert [
+        item.id for item in oracle.root_cause_semantics.causal_milestones
+    ] == ["lock_held", "update_waits", "probe_times_out"]
+
+
+def _copy_live_scenario(tmp_path: Path) -> Path:
+    source = LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001"
+    destination = tmp_path / source.name
+    shutil.copytree(source, destination)
+    return destination
+
+
+def _write_oracle(scenario_dir: Path, payload: object) -> None:
+    scenario_dir.joinpath("ground_truth.yaml").write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("semantics", "message"),
+    (
+        (
+                {
+                    "concepts": {"row_lock": ["row lock"]},
+                    "trigger": {"all_of": ["missing"]},
+                    "causal_milestones": [
+                        {"id": "first", "all_of": ["row_lock"]},
+                        {"id": "second", "all_of": ["row_lock"]},
+                        {"id": "third", "all_of": ["row_lock"]},
+                    ],
+            },
+            "unknown concept",
+        ),
+        (
+            {
+                "concepts": {"row_lock": [""]},
+                "trigger": {"all_of": ["row_lock"]},
+                "causal_milestones": [{"id": "lock", "all_of": ["row_lock"]}],
+            },
+            "aliases",
+        ),
+        (
+            {
+                "concepts": {"row_lock": ["row lock"]},
+                "trigger": {"all_of": ["row_lock"]},
+                    "causal_milestones": [
+                        {"id": "lock", "all_of": ["row_lock"]},
+                        {"id": "lock", "all_of": ["row_lock"]},
+                        {"id": "other", "all_of": ["row_lock"]},
+                    ],
+            },
+            "unique",
+        ),
+        (
+            {
+                "concepts": {"row_lock": ["row lock"]},
+                "causal_milestones": [{"id": "lock", "all_of": ["row_lock"]}],
+            },
+            "trigger",
+        ),
+        (
+            {
+                "concepts": {"row_lock": ["row lock"]},
+                "trigger": {"all_of": ["row_lock"]},
+                "causal_milestones": [],
+            },
+            "causal_milestones",
+        ),
+        (
+            {
+                "concepts": {"row_lock": ["row lock"]},
+                "trigger": {"all_of": ["row_lock"]},
+                "causal_milestones": [
+                    {"id": "first", "all_of": ["row_lock"]},
+                    {"id": "second", "all_of": ["row_lock"]},
+                ],
+            },
+            "exactly three",
+        ),
+    ),
+)
+def test_rejects_invalid_live_root_cause_semantics(
+    tmp_path: Path, semantics: dict[str, object], message: str
+) -> None:
+    scenario_dir = _copy_live_scenario(tmp_path)
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    payload["root_cause_semantics"] = semantics
+    _write_oracle(scenario_dir, payload)
+
+    with pytest.raises(ValueError, match=message):
+        load_live_oracle(scenario_dir)
+
+
+def test_requires_root_cause_semantics_for_live_oracle(tmp_path: Path) -> None:
+    scenario_dir = _copy_live_scenario(tmp_path)
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    payload.pop("root_cause_semantics", None)
+    _write_oracle(scenario_dir, payload)
+
+    with pytest.raises(ValueError, match="root_cause_semantics"):
+        load_live_oracle(scenario_dir)
 
 
 @pytest.mark.parametrize(

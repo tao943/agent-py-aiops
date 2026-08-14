@@ -20,3 +20,44 @@ required_rule_outs:
 forbidden_claims:
   - PostgreSQL is unreachable
   - the update is CPU-bound without a blocker
+root_cause_semantics:
+  concepts:
+    lock_holder:
+      - transaction
+      - blocker
+    row_lock:
+      - row lock
+      - lock event
+      - lock blocking
+      - lock contention
+      - lock graph
+    waiter:
+      - order status update
+      - waiting session
+      - session waiting
+      - waiter
+    wait_state:
+      - waiting
+      - waits
+      - blocked
+      - wait event
+    timeout:
+      - timeout
+      - timeouts
+      - timing out
+      - times out
+    causal_link:
+      - causes
+      - causing
+      - leads to
+      - results in
+      - times out
+  trigger:
+    all_of: [lock_holder, row_lock]
+  causal_milestones:
+    - id: lock_held
+      all_of: [lock_holder, row_lock]
+    - id: update_waits
+      all_of: [waiter, wait_state, row_lock]
+    - id: probe_times_out
+      all_of: [timeout, causal_link]

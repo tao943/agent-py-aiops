@@ -125,6 +125,86 @@ def test_live_score_uses_exact_hundred_point_contract() -> None:
     assert result.passed is True
 
 
+def test_live_score_accepts_grounded_baseline_root_cause_paraphrase() -> None:
+    artifact = replace(
+        passing_artifact(),
+        decision=RootCauseDecision(
+            "postgresql",
+            "row_lock_blocking",
+            "A transaction is holding a row lock required by order status updates.",
+            (
+                "The observation reveals a session waiting on a Lock event.",
+                "The lock graph confirmed a blocker to waiter edge causing the timeouts.",
+            ),
+            ("ev-session", "ev-graph"),
+            1.0,
+        ),
+    )
+
+    result = score(artifact)
+
+    assert result.root_cause == 20
+    assert result.total == 100
+    assert result.passed is True
+    root_reasons = {
+        reason.code: (reason.points, reason.maximum)
+        for reason in result.reasons
+        if reason.code.startswith(("primary_", "causal_milestone_"))
+    }
+    assert root_reasons == {
+        "primary_component_canonical": (4, 4),
+        "primary_mechanism_canonical": (6, 6),
+        "primary_trigger_semantic": (4, 4),
+        "causal_milestone_lock_held": (2, 2),
+        "causal_milestone_update_waits": (2, 2),
+        "causal_milestone_probe_times_out": (2, 2),
+    }
+
+
+def test_live_score_reports_wrong_structured_cause_without_semantic_credit() -> None:
+    decision = passing_artifact().decision
+    assert decision is not None
+    artifact = replace(
+        passing_artifact(),
+        decision=replace(
+            decision,
+            component="mysql",
+            mechanism="deadlock",
+        ),
+    )
+
+    result = score(artifact)
+
+    assert result.root_cause == 0
+    assert {
+        "primary_component_wrong",
+        "primary_mechanism_wrong",
+        "primary_trigger_unsupported",
+        "causal_chain_incomplete",
+        "primary_root_cause_wrong",
+    } <= set(result.failures)
+
+
+def test_live_score_reports_incomplete_trigger_and_causal_chain() -> None:
+    decision = passing_artifact().decision
+    assert decision is not None
+    artifact = replace(
+        passing_artifact(),
+        decision=replace(
+            decision,
+            trigger="The business probe timed out.",
+            causal_chain=("A transaction holds a row lock.",),
+        ),
+    )
+
+    result = score(artifact)
+
+    assert result.root_cause == 12
+    assert "primary_trigger_unsupported" in result.failures
+    assert "causal_chain_incomplete" in result.failures
+    assert "primary_root_cause_wrong" in result.failures
+
+
 @pytest.mark.parametrize(
     ("artifact", "kwargs", "gate"),
     (

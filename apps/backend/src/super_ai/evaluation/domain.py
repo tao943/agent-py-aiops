@@ -46,6 +46,31 @@ class EvidenceMilestone:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticConcept:
+    """Evaluator-only aliases for one domain concept."""
+
+    id: str
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticRequirement:
+    """Concepts that must all occur within one scored text field."""
+
+    id: str
+    all_of: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RootCauseSemantics:
+    """Private deterministic rubric for natural-language root-cause fields."""
+
+    concepts: tuple[SemanticConcept, ...]
+    trigger: SemanticRequirement
+    causal_milestones: tuple[SemanticRequirement, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ScenarioOracle:
     """Evaluator-only answer key for one scenario."""
 
@@ -55,6 +80,7 @@ class ScenarioOracle:
     required_evidence: tuple[EvidenceMilestone, ...]
     required_rule_outs: tuple[str, ...]
     forbidden_claims: tuple[str, ...]
+    root_cause_semantics: RootCauseSemantics | None = None
 
 
 @dataclass(frozen=True, slots=True)
