@@ -71,7 +71,7 @@ def score_live_run(
         recovery.action == "terminate_postgres_backend"
         and recovery.authorized
         and recovery.executed
-        and recovery.authorization_code == "allowed",
+        and recovery.authorization_code == "authorized",
     )
     recovery_verification = _award(
         reasons, "recovery_independently_verified", 15, verification.passed

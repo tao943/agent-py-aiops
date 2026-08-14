@@ -13,6 +13,8 @@ from time import monotonic
 from typing import Annotated, Any, Literal, TypedDict, cast
 from uuid import uuid4
 
+from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
@@ -21,6 +23,7 @@ from super_ai.aiops.reasoning import (
     HypothesisState,
     ObservationDecision,
     RootCauseDecision,
+    normalize_root_cause_decision,
     parse_observation_decision,
     parse_plan,
     parse_root_cause_decision,
@@ -28,7 +31,7 @@ from super_ai.aiops.reasoning import (
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
-from super_ai.mcp_client import McpClientError
+from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
     DiagnosticReportRecord,
@@ -60,6 +63,7 @@ class AiopsDiagnosticState(TypedDict, total=False):
     plan_origin: str
     plan_index: int
     public_hypotheses: list[JsonDict]
+    decision_vocabulary: JsonDict
     hypothesis_states: list[JsonDict]
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
@@ -82,6 +86,146 @@ AIOPS_REPORT_REQUIRED_HEADINGS = (
     "## 📋 活跃告警清单",
     "## 📊 结论",
 )
+
+
+def build_generic_live_plan(
+    *,
+    available_tools: Sequence[str],
+    known_hypotheses: Sequence[str],
+) -> list[JsonDict]:
+    """Build a safe evidence-gathering fallback from public Live contracts."""
+    available = set(available_tools)
+    known = set(known_hypotheses)
+    definitions: tuple[tuple[str, str, JsonDict, tuple[str, ...]], ...] = (
+        (
+            "VerifyServiceHealth",
+            "Check database reachability and service health.",
+            {"target": "postgres_cluster", "check_connection_pool": True},
+            ("postgres_connectivity_failure",),
+        ),
+        (
+            "InspectPostgresSessions",
+            "Inspect session states and wait events.",
+            {
+                "state_filter": ["active", "idle in transaction"],
+                "include_wait_events": True,
+            },
+            ("postgres_slow_query_without_lock", "postgres_lock_blocking"),
+        ),
+        (
+            "InspectPostgresLockGraph",
+            "Inspect current blocking chains and deadlock signals.",
+            {"detect_deadlocks": True, "analyze_blocking_chains": True},
+            ("postgres_lock_blocking",),
+        ),
+    )
+    return [
+        {
+            "id": f"live-evidence-{index}",
+            "tool": tool,
+            "arguments": dict(arguments),
+            "purpose": purpose,
+            "testsHypotheses": [item for item in hypotheses if item in known],
+        }
+        for index, (tool, purpose, arguments, hypotheses) in enumerate(definitions, start=1)
+        if tool in available
+    ]
+
+
+def plan_matches_tool_contracts(
+    plan: Sequence[JsonDict],
+    tool_definitions: Sequence[McpToolDefinition],
+) -> bool:
+    """Validate every planned argument object against its discovered MCP schema."""
+    definitions = {item.name: item for item in tool_definitions}
+    for step in plan:
+        tool_name = step.get("tool")
+        arguments = step.get("arguments")
+        if not isinstance(tool_name, str) or not isinstance(arguments, Mapping):
+            return False
+        definition = definitions.get(tool_name)
+        if definition is None:
+            return False
+        schema = definition.input_schema
+        try:
+            validator_class = validator_for(schema)
+            validator_class.check_schema(schema)
+            validator_class(schema).validate(dict(arguments))
+        except (SchemaError, ValidationError):
+            return False
+    return bool(plan)
+
+
+def build_grounded_fallback_decision(
+    *,
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    decision_vocabulary: JsonDict,
+) -> RootCauseDecision | None:
+    """Build a bounded decision from one strongly supported public hypothesis."""
+    candidates: list[tuple[str, tuple[str, ...], float]] = []
+    for state in hypothesis_states:
+        confidence = state.get("confidence")
+        if (
+            state.get("status") != "supported"
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or float(confidence) < 0.9
+        ):
+            continue
+        evidence_ids = _unique_strings(
+            [
+                item
+                for item in cast(list[object], state.get("evidenceIds") or [])
+                if isinstance(item, str)
+            ]
+        )
+        hypothesis_id = state.get("id")
+        if isinstance(hypothesis_id, str) and len(evidence_ids) >= 2:
+            candidates.append((hypothesis_id, tuple(evidence_ids), float(confidence)))
+    if len(candidates) != 1:
+        return None
+
+    hypothesis_id, evidence_ids, confidence = candidates[0]
+    public_hypothesis = next(
+        (item for item in public_hypotheses if item.get("id") == hypothesis_id),
+        None,
+    )
+    if public_hypothesis is None:
+        return None
+    description = public_hypothesis.get("description")
+    labels = _json_dict(
+        _json_dict(decision_vocabulary.get("labelsByHypothesis")).get(hypothesis_id)
+    )
+    component = labels.get("component")
+    mechanism = labels.get("mechanism")
+    if not all(
+        isinstance(item, str) and item.strip()
+        for item in (description, component, mechanism)
+    ):
+        return None
+
+    evidence_set = set(evidence_ids)
+    causal_chain = tuple(
+        summary.strip()
+        for observation in observation_decisions
+        if hypothesis_id in cast(list[object], observation.get("supports") or [])
+        and evidence_set.intersection(
+            item
+            for item in cast(list[object], observation.get("evidenceIds") or [])
+            if isinstance(item, str)
+        )
+        if isinstance((summary := observation.get("summary")), str) and summary.strip()
+    )
+    return RootCauseDecision(
+        component=cast(str, component).strip(),
+        mechanism=cast(str, mechanism).strip(),
+        trigger=cast(str, description).strip(),
+        causal_chain=causal_chain,
+        evidence_ids=evidence_ids,
+        confidence=confidence,
+    )
 
 
 class AiopsDiagnosticService:
@@ -144,6 +288,9 @@ class AiopsDiagnosticService:
             "query": task.query,
             "alert": alert,
             "public_hypotheses": _json_list(task.input_payload.get("hypotheses")),
+            "decision_vocabulary": _json_dict(
+                task.input_payload.get("decisionVocabulary")
+            ),
             "hypothesis_states": _initial_hypothesis_states(
                 _json_list(task.input_payload.get("hypotheses"))
             ),
@@ -314,9 +461,8 @@ class AiopsDiagnosticService:
         try:
             mcp_client = await self._mcp_client_for(owner_user_id)
             discovered_tools = await mcp_client.discover_tools()
-            available_tools = [definition.name for definition in discovered_tools]
         except McpClientError:
-            available_tools = []
+            discovered_tools = []
             events.append(
                 _task_status_event(
                     task_id,
@@ -332,7 +478,7 @@ class AiopsDiagnosticService:
             alert=_json_dict(state.get("alert")),
             sop_hits=sop_hits,
             no_sop_matched=no_sop_matched,
-            available_tools=available_tools,
+            tool_definitions=discovered_tools,
             known_hypotheses=[
                 str(item.get("id"))
                 for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
@@ -684,6 +830,7 @@ class AiopsDiagnosticService:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
         prompt = (
             "Return JSON only for one root-cause decision with component, mechanism, trigger, "
             "causalChain, evidenceIds, and confidence. This is a structured root-cause "
@@ -695,17 +842,51 @@ class AiopsDiagnosticService:
             f"{json.dumps(state.get('hypothesis_states') or [], ensure_ascii=False)}. "
             "Structured observations: "
             f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
+            "Use the canonical component and mechanism labels declared by this public "
+            "decision vocabulary when it contains a matching alias: "
+            f"{json.dumps(decision_vocabulary, ensure_ascii=False)}. "
             f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
         )
         decision: RootCauseDecision | None = None
+        decision_origin = "none"
+        decision_error_category: str | None = None
         try:
             response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-            decision = parse_root_cause_decision(
-                _model_text(response),
-                available_evidence_ids=set(evidence_ids),
-            )
         except Exception:
-            decision = None
+            decision_error_category = "model_call_failed"
+        else:
+            try:
+                decision = parse_root_cause_decision(
+                    _model_text(response),
+                    available_evidence_ids=set(evidence_ids),
+                )
+                decision = normalize_root_cause_decision(
+                    decision,
+                    component_aliases=_string_mapping(
+                        decision_vocabulary.get("componentAliases")
+                    ),
+                    mechanism_aliases=_string_mapping(
+                        decision_vocabulary.get("mechanismAliases")
+                    ),
+                )
+                decision_origin = "llm"
+            except Exception:
+                decision_error_category = "invalid_model_output"
+        if decision is None:
+            decision = build_grounded_fallback_decision(
+                public_hypotheses=cast(
+                    list[JsonDict], state.get("public_hypotheses") or []
+                ),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=decision_vocabulary,
+            )
+            if decision is not None:
+                decision_origin = "grounded_fallback"
         decision_payload = (
             _root_cause_decision_payload(decision) if decision is not None else None
         )
@@ -713,6 +894,8 @@ class AiopsDiagnosticService:
             "rootCauseDecision": decision_payload,
             "evidenceIds": list(decision.evidence_ids) if decision is not None else [],
             "status": "grounded" if decision is not None else "insufficient_evidence",
+            "decisionOrigin": decision_origin,
+            "decisionErrorCategory": decision_error_category,
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -861,17 +1044,22 @@ class AiopsDiagnosticService:
         alert: JsonDict,
         sop_hits: Sequence[JsonDict],
         no_sop_matched: bool,
-        available_tools: Sequence[str],
+        tool_definitions: Sequence[McpToolDefinition],
         known_hypotheses: Sequence[str],
     ) -> tuple[list[JsonDict], str]:
-        generic_plan = (
-            [self._generic_search_log_step(query)] if "SearchLog" in available_tools else []
+        available_tools = [definition.name for definition in tool_definitions]
+        generic_plan = build_generic_live_plan(
+            available_tools=available_tools,
+            known_hypotheses=known_hypotheses,
         )
+        if not generic_plan and "SearchLog" in available_tools:
+            generic_plan = [self._generic_search_log_step(query)]
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
-            "steps and only these tools: "
-            f"{json.dumps(list(available_tools))}. User query: {query}. Alert: "
+            "steps and only the tools and argument schemas in these discovered contracts: "
+            f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
+            f"User query: {query}. Alert: "
             f"{json.dumps(alert)}. SOP evidence: {json.dumps(list(sop_hits))}. "
             f"Known hypotheses: {json.dumps(list(known_hypotheses))}. "
             f"No SOP matched: {str(no_sop_matched).lower()}."
@@ -886,7 +1074,7 @@ class AiopsDiagnosticService:
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
-        if not plan:
+        if not plan or not plan_matches_tool_contracts(plan, tool_definitions):
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"
 
@@ -1007,6 +1195,29 @@ def _initial_hypothesis_states(public_hypotheses: Sequence[JsonDict]) -> list[Js
         }
         for item in public_hypotheses
         if item.get("id")
+    ]
+
+
+def _string_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        key: item
+        for key, item in cast(Mapping[object, object], value).items()
+        if isinstance(key, str) and isinstance(item, str)
+    }
+
+
+def _tool_contracts_payload(
+    tool_definitions: Sequence[McpToolDefinition],
+) -> list[JsonDict]:
+    return [
+        {
+            "name": item.name,
+            "description": item.description,
+            "inputSchema": item.input_schema,
+        }
+        for item in tool_definitions
     ]
 
 

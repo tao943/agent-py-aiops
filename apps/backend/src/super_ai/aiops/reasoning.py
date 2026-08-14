@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 
@@ -42,6 +42,20 @@ class RootCauseDecision:
     causal_chain: tuple[str, ...]
     evidence_ids: tuple[str, ...]
     confidence: float
+
+
+def normalize_root_cause_decision(
+    decision: RootCauseDecision,
+    *,
+    component_aliases: Mapping[str, str],
+    mechanism_aliases: Mapping[str, str],
+) -> RootCauseDecision:
+    """Apply only explicitly declared public output-label aliases."""
+    return replace(
+        decision,
+        component=component_aliases.get(decision.component, decision.component),
+        mechanism=mechanism_aliases.get(decision.mechanism, decision.mechanism),
+    )
 
 
 def parse_plan(

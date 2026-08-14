@@ -8,6 +8,11 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import RootCauseDecision
+from super_ai.aiops.diagnostics import (
+    build_generic_live_plan,
+    build_grounded_fallback_decision,
+    plan_matches_tool_contracts,
+)
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import (
     LivePostgresEvidenceMcpClient,
@@ -53,7 +58,162 @@ def _observation() -> LiveFaultObservation:
     return LiveFaultObservation(101, 102, True, True)
 
 
-def test_live_input_contains_only_answer_free_public_fields() -> None:
+def test_generic_fallback_uses_all_live_evidence_tools() -> None:
+    plan = build_generic_live_plan(
+        available_tools=(
+            "VerifyServiceHealth",
+            "InspectPostgresSessions",
+            "InspectPostgresLockGraph",
+        ),
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+
+    assert [step["tool"] for step in plan] == [
+        "VerifyServiceHealth",
+        "InspectPostgresSessions",
+        "InspectPostgresLockGraph",
+    ]
+    assert plan[0]["testsHypotheses"] == ["postgres_connectivity_failure"]
+    assert plan[1]["testsHypotheses"] == [
+        "postgres_slow_query_without_lock",
+        "postgres_lock_blocking",
+    ]
+    assert plan[2]["testsHypotheses"] == ["postgres_lock_blocking"]
+
+
+@pytest.mark.asyncio
+async def test_model_plan_arguments_are_checked_against_discovered_tool_contracts() -> None:
+    definitions = await LivePostgresEvidenceMcpClient(_observation()).discover_tools()
+    valid_plan = build_generic_live_plan(
+        available_tools=tuple(item.name for item in definitions),
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+    invalid_model_plan: list[dict[str, object]] = [
+        {
+            "id": "step_1",
+            "tool": "InspectPostgresSessions",
+            "purpose": "Inspect waiting sessions.",
+            "arguments": {
+                "filters": {
+                    "state": ["active", "idle in transaction"],
+                    "include_wait_events": True,
+                }
+            },
+            "testsHypotheses": ["postgres_lock_blocking"],
+        }
+    ]
+
+    assert plan_matches_tool_contracts(valid_plan, definitions) is True
+    assert plan_matches_tool_contracts(invalid_model_plan, definitions) is False
+
+
+def test_grounded_fallback_requires_one_high_confidence_cause_and_two_evidence() -> None:
+    decision = build_grounded_fallback_decision(
+        public_hypotheses=(
+            {
+                "id": "postgres_lock_blocking",
+                "description": "A transaction holds a required row lock.",
+            },
+            {
+                "id": "postgres_connectivity_failure",
+                "description": "The database cannot be reached.",
+            },
+        ),
+        hypothesis_states=(
+            {
+                "id": "postgres_lock_blocking",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-wait", "ev-graph"],
+            },
+            {
+                "id": "postgres_connectivity_failure",
+                "status": "refuted",
+                "confidence": 0.0,
+                "evidenceIds": ["ev-health"],
+            },
+        ),
+        observation_decisions=(
+            {
+                "supports": ["postgres_lock_blocking"],
+                "refutes": [],
+                "summary": "A lock wait event was observed.",
+                "evidenceIds": ["ev-wait"],
+            },
+            {
+                "supports": ["postgres_lock_blocking"],
+                "refutes": [],
+                "summary": "A blocker-to-waiter edge was observed.",
+                "evidenceIds": ["ev-graph"],
+            },
+        ),
+        decision_vocabulary={
+            "labelsByHypothesis": {
+                "postgres_lock_blocking": {
+                    "component": "postgresql",
+                    "mechanism": "row_lock_blocking",
+                },
+                "postgres_connectivity_failure": {
+                    "component": "postgresql",
+                    "mechanism": "connectivity_failure",
+                },
+            }
+        },
+    )
+
+    assert decision is not None
+    assert decision.component == "postgresql"
+    assert decision.mechanism == "row_lock_blocking"
+    assert decision.trigger == "A transaction holds a required row lock."
+    assert decision.causal_chain == (
+        "A lock wait event was observed.",
+        "A blocker-to-waiter edge was observed.",
+    )
+    assert decision.evidence_ids == ("ev-wait", "ev-graph")
+
+
+def test_grounded_fallback_refuses_ambiguous_high_confidence_causes() -> None:
+    assert (
+        build_grounded_fallback_decision(
+            public_hypotheses=(
+                {"id": "cause-a", "description": "Cause A."},
+                {"id": "cause-b", "description": "Cause B."},
+            ),
+            hypothesis_states=(
+                {
+                    "id": "cause-a",
+                    "status": "supported",
+                    "confidence": 1.0,
+                    "evidenceIds": ["ev-1", "ev-2"],
+                },
+                {
+                    "id": "cause-b",
+                    "status": "supported",
+                    "confidence": 0.95,
+                    "evidenceIds": ["ev-3", "ev-4"],
+                },
+            ),
+            observation_decisions=(),
+            decision_vocabulary={
+                "labelsByHypothesis": {
+                    "cause-a": {"component": "service", "mechanism": "cause_a"},
+                    "cause-b": {"component": "service", "mechanism": "cause_b"},
+                }
+            },
+        )
+        is None
+    )
+
+
+def test_live_input_contains_candidate_wide_vocabulary_without_oracle() -> None:
     scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
 
     payload = build_live_diagnostic_input(scenario)
@@ -61,8 +221,35 @@ def test_live_input_contains_only_answer_free_public_fields() -> None:
 
     assert payload["benchmarkMode"] == "live"
     assert payload["benchmarkScenarioId"] == scenario.id
+    vocabulary = cast(dict[str, Any], payload["decisionVocabulary"])
+    assert vocabulary["componentAliases"] == {
+        "postgres": "postgresql",
+        "postgresql": "postgresql",
+    }
+    assert vocabulary["mechanismAliases"] == {
+        "postgres_lock_blocking": "row_lock_blocking",
+        "row_lock_blocking": "row_lock_blocking",
+        "postgres_slow_query_without_lock": "slow_query_without_lock",
+        "slow_query_without_lock": "slow_query_without_lock",
+        "postgres_connectivity_failure": "connectivity_failure",
+        "connectivity_failure": "connectivity_failure",
+    }
+    assert vocabulary["labelsByHypothesis"] == {
+        "postgres_lock_blocking": {
+            "component": "postgresql",
+            "mechanism": "row_lock_blocking",
+        },
+        "postgres_slow_query_without_lock": {
+            "component": "postgresql",
+            "mechanism": "slow_query_without_lock",
+        },
+        "postgres_connectivity_failure": {
+            "component": "postgresql",
+            "mechanism": "connectivity_failure",
+        },
+    }
     assert "ground_truth" not in serialized
-    assert "row_lock_blocking" not in serialized
+    assert "synthetic_transaction_holds_order_row_lock" not in serialized
     assert "agent_py_live_eval" not in serialized
     assert "run_id" not in serialized
 
@@ -95,8 +282,57 @@ async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
         await client.call_tool("ReadGroundTruth", {})
 
 
+@pytest.mark.asyncio
+async def test_live_collector_accepts_declared_read_only_filters() -> None:
+    client = LivePostgresEvidenceMcpClient(_observation())
+
+    health = await client.call_tool(
+        "VerifyServiceHealth",
+        {"target": "postgres_cluster", "check_connection_pool": True},
+    )
+    sessions = await client.call_tool(
+        "InspectPostgresSessions",
+        {
+            "state_filter": ["active", "idle in transaction"],
+            "include_wait_events": True,
+        },
+    )
+    graph = await client.call_tool(
+        "InspectPostgresLockGraph",
+        {"detect_deadlocks": True, "analyze_blocking_chains": True},
+    )
+
+    assert isinstance(health, dict)
+    assert isinstance(sessions, dict)
+    assert isinstance(graph, dict)
+
+
+@pytest.mark.asyncio
+async def test_health_evidence_separates_reachability_from_business_probe() -> None:
+    health = await LivePostgresEvidenceMcpClient(_observation()).call_tool(
+        "VerifyServiceHealth",
+        {"target": "postgres_cluster", "check_connection_pool": True},
+    )
+
+    assert isinstance(health, dict)
+    assert health["databaseReachable"] is True
+    assert health["connectivityStatus"] == "healthy"
+    assert health["businessProbeSucceeded"] is False
+    assert "probeSucceeded" not in health
+
+
+@pytest.mark.asyncio
+async def test_live_collector_rejects_unknown_or_mutating_arguments() -> None:
+    client = LivePostgresEvidenceMcpClient(_observation())
+
+    with pytest.raises(McpClientError, match="arguments are invalid"):
+        await client.call_tool("InspectPostgresSessions", {"raw_sql": "SELECT 1"})
+    with pytest.raises(McpClientError, match="arguments are invalid"):
+        await client.call_tool("VerifyServiceHealth", {"restart": True})
+
+
 def test_runner_boundary_appends_authorized_and_verified_recovery_facts() -> None:
-    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "allowed")
+    recovery = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
     verification = LiveVerification(True, True, True, True, True, True)
 
     enriched = append_live_outcome(_artifact(), recovery=recovery, verification=verification)

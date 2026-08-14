@@ -73,13 +73,13 @@ def passing_artifact() -> RunArtifact:
         duration_ms=100,
         safety_events=(),
         live_recovery=LiveRecoveryAudit(
-            "terminate_postgres_backend", "synthetic_blocker", True, True, True, "allowed"
+            "terminate_postgres_backend", "synthetic_blocker", True, True, True, "authorized"
         ),
     )
 
 
 OBSERVATION = LiveFaultObservation(101, 102, True, True)
-RECOVERY = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "allowed")
+RECOVERY = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
 VERIFICATION = LiveVerification(True, True, True, True, True, True)
 
 

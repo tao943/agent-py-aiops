@@ -8,6 +8,8 @@ import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.reasoning import (
+    RootCauseDecision,
+    normalize_root_cause_decision,
     parse_observation_decision,
     parse_plan,
     parse_root_cause_decision,
@@ -72,6 +74,29 @@ def test_root_cause_decision_requires_available_evidence_ids() -> None:
             '"evidenceIds":["fabricated"],"confidence":0.9}',
             available_evidence_ids={"ev-1"},
         )
+
+
+def test_root_cause_decision_normalizes_only_declared_public_labels() -> None:
+    decision = RootCauseDecision(
+        component="postgres",
+        mechanism="postgres_lock_blocking",
+        trigger="concurrent transaction holds a row lock",
+        causal_chain=("row lock held", "update waits"),
+        evidence_ids=("ev-1",),
+        confidence=0.9,
+    )
+
+    normalized = normalize_root_cause_decision(
+        decision,
+        component_aliases={"postgres": "postgresql"},
+        mechanism_aliases={"postgres_lock_blocking": "row_lock_blocking"},
+    )
+
+    assert normalized.component == "postgresql"
+    assert normalized.mechanism == "row_lock_blocking"
+    assert normalized.trigger == decision.trigger
+    assert normalized.causal_chain == decision.causal_chain
+    assert normalized.evidence_ids == decision.evidence_ids
 
 
 class EmptyRetrieval:
