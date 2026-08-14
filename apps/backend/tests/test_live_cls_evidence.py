@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from super_ai.evaluation.live.cls_evidence import (
+    LiveClsEvidencePreparer,
+    build_live_cls_records,
+)
+from super_ai.evaluation.live.domain import (
+    LiveClsScope,
+    LiveFaultObservation,
+    LiveInfrastructureError,
+)
+from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
+
+LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
+SCENARIO = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+IDENTITY = validate_run_id("run-1")
+OBSERVATION = LiveFaultObservation(101, 102, True, True)
+NOW = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
+
+
+class RecordingUploader:
+    def __init__(
+        self,
+        *,
+        error: BaseException | None = None,
+        uploaded_count: int | None = None,
+    ) -> None:
+        self.error = error
+        self.uploaded_count = uploaded_count
+        self.records: tuple[Mapping[str, str], ...] = ()
+
+    async def put(
+        self, records: Sequence[Mapping[str, str]], *, filename: str
+    ) -> int:
+        assert filename == "agentpy-live-postgres.log"
+        if self.error is not None:
+            raise self.error
+        self.records = tuple(records)
+        return self.uploaded_count if self.uploaded_count is not None else len(records)
+
+
+class SequenceSearcher:
+    def __init__(
+        self,
+        responses: Sequence[Sequence[Mapping[str, object]]],
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        self.responses = list(responses)
+        self.error = error
+        self.scopes: list[LiveClsScope] = []
+
+    async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]:
+        self.scopes.append(scope)
+        if self.error is not None:
+            raise self.error
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.elapsed = 0.0
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def now(self) -> datetime:
+        return NOW
+
+    async def sleep(self, seconds: float) -> None:
+        self.elapsed += seconds
+
+
+def _record(*, run_id: str = "run-1") -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "scenario_id": SCENARIO.id,
+        "incident_id": f"{SCENARIO.id}-{run_id}",
+        "event": "order_update_timeout",
+    }
+
+
+def _preparer(
+    *, uploader: RecordingUploader, searcher: SequenceSearcher, clock: FakeClock
+) -> LiveClsEvidencePreparer:
+    return LiveClsEvidencePreparer(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        uploader=uploader,
+        searcher=searcher,
+        timeout_seconds=2.0,
+        poll_interval_seconds=1.0,
+        now=clock.now,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+
+def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
+    records = build_live_cls_records(
+        run_id=IDENTITY.run_id,
+        scenario_id=SCENARIO.id,
+        incident_id=f"{SCENARIO.id}-{IDENTITY.run_id}",
+        now=NOW,
+    )
+
+    assert len(records) == 3
+    assert {record["run_id"] for record in records} == {"run-1"}
+    assert {record["scenario_id"] for record in records} == {SCENARIO.id}
+    assert {record["incident_id"] for record in records} == {
+        f"{SCENARIO.id}-run-1"
+    }
+    assert all(
+        {
+            "run_id",
+            "scenario_id",
+            "incident_id",
+            "service",
+            "environment",
+            "event",
+            "level",
+            "trace_id",
+            "component",
+            "message",
+            "timestamp",
+        }
+        <= set(record)
+        for record in records
+    )
+    serialized = json.dumps(records)
+    assert "row_lock_blocking" not in serialized
+    assert "blocker" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_preparer_polls_until_every_uploaded_record_is_searchable() -> None:
+    clock = FakeClock()
+    uploader = RecordingUploader()
+    matching = _record()
+    searcher = SequenceSearcher(([matching], [matching, matching, matching]))
+
+    context = await _preparer(
+        uploader=uploader, searcher=searcher, clock=clock
+    ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+    assert len(uploader.records) == 3
+    assert context.source == "cls"
+    assert context.cls_scope is not None
+    assert context.cls_scope.run_id == "run-1"
+    assert context.readiness is not None
+    assert context.readiness.expected_log_count == 3
+    assert context.readiness.indexed_log_count == 3
+    assert context.readiness.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_preparer_ignores_foreign_run_records_and_times_out() -> None:
+    clock = FakeClock()
+    searcher = SequenceSearcher(([_record(run_id="run-2")],))
+
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=RecordingUploader(), searcher=searcher, clock=clock
+        ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+    assert captured.value.category == "cls_index_timeout"
+    assert len(searcher.scopes) == 3
+
+
+@pytest.mark.asyncio
+async def test_preparer_classifies_upload_failure_without_leaking_message() -> None:
+    clock = FakeClock()
+    uploader = RecordingUploader(error=RuntimeError("secret-key-value"))
+
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=uploader,
+            searcher=SequenceSearcher(([_record()],)),
+            clock=clock,
+        ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+    assert captured.value.category == "cls_upload_failed"
+    assert "secret" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_preparer_rejects_partial_upload_confirmation() -> None:
+    clock = FakeClock()
+
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=RecordingUploader(uploaded_count=2),
+            searcher=SequenceSearcher(([_record()],)),
+            clock=clock,
+        ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+    assert captured.value.category == "cls_upload_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_preparer_classifies_search_boundary_failure() -> None:
+    clock = FakeClock()
+
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=RecordingUploader(),
+            searcher=SequenceSearcher((), error=RuntimeError("secret-mcp-error")),
+            clock=clock,
+        ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
+
+    assert captured.value.category == "cls_mcp_unavailable"
+    assert "secret" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_preparer_preserves_cancellation() -> None:
+    clock = FakeClock()
+    uploader = RecordingUploader(error=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _preparer(
+            uploader=uploader,
+            searcher=SequenceSearcher(([_record()],)),
+            clock=clock,
+        ).prepare(identity=IDENTITY, scenario=SCENARIO, observation=OBSERVATION)
