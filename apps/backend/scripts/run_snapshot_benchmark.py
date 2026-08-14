@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from time import monotonic
@@ -19,6 +20,7 @@ from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
+    NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
 )
 from super_ai.llm import build_default_llm_provider, load_llm_provider_config
@@ -44,6 +46,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Production diagnostic adapter.",
     )
     parser.add_argument("--config", type=Path, help="Optional project configuration path.")
+    parser.add_argument(
+        "--rag-mode",
+        choices=("off", "on"),
+        default="on",
+        help="Disable or enable the production knowledge retrieval path.",
+    )
+    parser.add_argument(
+        "--owner-user-id",
+        help="Authorized knowledge owner; may also use AGENTPY_EVAL_OWNER_USER_ID.",
+    )
+    parser.add_argument(
+        "--knowledge-base-id",
+        help="Authorized knowledge base; defaults to kb_<owner-user-id>.",
+    )
     return parser
 
 
@@ -51,21 +67,40 @@ async def run_command(arguments: argparse.Namespace) -> int:
     if arguments.runs < 1:
         raise ValueError("--runs must be at least 1.")
     config_path = str(arguments.config) if arguments.config is not None else None
+    owner_user_id = arguments.owner_user_id or os.getenv("AGENTPY_EVAL_OWNER_USER_ID")
+    knowledge_base_id = arguments.knowledge_base_id or (
+        f"kb_{owner_user_id}" if owner_user_id else None
+    )
+    if arguments.rag_mode == "on" and (
+        not owner_user_id or not knowledge_base_id
+    ):
+        raise ValueError(
+            "RAG-on requires an explicit authorized owner and knowledge base."
+        )
+    resolved_owner = owner_user_id or "benchmark:snapshot-rag-off"
     engine = create_memory_engine(config_path=config_path)
     session_factory = create_memory_session_factory(engine)
     try:
         repositories = create_sqlalchemy_memory_repositories(session_factory)
         provider_config = load_llm_provider_config(config_path=config_path)
         llm_provider = build_default_llm_provider(config_path=config_path)
-        retrieval_tool = KnowledgeRetrievalTool(
-            embedding_model=llm_provider.create_embedding_model(),
-            vector_store=build_default_milvus_vector_store(config_path=config_path),
-            rerank_model=llm_provider.create_rerank_model(),
+        retrieval_tool = (
+            NullKnowledgeRetrievalTool()
+            if arguments.rag_mode == "off"
+            else KnowledgeRetrievalTool(
+                embedding_model=llm_provider.create_embedding_model(),
+                vector_store=build_default_milvus_vector_store(config_path=config_path),
+                rerank_model=llm_provider.create_rerank_model(),
+            )
         )
         adapter = ApplicationDiagnosticAdapter(
             repositories=repositories,
             llm_provider=llm_provider,
             retrieval_tool=retrieval_tool,
+            owner_user_id=resolved_owner,
+            accessible_knowledge_base_ids=(
+                (knowledge_base_id,) if knowledge_base_id is not None else ()
+            ),
         )
         runner = SnapshotBenchmarkRunner(
             scenario_root=SCENARIO_ROOT,
@@ -77,6 +112,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 "model": provider_config.chat_model,
                 "base_url": provider_config.base_url,
                 "temperature": provider_config.temperature,
+                "rag_mode": arguments.rag_mode,
             },
         )
         agent_version = AgentVersion(
@@ -106,6 +142,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
     payload: dict[str, object] = {
         "scenario": arguments.scenario,
         "suiteVersion": arguments.suite_version,
+        "ragMode": arguments.rag_mode,
         "runs": reports,
     }
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
