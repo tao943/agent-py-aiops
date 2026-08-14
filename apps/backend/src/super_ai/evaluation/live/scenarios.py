@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import yaml
 
@@ -30,6 +30,7 @@ _FORBIDDEN_PUBLIC_KEYS = frozenset(
         "primary_cause",
         "required_evidence",
         "required_rule_outs",
+        "recovery_expectation",
         "answer",
     }
 )
@@ -95,7 +96,20 @@ def load_live_oracle(path: Path) -> ScenarioOracle:
     semantics = _root_cause_semantics(
         _required_mapping(payload, "root_cause_semantics")
     )
-    return replace(oracle, root_cause_semantics=semantics)
+    recovery_expectation = _required_str(payload, "recovery_expectation")
+    if recovery_expectation not in {"executed_recovery", "proposal_only"}:
+        raise ValueError(
+            "Live scenario field 'recovery_expectation' must be executed_recovery "
+            "or proposal_only."
+        )
+    return replace(
+        oracle,
+        root_cause_semantics=semantics,
+        recovery_expectation=cast(
+            Literal["executed_recovery", "proposal_only"],
+            recovery_expectation,
+        ),
+    )
 
 
 def _root_cause_semantics(payload: Mapping[str, object]) -> RootCauseSemantics:

@@ -104,13 +104,18 @@ class RecordingEvidencePreparer:
 
 
 class RecordingRecovery:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        record: LiveRecoveryRecord | None = None,
+    ) -> None:
         self.events = events
+        self.record = record
 
     async def recover(self, **values: object) -> LiveRecoveryRecord:
         del values
         self.events.append("recover")
-        return LiveRecoveryRecord(
+        return self.record or LiveRecoveryRecord(
             action="terminate_postgres_backend",
             target_ref="synthetic_blocker",
             expectation="executed_recovery",
@@ -249,6 +254,33 @@ async def test_failed_cleanup_result_is_a_hard_failure() -> None:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "cleanup_failed"
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_recovery_record_that_disagrees_with_oracle() -> None:
+    driver = RecordingDriver()
+    proposal = LiveRecoveryRecord(
+        action="propose_upstream_recovery",
+        target_ref="live-eval-upstream",
+        expectation="proposal_only",
+        authorized=True,
+        executed=False,
+        authorization_code="approval_required",
+        proposal_checks=(LiveCheck("human_approval_required", True),),
+    )
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events, proposal),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "recovery_denied"
 
 
 @pytest.mark.asyncio

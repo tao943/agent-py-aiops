@@ -1,0 +1,17 @@
+id: APY-LIVE-PG-DEADLOCK-001
+title: Concurrent order transactions are rolling back while PostgreSQL remains reachable.
+symptom_family: postgresql-deadlock
+difficulty: hard
+modes: [live]
+driver: postgres_deadlock
+alert:
+  name: PostgresOrderTransactionRollbackHigh
+  severity: critical
+  summary: Concurrent order transactions are rolling back while PostgreSQL remains reachable.
+hypotheses:
+  - id: postgres_deadlock
+    description: Concurrent transactions formed a cyclic lock dependency.
+  - id: postgres_long_lock_wait
+    description: One long transaction is blocking otherwise valid updates.
+  - id: postgres_slow_statement
+    description: Expensive statements are failing without a lock cycle.

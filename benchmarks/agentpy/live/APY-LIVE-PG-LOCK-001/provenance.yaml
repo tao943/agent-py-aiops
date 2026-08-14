@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - AgentPy isolated PostgreSQL row-lock experiment
+  - Public PostgreSQL lock monitoring documentation
+transformation: The fixture, alert, evidence contract, oracle, and recovery policy are project-synthesized.
+validation_references:
+  - https://www.postgresql.org/docs/current/explicit-locking.html
+  - https://www.postgresql.org/docs/current/monitoring-stats.html
+license_notes:
+  - PostgreSQL documentation license applies to the referenced pages.
+  - Live fixture and benchmark contracts are original AgentPy material.
+accessed: 2026-08-14
+created: 2026-08-13

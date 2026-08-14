@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - AgentPy isolated Redis maxclients experiment
+  - Public Redis configuration and CLIENT LIST documentation
+transformation: The fixture, evidence contract, oracle, and scoped cleanup policy are project-synthesized.
+validation_references:
+  - https://redis.io/docs/latest/operate/oss_and_stack/management/config/
+  - https://redis.io/docs/latest/commands/client-list/
+license_notes:
+  - Redis documentation license applies to the referenced pages.
+  - Live fixture and benchmark contracts are original AgentPy material.
+accessed: 2026-08-14
+created: 2026-08-14

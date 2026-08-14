@@ -16,13 +16,20 @@ from super_ai.evaluation.live.cls_evidence import (
     LiveClsLogUploader,
     McpClsSearcher,
 )
-from super_ai.evaluation.live.diagnostics import ApplicationLiveDiagnosticAdapter
+from super_ai.evaluation.live.diagnostics import (
+    ApplicationLiveDiagnosticAdapter,
+    LivePostgresEvidenceMcpClient,
+)
 from super_ai.evaluation.live.domain import EvidenceSource
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
+)
+from super_ai.evaluation.live.registry import (
+    LiveScenarioComponents,
+    LiveScenarioRegistry,
 )
 from super_ai.evaluation.live.runner import (
     LiveBenchmarkError,
@@ -138,8 +145,11 @@ async def _run_live_command(
         evidence_source=evidence_source,
         config_path=config_path,
     )
+    components = build_live_scenario_registry().resolve(
+        cast(str, arguments.scenario)
+    )
     engine = create_memory_engine(config_path=config_path)
-    driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+    driver = components.driver
     try:
         repositories = create_sqlalchemy_memory_repositories(
             create_memory_session_factory(engine)
@@ -163,7 +173,7 @@ async def _run_live_command(
             driver=driver,
             evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
-            recovery=PostgresLiveRecoveryService(driver),
+            recovery=components.recovery,
             evaluator=_LiveScoringEvaluator(evidence_source),
         )
         try:
@@ -312,6 +322,23 @@ def build_live_evidence_runtime(
         poll_interval_seconds=float(required_int(live, "pollIntervalSeconds")),
     )
     return preparer, cls_client
+
+
+def build_live_scenario_registry() -> LiveScenarioRegistry:
+    """Build explicitly supported Live runtimes without a default fallback."""
+    registry = LiveScenarioRegistry()
+
+    def postgres_lock_components() -> LiveScenarioComponents:
+        driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="postgres_lock_wait",
+            driver=driver,
+            recovery=PostgresLiveRecoveryService(driver),
+            component_evidence_factory=LivePostgresEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-PG-LOCK-001", postgres_lock_components)
+    return registry
 
 
 async def _run_infrastructure_command(

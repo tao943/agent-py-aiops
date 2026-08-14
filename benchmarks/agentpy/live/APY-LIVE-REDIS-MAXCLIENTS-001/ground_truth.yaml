@@ -1,0 +1,45 @@
+primary_cause:
+  component: live-eval-redis
+  mechanism: benchmark_clients_exhausted_maxclients
+  trigger: current_run_named_clients_fill_the_dedicated_connection_limit
+contributing_causes: []
+causal_chain:
+  - current-run Benchmark clients occupy every dedicated Redis client slot
+  - Redis continues serving established clients but rejects new connections
+  - requests requiring a new connection fail
+required_evidence:
+  - id: redis-client-capacity
+    alternatives:
+      - [redis-maxclients-capacity]
+  - id: redis-scoped-client-identity
+    alternatives:
+      - [redis-scoped-clients]
+cls_required_evidence:
+  - id: cls-redis-rejection
+    alternatives:
+      - [cls-live-redis-connection-rejected]
+required_rule_outs:
+  - redis_process_unavailable
+  - host_file_descriptor_exhaustion
+forbidden_claims:
+  - Redis is stopped
+  - unknown clients may be closed
+recovery_expectation: executed_recovery
+root_cause_semantics:
+  concepts:
+    named_clients: [named clients, benchmark clients, current-run clients]
+    capacity: [maxclients, client limit, connection limit]
+    saturation: [exhausted, full, reached]
+    rejection: [rejected connections, connection rejected, new connections fail]
+    existing_healthy: [established clients succeed, existing operations succeed, ping succeeds]
+    scoped_cleanup: [scoped cleanup, current-run clients closed, named clients closed]
+    causal_link: [causes, causing, leads to, results in]
+  trigger:
+    all_of: [named_clients, capacity, saturation]
+  causal_milestones:
+    - id: slots_filled
+      all_of: [named_clients, capacity, saturation]
+    - id: new_connections_rejected
+      all_of: [rejection, causal_link]
+    - id: service_partially_healthy
+      all_of: [existing_healthy, capacity]

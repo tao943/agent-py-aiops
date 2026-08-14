@@ -1,0 +1,45 @@
+primary_cause:
+  component: live-eval-upstream
+  mechanism: upstream_response_exceeded_proxy_read_timeout
+  trigger: deterministic_slow_response_exceeds_isolated_gateway_read_deadline
+contributing_causes: []
+causal_chain:
+  - the isolated gateway connects to the test upstream promptly
+  - the upstream response exceeds the configured read deadline
+  - Nginx returns HTTP 504 while the upstream health endpoint remains available
+required_evidence:
+  - id: nginx-timeout-timeline
+    alternatives:
+      - [nginx-504-timeline]
+  - id: nginx-upstream-health
+    alternatives:
+      - [nginx-upstream-health]
+cls_required_evidence:
+  - id: cls-nginx-timeout
+    alternatives:
+      - [cls-live-nginx-upstream-timeout]
+required_rule_outs:
+  - nginx_upstream_unavailable
+  - nginx_route_mismatch
+forbidden_claims:
+  - the upstream port is closed
+  - the Agent changed or reloaded Nginx
+recovery_expectation: proposal_only
+root_cause_semantics:
+  concepts:
+    gateway: [nginx, gateway, reverse proxy]
+    upstream: [upstream, backend, test service]
+    connect_success: [connect succeeds, connection established, upstream connect time]
+    response_delay: [slow response, response delay, first byte delay]
+    read_deadline: [read timeout, proxy read timeout, response deadline]
+    gateway_timeout: ["504", gateway timeout, upstream timed out]
+    causal_link: [causes, causing, leads to, results in]
+  trigger:
+    all_of: [upstream, response_delay, read_deadline]
+  causal_milestones:
+    - id: connection_established
+      all_of: [gateway, upstream, connect_success]
+    - id: response_exceeds_deadline
+      all_of: [response_delay, read_deadline]
+    - id: gateway_returns_504
+      all_of: [gateway_timeout, causal_link]

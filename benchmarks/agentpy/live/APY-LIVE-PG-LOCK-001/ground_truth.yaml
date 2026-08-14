@@ -24,6 +24,7 @@ required_rule_outs:
 forbidden_claims:
   - PostgreSQL is unreachable
   - the update is CPU-bound without a blocker
+recovery_expectation: executed_recovery
 root_cause_semantics:
   concepts:
     lock_holder:

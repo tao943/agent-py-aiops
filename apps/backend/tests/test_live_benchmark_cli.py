@@ -9,11 +9,16 @@ import pytest
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
     build_live_evidence_runtime,
+    build_live_scenario_registry,
     build_parser,
     classify_live_failure,
     read_safe_report,
     safe_output,
     write_safe_report,
+)
+from super_ai.evaluation.live.postgres import (
+    PostgresLiveRecoveryService,
+    PostgresLockScenarioDriver,
 )
 from super_ai.evaluation.live.runner import LocalLiveEvidencePreparer
 from super_ai.project_config import ProjectConfigurationError
@@ -21,6 +26,14 @@ from super_ai.project_config import ProjectConfigurationError
 
 def test_cli_resolves_repository_live_scenario_root() -> None:
     assert (LIVE_SCENARIO_ROOT / "APY-LIVE-PG-LOCK-001" / "scenario.yaml").is_file()
+
+
+def test_cli_builds_existing_postgres_runtime_through_registry() -> None:
+    components = build_live_scenario_registry().resolve("APY-LIVE-PG-LOCK-001")
+
+    assert components.driver_name == "postgres_lock_wait"
+    assert isinstance(components.driver, PostgresLockScenarioDriver)
+    assert isinstance(components.recovery, PostgresLiveRecoveryService)
 
 
 @pytest.mark.parametrize("command", ("run", "verify", "cleanup", "report"))

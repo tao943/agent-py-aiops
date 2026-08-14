@@ -1,0 +1,45 @@
+primary_cause:
+  component: postgresql
+  mechanism: opposite_order_transaction_deadlock
+  trigger: concurrent_transactions_update_two_rows_in_reverse_order
+contributing_causes: []
+causal_chain:
+  - two current-run transactions acquire the same resources in reverse order
+  - the transactions form a cyclic wait relationship
+  - PostgreSQL aborts one transaction with SQLSTATE 40P01
+required_evidence:
+  - id: postgres-deadlock-error
+    alternatives:
+      - [postgres-deadlock-40p01]
+  - id: postgres-deadlock-cycle
+    alternatives:
+      - [postgres-deadlock-cycle]
+cls_required_evidence:
+  - id: cls-deadlock-event
+    alternatives:
+      - [cls-live-database-deadlock]
+required_rule_outs:
+  - postgres_long_lock_wait
+  - postgres_slow_statement
+forbidden_claims:
+  - PostgreSQL is unreachable
+  - an unrelated backend must be terminated
+recovery_expectation: executed_recovery
+root_cause_semantics:
+  concepts:
+    concurrent_transactions: [concurrent transactions, two transactions, transaction pair]
+    reverse_order: [reverse order, opposite order, conflicting order]
+    wait_cycle: [wait cycle, cyclic dependency, deadlock cycle]
+    aborted_transaction: [aborted transaction, victim transaction, rolled back transaction]
+    deadlock_error: [40P01, deadlock detected, deadlock error]
+    retry: [retry, replay, rerun]
+    causal_link: [causes, causing, leads to, results in]
+  trigger:
+    all_of: [concurrent_transactions, reverse_order]
+  causal_milestones:
+    - id: reverse_order_updates
+      all_of: [concurrent_transactions, reverse_order]
+    - id: cycle_forms
+      all_of: [wait_cycle, causal_link]
+    - id: victim_aborted
+      all_of: [aborted_transaction, deadlock_error]

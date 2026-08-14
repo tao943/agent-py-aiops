@@ -169,7 +169,12 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 ),
                 "recovery_failed",
             )
-            if not _recovery_contract_satisfied(recovery):
+            oracle = load_live_oracle(scenario_dir)
+            if (
+                oracle.recovery_expectation is None
+                or recovery.expectation != oracle.recovery_expectation
+                or not _recovery_contract_satisfied(recovery)
+            ):
                 raise LiveBenchmarkError("recovery_denied")
             verification = await self._classified(
                 self._driver.verify(identity), "recovery_verification_failed"
@@ -182,7 +187,6 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                     recovery=recovery,
                     verification=verification,
                 )
-            oracle = load_live_oracle(scenario_dir)
             try:
                 return self._evaluator.evaluate(
                     diagnostic_artifact=diagnostic_artifact,
