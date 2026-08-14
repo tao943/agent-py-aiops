@@ -33,6 +33,13 @@ SENSITIVE_FIELD_PATTERN = re.compile(
 )
 
 
+def test_expansion_does_not_create_snapshot_answer_cards() -> None:
+    cards = sorted(KNOWLEDGE.glob("*.md"))
+
+    assert len(cards) == 30
+    assert not any(card.name.casefold().startswith("apy-") for card in cards)
+
+
 @pytest.mark.parametrize("filename", DIFFERENTIAL_CARDS)
 def test_differential_card_has_reviewed_structure_and_no_benchmark_answers(
     filename: str,

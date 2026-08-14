@@ -18,6 +18,27 @@ NEW_PAIRS = (("APY-002", "APY-011"), ("APY-007", "APY-012"))
 NEW_SCENARIOS = tuple(item for pair in NEW_PAIRS for item in pair)
 
 
+def test_repository_contains_exactly_ten_snapshot_scenarios() -> None:
+    scenario_dirs = sorted(path for path in SCENARIOS.iterdir() if path.is_dir())
+
+    assert [path.name for path in scenario_dirs] == [
+        "APY-002",
+        "APY-003",
+        "APY-006",
+        "APY-007",
+        "APY-011",
+        "APY-012",
+        "APY-013",
+        "APY-014",
+        "APY-015",
+        "APY-016",
+    ]
+    assert all((path / "scenario.yaml").is_file() for path in scenario_dirs)
+    assert all((path / "ground_truth.yaml").is_file() for path in scenario_dirs)
+    assert all((path / "provenance.yaml").is_file() for path in scenario_dirs)
+    assert all((path / "snapshot" / "tool_responses.yaml").is_file() for path in scenario_dirs)
+
+
 @pytest.fixture
 def valid_scenario_dir(tmp_path: Path) -> Path:
     scenario_dir = tmp_path / "APY-003"

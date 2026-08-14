@@ -114,19 +114,20 @@ def test_evaluation_reports_retrieval_channel_coverage() -> None:
     assert report.hybrid_channel_coverage_rate == pytest.approx(1 / 3)
 
 
-def test_loads_sixty_answer_free_reviewed_queries_with_approved_distribution() -> None:
+def test_loads_sixty_four_answer_free_reviewed_queries_with_approved_distribution() -> None:
     queries = load_retrieval_queries(QUERIES)
 
-    assert len(queries) == 60
-    assert sum(not query.expected_no_answer for query in queries) == 54
+    assert len(queries) == 64
+    assert sum(not query.expected_no_answer for query in queries) == 58
     assert sum(query.expected_no_answer for query in queries) == 6
+    assert len({query.id for query in queries}) == 64
     distribution = Counter(query.query_type for query in queries)
     assert distribution == {
         "explicit_component": 12,
-        "ambiguous_symptom": 14,
-        "log_signal": 12,
-        "operator_perturbation": 8,
-        "cross_component_distractor": 8,
+        "ambiguous_symptom": 15,
+        "log_signal": 13,
+        "operator_perturbation": 9,
+        "cross_component_distractor": 9,
         "no_answer_probe": 6,
     }
     assert all(query.relevant_documents or query.expected_no_answer for query in queries)
