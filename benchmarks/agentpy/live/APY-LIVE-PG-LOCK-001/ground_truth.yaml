@@ -30,6 +30,7 @@ root_cause_semantics:
       - lock event
       - lock blocking
       - lock contention
+      - lock graph
     waiter:
       - order status update
       - waiting session
@@ -37,16 +38,20 @@ root_cause_semantics:
       - waiter
     wait_state:
       - waiting
+      - waits
       - blocked
       - wait event
     timeout:
       - timeout
+      - timeouts
       - timing out
+      - times out
     causal_link:
       - causes
       - causing
       - leads to
       - results in
+      - times out
   trigger:
     all_of: [lock_holder, row_lock]
   causal_milestones:

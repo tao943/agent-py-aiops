@@ -121,6 +121,10 @@ def _root_cause_semantics(payload: Mapping[str, object]) -> RootCauseSemantics:
     raw_milestones = _required_sequence(payload, "causal_milestones")
     if not raw_milestones:
         raise ValueError("root_cause_semantics causal_milestones must not be empty.")
+    if len(raw_milestones) != 3:
+        raise ValueError(
+            "root_cause_semantics causal_milestones must contain exactly three items."
+        )
     milestones = tuple(
         _semantic_requirement(
             _as_mapping(item, "causal milestone"), "causal_milestones"

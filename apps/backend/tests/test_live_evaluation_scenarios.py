@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import cast
 
 import pytest
 import yaml
@@ -63,10 +64,14 @@ def _write_oracle(scenario_dir: Path, payload: object) -> None:
     ("semantics", "message"),
     (
         (
-            {
-                "concepts": {"row_lock": ["row lock"]},
-                "trigger": {"all_of": ["missing"]},
-                "causal_milestones": [{"id": "lock", "all_of": ["row_lock"]}],
+                {
+                    "concepts": {"row_lock": ["row lock"]},
+                    "trigger": {"all_of": ["missing"]},
+                    "causal_milestones": [
+                        {"id": "first", "all_of": ["row_lock"]},
+                        {"id": "second", "all_of": ["row_lock"]},
+                        {"id": "third", "all_of": ["row_lock"]},
+                    ],
             },
             "unknown concept",
         ),
@@ -82,10 +87,11 @@ def _write_oracle(scenario_dir: Path, payload: object) -> None:
             {
                 "concepts": {"row_lock": ["row lock"]},
                 "trigger": {"all_of": ["row_lock"]},
-                "causal_milestones": [
-                    {"id": "lock", "all_of": ["row_lock"]},
-                    {"id": "lock", "all_of": ["row_lock"]},
-                ],
+                    "causal_milestones": [
+                        {"id": "lock", "all_of": ["row_lock"]},
+                        {"id": "lock", "all_of": ["row_lock"]},
+                        {"id": "other", "all_of": ["row_lock"]},
+                    ],
             },
             "unique",
         ),
@@ -104,16 +110,29 @@ def _write_oracle(scenario_dir: Path, payload: object) -> None:
             },
             "causal_milestones",
         ),
+        (
+            {
+                "concepts": {"row_lock": ["row lock"]},
+                "trigger": {"all_of": ["row_lock"]},
+                "causal_milestones": [
+                    {"id": "first", "all_of": ["row_lock"]},
+                    {"id": "second", "all_of": ["row_lock"]},
+                ],
+            },
+            "exactly three",
+        ),
     ),
 )
 def test_rejects_invalid_live_root_cause_semantics(
     tmp_path: Path, semantics: dict[str, object], message: str
 ) -> None:
     scenario_dir = _copy_live_scenario(tmp_path)
-    payload = yaml.safe_load(
-        scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
     )
-    assert isinstance(payload, dict)
     payload["root_cause_semantics"] = semantics
     _write_oracle(scenario_dir, payload)
 
@@ -123,10 +142,12 @@ def test_rejects_invalid_live_root_cause_semantics(
 
 def test_requires_root_cause_semantics_for_live_oracle(tmp_path: Path) -> None:
     scenario_dir = _copy_live_scenario(tmp_path)
-    payload = yaml.safe_load(
-        scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
     )
-    assert isinstance(payload, dict)
     payload.pop("root_cause_semantics", None)
     _write_oracle(scenario_dir, payload)
 
