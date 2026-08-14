@@ -5,12 +5,19 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
 import yaml
 
-from super_ai.evaluation.domain import PublicHypothesis, ScenarioOracle
+from super_ai.evaluation.domain import (
+    PublicHypothesis,
+    RootCauseSemantics,
+    ScenarioOracle,
+    SemanticConcept,
+    SemanticRequirement,
+)
 from super_ai.evaluation.live.domain import LiveRunIdentity, LiveScenario
 from super_ai.evaluation.scenarios import load_scenario_oracle
 
@@ -82,8 +89,76 @@ def load_live_scenario(path: Path) -> LiveScenario:
 
 
 def load_live_oracle(path: Path) -> ScenarioOracle:
-    """Load the private Live oracle through the existing evaluator contract."""
-    return load_scenario_oracle(path)
+    """Load the private Live oracle and its required semantic scoring rubric."""
+    oracle = load_scenario_oracle(path)
+    payload = _load_mapping(path / "ground_truth.yaml")
+    semantics = _root_cause_semantics(
+        _required_mapping(payload, "root_cause_semantics")
+    )
+    return replace(oracle, root_cause_semantics=semantics)
+
+
+def _root_cause_semantics(payload: Mapping[str, object]) -> RootCauseSemantics:
+    raw_concepts = _required_mapping(payload, "concepts")
+    if not raw_concepts:
+        raise ValueError("root_cause_semantics concepts must not be empty.")
+    concepts: list[SemanticConcept] = []
+    for concept_id, raw_aliases in raw_concepts.items():
+        aliases = _non_empty_string_sequence(
+            raw_aliases, f"root_cause_semantics concept '{concept_id}' aliases"
+        )
+        normalized_aliases = [alias.casefold() for alias in aliases]
+        if len(normalized_aliases) != len(set(normalized_aliases)):
+            raise ValueError(
+                f"root_cause_semantics concept '{concept_id}' aliases must be unique."
+            )
+        concepts.append(SemanticConcept(concept_id, aliases))
+
+    known_concepts = {concept.id for concept in concepts}
+    trigger = _semantic_requirement(
+        _required_mapping(payload, "trigger"), "trigger", default_id="trigger"
+    )
+    raw_milestones = _required_sequence(payload, "causal_milestones")
+    if not raw_milestones:
+        raise ValueError("root_cause_semantics causal_milestones must not be empty.")
+    milestones = tuple(
+        _semantic_requirement(
+            _as_mapping(item, "causal milestone"), "causal_milestones"
+        )
+        for item in raw_milestones
+    )
+    milestone_ids = [item.id for item in milestones]
+    if len(milestone_ids) != len(set(milestone_ids)):
+        raise ValueError("root_cause_semantics causal milestone IDs must be unique.")
+    for requirement in (trigger, *milestones):
+        unknown = set(requirement.all_of) - known_concepts
+        if unknown:
+            raise ValueError(
+                f"root_cause_semantics requirement '{requirement.id}' references "
+                "an unknown concept."
+            )
+    return RootCauseSemantics(tuple(concepts), trigger, milestones)
+
+
+def _semantic_requirement(
+    payload: Mapping[str, object], label: str, *, default_id: str | None = None
+) -> SemanticRequirement:
+    identifier = default_id or _required_str(payload, "id")
+    all_of = _non_empty_string_sequence(
+        payload.get("all_of"), f"root_cause_semantics {label} all_of"
+    )
+    if len(all_of) != len(set(all_of)):
+        raise ValueError(f"root_cause_semantics {label} all_of must be unique.")
+    return SemanticRequirement(identifier, all_of)
+
+
+def _non_empty_string_sequence(value: object, label: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"{label} must be a sequence.")
+    items = cast(Sequence[object], value)
+    if not items or not all(isinstance(item, str) and item.strip() for item in items):
+        raise ValueError(f"{label} must contain non-empty strings.")
+    return tuple(cast(str, item).strip() for item in items)
 
 
 def _load_mapping(path: Path) -> Mapping[str, object]:
