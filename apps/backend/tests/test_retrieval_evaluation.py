@@ -135,7 +135,7 @@ def test_loads_sixty_four_answer_free_reviewed_queries_with_approved_distributio
     assert not any("APY-" in query.query for query in queries)
 
 
-def test_answerable_queries_cover_all_cards_with_exactly_twenty_four_second_queries() -> None:
+def test_answerable_queries_cover_all_cards_with_approved_repeat_distribution() -> None:
     queries = load_retrieval_queries(QUERIES)
     approved_cards = {path.name for path in KNOWLEDGE.glob("*.md")}
     coverage = Counter(
@@ -146,8 +146,28 @@ def test_answerable_queries_cover_all_cards_with_exactly_twenty_four_second_quer
     )
 
     assert set(coverage) == approved_cards
-    assert set(coverage.values()) <= {1, 2}
-    assert sum(count == 2 for count in coverage.values()) == 24
+    assert Counter(coverage.values()) == {1: 6, 2: 20, 3: 4}
+    assert {document for document, count in coverage.items() if count == 3} == {
+        "http-rate-limit-retry-storm.md",
+        "nginx-upstream-timeout.md",
+        "postgres-deadlock.md",
+        "redis-maxclients-pressure.md",
+    }
+
+
+def test_expansion_queries_target_generic_cards_without_snapshot_leakage() -> None:
+    by_id = {query.id: query for query in load_retrieval_queries(QUERIES)}
+    expected = {
+        "RET-L-013": "postgres-deadlock.md",
+        "RET-O-009": "redis-maxclients-pressure.md",
+        "RET-A-015": "nginx-upstream-timeout.md",
+        "RET-X-009": "http-rate-limit-retry-storm.md",
+    }
+
+    assert {
+        query_id: by_id[query_id].relevant_documents[0] for query_id in expected
+    } == expected
+    assert all("apy-" not in by_id[query_id].query.casefold() for query_id in expected)
 
 
 @pytest.mark.parametrize(
