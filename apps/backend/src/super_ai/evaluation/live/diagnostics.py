@@ -50,6 +50,20 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
                 "postgres_connectivity_failure": "connectivity_failure",
                 "connectivity_failure": "connectivity_failure",
             },
+            "labelsByHypothesis": {
+                "postgres_lock_blocking": {
+                    "component": "postgresql",
+                    "mechanism": "row_lock_blocking",
+                },
+                "postgres_slow_query_without_lock": {
+                    "component": "postgresql",
+                    "mechanism": "slow_query_without_lock",
+                },
+                "postgres_connectivity_failure": {
+                    "component": "postgresql",
+                    "mechanism": "connectivity_failure",
+                },
+            },
         },
     }
 
@@ -96,7 +110,7 @@ class LivePostgresEvidenceMcpClient:
             ),
             McpToolDefinition(
                 "VerifyServiceHealth",
-                "Inspect the current synthetic service health probe.",
+                "Inspect database reachability separately from the synthetic business probe.",
                 {
                     "type": "object",
                     "properties": {
@@ -130,8 +144,12 @@ class LivePostgresEvidenceMcpClient:
             }
         if name == "VerifyServiceHealth":
             return {
-                "probeSucceeded": not self._observation.confirmed,
-                "status": "degraded" if self._observation.confirmed else "healthy",
+                "databaseReachable": True,
+                "connectivityStatus": "healthy",
+                "businessProbeSucceeded": not self._observation.confirmed,
+                "businessProbeStatus": (
+                    "degraded" if self._observation.confirmed else "healthy"
+                ),
                 "benchmarkEvidenceId": "live-postgres-health-probe",
             }
         raise McpClientError(f"Docker Live evidence tool is not available: {name}")

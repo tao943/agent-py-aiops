@@ -156,6 +156,78 @@ def plan_matches_tool_contracts(
     return bool(plan)
 
 
+def build_grounded_fallback_decision(
+    *,
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    decision_vocabulary: JsonDict,
+) -> RootCauseDecision | None:
+    """Build a bounded decision from one strongly supported public hypothesis."""
+    candidates: list[tuple[str, tuple[str, ...], float]] = []
+    for state in hypothesis_states:
+        confidence = state.get("confidence")
+        if (
+            state.get("status") != "supported"
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or float(confidence) < 0.9
+        ):
+            continue
+        evidence_ids = _unique_strings(
+            [
+                item
+                for item in cast(list[object], state.get("evidenceIds") or [])
+                if isinstance(item, str)
+            ]
+        )
+        hypothesis_id = state.get("id")
+        if isinstance(hypothesis_id, str) and len(evidence_ids) >= 2:
+            candidates.append((hypothesis_id, tuple(evidence_ids), float(confidence)))
+    if len(candidates) != 1:
+        return None
+
+    hypothesis_id, evidence_ids, confidence = candidates[0]
+    public_hypothesis = next(
+        (item for item in public_hypotheses if item.get("id") == hypothesis_id),
+        None,
+    )
+    if public_hypothesis is None:
+        return None
+    description = public_hypothesis.get("description")
+    labels = _json_dict(
+        _json_dict(decision_vocabulary.get("labelsByHypothesis")).get(hypothesis_id)
+    )
+    component = labels.get("component")
+    mechanism = labels.get("mechanism")
+    if not all(
+        isinstance(item, str) and item.strip()
+        for item in (description, component, mechanism)
+    ):
+        return None
+
+    evidence_set = set(evidence_ids)
+    causal_chain = tuple(
+        summary.strip()
+        for observation in observation_decisions
+        if hypothesis_id in cast(list[object], observation.get("supports") or [])
+        and evidence_set.intersection(
+            item
+            for item in cast(list[object], observation.get("evidenceIds") or [])
+            if isinstance(item, str)
+        )
+        if isinstance((summary := observation.get("summary")), str) and summary.strip()
+    )
+    return RootCauseDecision(
+        component=cast(str, component).strip(),
+        mechanism=cast(str, mechanism).strip(),
+        trigger=cast(str, description).strip(),
+        causal_chain=causal_chain,
+        evidence_ids=evidence_ids,
+        confidence=confidence,
+    )
+
+
 class AiopsDiagnosticService:
     """Run a bounded Plan-Execute-Replan workflow for one owned task."""
 
@@ -776,23 +848,45 @@ class AiopsDiagnosticService:
             f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
         )
         decision: RootCauseDecision | None = None
+        decision_origin = "none"
+        decision_error_category: str | None = None
         try:
             response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-            decision = parse_root_cause_decision(
-                _model_text(response),
-                available_evidence_ids=set(evidence_ids),
-            )
-            decision = normalize_root_cause_decision(
-                decision,
-                component_aliases=_string_mapping(
-                    decision_vocabulary.get("componentAliases")
-                ),
-                mechanism_aliases=_string_mapping(
-                    decision_vocabulary.get("mechanismAliases")
-                ),
-            )
         except Exception:
-            decision = None
+            decision_error_category = "model_call_failed"
+        else:
+            try:
+                decision = parse_root_cause_decision(
+                    _model_text(response),
+                    available_evidence_ids=set(evidence_ids),
+                )
+                decision = normalize_root_cause_decision(
+                    decision,
+                    component_aliases=_string_mapping(
+                        decision_vocabulary.get("componentAliases")
+                    ),
+                    mechanism_aliases=_string_mapping(
+                        decision_vocabulary.get("mechanismAliases")
+                    ),
+                )
+                decision_origin = "llm"
+            except Exception:
+                decision_error_category = "invalid_model_output"
+        if decision is None:
+            decision = build_grounded_fallback_decision(
+                public_hypotheses=cast(
+                    list[JsonDict], state.get("public_hypotheses") or []
+                ),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=decision_vocabulary,
+            )
+            if decision is not None:
+                decision_origin = "grounded_fallback"
         decision_payload = (
             _root_cause_decision_payload(decision) if decision is not None else None
         )
@@ -800,6 +894,8 @@ class AiopsDiagnosticService:
             "rootCauseDecision": decision_payload,
             "evidenceIds": list(decision.evidence_ids) if decision is not None else [],
             "status": "grounded" if decision is not None else "insufficient_evidence",
+            "decisionOrigin": decision_origin,
+            "decisionErrorCategory": decision_error_category,
         }
         await self._create_step(
             owner_user_id=owner_user_id,
