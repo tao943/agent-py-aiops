@@ -138,6 +138,10 @@ def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
         "APY-007",
         "APY-011",
         "APY-012",
+        "APY-013",
+        "APY-014",
+        "APY-015",
+        "APY-016",
         "uv run python scripts/run_snapshot_benchmark.py",
         "run_retrieval_benchmark.py",
         "Recall@3",
@@ -145,9 +149,9 @@ def test_agentpy_domainbench_guide_documents_first_snapshot_slice() -> None:
         "ground_truth.yaml",
         "deterministic_score",
         "Snapshot 不启动故障容器",
-        "L1/L2 恢复",
-        "可选 Judge",
-        "剩余八个 Snapshot",
+        "当前十个 Snapshot 场景",
+        "`executed_recovery`",
+        "`proposal_only`",
     ]
     for expected in required:
         assert expected in guide
@@ -162,8 +166,8 @@ def test_retrieval_docs_describe_expanded_catalog_and_probe_boundaries() -> None
 
     for phrase in (
         "30 张",
-        "60 条",
-        "54 条有答案",
+        "64 条",
+        "58 条有答案",
         "6 条无答案探针",
         "Document Recall@3",
         "docker_validation: pending",

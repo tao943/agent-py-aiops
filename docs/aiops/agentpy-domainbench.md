@@ -6,9 +6,9 @@ OpenSRE 官方 Benchmark，也不使用 OpenSRE 的评分体系。
 
 ## 当前十个 Snapshot 场景
 
-当前目录包含 `APY-002`、`APY-003`、`APY-006`、`APY-007`、`APY-011` 和
-`APY-012`，以及本轮新增的 `APY-013` 至 `APY-016`。其中 PostgreSQL 和 Redis
-各有一对公开输入相同、真实原因不同的差分案例：
+当前目录包含 `APY-002`、`APY-003`、`APY-006`、`APY-007`、`APY-011`、
+`APY-012`、`APY-013`、`APY-014`、`APY-015` 和 `APY-016`。其中 PostgreSQL 和
+Redis 各有一对公开输入相同、真实原因不同的差分案例：
 
 | 场景对 | 公开现象 | 需要通过证据区分的方向 |
 |---|---|---|
@@ -152,13 +152,13 @@ FROM aiops_graph_checkpoints WHERE task_id = '<diagnostic-task-id>' ORDER BY cre
 
 ## Retrieval Eval
 
-`docs/knowledge-candidates` 当前包含 30 张原创差分排障卡；每张卡的
-`docker_validation: pending` 表示完成了来源与结构审核，但尚未在下一阶段 Docker 故障
-实验中验证。六个运维章节进入向量索引，来源和验证状态仅保留在 PostgreSQL 完整原文与
-metadata 中。当前 audit 预期共 180 个 Chunk。
+`docs/knowledge-candidates` 当前包含 30 张原创差分排障卡；其中 PostgreSQL deadlock、
+Redis maxclients 和 Nginx upstream timeout 三张卡已通过隔离 Docker Live 验证，其余
+27 张卡保持 `docker_validation: pending`。六个运维章节进入向量索引，来源和验证状态仅
+保留在 PostgreSQL 完整原文与 metadata 中。当前 audit 预期共 180 个 Chunk。
 
-`benchmarks/agentpy/retrieval/queries.yaml` 保存 60 条经过审核且不含场景答案的查询：
-54 条有答案查询覆盖全部 30 张卡，6 条无答案探针用于观察知识域外查询的 Top-1 分数与
+`benchmarks/agentpy/retrieval/queries.yaml` 保存 64 条经过审核且不含场景答案的查询：
+58 条有答案查询覆盖全部 30 张卡，6 条无答案探针用于观察知识域外查询的 Top-1 分数与
 Top-2 margin。探针不进入 Recall/MRR 分母，也不影响退出码，只有得到独立校准集后才设置
 拒答阈值。
 纯评分器计算：
@@ -172,11 +172,11 @@ Retrieval Eval 不评价诊断正确性。它只验证问题能否在严格 owne
 合适的通用知识，以及引用信息是否可审计；根因、证据链和恢复安全仍由 Snapshot 的
 `deterministic_score` 评价。
 
-真实检索必须显式提供 owner 和知识库，按顺序执行 60 条查询以控制额度：
+真实检索必须显式提供 owner 和知识库，按顺序执行 64 条查询以控制额度：
 
 ```powershell
 cd apps/backend
-uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-30-card-v1.json
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/retrieval-64-2026-08-14.json
 ```
 
 该命令调用真实 Embedding、Milvus 和 Rerank，消耗对应额度但不调用 Agent Chat，且不
@@ -186,12 +186,12 @@ uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --kn
 
 更新两张知识卡时，batch importer 仍使用 `overwrite=true`。同 owner、同知识库、同
 文件名即使正文改变，也会先删除被替换文档的 Milvus chunks，再 soft-delete 旧记录并
-创建新文档；不同文件名不会互相替换。若历史数据已经有多个同名 active 记录，应先
-人工审计，不允许 importer 静默批量删除。
+创建新文档；不同文件名不会互相替换。若历史数据已经有多个同名当前记录（现行状态为
+`ready`，并兼容旧 `active`），应先人工审计，不允许 importer 静默批量删除。
 
-Agent RAG before/after 对比要等真实两卡导入和 Retrieval Eval 通过后再做。届时固定
-场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；当前阶段不运行这组 Agent
-调用，也不为了让检索通过而修改标签或分数。
+Agent RAG before/after 对比在 30 卡导入与 64-query Retrieval Eval 通过后执行。对比固定
+场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；不能为了改善结果修改标签、
+Prompt 或评分规则。
 
 ### 历史两卡 smoke 基线（2026-08-13）
 
@@ -210,7 +210,7 @@ soft-delete，新文档为 indexed；Milvus 中新文档各有两个 chunk，旧
 
 ### 30 卡真实 Retrieval 基线（2026-08-13）
 
-30 张卡已导入隔离知识库：PostgreSQL 中 30 个批准文件各有且仅有一个 active indexed
+30 张卡已导入隔离知识库：PostgreSQL 中 30 个批准文件各有且仅有一个 ready/indexed
 记录；Milvus 共 180 个 scoped Chunk，每文档 6 个，owner/tenant/KB 越界为 0，来源与
 验证状态 Chunk 为 0。Embedding 使用 `qwen3.7-text-embedding`，Rerank 使用
 `qwen3-vl-rerank`。一次 60 查询真实运行得到：
@@ -238,15 +238,45 @@ BM25、RRF 与 rerank 证据，但不在 vector Top-20，因此 `vectorScore` �
 - Retrieval queries：64 条，其中 58 条有答案、6 条 no-answer probe。
 - `snapshot_knowledge_coverage.yaml` 仅供 evaluator 校验覆盖完整性，不进入 importer、
   Prompt、Agent Artifact、报告或 Milvus。
-- 60 问真实 Retrieval 结果仍是当前已测历史基线；64 问真实基线要等知识库恢复并在
-  独立真实验收阶段执行，不能用离线合同测试冒充真实指标。
+- 60 问真实 Retrieval 结果保留为历史基线；64 问结果见下一节，不能用离线合同测试
+  冒充真实指标。
+
+### 30 卡、64-query 真实 Retrieval 基线（2026-08-14）
+
+导入后审计确认 PostgreSQL 为 30 个 `ready/indexed` 文档、30 个不同文件名、0 个当前
+同名重复；Milvus 为 180 个 scoped Chunk、30 个文档、每文档 6 个 Chunk，且 owner、
+tenant、KB、文档关联错配均为 0。Embedding 使用 `qwen3.7-text-embedding`，Rerank 使用
+`qwen3-vl-rerank`。64 条查询顺序执行约 11 分 19 秒，得到：
+
+- `Document Recall@1 = 0.9310`；
+- `Document Recall@3 = 1.0000`；
+- `MRR = 0.9626`；
+- `forbiddenTopOneRate = 0.0172`；
+- `citationCompletenessRate = 1.0000`；
+- vector、BM25、hybrid channel coverage 分别为 `0.9844`、`0.7083`、`0.6927`。
+
+全部正式门槛通过。以下表格保留 4 个 Top-1 bad case；排名为目标 hit 与错误 Top-1 hit 的
+`vector/BM25/rerank` 排名，`-` 表示该召回通道未参与。查询原文与 Chunk 内容不进入公开
+报告，相关性标签也未因结果而调整。
+
+| Query | 目标文档 | 去重后的文档顺序 | 目标排名 / Top-1 排名 | Forbidden Top-1 | 分类 |
+| --- | --- | --- | --- | --- | --- |
+| `RET-A-001` | `nginx-upstream-timeout.md` | `microservice-timeout.md` → `nginx-upstream-timeout.md` | `v6/b-/r3` / `v4/b-/r1` | 否 | `vector_recall` |
+| `RET-L-010` | `postgres-disk-wal-pressure.md` | `postgres-replication-lag.md` → `postgres-disk-wal-pressure.md` | `v1/b-/r2` / `v4/b-/r1` | 否 | `rerank_order` |
+| `RET-L-011` | `redis-unavailable.md` | `redis-failover-reconnect.md` → `redis-unavailable.md` → `postgres-connectivity-auth.md` | `v2/b6/r2` / `v1/b-/r1` | 是 | `rerank_order` |
+| `RET-X-002` | `service-circuit-breaker-degradation.md` | `redis-failover-reconnect.md` → `nginx-upstream-502.md` → `service-circuit-breaker-degradation.md` | `v19/b7/r3` / `v9/b-/r1` | 否 | `rerank_order` |
+
+`RET-A-001` 的目标仅以较低向量位次进入候选且无 BM25 信号，因此分类为
+`vector_recall`；其余三个目标在候选阶段已有可审计信号，但 rerank 将其排在错误文档
+之后，分类为 `rerank_order`。原始安全报告位于 Git 忽略的
+`apps/backend/var/benchmarks/retrieval-64-2026-08-14.json`。
 
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
 PostgreSQL deadlock、Redis maxclients 与 Nginx timeout 四个隔离场景；driver、证据工具、
-清理和执行恢复/人工审批边界已经实现并通过顺序 Docker 验证。四场景的 RAG before/after、
-64 问真实 Retrieval 基线与真实 LLM+CLS 验收仍属于后续独立验证阶段。
+清理和执行恢复/人工审批边界已经实现并通过顺序 Docker 验证。64-query 真实 Retrieval
+基线已经完成；四个 Snapshot 的 RAG off/on 与真实 LLM+CLS 验收仍属于后续验证阶段。
 
 ### 四场景 Docker Live 验证（2026-08-14）
 
