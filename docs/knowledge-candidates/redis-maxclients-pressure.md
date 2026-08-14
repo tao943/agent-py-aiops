@@ -28,5 +28,8 @@
 
 ## 验证状态
 content_type: agentpy-original-summary
-docker_validation: pending
+docker_validation: verified
+docker_validation_date: 2026-08-14
+docker_validation_scope: isolated_live_eval_fixture
+已在隔离容器中验证客户端槽位耗尽会拒绝新连接，同时既有连接仍可用，并可通过作用域客户端计数与独立 PING 检查恢复结果。
 reviewed_on: 2026-08-13

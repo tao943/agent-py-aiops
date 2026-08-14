@@ -32,6 +32,12 @@ from super_ai.evaluation.live.postgres_deadlock import (
     PostgresDeadlockRecoveryService,
     PostgresDeadlockScenarioDriver,
 )
+from super_ai.evaluation.live.redis_maxclients import (
+    RedisLiveConfig,
+    RedisMaxclientsEvidenceMcpClient,
+    RedisMaxclientsRecoveryService,
+    RedisMaxclientsScenarioDriver,
+)
 from super_ai.evaluation.live.registry import (
     LiveScenarioComponents,
     LiveScenarioRegistry,
@@ -355,6 +361,17 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
         )
 
     registry.register("APY-LIVE-PG-DEADLOCK-001", postgres_deadlock_components)
+
+    def redis_maxclients_components() -> LiveScenarioComponents:
+        driver = RedisMaxclientsScenarioDriver(_redis_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="redis_maxclients",
+            driver=driver,
+            recovery=RedisMaxclientsRecoveryService(driver),
+            component_evidence_factory=RedisMaxclientsEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-REDIS-MAXCLIENTS-001", redis_maxclients_components)
     return registry
 
 
@@ -388,6 +405,12 @@ def _postgres_config_from_environment() -> PostgresConnectionConfig:
         user=os.getenv("LIVE_POSTGRES_USER", "agent_py"),
         password=os.getenv("LIVE_POSTGRES_PASSWORD", "agent_py_dev"),
         database="agent_py_live_eval",
+    )
+
+
+def _redis_config_from_environment() -> RedisLiveConfig:
+    return RedisLiveConfig(
+        url=os.getenv("LIVE_REDIS_URL", "redis://127.0.0.1:16379/0")
     )
 
 

@@ -24,6 +24,10 @@ from super_ai.evaluation.live.postgres_deadlock import (
     PostgresDeadlockRecoveryService,
     PostgresDeadlockScenarioDriver,
 )
+from super_ai.evaluation.live.redis_maxclients import (
+    RedisMaxclientsRecoveryService,
+    RedisMaxclientsScenarioDriver,
+)
 from super_ai.evaluation.live.runner import LocalLiveEvidencePreparer
 from super_ai.project_config import ProjectConfigurationError
 
@@ -46,6 +50,16 @@ def test_cli_builds_postgres_deadlock_runtime_through_registry() -> None:
     assert components.driver_name == "postgres_deadlock"
     assert isinstance(components.driver, PostgresDeadlockScenarioDriver)
     assert isinstance(components.recovery, PostgresDeadlockRecoveryService)
+
+
+def test_cli_builds_redis_maxclients_runtime_through_registry() -> None:
+    components = build_live_scenario_registry().resolve(
+        "APY-LIVE-REDIS-MAXCLIENTS-001"
+    )
+
+    assert components.driver_name == "redis_maxclients"
+    assert isinstance(components.driver, RedisMaxclientsScenarioDriver)
+    assert isinstance(components.recovery, RedisMaxclientsRecoveryService)
 
 
 @pytest.mark.parametrize("command", ("run", "verify", "cleanup", "report"))
