@@ -529,7 +529,7 @@ Run from `apps/backend` after Step 3 establishes `$EvalOwner` and `$EvalKnowledg
 
 ```powershell
 $env:PYTHONPATH = (Resolve-Path 'src').Path
-& .\.venv\Scripts\python.exe scripts/run_snapshot_benchmark.py --scenario APY-013 --suite-version evidence-v2 --runs 1 --adapter application --config config/project.json --rag-mode on --owner-user-id $EvalOwner --knowledge-base-id $EvalKnowledgeBase --output var/benchmarks/APY-013-decision-refinement-real-worktree.json
+& .\.venv\Scripts\python.exe scripts/run_snapshot_benchmark.py --scenario APY-013 --suite-version evidence-v2 --runs 1 --adapter application --config ../../config/project.json --rag-mode on --owner-user-id $EvalOwner --knowledge-base-id $EvalKnowledgeBase --output var/benchmarks/APY-013-decision-refinement-real-worktree.json
 ```
 
 Expected: existing score threshold passes, required evidence includes the error plus resource-order
