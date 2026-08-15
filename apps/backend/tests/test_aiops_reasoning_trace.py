@@ -20,6 +20,7 @@ from super_ai.aiops.reasoning import (
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
 from super_ai.llm import LlmProvider
+from super_ai.mcp.tool_arguments import constrain_tool_definitions, tool_step_fingerprint
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -108,6 +109,154 @@ async def test_plan_normalizer_preserves_valid_variants_and_filters_invalid() ->
         "sampled-timeline",
     ]
     assert [error.code for error in errors] == ["invalid_variant"]
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_ambiguous_legacy_arguments_before_mcp_audit(
+    migrated_database_url: str,
+) -> None:
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-016" / "snapshot" / "tool_responses.yaml"
+    )
+    definitions = constrain_tool_definitions(
+        await snapshot.discover_tools(),
+        snapshot.tool_argument_contracts,
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-invalid-legacy-arguments",
+            status="accepted",
+            query="Inspect retry amplification",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, object()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        result = await service._executor(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "query": task.query,
+                    "accessible_knowledge_base_ids": (),
+                    "plan": [
+                        {
+                            "id": "ambiguous-policy-view",
+                            "tool": "InspectClientRetryPolicy",
+                            "arguments": {"client": "checkout-client"},
+                            "purpose": "Inspect retry policy.",
+                            "testsHypotheses": [],
+                        }
+                    ],
+                    "plan_index": 0,
+                    "executor_attempt_count": 0,
+                    "max_total_steps": 6,
+                    "executed_step_fingerprints": [],
+                    "tool_definitions": tuple(definitions),
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        audits = await cast(Any, repositories.tool_call_audits).list_for_diagnostic_task(
+            owner_user_id=task.owner_user_id,
+            diagnostic_task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert snapshot.observations == ()
+    assert audits == []
+    assert result["executor_attempt_count"] == 1
+    assert steps[-1].payload == {
+        "planStepId": "ambiguous-policy-view",
+        "tool": "InspectClientRetryPolicy",
+        "errorCategory": "invalid_arguments",
+        "contractCode": "ambiguous_variant",
+    }
+
+
+@pytest.mark.asyncio
+async def test_executor_duplicate_legacy_step_does_not_consume_attempt_budget(
+    migrated_database_url: str,
+) -> None:
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-003" / "snapshot" / "tool_responses.yaml"
+    )
+    step: dict[str, object] = {
+        "id": "duplicate-container",
+        "tool": "InspectContainer",
+        "arguments": {"service": "checkout-service"},
+        "purpose": "Repeat a completed inspection.",
+        "testsHypotheses": [],
+    }
+    fingerprint = tool_step_fingerprint(
+        "InspectContainer",
+        cast(dict[str, object], step["arguments"]),
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-duplicate-legacy-step",
+            status="accepted",
+            query="Inspect checkout",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, object()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        result = await service._executor(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "plan": [step],
+                    "plan_index": 0,
+                    "executor_attempt_count": 2,
+                    "max_total_steps": 6,
+                    "executed_step_fingerprints": [fingerprint],
+                    "tool_definitions": tuple(await snapshot.discover_tools()),
+                },
+            )
+        )
+        audits = await cast(Any, repositories.tool_call_audits).list_for_diagnostic_task(
+            owner_user_id=task.owner_user_id,
+            diagnostic_task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert result["executor_attempt_count"] == 2
+    assert result["plan_index"] == 1
+    assert snapshot.observations == ()
+    assert audits == []
 
 
 def test_plan_rejects_unknown_tools_and_hypotheses() -> None:
@@ -584,6 +733,194 @@ class ContractReplanningLlmProvider:
         return self.model
 
 
+class PostgresContractAcceptanceChatModel:
+    def __init__(self) -> None:
+        self.sufficiency_count = 0
+
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+        if "bounded diagnostic plan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": f"errors-{window}",
+                            "tool": "InspectPostgresErrors",
+                            "arguments": {
+                                "service": "order-service",
+                                "windowMinutes": window,
+                            },
+                            "purpose": "Inspect structured PostgreSQL errors.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                        }
+                        for window in (30, 60)
+                    ]
+                    + [
+                        {
+                            "id": f"resource-order-{window}",
+                            "tool": "InspectTransactionResourceOrder",
+                            "arguments": {
+                                "service": "order-service",
+                                "windowMinutes": window,
+                            },
+                            "purpose": "Compare transaction resource order.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                        }
+                        for window in (30, 60)
+                    ]
+                }
+            )
+        if "gap-targeted diagnostic replan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": f"wait-graph-{window}",
+                            "tool": "InspectPostgresWaitGraph",
+                            "arguments": {
+                                "database": "order-service",
+                                "windowMinutes": window,
+                            },
+                            "purpose": "Inspect the PostgreSQL wait graph.",
+                            "testsHypotheses": [
+                                "postgres_deadlock",
+                                "postgres_lock_wait",
+                            ],
+                        }
+                        for window in (30, 60)
+                    ]
+                    + [
+                        {
+                            "id": f"metrics-{window}",
+                            "tool": "GetDatabaseMetrics",
+                            "arguments": {
+                                "database": "order-service",
+                                "windowMinutes": window,
+                            },
+                            "purpose": "Rule out database capacity and slow-query pressure.",
+                            "testsHypotheses": ["postgres_slow_query"],
+                        }
+                        for window in (30, 60)
+                    ]
+                }
+            )
+        if "observation decision" in prompt:
+            if "InspectPostgresWaitGraph" in prompt:
+                return json.dumps(
+                    {
+                        "purpose": "Inspect the PostgreSQL wait graph.",
+                        "supports": ["postgres_deadlock"],
+                        "refutes": ["postgres_lock_wait"],
+                        "summary": "A two-session cycle exists without an ordinary blocker.",
+                    }
+                )
+            if "GetDatabaseMetrics" in prompt:
+                return json.dumps(
+                    {
+                        "purpose": "Rule out database capacity and slow-query pressure.",
+                        "supports": [],
+                        "refutes": ["postgres_slow_query"],
+                        "summary": "Latency and capacity remain within the bounded baseline.",
+                    }
+                )
+            return json.dumps(
+                {
+                    "purpose": "Inspect deadlock evidence.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": [],
+                    "summary": "The observation contains direct cyclic-dependency evidence.",
+                }
+            )
+        if "evidence sufficiency decision" in prompt:
+            self.sufficiency_count += 1
+            sufficient = self.sufficiency_count >= 4
+            return json.dumps(
+                {
+                    "status": "sufficient" if sufficient else "insufficient",
+                    "evidenceIds": evidence_ids,
+                    "supportedHypotheses": ["postgres_deadlock"],
+                    "refutedHypotheses": (
+                        ["postgres_lock_wait", "postgres_slow_query"]
+                        if sufficient
+                        else []
+                    ),
+                    "unresolvedHypotheses": (
+                        []
+                        if sufficient
+                        else ["postgres_lock_wait", "postgres_slow_query"]
+                    ),
+                    "missingEvidence": [] if sufficient else ["Inspect remaining alternatives."],
+                    "recommendedTools": (
+                        []
+                        if sufficient
+                        else ["InspectPostgresWaitGraph", "GetDatabaseMetrics"]
+                    ),
+                    "summary": (
+                        "The deadlock and its alternatives are resolved."
+                        if sufficient
+                        else "More direct and rule-out evidence is required."
+                    ),
+                }
+            )
+        if "root-cause decision" in prompt:
+            return json.dumps(
+                {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                    "trigger": (
+                        "concurrent_updates_acquired_order_and_inventory_rows_in_reverse_order"
+                    ),
+                    "causalChain": [
+                        "transactions acquired order and inventory rows in opposite order",
+                        "each transaction waited for a row held by the other",
+                        "PostgreSQL detected the cycle and aborted one transaction",
+                    ],
+                    "evidenceIds": evidence_ids,
+                    "confidence": 0.96,
+                }
+            )
+        if "root-cause validation decision" in prompt:
+            return json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": evidence_ids,
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "The error, resource order, and wait cycle support the decision.",
+                }
+            )
+        if "structured recovery plan" in prompt:
+            return json.dumps(
+                {
+                    "mode": "external_policy_required",
+                    "action": "standardize_transaction_resource_order",
+                    "target": "order-service",
+                    "rationale": "The validated cycle requires an application change.",
+                    "tool": None,
+                    "arguments": {},
+                    "risk": "Changing transaction order requires application review.",
+                    "rollback": "Restore the previous transaction implementation.",
+                    "verificationSteps": [
+                        "Run concurrent order updates.",
+                        "Confirm SQLSTATE 40P01 no longer occurs.",
+                    ],
+                    "evidenceIds": evidence_ids,
+                    "decisionConfidence": 0.96,
+                    "humanApprovalRequired": True,
+                }
+            )
+        return "# PostgreSQL transaction diagnosis\n\nThe bounded evidence supports a deadlock."
+
+
+class PostgresContractAcceptanceLlmProvider:
+    def __init__(self) -> None:
+        self.model = PostgresContractAcceptanceChatModel()
+
+    def create_chat_model(self) -> PostgresContractAcceptanceChatModel:
+        return self.model
+
+
 class DuplicateStepChatModel(ReplanningChatModel):
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
@@ -890,6 +1227,80 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
     assert recovery.payload["mode"] == "external_policy_required"
     assert policy.payload["status"] == "deferred"
     assert policy.payload["executionPermitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_apy_013_wrong_scope_retries_become_four_exact_calls_and_a_decision(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-apy-013-contract-regression",
+            status="accepted",
+            query=scenario.title,
+            input_payload={
+                "alert": scenario.alert,
+                "hypotheses": [
+                    {"id": item.id, "description": item.description}
+                    for item in scenario.hypotheses
+                ],
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, PostgresContractAcceptanceLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        async for _ in service.stream(task=task, accessible_knowledge_base_ids=()):
+            pass
+        completed = await repositories.diagnostics.get_task(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert completed is not None
+    assert [observation.tool_name for observation in snapshot.observations] == [
+        "InspectPostgresErrors",
+        "InspectTransactionResourceOrder",
+        "InspectPostgresWaitGraph",
+        "GetDatabaseMetrics",
+    ]
+    assert all(
+        observation.arguments["windowMinutes"] == 15
+        for observation in snapshot.observations
+    )
+    assert snapshot.observations[2].arguments["database"] == "agent_py"
+    assert not any(
+        step.phase == "executor" and "errorCategory" in step.payload
+        for step in steps
+    )
+    assert not any(
+        step.payload.get("terminationReason") == "step_budget_exhausted"
+        for step in steps
+    )
+    decision = next(step for step in steps if step.phase == "decision")
+    assert decision.payload["rootCauseDecision"] is not None
+    assert completed.status == "succeeded"
 
 
 @pytest.mark.asyncio

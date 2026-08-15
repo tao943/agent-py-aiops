@@ -262,7 +262,7 @@ configuration error. Preserve `ReadGroundTruth` filtering and exact `_calls` loo
 - [ ] **Step 4: Run fixture-wide tests and static checks**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests/test_snapshot_evaluation_tools.py tests/test_answer_isolation.py -q -p no:cacheprovider --basetemp=var/pytest-snapshot-contract-green
+& .\.venv\Scripts\python.exe -m pytest tests/test_snapshot_evaluation_tools.py tests/test_evaluation_scenarios.py tests/test_evaluation_scoring.py tests/test_knowledge_candidate_safety.py -q -p no:cacheprovider --basetemp=var/pytest-snapshot-contract-green
 & .\.venv\Scripts\python.exe -m ruff check src/super_ai/evaluation/snapshot.py tests/test_snapshot_evaluation_tools.py
 & .\.venv\Scripts\python.exe -m pyright --pythonpath .\.venv\Scripts\python.exe src/super_ai/evaluation/snapshot.py tests/test_snapshot_evaluation_tools.py
 ```
@@ -480,7 +480,7 @@ Add a short Tool Calling section to `docs/aiops/agentpy-domainbench.md` explaini
 From `apps/backend`:
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests/test_tool_argument_contracts.py tests/test_snapshot_evaluation_tools.py tests/test_snapshot_benchmark_runner.py tests/test_aiops_reasoning_trace.py tests/test_live_diagnostic_adapter.py tests/test_answer_isolation.py tests/test_evaluation_safety.py -q -p no:cacheprovider --basetemp=var/pytest-tool-calling-final
+& .\.venv\Scripts\python.exe -m pytest tests/test_tool_argument_contracts.py tests/test_snapshot_evaluation_tools.py tests/test_snapshot_benchmark_runner.py tests/test_aiops_reasoning_trace.py tests/test_live_diagnostic_adapter.py tests/test_evaluation_scenarios.py tests/test_evaluation_scoring.py tests/test_knowledge_candidate_safety.py tests/test_evaluation_cli.py -q -p no:cacheprovider --basetemp=var/pytest-tool-calling-final
 & .\.venv\Scripts\python.exe -m ruff check src/super_ai/mcp/tool_arguments.py src/super_ai/evaluation/snapshot.py src/super_ai/evaluation/runner.py src/super_ai/aiops/diagnostics.py tests/test_tool_argument_contracts.py tests/test_snapshot_evaluation_tools.py tests/test_snapshot_benchmark_runner.py tests/test_aiops_reasoning_trace.py
 & .\.venv\Scripts\python.exe -m pyright --pythonpath .\.venv\Scripts\python.exe src/super_ai/mcp/tool_arguments.py src/super_ai/evaluation/snapshot.py src/super_ai/evaluation/runner.py src/super_ai/aiops/diagnostics.py tests/test_tool_argument_contracts.py tests/test_snapshot_evaluation_tools.py tests/test_snapshot_benchmark_runner.py tests/test_aiops_reasoning_trace.py
 ```

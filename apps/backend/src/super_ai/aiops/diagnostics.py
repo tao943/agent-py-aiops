@@ -714,13 +714,64 @@ class AiopsDiagnosticService:
         if plan_index >= len(plan):
             return {"current_evidence_id": "", "events": []}
 
-        step = plan[plan_index]
+        source_step = plan[plan_index]
+        normalized_steps, contract_errors = normalize_tool_plan_steps(
+            [source_step],
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tuple(state.get("tool_definitions") or ()),
+        )
+        if contract_errors or not normalized_steps:
+            error = (
+                contract_errors[0]
+                if contract_errors
+                else ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=str(source_step.get("tool") or "unknown"),
+                )
+            )
+            tool_name = str(source_step.get("tool") or "unknown")
+            fingerprint = _step_fingerprint(source_step)
+            payload: JsonDict = {
+                "planStepId": str(source_step.get("id") or ""),
+                "tool": tool_name,
+                "errorCategory": "invalid_arguments",
+                "contractCode": error.code,
+            }
+            await self._create_step(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                phase="executor",
+                status="failed",
+                payload=payload,
+            )
+            await self._save_checkpoint(state, "executor", payload)
+            return {
+                "plan_index": plan_index + 1,
+                "executor_attempt_count": attempt_count + 1,
+                "executed_step_fingerprints": [fingerprint],
+                "current_evidence_id": "",
+                "current_plan_step": {
+                    "id": str(source_step.get("id") or ""),
+                    "tool": tool_name,
+                },
+                "events": [
+                    _task_status_event(
+                        task_id,
+                        "running",
+                        "Executor: rejected invalid diagnostic tool arguments.",
+                        55,
+                    )
+                ],
+            }
+
+        step = normalized_steps[0]
         tool_name = str(step.get("tool") or "")
         arguments = _json_dict(step.get("arguments"))
         fingerprint = _step_fingerprint(step)
         if fingerprint in set(state.get("executed_step_fingerprints") or []):
             payload: JsonDict = {
-                "planStep": step,
+                "planStepId": str(step.get("id") or ""),
                 "tool": tool_name,
                 "errorCategory": "duplicate_step",
             }
@@ -734,7 +785,7 @@ class AiopsDiagnosticService:
             await self._save_checkpoint(state, "executor", payload)
             return {
                 "plan_index": plan_index + 1,
-                "executor_attempt_count": attempt_count + 1,
+                "executor_attempt_count": attempt_count,
                 "executed_step_fingerprints": [fingerprint],
                 "current_evidence_id": "",
                 "current_plan_step": step,
