@@ -2,7 +2,7 @@ import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -19,6 +19,7 @@ from super_ai.aiops.reasoning import (
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
 from super_ai.llm import LlmProvider
+from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
@@ -417,6 +418,27 @@ class ReplanningChatModel:
                     "summary": "The trigger and causal chain are supported by the observations.",
                 }
             )
+        if "structured recovery plan" in prompt:
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            return json.dumps(
+                {
+                    "mode": "external_policy_required",
+                    "action": "restore_checkout_process",
+                    "target": "checkout-service",
+                    "rationale": "The validated diagnosis shows the process is unavailable.",
+                    "tool": None,
+                    "arguments": {},
+                    "risk": "A restart can interrupt in-flight work.",
+                    "rollback": "Stop the replacement and restore the prior deployment state.",
+                    "verificationSteps": [
+                        "Verify the checkout listener is healthy.",
+                        "Repeat the gateway request and confirm the 502 alert resolves.",
+                    ],
+                    "evidenceIds": evidence_ids,
+                    "decisionConfidence": 0.95,
+                    "humanApprovalRequired": True,
+                }
+            )
         return (
             "# 告警分析报告\n\n## 📋 活跃告警清单\n\n"
             "- CheckoutUpstream5xxHigh\n\n## 📊 结论\n\n证据充分。"
@@ -523,6 +545,139 @@ class ValidationGapLlmProvider:
         return self.model
 
 
+class ProposalMcpClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def discover_tools(self) -> list[McpToolDefinition]:
+        return [
+            McpToolDefinition(
+                "InspectSignal",
+                "Read one safe diagnostic signal.",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+            McpToolDefinition(
+                "ProposeMitigation",
+                "Record a side-effect-free mitigation proposal.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "humanApprovalRequired": {"type": "boolean", "const": True},
+                    },
+                    "required": ["target", "humanApprovalRequired"],
+                    "additionalProperties": False,
+                },
+            ),
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        self.calls.append((name, dict(arguments)))
+        if name == "InspectSignal":
+            return {"benchmarkEvidenceId": "signal-confirmed", "confirmed": True}
+        if name == "ProposeMitigation":
+            return {"accepted": True, "humanApprovalRequired": True}
+        raise AssertionError(f"Unexpected tool: {name}")
+
+
+class ProposalChatModel:
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+        if "bounded diagnostic plan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-signal",
+                            "tool": "InspectSignal",
+                            "arguments": {},
+                            "purpose": "Confirm the public incident signal.",
+                            "testsHypotheses": ["signal_failure"],
+                        }
+                    ]
+                }
+            )
+        if "observation decision" in prompt:
+            return json.dumps(
+                {
+                    "purpose": "Confirm the public incident signal.",
+                    "supports": ["signal_failure"],
+                    "refutes": [],
+                    "summary": "The incident signal is confirmed.",
+                }
+            )
+        if "evidence sufficiency decision" in prompt:
+            return json.dumps(
+                {
+                    "status": "sufficient",
+                    "evidenceIds": evidence_ids,
+                    "supportedHypotheses": ["signal_failure"],
+                    "refutedHypotheses": [],
+                    "unresolvedHypotheses": [],
+                    "missingEvidence": [],
+                    "recommendedTools": [],
+                    "summary": "The signal and impact are directly observed.",
+                }
+            )
+        if "root-cause decision" in prompt:
+            return json.dumps(
+                {
+                    "component": "test-service",
+                    "mechanism": "signal_failure",
+                    "trigger": "confirmed_signal",
+                    "causalChain": ["signal failed", "service impact observed"],
+                    "evidenceIds": evidence_ids,
+                    "confidence": 0.92,
+                }
+            )
+        if "root-cause validation decision" in prompt:
+            return json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": evidence_ids,
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "The decision is grounded.",
+                }
+            )
+        if "structured recovery plan" in prompt:
+            return json.dumps(
+                {
+                    "mode": "proposal_only",
+                    "action": "propose_mitigation",
+                    "target": "test-service",
+                    "rationale": "The grounded signal supports a reviewed mitigation.",
+                    "tool": "ProposeMitigation",
+                    "arguments": {
+                        "target": "test-service",
+                        "humanApprovalRequired": True,
+                    },
+                    "risk": "The mitigation may change request behavior after approval.",
+                    "rollback": "Restore the prior service policy.",
+                    "verificationSteps": [
+                        "Repeat the signal check.",
+                        "Confirm service health after an approved action.",
+                    ],
+                    "evidenceIds": evidence_ids,
+                    "decisionConfidence": 0.92,
+                    "humanApprovalRequired": True,
+                }
+            )
+        return (
+            "# 告警分析报告\n\n## 📋 活跃告警清单\n\n"
+            "- SignalFailure\n\n## 📊 结论\n\n提案已记录。"
+        )
+
+
+class ProposalLlmProvider:
+    def __init__(self) -> None:
+        self.model = ProposalChatModel()
+
+    def create_chat_model(self) -> ProposalChatModel:
+        return self.model
+
+
 @pytest.mark.asyncio
 async def test_workflow_replans_from_an_explicit_evidence_gap(
     migrated_database_url: str,
@@ -588,6 +743,8 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
         "sufficiency_gate",
         "decision",
         "decision_validation",
+        "recovery_planning",
+        "policy_gate",
         "report",
     ]
     replanner = next(step for step in steps if step.phase == "replanner")
@@ -596,6 +753,11 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
     assert replanner.payload["replanCount"] == 1
     validation = next(step for step in steps if step.phase == "decision_validation")
     assert validation.payload["status"] == "valid"
+    recovery = next(step for step in steps if step.phase == "recovery_planning")
+    policy = next(step for step in steps if step.phase == "policy_gate")
+    assert recovery.payload["mode"] == "external_policy_required"
+    assert policy.payload["status"] == "deferred"
+    assert policy.payload["executionPermitted"] is False
 
 
 @pytest.mark.asyncio
@@ -703,6 +865,137 @@ async def test_invalid_decision_validation_replans_before_reporting(
 
 
 @pytest.mark.asyncio
+async def test_policy_gate_records_only_a_whitelisted_proposal_tool(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    client = ProposalMcpClient()
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-proposal-policy",
+            status="accepted",
+            query="Investigate a test signal",
+            input_payload={
+                "alert": {"alertname": "SignalFailure"},
+                "hypotheses": [
+                    {"id": "signal_failure", "description": "The signal failed."}
+                ],
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, ProposalLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, client),
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_policies={"ProposeMitigation": "proposal_only"},
+        )
+
+        async for _ in service.stream(task=task, accessible_knowledge_base_ids=()):
+            pass
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        audits = await cast(Any, repositories.tool_call_audits).list_for_diagnostic_task(
+            owner_user_id=task.owner_user_id,
+            diagnostic_task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    policy = next(step for step in steps if step.phase == "policy_gate")
+    assert [name for name, _ in client.calls] == ["InspectSignal", "ProposeMitigation"]
+    assert policy.payload["status"] == "allowed"
+    assert policy.payload["authorizationCode"] == "proposal_recorded"
+    assert policy.payload["executionPermitted"] is False
+    assert policy.payload["proposalRecorded"] is True
+    assert [audit.tool_name for audit in audits] == [
+        "knowledge_retrieval",
+        "InspectSignal",
+        "ProposeMitigation",
+    ]
+    forbidden_terms = ("write", "reload", "restart", "switch", "signal", "apply")
+    assert not any(
+        term in audit.tool_name.casefold()
+        for audit in audits
+        if audit.tool_name == "ProposeMitigation"
+        for term in forbidden_terms
+    )
+
+
+@pytest.mark.asyncio
+async def test_policy_gate_denies_a_proposal_without_a_request_policy(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    client = ProposalMcpClient()
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-proposal-denied",
+            status="accepted",
+            query="Investigate a test signal",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, ProposalLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, client),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+        await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "recovery_plan": {
+                        "mode": "proposal_only",
+                        "action": "propose_mitigation",
+                        "target": "test-service",
+                        "rationale": "Record a reviewed mitigation.",
+                        "tool": "ProposeMitigation",
+                        "arguments": {
+                            "target": "test-service",
+                            "humanApprovalRequired": True,
+                        },
+                        "risk": "The later action may change request behavior.",
+                        "rollback": "Restore the prior service policy.",
+                        "verificationSteps": ["Repeat the check.", "Confirm health."],
+                        "evidenceIds": ["evidence-public"],
+                        "decisionConfidence": 0.92,
+                        "humanApprovalRequired": True,
+                    },
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    denied = next(step for step in steps if step.phase == "policy_gate")
+    assert denied.payload["status"] == "denied"
+    assert denied.payload["authorizationCode"] == "proposal_tool_not_allowed"
+    assert denied.payload["executionPermitted"] is False
+    assert denied.payload["proposalRecorded"] is False
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
     migrated_database_url: str,
 ) -> None:
@@ -772,6 +1065,8 @@ async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
         "replanner",
         "decision",
         "decision_validation",
+        "recovery_planning",
+        "policy_gate",
         "report",
     ]
     decision = cast(dict[str, object], reports[0].payload["rootCauseDecision"])

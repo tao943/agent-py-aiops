@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timezone
 from operator import add
 from time import monotonic
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, TypedDict, cast
 from uuid import uuid4
 
@@ -23,12 +24,15 @@ from super_ai.aiops.reasoning import (
     EvidenceSufficiencyDecision,
     HypothesisState,
     ObservationDecision,
+    RecoveryPlan,
+    RecoveryPolicyDecision,
     RootCauseDecision,
     RootCauseValidationDecision,
     normalize_root_cause_decision,
     parse_evidence_sufficiency,
     parse_observation_decision,
     parse_plan,
+    parse_recovery_plan,
     parse_root_cause_decision,
     parse_root_cause_validation,
 )
@@ -73,6 +77,8 @@ class AiopsDiagnosticState(TypedDict, total=False):
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
     decision_validation: JsonDict
+    recovery_plan: JsonDict
+    recovery_policy: JsonDict
     current_evidence_id: str
     current_evidence_summary: str
     current_plan_step: JsonDict
@@ -272,6 +278,7 @@ class AiopsDiagnosticService:
         cls_region: str,
         cls_topic_id: str,
         trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None,
+        tool_policies: Mapping[str, Literal["proposal_only"]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
     ) -> None:
         self._repositories = repositories
@@ -287,6 +294,21 @@ class AiopsDiagnosticService:
             name: dict(arguments)
             for name, arguments in (trusted_tool_arguments or {}).items()
         }
+        copied_tool_policies = dict(tool_policies or {})
+        unsupported_policies = {
+            str(policy) for policy in copied_tool_policies.values() if policy != "proposal_only"
+        }
+        if unsupported_policies:
+            raise ValueError(
+                "Unsupported tool policy: " + ", ".join(sorted(unsupported_policies))
+            )
+        validated_tool_policies: dict[str, Literal["proposal_only"]] = {
+            name: cast(Literal["proposal_only"], policy)
+            for name, policy in copied_tool_policies.items()
+        }
+        self._tool_policies: Mapping[str, Literal["proposal_only"]] = MappingProxyType(
+            validated_tool_policies
+        )
         self._case_persistor = case_persistor
 
     async def stream(
@@ -396,6 +418,8 @@ class AiopsDiagnosticService:
         graph.add_node("replanner", self._replanner)
         graph.add_node("decision", self._decision)
         graph.add_node("decision_validator", self._decision_validator)
+        graph.add_node("recovery_planner", self._recovery_planner)
+        graph.add_node("policy_gate", self._policy_gate)
         graph.add_node("report", self._report)
         graph.add_edge(START, "planner")
         graph.add_edge("planner", "executor")
@@ -415,8 +439,10 @@ class AiopsDiagnosticService:
         graph.add_conditional_edges(
             "decision_validator",
             self._route_after_decision_validation,
-            {"replanner": "replanner", "report": "report"},
+            {"replanner": "replanner", "recovery_planner": "recovery_planner"},
         )
+        graph.add_edge("recovery_planner", "policy_gate")
+        graph.add_edge("policy_gate", "report")
         graph.add_edge("report", END)
         return graph.compile()
 
@@ -531,7 +557,9 @@ class AiopsDiagnosticService:
             alert=_json_dict(state.get("alert")),
             sop_hits=sop_hits,
             no_sop_matched=no_sop_matched,
-            tool_definitions=discovered_tools,
+            tool_definitions=[
+                item for item in discovered_tools if item.name not in self._tool_policies
+            ],
             known_hypotheses=[
                 str(item.get("id"))
                 for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
@@ -893,7 +921,11 @@ class AiopsDiagnosticService:
         known_hypotheses = {
             str(item.get("id")) for item in public_hypotheses if item.get("id")
         }
-        tool_definitions = tuple(state.get("tool_definitions") or ())
+        tool_definitions = tuple(
+            definition
+            for definition in (state.get("tool_definitions") or ())
+            if definition.name not in self._tool_policies
+        )
         available_tools = {definition.name for definition in tool_definitions}
         prompt = (
             "Return one JSON evidence sufficiency decision with status, evidenceIds, "
@@ -970,7 +1002,11 @@ class AiopsDiagnosticService:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         current_plan = cast(list[JsonDict], state.get("plan") or [])
-        tool_definitions = tuple(state.get("tool_definitions") or ())
+        tool_definitions = tuple(
+            definition
+            for definition in (state.get("tool_definitions") or ())
+            if definition.name not in self._tool_policies
+        )
         available_tools = {definition.name for definition in tool_definitions}
         known_hypotheses = {
             str(item.get("id"))
@@ -1227,7 +1263,7 @@ class AiopsDiagnosticService:
             and bool(validation.missing_evidence)
             and _can_replan(state)
         )
-        route = "replanner" if can_replan else "report"
+        route = "replanner" if can_replan else "recovery_planner"
         termination_reason = str(state.get("termination_reason") or "")
         root_cause_payload = state.get("root_cause_decision")
         if validation.status == "invalid" and not can_replan:
@@ -1248,7 +1284,7 @@ class AiopsDiagnosticService:
         return {
             "decision_validation": payload,
             "root_cause_decision": root_cause_payload,
-            "next_route": cast(Literal["replanner", "report"], route),
+            "next_route": cast(Literal["replanner", "recovery_planner"], route),
             "termination_reason": termination_reason,
             "events": [
                 _task_status_event(
@@ -1259,6 +1295,214 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+
+    async def _recovery_planner(
+        self,
+        state: AiopsDiagnosticState,
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+        proposal_definitions = tuple(
+            definition
+            for definition in (state.get("tool_definitions") or ())
+            if self._tool_policies.get(definition.name) == "proposal_only"
+        )
+        proposal_tools = {definition.name for definition in proposal_definitions}
+        if candidate is None:
+            plan = _fallback_recovery_plan(None, proposal_tools=proposal_tools)
+        else:
+            prompt = (
+                "Return one JSON structured recovery plan with mode, action, target, rationale, "
+                "tool, arguments, risk, rollback, verificationSteps, evidenceIds, "
+                "decisionConfidence, and humanApprovalRequired. A plan is a recommendation, not "
+                "authorization. Use only the validated decision, persisted evidence IDs, and "
+                "discovered proposal-only contracts. Do not request infrastructure execution. "
+                "Validated decision: "
+                f"{json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
+                f"Persisted evidence IDs: {json.dumps(evidence_ids)}. "
+                "Proposal-only contracts: "
+                f"{json.dumps(_tool_contracts_payload(proposal_definitions), ensure_ascii=False)}."
+            )
+            try:
+                response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+                plan = parse_recovery_plan(
+                    _model_text(response),
+                    available_evidence_ids=set(evidence_ids),
+                    proposal_tools=proposal_tools,
+                )
+            except Exception:
+                plan = _fallback_recovery_plan(candidate, proposal_tools=proposal_tools)
+        payload = _recovery_plan_payload(plan)
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="recovery_planning",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "recovery_planning", payload)
+        return {
+            "recovery_plan": payload,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Recovery Planner: classified plan as {plan.mode}.",
+                    89,
+                )
+            ],
+        }
+
+    async def _policy_gate(
+        self,
+        state: AiopsDiagnosticState,
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        plan = _recovery_plan_from_payload(state.get("recovery_plan"))
+        if plan is None or plan.mode == "no_action":
+            decision = RecoveryPolicyDecision(
+                status="deferred",
+                authorization_code="no_grounded_action",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=False,
+                summary="No grounded recovery action was authorized.",
+            )
+        elif plan.mode == "external_policy_required":
+            decision = RecoveryPolicyDecision(
+                status="deferred",
+                authorization_code="external_policy_required",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=plan.human_approval_required,
+                summary="The existing external recovery policy must revalidate this action.",
+            )
+        elif plan.mode == "manual_review":
+            decision = RecoveryPolicyDecision(
+                status="deferred",
+                authorization_code="manual_review_required",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=True,
+                summary="A human must review the recovery recommendation.",
+            )
+        else:
+            decision = await self._record_proposal(
+                state=state,
+                plan=plan,
+            )
+        payload = _recovery_policy_payload(decision)
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="policy_gate",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "policy_gate", payload)
+        return {
+            "recovery_policy": payload,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Policy Gate: {decision.authorization_code}.",
+                    90,
+                )
+            ],
+        }
+
+    async def _record_proposal(
+        self,
+        *,
+        state: AiopsDiagnosticState,
+        plan: RecoveryPlan,
+    ) -> RecoveryPolicyDecision:
+        tool_name = plan.tool or ""
+        if self._tool_policies.get(tool_name) != "proposal_only":
+            return RecoveryPolicyDecision(
+                status="denied",
+                authorization_code="proposal_tool_not_allowed",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=plan.human_approval_required,
+                summary="The proposal tool is not allowed by this request's policy.",
+            )
+        if not plan.human_approval_required:
+            return RecoveryPolicyDecision(
+                status="denied",
+                authorization_code="human_approval_required",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=False,
+                summary="A proposal must require human approval before any later action.",
+            )
+
+        definitions = tuple(state.get("tool_definitions") or ())
+        proposal_step: JsonDict = {
+            "tool": tool_name,
+            "arguments": dict(plan.arguments),
+        }
+        if not plan_matches_tool_contracts([proposal_step], definitions):
+            return RecoveryPolicyDecision(
+                status="denied",
+                authorization_code="proposal_schema_invalid",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=plan.human_approval_required,
+                summary="The proposal arguments do not match the discovered tool contract.",
+            )
+
+        owner_user_id = str(state["owner_user_id"])
+        task_id = str(state["task_id"])
+        audit_id = f"tool_{uuid4().hex}"
+        try:
+            await self._create_audit(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                audit_id=audit_id,
+                tool_name=tool_name,
+                arguments=dict(plan.arguments),
+            )
+            mcp_client = await self._mcp_client_for(owner_user_id)
+            output = await mcp_client.call_tool(tool_name, dict(plan.arguments))
+            await self._finalize_audit(
+                owner_user_id=owner_user_id,
+                audit_id=audit_id,
+                status="completed",
+                result_summary=_tool_result_summary(tool_name, output),
+            )
+        except Exception as exc:
+            safe_error = _safe_error(exc)
+            try:
+                await self._finalize_audit(
+                    owner_user_id=owner_user_id,
+                    audit_id=audit_id,
+                    status="failed",
+                    error_message=safe_error,
+                )
+            except Exception:
+                pass
+            return RecoveryPolicyDecision(
+                status="denied",
+                authorization_code="proposal_record_failed",
+                execution_permitted=False,
+                proposal_recorded=False,
+                human_approval_required=plan.human_approval_required,
+                summary="The proposal could not be recorded safely.",
+            )
+
+        return RecoveryPolicyDecision(
+            status="allowed",
+            authorization_code="proposal_recorded",
+            execution_permitted=False,
+            proposal_recorded=True,
+            human_approval_required=True,
+            summary="The side-effect-free proposal was recorded for human review.",
+        )
 
     async def _report(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -1284,6 +1528,8 @@ class AiopsDiagnosticService:
             "status": status,
             "rootCauseDecision": state.get("root_cause_decision"),
             "decisionValidation": state.get("decision_validation"),
+            "recoveryPlan": state.get("recovery_plan"),
+            "recoveryPolicy": state.get("recovery_policy"),
             "evidenceSufficiency": state.get("evidence_sufficiency"),
             "terminationReason": str(state.get("termination_reason") or ""),
         }
@@ -1390,7 +1636,7 @@ class AiopsDiagnosticService:
         return "executor" if plan_index < len(plan) and attempts < maximum else "decision"
 
     def _route_after_decision_validation(self, state: AiopsDiagnosticState) -> str:
-        return str(state.get("next_route") or "report")
+        return str(state.get("next_route") or "recovery_planner")
 
     async def _create_plan(
         self,
@@ -1803,6 +2049,130 @@ def _root_cause_validation_payload(
         "evidenceIds": list(decision.evidence_ids),
         "unsupportedFields": list(decision.unsupported_fields),
         "missingEvidence": list(decision.missing_evidence),
+        "summary": decision.summary,
+    }
+
+
+def _fallback_recovery_plan(
+    decision: RootCauseDecision | None,
+    *,
+    proposal_tools: set[str],
+) -> RecoveryPlan:
+    if decision is None:
+        return RecoveryPlan(
+            mode="no_action",
+            action="none",
+            target="none",
+            rationale="No validated root-cause decision is available.",
+            tool=None,
+            arguments={},
+            risk="No action is proposed.",
+            rollback="No rollback is required.",
+            verification_steps=(),
+            evidence_ids=(),
+            decision_confidence=0.0,
+            human_approval_required=False,
+        )
+    return RecoveryPlan(
+        mode="manual_review" if proposal_tools else "external_policy_required",
+        action="review_validated_diagnosis",
+        target=decision.component,
+        rationale="Recovery planning model output was unavailable or invalid.",
+        tool=None,
+        arguments={},
+        risk="The appropriate recovery action has not been independently validated.",
+        rollback="No action may execute until an external policy approves a rollback plan.",
+        verification_steps=(
+            "Revalidate the target against current evidence.",
+            "Verify service health after an approved external action.",
+        ),
+        evidence_ids=decision.evidence_ids,
+        decision_confidence=decision.confidence,
+        human_approval_required=True,
+    )
+
+
+def _recovery_plan_payload(plan: RecoveryPlan) -> JsonDict:
+    return {
+        "mode": plan.mode,
+        "action": plan.action,
+        "target": plan.target,
+        "rationale": plan.rationale,
+        "tool": plan.tool,
+        "arguments": plan.arguments,
+        "risk": plan.risk,
+        "rollback": plan.rollback,
+        "verificationSteps": list(plan.verification_steps),
+        "evidenceIds": list(plan.evidence_ids),
+        "decisionConfidence": plan.decision_confidence,
+        "humanApprovalRequired": plan.human_approval_required,
+    }
+
+
+def _recovery_plan_from_payload(value: object) -> RecoveryPlan | None:
+    payload = _json_dict(value)
+    mode = payload.get("mode")
+    if mode not in {
+        "no_action",
+        "proposal_only",
+        "external_policy_required",
+        "manual_review",
+    }:
+        return None
+    tool = payload.get("tool")
+    arguments = payload.get("arguments")
+    verification = payload.get("verificationSteps")
+    evidence_ids = payload.get("evidenceIds")
+    confidence = payload.get("decisionConfidence")
+    approval = payload.get("humanApprovalRequired")
+    text_fields = [
+        payload.get("action"),
+        payload.get("target"),
+        payload.get("rationale"),
+        payload.get("risk"),
+        payload.get("rollback"),
+    ]
+    if (
+        not all(isinstance(item, str) and item for item in text_fields)
+        or (tool is not None and not isinstance(tool, str))
+        or not isinstance(arguments, Mapping)
+        or not isinstance(verification, list)
+        or not all(isinstance(item, str) for item in verification)
+        or not isinstance(evidence_ids, list)
+        or not all(isinstance(item, str) for item in evidence_ids)
+        or not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not isinstance(approval, bool)
+    ):
+        return None
+    return RecoveryPlan(
+        mode=cast(
+            Literal[
+                "no_action", "proposal_only", "external_policy_required", "manual_review"
+            ],
+            mode,
+        ),
+        action=cast(str, text_fields[0]),
+        target=cast(str, text_fields[1]),
+        rationale=cast(str, text_fields[2]),
+        tool=cast(str | None, tool),
+        arguments=dict(cast(Mapping[str, object], arguments)),
+        risk=cast(str, text_fields[3]),
+        rollback=cast(str, text_fields[4]),
+        verification_steps=tuple(cast(list[str], verification)),
+        evidence_ids=tuple(cast(list[str], evidence_ids)),
+        decision_confidence=float(confidence),
+        human_approval_required=approval,
+    )
+
+
+def _recovery_policy_payload(decision: RecoveryPolicyDecision) -> JsonDict:
+    return {
+        "status": decision.status,
+        "authorizationCode": decision.authorization_code,
+        "executionPermitted": decision.execution_permitted,
+        "proposalRecorded": decision.proposal_recorded,
+        "humanApprovalRequired": decision.human_approval_required,
         "summary": decision.summary,
     }
 

@@ -324,6 +324,8 @@ async def test_diagnostic_runs_sop_first_persists_evidence_and_audits(
         "replanner",
         "decision",
         "decision_validation",
+        "recovery_planning",
+        "policy_gate",
         "report",
     ]
     assert [audit.tool_name for audit in audits] == ["knowledge_retrieval", "SearchLog"]
@@ -335,6 +337,8 @@ async def test_diagnostic_runs_sop_first_persists_evidence_and_audits(
         "replanner",
         "decision",
         "decision_validation",
+        "recovery_planning",
+        "policy_gate",
         "report",
     ]
     assert {item.kind for item in evidence} == {"alert", "knowledge_reference", "log"}
