@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from datetime import datetime, timezone
 from operator import add
 from time import monotonic
@@ -1075,9 +1075,25 @@ class AiopsDiagnosticService:
         payload = _evidence_sufficiency_payload(decision)
         attempt_count = int(state.get("executor_attempt_count") or 0)
         max_total_steps = int(state.get("max_total_steps") or 6)
+        refinement_index: int | None = None
+        refinement_reason = ""
         if decision.status == "sufficient":
-            next_route: Literal["executor", "replanner", "decision"] = "decision"
-            termination_reason = "evidence_sufficient"
+            if attempt_count < max_total_steps:
+                refinement_index = _supported_refinement_index(
+                    plan=plan,
+                    plan_index=plan_index,
+                    supported_hypotheses=decision.supported_hypotheses,
+                    executed_fingerprints=cast(
+                        list[str], state.get("executed_step_fingerprints") or []
+                    ),
+                )
+            if refinement_index is not None:
+                next_route = "executor"
+                termination_reason = ""
+                refinement_reason = "supported_hypothesis_plan_step_remaining"
+            else:
+                next_route = "decision"
+                termination_reason = "evidence_sufficient"
         elif plan_index < len(plan) and attempt_count < max_total_steps:
             next_route = "executor"
             termination_reason = ""
@@ -1092,14 +1108,22 @@ class AiopsDiagnosticService:
             task_id=task_id,
             phase="sufficiency_gate",
             status="completed",
-            payload={**payload, "nextRoute": next_route},
+            payload={
+                **payload,
+                "nextRoute": next_route,
+                "refinementReason": refinement_reason,
+            },
         )
         await self._save_checkpoint(
             state,
             "sufficiency_gate",
-            {**payload, "nextRoute": next_route},
+            {
+                **payload,
+                "nextRoute": next_route,
+                "refinementReason": refinement_reason,
+            },
         )
-        return {
+        update: dict[str, object] = {
             "evidence_sufficiency": payload,
             "next_route": next_route,
             "termination_reason": termination_reason,
@@ -1112,6 +1136,9 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        if refinement_index is not None:
+            update["plan_index"] = refinement_index
+        return update
 
     async def _replanner(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -1922,6 +1949,31 @@ def _step_fingerprint(step: Mapping[str, object]) -> str:
         str(step.get("tool") or ""),
         _json_dict(step.get("arguments")),
     )
+
+
+def _supported_refinement_index(
+    *,
+    plan: Sequence[JsonDict],
+    plan_index: int,
+    supported_hypotheses: Collection[str],
+    executed_fingerprints: Collection[str],
+) -> int | None:
+    supported = set(supported_hypotheses)
+    executed = set(executed_fingerprints)
+    if not supported:
+        return None
+    for index in range(max(plan_index, 0), len(plan)):
+        step = plan[index]
+        raw_tests = step.get("testsHypotheses")
+        tested = (
+            {item for item in raw_tests if isinstance(item, str)}
+            if isinstance(raw_tests, list)
+            else set()
+        )
+        if supported.isdisjoint(tested) or _step_fingerprint(step) in executed:
+            continue
+        return index
+    return None
 
 
 def _can_replan(state: AiopsDiagnosticState) -> bool:

@@ -7,7 +7,10 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
-from super_ai.aiops.diagnostics import normalize_tool_plan_steps
+from super_ai.aiops.diagnostics import (
+    _supported_refinement_index,
+    normalize_tool_plan_steps,
+)
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
     normalize_root_cause_decision,
@@ -27,6 +30,103 @@ from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+def _refinement_step(
+    step_id: str,
+    tool: str,
+    hypotheses: list[str],
+) -> dict[str, object]:
+    return {
+        "id": step_id,
+        "tool": tool,
+        "arguments": {"scope": step_id},
+        "purpose": f"Inspect {step_id}.",
+        "testsHypotheses": hypotheses,
+    }
+
+
+def test_supported_refinement_selects_first_remaining_matching_step() -> None:
+    metrics = _refinement_step("metrics", "GetDatabaseMetrics", ["postgres_slow_query"])
+    resource_order = _refinement_step(
+        "resource-order",
+        "InspectTransactionResourceOrder",
+        ["postgres_deadlock"],
+    )
+    second_match = _refinement_step(
+        "second-match",
+        "InspectPostgresWaitGraph",
+        ["postgres_deadlock"],
+    )
+
+    assert _supported_refinement_index(
+        plan=[metrics, resource_order, second_match],
+        plan_index=0,
+        supported_hypotheses={"postgres_deadlock"},
+        executed_fingerprints=set(),
+    ) == 1
+
+
+def test_supported_refinement_skips_executed_match() -> None:
+    executed = _refinement_step(
+        "resource-order",
+        "InspectTransactionResourceOrder",
+        ["postgres_deadlock"],
+    )
+    remaining = _refinement_step(
+        "wait-graph",
+        "InspectPostgresWaitGraph",
+        ["postgres_deadlock"],
+    )
+
+    assert _supported_refinement_index(
+        plan=[executed, remaining],
+        plan_index=0,
+        supported_hypotheses={"postgres_deadlock"},
+        executed_fingerprints={
+            tool_step_fingerprint("InspectTransactionResourceOrder", {"scope": "resource-order"})
+        },
+    ) == 1
+
+
+def test_supported_refinement_does_not_revisit_plan_prefix() -> None:
+    previous = _refinement_step(
+        "previous",
+        "InspectPostgresErrors",
+        ["postgres_deadlock"],
+    )
+    unrelated = _refinement_step(
+        "metrics",
+        "GetDatabaseMetrics",
+        ["postgres_slow_query"],
+    )
+
+    assert _supported_refinement_index(
+        plan=[previous, unrelated],
+        plan_index=1,
+        supported_hypotheses={"postgres_deadlock"},
+        executed_fingerprints=set(),
+    ) is None
+
+
+def test_supported_refinement_ignores_non_supported_candidates() -> None:
+    lock_wait = _refinement_step(
+        "lock-wait",
+        "InspectPostgresWaitGraph",
+        ["postgres_lock_wait"],
+    )
+    slow_query = _refinement_step(
+        "metrics",
+        "GetDatabaseMetrics",
+        ["postgres_slow_query"],
+    )
+
+    assert _supported_refinement_index(
+        plan=[lock_wait, slow_query],
+        plan_index=0,
+        supported_hypotheses={"postgres_deadlock"},
+        executed_fingerprints=set(),
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -490,6 +590,113 @@ class EmptyRetrieval:
             results=[],
             citations=[],
         )
+
+
+class SufficientGateChatModel:
+    async def ainvoke(self, input: object) -> str:
+        del input
+        return json.dumps(
+            {
+                "status": "sufficient",
+                "evidenceIds": ["ev-cycle"],
+                "supportedHypotheses": ["postgres_deadlock"],
+                "refutedHypotheses": ["postgres_lock_wait", "postgres_slow_query"],
+                "unresolvedHypotheses": [],
+                "missingEvidence": [],
+                "recommendedTools": [],
+                "summary": "The observed cycle supports the deadlock candidate.",
+            }
+        )
+
+
+class SufficientGateLlmProvider:
+    def create_chat_model(self) -> SufficientGateChatModel:
+        return SufficientGateChatModel()
+
+
+@pytest.mark.asyncio
+async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    metrics = _refinement_step("metrics", "GetDatabaseMetrics", ["postgres_slow_query"])
+    resource_order = _refinement_step(
+        "resource-order",
+        "InspectTransactionResourceOrder",
+        ["postgres_deadlock"],
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, SufficientGateLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        async def run_gate(task_id: str, *, attempts: int) -> tuple[dict[str, object], object]:
+            await repositories.diagnostics.create_task(
+                owner_user_id="benchmark-user",
+                task_id=task_id,
+                status="running",
+                query=scenario.title,
+                input_payload={},
+            )
+            update = await service._sufficiency_gate(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        "owner_user_id": "benchmark-user",
+                        "task_id": task_id,
+                        "plan": [metrics, resource_order],
+                        "plan_index": 0,
+                        "evidence_ids": ["ev-cycle"],
+                        "public_hypotheses": [
+                            {"id": item.id, "description": item.description}
+                            for item in scenario.hypotheses
+                        ],
+                        "hypothesis_states": [],
+                        "observation_decisions": [],
+                        "evidence": [],
+                        "tool_definitions": (),
+                        "executed_step_fingerprints": [],
+                        "executor_attempt_count": attempts,
+                        "max_total_steps": 6,
+                        "max_replans": 2,
+                        "replan_count": 0,
+                    },
+                )
+            )
+            steps = await repositories.diagnostics.list_steps(
+                owner_user_id="benchmark-user",
+                task_id=task_id,
+            )
+            return cast(dict[str, object], update), steps[-1]
+
+        update, gate_step = await run_gate("gate-with-refinement", attempts=2)
+        exhausted, exhausted_step = await run_gate("gate-without-budget", attempts=6)
+    finally:
+        await engine.dispose()
+
+    assert update["next_route"] == "executor"
+    assert update["plan_index"] == 1
+    assert update["termination_reason"] == ""
+    assert gate_step.payload["nextRoute"] == "executor"
+    assert (
+        gate_step.payload["refinementReason"]
+        == "supported_hypothesis_plan_step_remaining"
+    )
+    assert exhausted["next_route"] == "decision"
+    assert "plan_index" not in exhausted
+    assert exhausted_step.payload["refinementReason"] == ""
 
 
 class ReasoningChatModel:
