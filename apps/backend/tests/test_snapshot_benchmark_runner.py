@@ -22,7 +22,7 @@ from super_ai.evaluation.runner import (
     BenchmarkRunError,
     NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
-    _snapshot_decision_vocabulary,
+    _snapshot_decision_vocabulary,  # pyright: ignore[reportPrivateUsage]
     build_application_diagnostic_input,
 )
 from super_ai.evaluation.scenarios import load_public_scenario

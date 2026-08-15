@@ -8,7 +8,7 @@ import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
-    _supported_refinement_index,
+    _supported_refinement_index,  # pyright: ignore[reportPrivateUsage]
     normalize_tool_plan_steps,
 )
 from super_ai.aiops.reasoning import (
@@ -27,6 +27,7 @@ from super_ai.llm import LlmProvider
 from super_ai.mcp.tool_arguments import constrain_tool_definitions, tool_step_fingerprint
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
+from super_ai.memory.repositories import DiagnosticStepRecord
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
@@ -643,7 +644,11 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
             cls_topic_id="unused",
         )
 
-        async def run_gate(task_id: str, *, attempts: int) -> tuple[dict[str, object], object]:
+        async def run_gate(
+            task_id: str,
+            *,
+            attempts: int,
+        ) -> tuple[dict[str, object], DiagnosticStepRecord]:
             await repositories.diagnostics.create_task(
                 owner_user_id="benchmark-user",
                 task_id=task_id,
@@ -680,7 +685,7 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
                 owner_user_id="benchmark-user",
                 task_id=task_id,
             )
-            return cast(dict[str, object], update), steps[-1]
+            return update, steps[-1]
 
         update, gate_step = await run_gate("gate-with-refinement", attempts=2)
         exhausted, exhausted_step = await run_gate("gate-without-budget", attempts=6)
