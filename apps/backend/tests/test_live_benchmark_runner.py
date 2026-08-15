@@ -78,15 +78,24 @@ class RecordingDriver:
 
 
 class RecordingDiagnostic:
-    def __init__(self, events: list[str], *, cancelled: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        cancelled: bool = False,
+        failed: bool = False,
+    ) -> None:
         self.events = events
         self.cancelled = cancelled
+        self.failed = failed
 
     async def diagnose(self, **values: object) -> object:
         del values
         self.events.append("diagnose")
         if self.cancelled:
             raise asyncio.CancelledError
+        if self.failed:
+            raise RuntimeError("secret-diagnostic-failure")
         return {"decision": "row_lock_blocking"}
 
 
@@ -198,6 +207,29 @@ async def test_runner_cleans_up_and_redacts_driver_failure() -> None:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "fault_injection_failed"
+    assert captured.value.stage == "inject"
+    assert "secret" not in str(captured.value)
+    assert driver.events[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_runner_classifies_a_diagnostic_boundary_without_raw_error() -> None:
+    driver = RecordingDriver()
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events, failed=True),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "diagnostic_failed"
+    assert captured.value.stage == "diagnose"
+    assert captured.value.authorization_code is None
     assert "secret" not in str(captured.value)
     assert driver.events[-1] == "cleanup"
 
@@ -254,6 +286,7 @@ async def test_failed_cleanup_result_is_a_hard_failure() -> None:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "cleanup_failed"
+    assert captured.value.stage == "cleanup"
 
 
 @pytest.mark.asyncio
@@ -281,6 +314,8 @@ async def test_runner_rejects_recovery_record_that_disagrees_with_oracle() -> No
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "recovery_denied"
+    assert captured.value.stage == "recover"
+    assert captured.value.authorization_code == "approval_required"
 
 
 @pytest.mark.asyncio

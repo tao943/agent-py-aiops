@@ -85,6 +85,8 @@ _SAFE_RESULT_FIELDS = frozenset(
         "evidenceSource",
         "validity",
         "failureCategory",
+        "failureStage",
+        "authorizationCode",
     }
 )
 
@@ -200,20 +202,11 @@ async def _run_live_command(
                 run_id=cast(str, arguments.run_id),
             )
         except LiveBenchmarkError as exc:
-            status, validity, exit_code = classify_live_failure(
-                exc.category,
-                evidence_source=evidence_source,
-            )
-            payload = safe_output(
-                command="run",
+            payload, exit_code = _live_failure_payload(
                 scenario_id=cast(str, arguments.scenario),
                 run_id=cast(str, arguments.run_id),
-                status=status,
-                result={
-                    "evidenceSource": evidence_source,
-                    "validity": validity,
-                    "failureCategory": exc.category,
-                },
+                evidence_source=evidence_source,
+                error=exc,
             )
             write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
             return payload, exit_code
@@ -299,6 +292,38 @@ def classify_live_failure(
     if infrastructure:
         return "infra_invalid", "INFRA_INVALID", 2
     return "failed", "VALID_FAIL", 1
+
+
+def _live_failure_payload(
+    *,
+    scenario_id: str,
+    run_id: str,
+    evidence_source: EvidenceSource,
+    error: LiveBenchmarkError,
+) -> tuple[dict[str, object], int]:
+    status, validity, exit_code = classify_live_failure(
+        error.category,
+        evidence_source=evidence_source,
+    )
+    result: dict[str, object] = {
+        "evidenceSource": evidence_source,
+        "validity": validity,
+        "failureCategory": error.category,
+    }
+    if error.stage is not None:
+        result["failureStage"] = error.stage
+    if error.authorization_code is not None:
+        result["authorizationCode"] = error.authorization_code
+    return (
+        safe_output(
+            command="run",
+            scenario_id=scenario_id,
+            run_id=run_id,
+            status=status,
+            result=result,
+        ),
+        exit_code,
+    )
 
 
 def build_live_evidence_runtime(

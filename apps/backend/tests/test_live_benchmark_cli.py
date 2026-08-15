@@ -35,7 +35,7 @@ from super_ai.evaluation.live.redis_maxclients import (
     RedisMaxclientsRecoveryService,
     RedisMaxclientsScenarioDriver,
 )
-from super_ai.evaluation.live.runner import LocalLiveEvidencePreparer
+from super_ai.evaluation.live.runner import LiveBenchmarkError, LocalLiveEvidencePreparer
 from super_ai.project_config import ProjectConfigurationError
 
 
@@ -232,6 +232,34 @@ def test_live_failure_classification_separates_infrastructure_from_agent() -> No
         "INFRA_INVALID",
         2,
     )
+
+
+def test_live_failure_payload_keeps_only_bounded_error_metadata() -> None:
+    payload, exit_code = live_cli._live_failure_payload(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-NGINX-TIMEOUT-001",
+        run_id="live-run-1",
+        evidence_source="cls",
+        error=LiveBenchmarkError(
+            "recovery_denied",
+            stage="recover",
+            authorization_code="proposal_denied",
+        ),
+    )
+
+    assert exit_code == 1
+    assert payload == {
+        "command": "run",
+        "scenarioId": "APY-LIVE-NGINX-TIMEOUT-001",
+        "runId": "live-run-1",
+        "status": "failed",
+        "result": {
+            "evidenceSource": "cls",
+            "validity": "VALID_FAIL",
+            "failureCategory": "recovery_denied",
+            "failureStage": "recover",
+            "authorizationCode": "proposal_denied",
+        },
+    }
     assert classify_live_failure("diagnostic_failed", evidence_source="local") == (
         "failed",
         "VALID_FAIL",
@@ -339,6 +367,8 @@ def test_safe_json_output_drops_sensitive_and_oracle_fields() -> None:
             "passed": True,
             "evidenceSource": "cls",
             "validity": "VALID_PASS",
+            "failureStage": "recover",
+            "authorizationCode": "proposal_denied",
             "password": "secret",
             "dsn": "postgresql://secret",
             "rawLogs": ["secret"],
@@ -357,6 +387,8 @@ def test_safe_json_output_drops_sensitive_and_oracle_fields() -> None:
             "passed": True,
             "evidenceSource": "cls",
             "validity": "VALID_PASS",
+            "failureStage": "recover",
+            "authorizationCode": "proposal_denied",
         },
     }
     assert "secret" not in serialized

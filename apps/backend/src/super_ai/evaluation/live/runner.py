@@ -34,9 +34,17 @@ AwaitedT = TypeVar("AwaitedT")
 class LiveBenchmarkError(RuntimeError):
     """Safe classified failure at a Live evaluation boundary."""
 
-    def __init__(self, category: str) -> None:
+    def __init__(
+        self,
+        category: str,
+        *,
+        stage: str | None = None,
+        authorization_code: str | None = None,
+    ) -> None:
         super().__init__("Docker Live benchmark failed at a classified boundary.")
         self.category = category
+        self.stage = stage
+        self.authorization_code = authorization_code
 
 
 class LiveScenarioDriver(Protocol):
@@ -137,13 +145,17 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
 
         active_error: BaseException | None = None
         try:
-            await self._classified(self._driver.preflight(identity), "preflight_failed")
-            await self._classified(self._driver.baseline(identity), "baseline_failed")
+            await self._classified(
+                self._driver.preflight(identity), "preflight_failed", "preflight"
+            )
+            await self._classified(
+                self._driver.baseline(identity), "baseline_failed", "baseline"
+            )
             observation = await self._classified(
-                self._driver.inject(identity), "fault_injection_failed"
+                self._driver.inject(identity), "fault_injection_failed", "inject"
             )
             if not observation.confirmed:
-                raise LiveBenchmarkError("fault_injection_failed")
+                raise LiveBenchmarkError("fault_injection_failed", stage="inject")
             evidence_context = await self._classified(
                 self._evidence_preparer.prepare(
                     identity=identity,
@@ -151,6 +163,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                     observation=observation,
                 ),
                 "evidence_preparation_failed",
+                "evidence",
             )
             diagnostic_artifact = await self._classified(
                 self._diagnostic.diagnose(
@@ -160,6 +173,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                     evidence_context=evidence_context,
                 ),
                 "diagnostic_failed",
+                "diagnose",
             )
             recovery = await self._classified(
                 self._recovery.recover(
@@ -168,6 +182,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                     observation=observation,
                 ),
                 "recovery_failed",
+                "recover",
             )
             oracle = load_live_oracle(scenario_dir)
             if (
@@ -175,12 +190,19 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 or recovery.expectation != oracle.recovery_expectation
                 or not _recovery_contract_satisfied(recovery)
             ):
-                raise LiveBenchmarkError("recovery_denied")
+                raise LiveBenchmarkError(
+                    "recovery_denied",
+                    stage="recover",
+                    authorization_code=recovery.authorization_code,
+                )
             verification = await self._classified(
-                self._driver.verify(identity), "recovery_verification_failed"
+                self._driver.verify(identity), "recovery_verification_failed", "verify"
             )
             if not verification.passed:
-                raise LiveBenchmarkError("recovery_verification_failed")
+                raise LiveBenchmarkError(
+                    "recovery_verification_failed",
+                    stage="verify",
+                )
             if isinstance(diagnostic_artifact, RunArtifact):
                 diagnostic_artifact = append_live_outcome(
                     diagnostic_artifact,
@@ -196,7 +218,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                     oracle=oracle,
                 )
             except Exception as exc:
-                raise LiveBenchmarkError("evaluation_failed") from exc
+                raise LiveBenchmarkError("evaluation_failed", stage="evaluate") from exc
         except BaseException as exc:
             active_error = exc
             raise
@@ -204,18 +226,22 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             try:
                 cleanup = await self._driver.cleanup(identity)
                 if not cleanup.passed:
-                    raise LiveBenchmarkError("cleanup_failed")
+                    raise LiveBenchmarkError("cleanup_failed", stage="cleanup")
             except BaseException as cleanup_exc:
                 if isinstance(cleanup_exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 if isinstance(cleanup_exc, LiveBenchmarkError):
                     raise cleanup_exc from active_error
-                raise LiveBenchmarkError("cleanup_failed") from (
+                raise LiveBenchmarkError("cleanup_failed", stage="cleanup") from (
                     cleanup_exc if active_error is None else active_error
                 )
 
     @staticmethod
-    async def _classified(awaitable: Awaitable[AwaitedT], category: str) -> AwaitedT:
+    async def _classified(
+        awaitable: Awaitable[AwaitedT],
+        category: str,
+        stage: str,
+    ) -> AwaitedT:
         try:
             return await awaitable
         except asyncio.CancelledError:
@@ -223,9 +249,9 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
         except LiveBenchmarkError:
             raise
         except LiveInfrastructureError as exc:
-            raise LiveBenchmarkError(exc.category) from exc
+            raise LiveBenchmarkError(exc.category, stage=stage) from exc
         except Exception as exc:
-            raise LiveBenchmarkError(category) from exc
+            raise LiveBenchmarkError(category, stage=stage) from exc
 
 
 def _recovery_contract_satisfied(record: LiveRecoveryRecord) -> bool:
