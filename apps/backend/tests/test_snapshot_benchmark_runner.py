@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
-from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
+from super_ai.evaluation import (
+    ArtifactEvidence,
+    ArtifactToolCall,
+    RunArtifact,
+    SnapshotMcpClient,
+)
 from super_ai.evaluation.domain import PublicScenario
 from super_ai.evaluation.runner import (
     AgentVersion,
+    ApplicationDiagnosticAdapter,
     BenchmarkRunError,
     NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
@@ -19,6 +27,8 @@ from super_ai.evaluation.runner import (
 from super_ai.evaluation.scenarios import load_public_scenario
 from super_ai.evaluation.scoring import EvaluationResult
 from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.memory.database import create_memory_engine, create_memory_session_factory
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
@@ -34,6 +44,56 @@ async def test_rag_off_returns_no_hits_or_citations() -> None:
 
     assert result.results == []
     assert result.citations == []
+
+
+@pytest.mark.asyncio
+async def test_application_adapter_forwards_snapshot_argument_contracts(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class CapturingDiagnosticService:
+        def __init__(self, **values: object) -> None:
+            captured.update(values)
+
+        async def stream(self, **values: object) -> AsyncIterator[dict[str, object]]:
+            del values
+            if False:
+                yield {}
+
+    monkeypatch.setattr(
+        "super_ai.evaluation.runner.AiopsDiagnosticService",
+        CapturingDiagnosticService,
+    )
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        adapter = ApplicationDiagnosticAdapter(
+            repositories=repositories,
+            llm_provider=cast(Any, object()),
+            retrieval_tool=NullKnowledgeRetrievalTool(),
+        )
+
+        await adapter.run(
+            run_id="contract-forwarding",
+            scenario=scenario,
+            mcp_client=snapshot,
+        )
+    finally:
+        await engine.dispose()
+
+    contracts = captured["tool_argument_contracts"]
+    assert isinstance(contracts, Mapping)
+    assert set(cast(Mapping[str, object], contracts)) == set(
+        snapshot.tool_argument_contracts
+    )
 
 
 class RecordingScriptedDiagnosticAdapter:

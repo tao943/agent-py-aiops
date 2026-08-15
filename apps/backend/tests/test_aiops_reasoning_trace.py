@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.diagnostics import normalize_tool_plan_steps
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
     normalize_root_cause_decision,
@@ -25,6 +26,88 @@ from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+@pytest.mark.asyncio
+async def test_plan_normalizer_binds_snapshot_scope_and_deduplicates() -> None:
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / "snapshot" / "tool_responses.yaml"
+    )
+    definitions = await snapshot.discover_tools()
+    plan: list[dict[str, object]] = [
+        {
+            "id": "errors-30",
+            "tool": "InspectPostgresErrors",
+            "arguments": {"service": "order-service", "windowMinutes": 30},
+            "purpose": "Inspect deadlock errors.",
+            "testsHypotheses": ["opposite_order_transaction_deadlock"],
+        },
+        {
+            "id": "errors-60-duplicate",
+            "tool": "InspectPostgresErrors",
+            "arguments": {"service": "wrong-service", "windowMinutes": 60},
+            "purpose": "Repeat the same error inspection.",
+            "testsHypotheses": ["opposite_order_transaction_deadlock"],
+        },
+        {
+            "id": "wait-graph",
+            "tool": "InspectPostgresWaitGraph",
+            "arguments": {"database": "order-service", "windowMinutes": 60},
+            "purpose": "Inspect the wait graph.",
+            "testsHypotheses": ["opposite_order_transaction_deadlock"],
+        },
+    ]
+
+    normalized, errors = normalize_tool_plan_steps(
+        plan,
+        trusted_tool_arguments={},
+        tool_argument_contracts=snapshot.tool_argument_contracts,
+        tool_definitions=definitions,
+    )
+
+    assert errors == []
+    assert [step["id"] for step in normalized] == ["errors-30", "wait-graph"]
+    assert normalized[0]["arguments"] == {
+        "service": "order-service",
+        "windowMinutes": 15,
+    }
+    assert normalized[1]["arguments"] == {
+        "database": "agent_py",
+        "windowMinutes": 15,
+    }
+
+
+@pytest.mark.asyncio
+async def test_plan_normalizer_preserves_valid_variants_and_filters_invalid() -> None:
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-016" / "snapshot" / "tool_responses.yaml"
+    )
+    definitions = await snapshot.discover_tools()
+    plan: list[dict[str, object]] = [
+        {
+            "id": view,
+            "tool": "InspectClientRetryPolicy",
+            "arguments": {"client": "wrong-client", "view": view},
+            "purpose": "Inspect retry behavior.",
+            "testsHypotheses": ["client_retry_amplification"],
+        }
+        for view in ("effective-policy", "sampled-timeline", "invented-view")
+    ]
+
+    normalized, errors = normalize_tool_plan_steps(
+        plan,
+        trusted_tool_arguments={},
+        tool_argument_contracts=snapshot.tool_argument_contracts,
+        tool_definitions=definitions,
+    )
+
+    assert [
+        cast(dict[str, object], step["arguments"])["view"] for step in normalized
+    ] == [
+        "effective-policy",
+        "sampled-timeline",
+    ]
+    assert [error.code for error in errors] == ["invalid_variant"]
 
 
 def test_plan_rejects_unknown_tools_and_hypotheses() -> None:
@@ -453,6 +536,54 @@ class ReplanningLlmProvider:
         return self.model
 
 
+class ContractReplanningChatModel(ReplanningChatModel):
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "bounded diagnostic plan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-container-wrong-scope",
+                            "tool": "InspectContainer",
+                            "arguments": {"service": "order-service"},
+                            "purpose": "Check whether the checkout process is running.",
+                            "testsHypotheses": [
+                                "upstream_process_down",
+                                "upstream_port_mismatch",
+                            ],
+                        }
+                    ]
+                }
+            )
+        if "gap-targeted diagnostic replan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-nginx-wrong-scope",
+                            "tool": "InspectNginx",
+                            "arguments": {"route": "order-service"},
+                            "purpose": "Resolve the remaining route and DNS alternatives.",
+                            "testsHypotheses": [
+                                "upstream_port_mismatch",
+                                "dns_resolution_failure",
+                            ],
+                        }
+                    ]
+                }
+            )
+        return await super().ainvoke(input)
+
+
+class ContractReplanningLlmProvider:
+    def __init__(self) -> None:
+        self.model = ContractReplanningChatModel()
+
+    def create_chat_model(self) -> ContractReplanningChatModel:
+        return self.model
+
+
 class DuplicateStepChatModel(ReplanningChatModel):
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
@@ -706,11 +837,12 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
         )
         service = AiopsDiagnosticService(
             repositories=repositories,
-            llm_provider=cast(LlmProvider, ReplanningLlmProvider()),
+            llm_provider=cast(LlmProvider, ContractReplanningLlmProvider()),
             retrieval_tool=EmptyRetrieval(),
             mcp_client=snapshot,
             cls_region="unused",
             cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
         )
 
         events = [
@@ -761,7 +893,7 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_plan_step_consumes_budget_without_repeating_mcp_call(
+async def test_duplicate_plan_step_is_filtered_before_executor(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-003")
@@ -793,6 +925,7 @@ async def test_duplicate_plan_step_consumes_budget_without_repeating_mcp_call(
             mcp_client=snapshot,
             cls_region="unused",
             cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
         )
 
         async for _ in service.stream(task=task, accessible_knowledge_base_ids=()):
@@ -805,9 +938,12 @@ async def test_duplicate_plan_step_consumes_budget_without_repeating_mcp_call(
         await engine.dispose()
 
     executor_steps = [step for step in steps if step.phase == "executor"]
-    assert [item.tool_name for item in snapshot.observations] == ["InspectContainer"]
+    assert [item.tool_name for item in snapshot.observations] == [
+        "InspectContainer",
+        "InspectNginx",
+    ]
     assert len(executor_steps) == 2
-    assert executor_steps[1].payload["errorCategory"] == "duplicate_step"
+    assert all("errorCategory" not in step.payload for step in executor_steps)
 
 
 @pytest.mark.asyncio

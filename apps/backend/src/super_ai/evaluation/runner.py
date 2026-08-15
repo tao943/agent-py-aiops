@@ -16,6 +16,7 @@ from super_ai.evaluation.scoring import EvaluationResult, score_run
 from super_ai.evaluation.snapshot import SnapshotMcpClient
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp.tool_arguments import ToolArgumentContractProvider
 from super_ai.memory.repositories import EvaluationFailureStatus, JsonDict, MemoryRepositories
 from super_ai.retrieval import (
     DEFAULT_RETRIEVAL_TOP_K,
@@ -171,6 +172,11 @@ class ApplicationDiagnosticAdapter:
             mcp_client=mcp_client,
             cls_region="snapshot",
             cls_topic_id="snapshot",
+            tool_argument_contracts=(
+                dict(mcp_client.tool_argument_contracts)
+                if isinstance(mcp_client, ToolArgumentContractProvider)
+                else {}
+            ),
         )
         async for _event in service.stream(
             task=task,

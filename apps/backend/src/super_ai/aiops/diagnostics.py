@@ -39,6 +39,13 @@ from super_ai.aiops.reasoning import (
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp.tool_arguments import (
+    ToolArgumentContract,
+    ToolArgumentContractError,
+    constrain_tool_definitions,
+    normalize_tool_arguments,
+    tool_step_fingerprint,
+)
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
@@ -192,6 +199,56 @@ def plan_matches_tool_contracts(
     return bool(plan)
 
 
+def normalize_tool_plan_steps(
+    plan: Sequence[JsonDict],
+    *,
+    trusted_tool_arguments: Mapping[str, Mapping[str, object]],
+    tool_argument_contracts: Mapping[str, ToolArgumentContract],
+    tool_definitions: Sequence[McpToolDefinition],
+) -> tuple[list[JsonDict], list[ToolArgumentContractError]]:
+    """Bind, validate, and deduplicate effective planned MCP calls."""
+    bound = bind_trusted_tool_arguments(plan, trusted_tool_arguments)
+    accepted: list[JsonDict] = []
+    errors: list[ToolArgumentContractError] = []
+    fingerprints: set[str] = set()
+    for source in bound:
+        step = dict(source)
+        tool_name = step.get("tool")
+        arguments = step.get("arguments")
+        if not isinstance(tool_name, str) or not isinstance(arguments, Mapping):
+            errors.append(
+                ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=str(tool_name or "unknown"),
+                )
+            )
+            continue
+        try:
+            effective_arguments = normalize_tool_arguments(
+                tool_name,
+                arguments,
+                tool_argument_contracts,
+            )
+        except ToolArgumentContractError as exc:
+            errors.append(exc)
+            continue
+        step["arguments"] = effective_arguments
+        if not plan_matches_tool_contracts([step], tool_definitions):
+            errors.append(
+                ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=tool_name,
+                )
+            )
+            continue
+        fingerprint = tool_step_fingerprint(tool_name, effective_arguments)
+        if fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        accepted.append(step)
+    return accepted, errors
+
+
 def build_grounded_fallback_decision(
     *,
     public_hypotheses: Sequence[JsonDict],
@@ -278,6 +335,7 @@ class AiopsDiagnosticService:
         cls_region: str,
         cls_topic_id: str,
         trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None,
+        tool_argument_contracts: Mapping[str, ToolArgumentContract] | None = None,
         tool_policies: Mapping[str, Literal["proposal_only"]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
     ) -> None:
@@ -294,6 +352,9 @@ class AiopsDiagnosticService:
             name: dict(arguments)
             for name, arguments in (trusted_tool_arguments or {}).items()
         }
+        self._tool_argument_contracts = MappingProxyType(
+            dict(tool_argument_contracts or {})
+        )
         copied_tool_policies = dict(tool_policies or {})
         unsupported_policies = {
             str(policy) for policy in copied_tool_policies.values() if policy != "proposal_only"
@@ -539,7 +600,10 @@ class AiopsDiagnosticService:
 
         try:
             mcp_client = await self._mcp_client_for(owner_user_id)
-            discovered_tools = await mcp_client.discover_tools()
+            discovered_tools = constrain_tool_definitions(
+                await mcp_client.discover_tools(),
+                self._tool_argument_contracts,
+            )
         except McpClientError:
             discovered_tools = []
             events.append(
@@ -1046,8 +1110,11 @@ class AiopsDiagnosticService:
             parsed_steps = [_diagnostic_plan_step_payload(step) for step in parsed]
         except Exception:
             parsed_steps = []
-        parsed_steps = bind_trusted_tool_arguments(
-            parsed_steps, self._trusted_tool_arguments
+        parsed_steps, _contract_errors = normalize_tool_plan_steps(
+            parsed_steps,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
         )
         executed = set(state.get("executed_step_fingerprints") or [])
         accepted: list[JsonDict] = []
@@ -1056,8 +1123,6 @@ class AiopsDiagnosticService:
             if fingerprint in executed or any(
                 _step_fingerprint(existing) == fingerprint for existing in accepted
             ):
-                continue
-            if not plan_matches_tool_contracts([step], tool_definitions):
                 continue
             accepted.append(step)
             if len(accepted) >= remaining_budget:
@@ -1655,9 +1720,11 @@ class AiopsDiagnosticService:
         )
         if not generic_plan and "SearchLog" in available_tools:
             generic_plan = [self._generic_search_log_step(query)]
-        generic_plan = bind_trusted_tool_arguments(
+        generic_plan, _generic_contract_errors = normalize_tool_plan_steps(
             generic_plan,
-            self._trusted_tool_arguments,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
         )
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
@@ -1682,8 +1749,13 @@ class AiopsDiagnosticService:
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
-        plan = bind_trusted_tool_arguments(plan, self._trusted_tool_arguments)
-        if not plan or not plan_matches_tool_contracts(plan, tool_definitions):
+        plan, _contract_errors = normalize_tool_plan_steps(
+            plan,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
+        )
+        if not plan:
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"
 
@@ -1795,15 +1867,9 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
 
 
 def _step_fingerprint(step: Mapping[str, object]) -> str:
-    canonical = {
-        "tool": str(step.get("tool") or ""),
-        "arguments": _json_dict(step.get("arguments")),
-    }
-    return json.dumps(
-        canonical,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return tool_step_fingerprint(
+        str(step.get("tool") or ""),
+        _json_dict(step.get("arguments")),
     )
 
 
