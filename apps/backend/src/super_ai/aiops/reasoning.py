@@ -44,6 +44,67 @@ class RootCauseDecision:
     confidence: float
 
 
+@dataclass(frozen=True, slots=True)
+class EvidenceSufficiencyDecision:
+    status: Literal["sufficient", "insufficient"]
+    evidence_ids: tuple[str, ...]
+    supported_hypotheses: tuple[str, ...]
+    refuted_hypotheses: tuple[str, ...]
+    unresolved_hypotheses: tuple[str, ...]
+    missing_evidence: tuple[str, ...]
+    recommended_tools: tuple[str, ...]
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class RootCauseValidationDecision:
+    status: Literal["valid", "invalid"]
+    evidence_ids: tuple[str, ...]
+    unsupported_fields: tuple[
+        Literal["component", "mechanism", "trigger", "causalChain"], ...
+    ]
+    missing_evidence: tuple[str, ...]
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryPlan:
+    mode: Literal[
+        "no_action", "proposal_only", "external_policy_required", "manual_review"
+    ]
+    action: str
+    target: str
+    rationale: str
+    tool: str | None
+    arguments: dict[str, object]
+    risk: str
+    rollback: str
+    verification_steps: tuple[str, ...]
+    evidence_ids: tuple[str, ...]
+    decision_confidence: float
+    human_approval_required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryPolicyDecision:
+    status: Literal["allowed", "denied", "deferred"]
+    authorization_code: str
+    execution_permitted: bool
+    proposal_recorded: bool
+    human_approval_required: bool
+    summary: str
+
+
+_ROOT_CAUSE_FIELDS = {"component", "mechanism", "trigger", "causalChain"}
+_RECOVERY_MODES = {
+    "no_action",
+    "proposal_only",
+    "external_policy_required",
+    "manual_review",
+}
+_MAX_AUDIT_ITEMS = 6
+
+
 def normalize_root_cause_decision(
     decision: RootCauseDecision,
     *,
@@ -168,6 +229,149 @@ def parse_root_cause_decision(
     )
 
 
+def parse_evidence_sufficiency(
+    text: str,
+    *,
+    available_evidence_ids: Set[str],
+    known_hypotheses: Set[str],
+    available_tools: Set[str],
+) -> EvidenceSufficiencyDecision:
+    """Validate an evidence-sufficiency assessment against public runtime IDs."""
+    payload = _json_mapping(text)
+    status = _required_choice(payload, "status", {"sufficient", "insufficient"})
+    evidence_ids = _known_strings(
+        payload,
+        "evidenceIds",
+        allowed=available_evidence_ids,
+        label="Sufficiency evidence",
+    )
+    supported = _known_strings(
+        payload,
+        "supportedHypotheses",
+        allowed=known_hypotheses,
+        label="Supported hypotheses",
+    )
+    refuted = _known_strings(
+        payload,
+        "refutedHypotheses",
+        allowed=known_hypotheses,
+        label="Refuted hypotheses",
+    )
+    unresolved = _known_strings(
+        payload,
+        "unresolvedHypotheses",
+        allowed=known_hypotheses,
+        label="Unresolved hypotheses",
+    )
+    if (set(supported) & set(refuted)) or (
+        set(unresolved) & (set(supported) | set(refuted))
+    ):
+        raise ValueError("Sufficiency hypothesis classifications must be disjoint.")
+    missing_evidence = _bounded_strings(payload, "missingEvidence")
+    recommended_tools = _known_strings(
+        payload,
+        "recommendedTools",
+        allowed=available_tools,
+        label="Recommended tools",
+    )
+    if status == "sufficient" and (unresolved or missing_evidence):
+        raise ValueError("Sufficient evidence cannot declare unresolved gaps.")
+    return EvidenceSufficiencyDecision(
+        status=cast(Literal["sufficient", "insufficient"], status),
+        evidence_ids=evidence_ids,
+        supported_hypotheses=supported,
+        refuted_hypotheses=refuted,
+        unresolved_hypotheses=unresolved,
+        missing_evidence=missing_evidence,
+        recommended_tools=recommended_tools,
+        summary=_required_str(payload, "summary"),
+    )
+
+
+def parse_root_cause_validation(
+    text: str,
+    *,
+    available_evidence_ids: Set[str],
+) -> RootCauseValidationDecision:
+    """Validate a public audit of a candidate root-cause decision."""
+    payload = _json_mapping(text)
+    status = _required_choice(payload, "status", {"valid", "invalid"})
+    evidence_ids = _known_strings(
+        payload,
+        "evidenceIds",
+        allowed=available_evidence_ids,
+        label="Validation evidence",
+    )
+    raw_fields = _bounded_strings(payload, "unsupportedFields")
+    unknown = set(raw_fields) - _ROOT_CAUSE_FIELDS
+    if unknown:
+        raise ValueError(
+            "Root-cause validation references unsupported field: "
+            + ", ".join(sorted(unknown))
+            + "."
+        )
+    missing_evidence = _bounded_strings(payload, "missingEvidence")
+    if status == "valid" and (raw_fields or missing_evidence):
+        raise ValueError("A valid root-cause decision cannot declare unsupported fields.")
+    return RootCauseValidationDecision(
+        status=cast(Literal["valid", "invalid"], status),
+        evidence_ids=evidence_ids,
+        unsupported_fields=cast(
+            tuple[Literal["component", "mechanism", "trigger", "causalChain"], ...],
+            raw_fields,
+        ),
+        missing_evidence=missing_evidence,
+        summary=_required_str(payload, "summary"),
+    )
+
+
+def parse_recovery_plan(
+    text: str,
+    *,
+    available_evidence_ids: Set[str],
+    proposal_tools: Set[str],
+) -> RecoveryPlan:
+    """Validate a non-authorizing recovery recommendation."""
+    payload = _json_mapping(text)
+    mode = _required_choice(payload, "mode", _RECOVERY_MODES)
+    raw_tool = payload.get("tool")
+    tool = raw_tool.strip() if isinstance(raw_tool, str) and raw_tool.strip() else None
+    if mode == "proposal_only":
+        if tool is None or tool not in proposal_tools:
+            raise ValueError("Proposal-only recovery must use a known proposal tool.")
+    elif tool is not None:
+        raise ValueError("Only proposal-only recovery may select a tool.")
+    arguments = dict(_required_mapping(payload, "arguments")) if tool is not None else {}
+    evidence_ids = _known_strings(
+        payload,
+        "evidenceIds",
+        allowed=available_evidence_ids,
+        label="Recovery evidence",
+    )
+    verification_steps = _bounded_strings(payload, "verificationSteps")
+    if mode in {"proposal_only", "external_policy_required"} and len(verification_steps) < 2:
+        raise ValueError("Actionable recovery requires at least two verification steps.")
+    return RecoveryPlan(
+        mode=cast(
+            Literal[
+                "no_action", "proposal_only", "external_policy_required", "manual_review"
+            ],
+            mode,
+        ),
+        action=_required_str(payload, "action"),
+        target=_required_str(payload, "target"),
+        rationale=_required_str(payload, "rationale"),
+        tool=tool,
+        arguments=arguments,
+        risk=_required_str(payload, "risk"),
+        rollback=_required_str(payload, "rollback"),
+        verification_steps=verification_steps,
+        evidence_ids=evidence_ids,
+        decision_confidence=_number_zero_one(payload, "decisionConfidence"),
+        human_approval_required=_required_bool(payload, "humanApprovalRequired"),
+    )
+
+
 def _json_mapping(text: str) -> Mapping[str, object]:
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if match is None:
@@ -213,3 +417,50 @@ def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
     if not all(isinstance(value, str) and value.strip() for value in values):
         raise ValueError(f"Model field '{key}' must contain non-empty strings.")
     return tuple(cast(str, value).strip() for value in values)
+
+
+def _bounded_strings(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
+    values = _string_tuple(payload, key)
+    if len(values) > _MAX_AUDIT_ITEMS:
+        raise ValueError(f"Model field '{key}' cannot contain more than {_MAX_AUDIT_ITEMS} items.")
+    return values
+
+
+def _known_strings(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    allowed: Set[str],
+    label: str,
+) -> tuple[str, ...]:
+    values = _bounded_strings(payload, key)
+    unknown = set(values) - set(allowed)
+    if unknown:
+        raise ValueError(f"{label} references unknown value: {', '.join(sorted(unknown))}.")
+    return values
+
+
+def _required_choice(
+    payload: Mapping[str, object], key: str, choices: Set[str]
+) -> str:
+    value = _required_str(payload, key)
+    if value not in choices:
+        raise ValueError(f"Model field '{key}' contains an unsupported value.")
+    return value
+
+
+def _required_bool(payload: Mapping[str, object], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Model field '{key}' must be a boolean.")
+    return value
+
+
+def _number_zero_one(payload: Mapping[str, object], key: str) -> float:
+    value = payload.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"Model field '{key}' must be a number between zero and one.")
+    normalized = float(value)
+    if not 0 <= normalized <= 1:
+        raise ValueError(f"Model field '{key}' must be a number between zero and one.")
+    return normalized

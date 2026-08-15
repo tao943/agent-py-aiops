@@ -10,9 +10,12 @@ from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
     normalize_root_cause_decision,
+    parse_evidence_sufficiency,
     parse_observation_decision,
     parse_plan,
+    parse_recovery_plan,
     parse_root_cause_decision,
+    parse_root_cause_validation,
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
 from super_ai.llm import LlmProvider
@@ -97,6 +100,84 @@ def test_root_cause_decision_normalizes_only_declared_public_labels() -> None:
     assert normalized.trigger == decision.trigger
     assert normalized.causal_chain == decision.causal_chain
     assert normalized.evidence_ids == decision.evidence_ids
+
+
+def test_sufficiency_rejects_unknown_evidence_hypotheses_and_tools() -> None:
+    payload = json.dumps(
+        {
+            "status": "insufficient",
+            "evidenceIds": ["fabricated"],
+            "supportedHypotheses": ["unknown"],
+            "refutedHypotheses": [],
+            "unresolvedHypotheses": ["h-open"],
+            "missingEvidence": ["Read the lock graph."],
+            "recommendedTools": ["Shell"],
+            "summary": "More evidence is required.",
+        }
+    )
+
+    with pytest.raises(ValueError):
+        parse_evidence_sufficiency(
+            payload,
+            available_evidence_ids={"ev-1"},
+            known_hypotheses={"h-open"},
+            available_tools={"InspectPostgresLockGraph"},
+        )
+
+
+def test_root_cause_validation_limits_unsupported_fields() -> None:
+    with pytest.raises(ValueError, match="unsupported field"):
+        parse_root_cause_validation(
+            json.dumps(
+                {
+                    "status": "invalid",
+                    "evidenceIds": ["ev-1"],
+                    "unsupportedFields": ["privateReasoning"],
+                    "missingEvidence": ["A direct trigger observation is missing."],
+                    "summary": "The trigger is unsupported.",
+                }
+            ),
+            available_evidence_ids={"ev-1"},
+        )
+
+
+def test_recovery_plan_requires_schema_valid_proposal_fields() -> None:
+    plan = parse_recovery_plan(
+        json.dumps(
+            {
+                "mode": "proposal_only",
+                "action": "propose_nginx_timeout_mitigation",
+                "target": "live_eval_upstream",
+                "rationale": "The upstream response exceeded the read timeout.",
+                "tool": "ProposeNginxTimeoutMitigation",
+                "arguments": {
+                    "target": "live_eval_upstream",
+                    "risk": "A larger timeout can retain connections longer.",
+                    "rollback": "Restore the previous timeout after approval.",
+                    "verificationSteps": [
+                        "Repeat the gateway probe.",
+                        "Confirm the upstream latency is within the approved timeout.",
+                    ],
+                    "humanApprovalRequired": True,
+                },
+                "risk": "A larger timeout can retain connections longer.",
+                "rollback": "Restore the previous timeout after approval.",
+                "verificationSteps": [
+                    "Repeat the gateway probe.",
+                    "Confirm the upstream latency is within the approved timeout.",
+                ],
+                "evidenceIds": ["ev-1"],
+                "decisionConfidence": 0.91,
+                "humanApprovalRequired": True,
+            }
+        ),
+        available_evidence_ids={"ev-1"},
+        proposal_tools={"ProposeNginxTimeoutMitigation"},
+    )
+
+    assert plan.mode == "proposal_only"
+    assert plan.tool == "ProposeNginxTimeoutMitigation"
+    assert plan.human_approval_required is True
 
 
 class EmptyRetrieval:
