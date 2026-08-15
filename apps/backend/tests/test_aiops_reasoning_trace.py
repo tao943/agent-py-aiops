@@ -1394,11 +1394,10 @@ class PostgresContractAcceptanceChatModel:
                     "trigger": (
                         "concurrent_updates_acquired_order_and_inventory_rows_in_reverse_order"
                     ),
-                    "causalChain": [
-                        "transactions acquired order and inventory rows in opposite order",
-                        "each transaction waited for a row held by the other",
-                        "PostgreSQL detected the cycle and aborted one transaction",
-                    ],
+                    "causalChain": (
+                        "Transactions acquire shared resources in opposite orders -> "
+                        "a wait cycle forms -> PostgreSQL aborts one transaction."
+                    ),
                     "evidenceIds": evidence_ids,
                     "confidence": 0.96,
                 }
@@ -1827,7 +1826,25 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
         for step in steps
     )
     decision = next(step for step in steps if step.phase == "decision")
-    assert decision.payload["rootCauseDecision"] is not None
+    validations = [step for step in steps if step.phase == "decision_validation"]
+    decisions = [step for step in steps if step.phase == "decision"]
+    assert len(decisions) == 1
+    assert len(validations) == 1
+    assert not any(
+        step.phase == "replanner"
+        and step.payload.get("reason") == "decision_validation_gap"
+        for step in steps
+    )
+    root_cause = cast(dict[str, object], decision.payload["rootCauseDecision"])
+    observation_summaries = [
+        cast(dict[str, object], step.payload["observationDecision"])["summary"]
+        for step in steps
+        if step.phase == "evidence_evaluation"
+    ]
+    assert decision.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
+    assert root_cause["causalChain"] == observation_summaries
+    assert len(cast(list[object], root_cause["causalChain"])) == 3
+    assert validations[0].payload["status"] == "valid"
     assert completed.status == "succeeded"
 
 
