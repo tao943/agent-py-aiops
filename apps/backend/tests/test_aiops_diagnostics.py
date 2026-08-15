@@ -468,12 +468,13 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
     migrated_database_url: str,
 ) -> None:
     runner = FakeAiopsRunner()
+    app = create_app(
+        database_url=migrated_database_url,
+        aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
+        redis_client=cast(Redis, UnavailableRedisClient()),
+    )
     transport = httpx.ASGITransport(
-        app=create_app(
-            database_url=migrated_database_url,
-            aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
-            redis_client=cast(Redis, UnavailableRedisClient()),
-        )
+        app=app
     )
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         owner = await _register(client, "owner@example.com")
@@ -487,6 +488,50 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
         stream = await client.post(
             f"/aiops/diagnostics/{diagnostic_id}:stream",
             headers=_auth_headers(owner["accessToken"]),
+        )
+        repositories = app.state.memory_repositories
+        owner_user_id = owner["user"]["id"]
+        phases = (
+            "sufficiency_gate",
+            "decision_validation",
+            "recovery_planning",
+            "policy_gate",
+        )
+        for sequence, phase in enumerate(phases, start=1):
+            await repositories.diagnostics.create_step(
+                owner_user_id=owner_user_id,
+                step_id=f"step-owner-{sequence}",
+                task_id=diagnostic_id,
+                sequence=sequence,
+                phase=phase,
+                status="completed",
+                payload={"phase": phase},
+            )
+            await repositories.diagnostics.save_checkpoint(
+                owner_user_id=owner_user_id,
+                checkpoint_record_id=f"checkpoint-owner-{sequence}",
+                task_id=diagnostic_id,
+                thread_id=f"aiops:{diagnostic_id}",
+                checkpoint_ns=phase,
+                checkpoint_id=f"checkpoint-id-{sequence}",
+                checkpoint_payload={"phase": phase},
+                metadata={"node": phase},
+            )
+        await repositories.diagnostics.create_evidence(
+            owner_user_id=owner_user_id,
+            evidence_id="evidence-owner",
+            task_id=diagnostic_id,
+            step_id="step-owner-1",
+            kind="alert",
+            source="test",
+            summary="Owner-scoped evidence.",
+        )
+        await repositories.diagnostics.add_report(
+            owner_user_id=owner_user_id,
+            report_id="report-owner",
+            task_id=diagnostic_id,
+            title="Owner report",
+            content="Owner-scoped report.",
         )
         denied = await client.post(
             f"/aiops/diagnostics/{diagnostic_id}:stream",
@@ -507,6 +552,7 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
 
     assert create_response.status_code == 202
     assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "AUTH_FORBIDDEN"
     assert stream.status_code == 200
     assert stream.headers["content-type"].startswith("text/event-stream")
     assert "event: task.status" in stream.text
@@ -515,7 +561,27 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
     assert [item["id"] for item in history.json()["data"]["items"]] == [diagnostic_id]
     assert owner_chain.status_code == 200
     assert owner_chain.json()["data"]["task"]["id"] == diagnostic_id
+    assert [item["phase"] for item in owner_chain.json()["data"]["steps"]] == list(phases)
+    assert [
+        item["checkpointNamespace"] for item in owner_chain.json()["data"]["checkpoints"]
+    ] == list(phases)
     assert denied_chain.status_code == 403
+    assert denied_chain.json()["error"]["code"] == "AUTH_FORBIDDEN"
+    other_user_id = other["user"]["id"]
+    with pytest.raises(TenantScopeError):
+        await repositories.diagnostics.list_steps(
+            owner_user_id=other_user_id, task_id=diagnostic_id
+        )
+    assert await repositories.diagnostics.list_checkpoints(
+        owner_user_id=other_user_id, task_id=diagnostic_id
+    ) == []
+    with pytest.raises(TenantScopeError):
+        await repositories.diagnostics.list_evidence(
+            owner_user_id=other_user_id, task_id=diagnostic_id
+        )
+    assert await repositories.diagnostics.list_reports(
+        owner_user_id=other_user_id, task_id=diagnostic_id
+    ) == []
 
 
 @pytest.mark.asyncio
