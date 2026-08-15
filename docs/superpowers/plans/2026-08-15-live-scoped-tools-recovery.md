@@ -38,7 +38,7 @@
 - Extends: `AiopsDiagnosticService.__init__(..., trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None)`.
 - Consumes: `LiveEvidenceContext.cls_scope` in `ApplicationLiveDiagnosticAdapter`.
 
-- [ ] **Step 1: Write failing tests for one canonical CLS argument builder**
+- [x] **Step 1: Write failing tests for one canonical CLS argument builder**
 
 Add a test that constructs a `LiveClsScope` and asserts the builder returns exact Region, TopicId,
 From, To, a Query containing the quoted run/scenario/incident terms, and bounded Limit 20. Add
@@ -59,7 +59,7 @@ assert arguments == {
 }
 ```
 
-- [ ] **Step 2: Run the builder tests and observe RED**
+- [x] **Step 2: Run the builder tests and observe RED**
 
 Run:
 
@@ -70,16 +70,16 @@ $env:PYTHONPATH=(Resolve-Path 'src').Path
 
 Expected: collection or import failure because `build_cls_search_arguments` does not exist.
 
-- [ ] **Step 3: Implement the canonical builder and reuse it in readiness polling**
+- [x] **Step 3: Implement the canonical builder and reuse it in readiness polling**
 
 Move the duplicated `SearchLog` mapping in `McpClsSearcher.search` behind the new function. Validate
 `1 <= limit <= 100` in the builder and keep all existing parsing and polling behavior unchanged.
 
-- [ ] **Step 4: Run the builder tests and observe GREEN**
+- [x] **Step 4: Run the builder tests and observe GREEN**
 
 Run the Step 2 command. Expected: all `test_live_cls_evidence.py` tests pass.
 
-- [ ] **Step 5: Write failing tests for trusted plan binding**
+- [x] **Step 5: Write failing tests for trusted plan binding**
 
 Test the public pure helper with a model/SOP plan containing invalid `SearchLog` arguments. Assert
 the effective plan uses the trusted mapping while preserving `id`, `tool`, `purpose`, and
@@ -95,7 +95,7 @@ assert model_plan[0]["arguments"] == {"Query": "*"}
 Add a service-level test in which the chat model returns an SOP/model `SearchLog` step with invalid
 scope and assert `_create_plan` returns a contract-valid effective step rather than generic failure.
 
-- [ ] **Step 6: Run the trusted binding tests and observe RED**
+- [x] **Step 6: Run the trusted binding tests and observe RED**
 
 Run:
 
@@ -105,14 +105,14 @@ Run:
 
 Expected: import/signature/assertion failures because trusted binding is absent.
 
-- [ ] **Step 7: Implement immutable trusted binding in the AIOps planner**
+- [x] **Step 7: Implement immutable trusted binding in the AIOps planner**
 
 Add the pure copy-on-write helper. Store a defensive copy of the optional trusted mapping in
 `AiopsDiagnosticService`. Apply binding to both the generic fallback and parsed model plan before
 `plan_matches_tool_contracts`. Preserve the existing wildcard generic step only when no trusted
 mapping is supplied, so non-Live diagnostics retain current behavior.
 
-- [ ] **Step 8: Inject trusted SearchLog scope from the Live adapter**
+- [x] **Step 8: Inject trusted SearchLog scope from the Live adapter**
 
 When `evidence_context.cls_scope` exists, pass:
 
@@ -123,7 +123,7 @@ trusted_tool_arguments={"SearchLog": build_cls_search_arguments(scope)}
 When the source is local, pass no trusted mapping. Do not put root-cause labels or observation facts
 in the trusted arguments.
 
-- [ ] **Step 9: Run Task 1 tests and commit**
+- [x] **Step 9: Run Task 1 tests and commit**
 
 Run:
 
@@ -151,7 +151,7 @@ git commit -m "fix: bind trusted cls scope in live plans"
 - Extends: `NginxTimeoutEvidenceMcpClient.call_tool()` with schema-equivalent runtime validation and a bounded acknowledgement.
 - Consumes: the existing `NginxProposalRecoveryService` audit contract without changing its policy.
 
-- [ ] **Step 1: Write failing discovery and execution tests**
+- [x] **Step 1: Write failing discovery and execution tests**
 
 Change the toolset assertion to include `ProposeNginxTimeoutMitigation`. Assert the definition
 requires target, risk, rollback, verificationSteps, and humanApprovalRequired; forbids additional
@@ -161,13 +161,13 @@ Call the tool with a complete proposal and assert the response contains only a s
 evidence ID, `accepted: true`, and `humanApprovalRequired: true`. Assert no fixture file timestamp or
 driver state changes.
 
-- [ ] **Step 2: Write failing rejection tests**
+- [x] **Step 2: Write failing rejection tests**
 
 Parametrize missing/empty risk, rollback, fewer than two verification steps, false approval, wrong
 target type, and extra fields. Each case must raise `McpClientError`; read-only tools must continue
 to reject non-empty arguments.
 
-- [ ] **Step 3: Run Nginx contract tests and observe RED**
+- [x] **Step 3: Run Nginx contract tests and observe RED**
 
 Run:
 
@@ -177,14 +177,14 @@ Run:
 
 Expected: discovery and proposal execution assertions fail because the tool is absent.
 
-- [ ] **Step 4: Implement the side-effect-free proposal tool**
+- [x] **Step 4: Implement the side-effect-free proposal tool**
 
 Add a dedicated JSON Schema and a private argument validator that uses the same semantic rules as
 `NginxProposalRecoveryService`: non-empty text, at least two non-empty verification steps, exact
 human approval, and no additional fields. Return a bounded acknowledgement without touching the
 driver, filesystem, HTTP endpoints, Docker, or processes.
 
-- [ ] **Step 5: Run Nginx unit and Docker contract tests and commit**
+- [x] **Step 5: Run Nginx unit and Docker contract tests and commit**
 
 Run offline unit tests first:
 
@@ -213,7 +213,7 @@ git commit -m "feat: add nginx proposal only live tool"
 - Extends: `LiveBenchmarkError(category: str, *, stage: str | None = None, authorization_code: str | None = None)`.
 - Extends safe result allowlist with `failureStage` and `authorizationCode`.
 
-- [ ] **Step 1: Write failing runner metadata tests**
+- [x] **Step 1: Write failing runner metadata tests**
 
 Extend the recovery-oracle mismatch test to assert:
 
@@ -225,7 +225,7 @@ assert captured.value.authorization_code == "approval_required"
 Add one diagnostic exception test and one cleanup failure test asserting `diagnose` and `cleanup`
 stages respectively. Existing categories and exception chaining must remain unchanged.
 
-- [ ] **Step 2: Run runner tests and observe RED**
+- [x] **Step 2: Run runner tests and observe RED**
 
 Run:
 
@@ -235,20 +235,20 @@ Run:
 
 Expected: missing attributes or constructor keyword failures.
 
-- [ ] **Step 3: Implement bounded error metadata**
+- [x] **Step 3: Implement bounded error metadata**
 
 Add the two optional fields to `LiveBenchmarkError`. Pass explicit stages at runner boundaries and
 attach `recovery.authorization_code` to `recovery_denied`. Cleanup errors must replace earlier stage
 metadata only when cleanup itself fails, preserving the existing hard-failure behavior.
 
-- [ ] **Step 4: Write failing safe-report tests**
+- [x] **Step 4: Write failing safe-report tests**
 
 Extend `test_safe_json_output_drops_sensitive_and_oracle_fields` with valid `failureStage` and
 `authorizationCode` plus disallowed raw error/model/tool fields. Add a CLI failure-path test that
 raises a classified error and asserts the JSON result contains only the two safe metadata fields in
 addition to the existing category, validity, and evidence source.
 
-- [ ] **Step 5: Run CLI tests and observe RED**
+- [x] **Step 5: Run CLI tests and observe RED**
 
 Run:
 
@@ -258,13 +258,13 @@ Run:
 
 Expected: the new fields are missing from the safe output.
 
-- [ ] **Step 6: Add the fields to CLI serialization**
+- [x] **Step 6: Add the fields to CLI serialization**
 
 Allowlist `failureStage` and `authorizationCode`, then populate them from the caught
 `LiveBenchmarkError`. Do not serialize `str(exc)`, causes, tool arguments, raw model output, or
 resource identifiers.
 
-- [ ] **Step 7: Run Task 3 tests and commit**
+- [x] **Step 7: Run Task 3 tests and commit**
 
 Run:
 
@@ -291,7 +291,7 @@ git commit -m "feat: report live recovery failure stage"
 - Consumes all Task 1-3 interfaces.
 - Produces offline verification evidence and, only after offline success, a decision on paid Live reruns.
 
-- [ ] **Step 1: Run focused Live regression**
+- [x] **Step 1: Run focused Live regression**
 
 ```powershell
 & $env:SHARED_BACKEND_PYTHON -m pytest tests/test_live_diagnostic_adapter.py tests/test_live_cls_evidence.py tests/test_live_evidence_client.py tests/test_live_nginx_timeout_contracts.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py -q
@@ -299,7 +299,7 @@ git commit -m "feat: report live recovery failure stage"
 
 Expected: pass with no skipped selected tests.
 
-- [ ] **Step 2: Run adjacent AIOps regression**
+- [x] **Step 2: Run adjacent AIOps regression**
 
 ```powershell
 & $env:SHARED_BACKEND_PYTHON -m pytest tests/test_aiops_diagnostics.py tests/test_evaluation_artifacts.py -q
@@ -307,7 +307,7 @@ Expected: pass with no skipped selected tests.
 
 Expected: pass.
 
-- [ ] **Step 3: Run Ruff and strict Pyright for modified files**
+- [x] **Step 3: Run Ruff and strict Pyright for modified files**
 
 ```powershell
 & $env:SHARED_BACKEND_PYTHON -m ruff check src/super_ai/aiops/diagnostics.py src/super_ai/evaluation/live/cls_evidence.py src/super_ai/evaluation/live/diagnostics.py src/super_ai/evaluation/live/nginx_timeout.py src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py tests/test_live_diagnostic_adapter.py tests/test_live_cls_evidence.py tests/test_live_nginx_timeout_contracts.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py
@@ -316,7 +316,7 @@ Expected: pass.
 
 Expected: both commands exit 0.
 
-- [ ] **Step 4: Run the ordinary offline backend suite**
+- [x] **Step 4: Run the ordinary offline backend suite**
 
 ```powershell
 & $env:SHARED_BACKEND_PYTHON -m pytest -q
@@ -324,7 +324,7 @@ Expected: both commands exit 0.
 
 Expected: exit 0; configured live markers remain excluded by ordinary CI policy.
 
-- [ ] **Step 5: Inspect diff and commit any verification-only correction**
+- [x] **Step 5: Inspect diff and commit any verification-only correction**
 
 ```powershell
 git diff --check
@@ -334,7 +334,7 @@ git status --short
 If no correction was needed, create no empty commit. If a focused correction was required, rerun the
 failed gate and commit only the already-scoped files with `fix: harden scoped live recovery`.
 
-- [ ] **Step 6: Ask before consuming external model/CLS quota**
+- [x] **Step 6: Ask before consuming external model/CLS quota**
 
 Do not automatically rerun the three paid LLM + CLS scenarios. Present offline evidence and request
 explicit approval for sequential deadlock, Redis, and Nginx acceptance. If approved, use new run IDs,
