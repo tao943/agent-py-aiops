@@ -505,8 +505,18 @@ $EvalKnowledgeBase = $env:AGENTPY_EVAL_KNOWLEDGE_BASE_ID
 if ([string]::IsNullOrWhiteSpace($EvalOwner) -or [string]::IsNullOrWhiteSpace($EvalKnowledgeBase)) {
     throw 'Set the existing test owner and indexed 30-card knowledge-base IDs in the AGENTPY_EVAL_OWNER_USER_ID and AGENTPY_EVAL_KNOWLEDGE_BASE_ID environment variables.'
 }
-& .\.venv\Scripts\python.exe scripts/run_snapshot_benchmark.py --scenario APY-013 --suite-version evidence-v2 --runs 1 --adapter application --config config/user.project.json --rag-mode on --owner-user-id $EvalOwner --knowledge-base-id $EvalKnowledgeBase --output var/benchmarks/APY-013-tool-contract-real.json
+$env:PYTHONPATH = (Resolve-Path 'src').Path
+try {
+    & .\.venv\Scripts\python.exe scripts/run_snapshot_benchmark.py --scenario APY-013 --suite-version evidence-v2 --runs 1 --adapter application --config config/project.json --rag-mode on --owner-user-id $EvalOwner --knowledge-base-id $EvalKnowledgeBase --output var/benchmarks/APY-013-tool-contract-real.json
+} finally {
+    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+}
 ```
+
+When a shared virtual environment points its editable install at another checkout, `PYTHONPATH`
+is mandatory here: verify `super_ai.aiops.diagnostics.__file__` resolves inside the active worktree
+before spending model quota. Pass the base `project.json`; its loader automatically merges the
+ignored sibling `user.project.json` containing private overrides.
 
 Expected: existing score threshold yields `VALID_PASS`, there are successful Snapshot observations,
 and the report contains neither `missing_root_cause_decision` nor argument-contract failures. If it

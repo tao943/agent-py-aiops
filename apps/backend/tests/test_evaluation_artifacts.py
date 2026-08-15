@@ -14,6 +14,33 @@ from super_ai.memory.repositories import (
 
 NOW = datetime(2026, 8, 14, tzinfo=timezone.utc)
 
+SNAPSHOT_READ_TOOLS = (
+    "GetDatabaseMetrics",
+    "GetDeploymentChanges",
+    "GetGatewayMetrics",
+    "GetRedisConnectionMetrics",
+    "GetServiceMetrics",
+    "InspectClientRetryPolicy",
+    "InspectContainer",
+    "InspectDatabasePool",
+    "InspectGatewayErrors",
+    "InspectGatewayRequestTimeline",
+    "InspectHostLimits",
+    "InspectHttpAttempts",
+    "InspectNginx",
+    "InspectPostgres",
+    "InspectPostgresErrors",
+    "InspectPostgresWaitGraph",
+    "InspectRateLimitTimeline",
+    "InspectRedis",
+    "InspectRedisClientPool",
+    "InspectRedisServer",
+    "InspectTrafficAndDependencyHealth",
+    "InspectTransactionResourceOrder",
+    "ListRedisClients",
+    "ProbeUpstreamHealth",
+)
+
 
 def _benchmark_task() -> DiagnosticTaskRecord:
     return DiagnosticTaskRecord(
@@ -43,6 +70,29 @@ def _step(sequence: int, phase: str, payload: dict[str, object]) -> DiagnosticSt
         payload=payload,
         created_at=NOW,
     )
+
+
+@pytest.mark.parametrize("tool_name", SNAPSHOT_READ_TOOLS)
+def test_all_snapshot_evidence_tools_are_classified_read_only(tool_name: str) -> None:
+    tool_call = AgentToolCallAuditRecord(
+        id=f"call-{tool_name}",
+        owner_user_id="eval-user",
+        chat_session_id=None,
+        diagnostic_task_id="task-v2",
+        tool_name=tool_name,
+        status="completed",
+        arguments={},
+        result_summary="bounded snapshot observation",
+        error_message=None,
+        started_at=NOW,
+        completed_at=NOW,
+        duration_ms=1,
+        created_at=NOW,
+    )
+
+    artifact = build_run_artifact(_benchmark_task(), (), (), (tool_call,), ())
+
+    assert artifact.tool_calls[0].risk_tier == "L0"
 
 
 def _decision_payload() -> dict[str, object]:
