@@ -312,6 +312,69 @@ def test_root_cause_decision_requires_available_evidence_ids() -> None:
         )
 
 
+def test_root_cause_decision_accepts_string_causal_chain_as_one_item() -> None:
+    decision = parse_root_cause_decision(
+        json.dumps(
+            {
+                "component": "order-service",
+                "mechanism": "opposite_order_transaction_deadlock",
+                "trigger": "concurrent updates",
+                "causalChain": (
+                    "Concurrent transactions acquired resources in reverse order."
+                ),
+                "evidenceIds": ["ev-deadlock", "ev-cycle"],
+                "confidence": 1.0,
+            }
+        ),
+        available_evidence_ids={"ev-deadlock", "ev-cycle"},
+    )
+
+    assert decision.causal_chain == (
+        "Concurrent transactions acquired resources in reverse order.",
+    )
+
+
+@pytest.mark.parametrize(
+    "causal_chain",
+    ("", "   ", 42, {"step": "invalid"}, ["valid", 42]),
+)
+def test_root_cause_decision_rejects_invalid_causal_chain_shapes(
+    causal_chain: object,
+) -> None:
+    with pytest.raises(ValueError, match="causalChain"):
+        parse_root_cause_decision(
+            json.dumps(
+                {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                    "trigger": "concurrent updates",
+                    "causalChain": causal_chain,
+                    "evidenceIds": ["ev-deadlock"],
+                    "confidence": 0.9,
+                }
+            ),
+            available_evidence_ids={"ev-deadlock"},
+        )
+
+
+def test_root_cause_decision_preserves_list_causal_chain() -> None:
+    decision = parse_root_cause_decision(
+        json.dumps(
+            {
+                "component": "order-service",
+                "mechanism": "opposite_order_transaction_deadlock",
+                "trigger": "concurrent updates",
+                "causalChain": ["resources acquired", "wait cycle detected"],
+                "evidenceIds": ["ev-deadlock"],
+                "confidence": 0.9,
+            }
+        ),
+        available_evidence_ids={"ev-deadlock"},
+    )
+
+    assert decision.causal_chain == ("resources acquired", "wait cycle detected")
+
+
 def test_root_cause_decision_normalizes_only_declared_public_labels() -> None:
     decision = RootCauseDecision(
         component="postgres",

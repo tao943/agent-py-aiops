@@ -223,7 +223,7 @@ def parse_root_cause_decision(
         component=_required_str(payload, "component"),
         mechanism=_required_str(payload, "mechanism"),
         trigger=_required_str(payload, "trigger"),
-        causal_chain=_string_tuple(payload, "causalChain"),
+        causal_chain=_string_sequence_or_singleton(payload, "causalChain"),
         evidence_ids=evidence_ids,
         confidence=normalized_confidence,
     )
@@ -417,6 +417,18 @@ def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
     if not all(isinstance(value, str) and value.strip() for value in values):
         raise ValueError(f"Model field '{key}' must contain non-empty strings.")
     return tuple(cast(str, value).strip() for value in values)
+
+
+def _string_sequence_or_singleton(
+    payload: Mapping[str, object],
+    key: str,
+) -> tuple[str, ...]:
+    value = payload.get(key)
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError(f"Model field '{key}' must contain non-empty strings.")
+        return (value.strip(),)
+    return _string_tuple(payload, key)
 
 
 def _bounded_strings(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
