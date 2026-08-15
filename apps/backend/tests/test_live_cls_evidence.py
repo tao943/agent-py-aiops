@@ -11,6 +11,7 @@ import pytest
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     McpClsSearcher,
+    build_cls_search_arguments,
     build_live_cls_records,
 )
 from super_ai.evaluation.live.domain import (
@@ -30,6 +31,46 @@ OBSERVATION = LiveFaultObservation(
     (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
 )
 NOW = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
+
+
+def test_cls_search_arguments_are_derived_from_the_exact_live_scope() -> None:
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_700_000_000_000,
+        to_ms=1_700_000_090_000,
+        run_id="run-1",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        incident_id="APY-LIVE-PG-LOCK-001-run-1",
+    )
+
+    assert build_cls_search_arguments(scope) == {
+        "Region": "ap-guangzhou",
+        "TopicId": "topic-live",
+        "From": 1_700_000_000_000,
+        "To": 1_700_000_090_000,
+        "Query": (
+            'run_id:"run-1" AND scenario_id:"APY-LIVE-PG-LOCK-001" '
+            'AND incident_id:"APY-LIVE-PG-LOCK-001-run-1"'
+        ),
+        "Limit": 20,
+    }
+
+
+@pytest.mark.parametrize("limit", (0, 101))
+def test_cls_search_arguments_reject_an_unbounded_limit(limit: int) -> None:
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_700_000_000_000,
+        to_ms=1_700_000_090_000,
+        run_id="run-1",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        incident_id="APY-LIVE-PG-LOCK-001-run-1",
+    )
+
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        build_cls_search_arguments(scope, limit=limit)
 
 
 class RecordingUploader:

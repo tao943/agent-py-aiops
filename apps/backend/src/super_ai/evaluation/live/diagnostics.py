@@ -16,6 +16,7 @@ from super_ai.evaluation.artifacts import (
     RunArtifact,
     build_run_artifact,
 )
+from super_ai.evaluation.live.cls_evidence import build_cls_search_arguments
 from super_ai.evaluation.live.domain import (
     LiveEvidenceContext,
     LiveFaultObservation,
@@ -337,6 +338,11 @@ class ApplicationLiveDiagnosticAdapter:
             ),
             cls_region=scope.region if scope is not None else "docker-live",
             cls_topic_id=scope.topic_id if scope is not None else "local-postgres",
+            trusted_tool_arguments=(
+                {"SearchLog": build_cls_search_arguments(scope)}
+                if scope is not None
+                else None
+            ),
         )
         async for _ in service.stream(
             task=task,

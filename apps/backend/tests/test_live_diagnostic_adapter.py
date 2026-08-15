@@ -9,6 +9,8 @@ import pytest
 
 from super_ai.aiops import RootCauseDecision
 from super_ai.aiops.diagnostics import (
+    AiopsDiagnosticService,
+    bind_trusted_tool_arguments,
     build_generic_live_plan,
     build_grounded_fallback_decision,
     plan_matches_tool_contracts,
@@ -29,7 +31,7 @@ from super_ai.evaluation.live.domain import (
 )
 from super_ai.evaluation.live.postgres_deadlock import PostgresDeadlockEvidenceMcpClient
 from super_ai.evaluation.live.scenarios import load_live_scenario
-from super_ai.mcp_client import McpClientError
+from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
@@ -144,6 +146,122 @@ def test_generic_fallback_uses_all_live_evidence_tools() -> None:
         "postgres_lock_blocking",
     ]
     assert plan[2]["testsHypotheses"] == ["postgres_lock_blocking"]
+
+
+def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:
+    model_plan: list[dict[str, object]] = [
+        {
+            "id": "search-current-incident",
+            "tool": "SearchLog",
+            "arguments": {"Query": "*"},
+            "purpose": "Correlate request failures with the component evidence.",
+            "testsHypotheses": ["postgres_lock_blocking"],
+        },
+        {
+            "id": "inspect-locks",
+            "tool": "InspectPostgresLockGraph",
+            "arguments": {"detect_deadlocks": True},
+            "purpose": "Inspect blocking edges.",
+            "testsHypotheses": ["postgres_lock_blocking"],
+        },
+    ]
+    trusted = {
+        "Region": "ap-guangzhou",
+        "TopicId": "topic-live",
+        "From": 100,
+        "To": 200,
+        "Query": (
+            'run_id:"run-1" AND scenario_id:"APY-LIVE-PG-LOCK-001" '
+            'AND incident_id:"incident-1"'
+        ),
+        "Limit": 20,
+    }
+
+    bound = bind_trusted_tool_arguments(model_plan, {"SearchLog": trusted})
+
+    assert bound[0] == {
+        **model_plan[0],
+        "arguments": trusted,
+    }
+    assert bound[1] == model_plan[1]
+    assert model_plan[0]["arguments"] == {"Query": "*"}
+
+
+@pytest.mark.asyncio
+async def test_model_search_plan_is_bound_before_contract_validation() -> None:
+    class StaticChatModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "search-current-incident",
+                            "tool": "SearchLog",
+                            "arguments": {"Query": "*"},
+                            "purpose": "Correlate current incident logs.",
+                            "testsHypotheses": ["postgres_lock_blocking"],
+                        }
+                    ]
+                }
+            )
+
+    class StaticLlmProvider:
+        def create_chat_model(self) -> StaticChatModel:
+            return StaticChatModel()
+
+    trusted = {
+        "Region": "ap-guangzhou",
+        "TopicId": "topic-live",
+        "From": 100,
+        "To": 200,
+        "Query": (
+            'run_id:"run-1" AND scenario_id:"APY-LIVE-PG-LOCK-001" '
+            'AND incident_id:"incident-1"'
+        ),
+        "Limit": 20,
+    }
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, StaticLlmProvider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        trusted_tool_arguments={"SearchLog": trusted},
+    )
+    definitions = (
+        McpToolDefinition(
+            "SearchLog",
+            "Search scoped CLS logs.",
+            {
+                "type": "object",
+                "properties": {
+                    "Region": {"type": "string"},
+                    "TopicId": {"type": "string"},
+                    "From": {"type": "integer"},
+                    "To": {"type": "integer"},
+                    "Query": {"type": "string"},
+                    "Limit": {"type": "integer"},
+                },
+                "required": ["Region", "TopicId", "From", "To", "Query", "Limit"],
+                "additionalProperties": False,
+            },
+        ),
+    )
+
+    plan, origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate the current incident.",
+        alert={},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=definitions,
+        known_hypotheses=("postgres_lock_blocking",),
+    )
+
+    assert origin == "model"
+    assert plan[0]["arguments"] == trusted
+    assert plan[0]["purpose"] == "Correlate current incident logs."
 
 
 @pytest.mark.asyncio
