@@ -215,13 +215,13 @@ class NginxTimeoutEvidenceMcpClient:
         self._observation = observation
 
     async def discover_tools(self) -> Sequence[McpToolDefinition]:
-        schema: dict[str, object] = {
+        read_schema: dict[str, object] = {
             "type": "object",
             "properties": {},
             "additionalProperties": False,
         }
-        return tuple(
-            McpToolDefinition(name, description, schema, "nginx-timeout-live")
+        read_tools = tuple(
+            McpToolDefinition(name, description, read_schema, "nginx-timeout-live")
             for name, description in (
                 (
                     "InspectNginxRequestTimeline",
@@ -237,8 +237,46 @@ class NginxTimeoutEvidenceMcpClient:
                 ),
             )
         )
+        proposal_schema: dict[str, object] = {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "risk": {"type": "string", "minLength": 1},
+                "rollback": {"type": "string", "minLength": 1},
+                "verificationSteps": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 2,
+                },
+                "humanApprovalRequired": {"type": "boolean", "const": True},
+            },
+            "required": [
+                "target",
+                "risk",
+                "rollback",
+                "verificationSteps",
+                "humanApprovalRequired",
+            ],
+            "additionalProperties": False,
+        }
+        return read_tools + (
+            McpToolDefinition(
+                "ProposeNginxTimeoutMitigation",
+                "Propose a reviewed timeout mitigation without executing any write action.",
+                proposal_schema,
+                "nginx-timeout-live",
+            ),
+        )
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        if name == "ProposeNginxTimeoutMitigation":
+            if not _valid_proposal_arguments(arguments):
+                raise McpClientError("Nginx Live proposal arguments are invalid.")
+            return {
+                "benchmarkEvidenceId": "nginx-mitigation-proposal",
+                "accepted": True,
+                "humanApprovalRequired": True,
+            }
         if arguments:
             raise McpClientError("Nginx Live evidence arguments are invalid.")
         if name == "InspectNginxRequestTimeline":
@@ -299,3 +337,21 @@ def _valid_verification_steps(value: object) -> bool:
         return False
     steps = cast(list[object], value)
     return len(steps) >= 2 and all(_nonempty_text(item) for item in steps)
+
+
+def _valid_proposal_arguments(arguments: Mapping[str, object]) -> bool:
+    return (
+        set(arguments)
+        == {
+            "target",
+            "risk",
+            "rollback",
+            "verificationSteps",
+            "humanApprovalRequired",
+        }
+        and _nonempty_text(arguments.get("target"))
+        and _nonempty_text(arguments.get("risk"))
+        and _nonempty_text(arguments.get("rollback"))
+        and _valid_verification_steps(arguments.get("verificationSteps"))
+        and arguments.get("humanApprovalRequired") is True
+    )

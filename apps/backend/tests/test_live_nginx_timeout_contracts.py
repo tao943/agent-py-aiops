@@ -11,6 +11,7 @@ from super_ai.evaluation.live.nginx_timeout import (
     NginxTimeoutLiveConfig,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
+from super_ai.mcp_client import McpClientError
 
 
 def _observation() -> LiveFaultObservation:
@@ -108,14 +109,88 @@ async def test_write_like_tool_name_denies_the_proposal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nginx_component_client_exposes_only_read_tools() -> None:
+async def test_nginx_component_client_exposes_read_and_proposal_only_tools() -> None:
     client = NginxTimeoutEvidenceMcpClient(_observation())
 
-    assert {item.name for item in await client.discover_tools()} == {
+    definitions = {item.name: item for item in await client.discover_tools()}
+
+    assert set(definitions) == {
         "InspectNginxRequestTimeline",
         "ProbeLiveEvalUpstream",
         "ReadNginxTimeoutSummary",
+        "ProposeNginxTimeoutMitigation",
     }
+    proposal = definitions["ProposeNginxTimeoutMitigation"].input_schema
+    assert proposal["required"] == [
+        "target",
+        "risk",
+        "rollback",
+        "verificationSteps",
+        "humanApprovalRequired",
+    ]
+    assert proposal["additionalProperties"] is False
+    assert proposal["properties"]["humanApprovalRequired"] == {
+        "type": "boolean",
+        "const": True,
+    }
+
+
+def _proposal_arguments() -> dict[str, object]:
+    return {
+        "target": "live-eval-upstream",
+        "risk": "A larger deadline can retain gateway resources longer.",
+        "rollback": "Restore the reviewed timeout value.",
+        "verificationSteps": [
+            "repeat the slow request",
+            "verify upstream health",
+        ],
+        "humanApprovalRequired": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_nginx_proposal_tool_returns_a_bounded_acknowledgement() -> None:
+    client = NginxTimeoutEvidenceMcpClient(_observation())
+
+    result = await client.call_tool(
+        "ProposeNginxTimeoutMitigation",
+        _proposal_arguments(),
+    )
+
+    assert result == {
+        "benchmarkEvidenceId": "nginx-mitigation-proposal",
+        "accepted": True,
+        "humanApprovalRequired": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {**_proposal_arguments(), "risk": ""},
+        {**_proposal_arguments(), "rollback": "  "},
+        {**_proposal_arguments(), "verificationSteps": ["one step"]},
+        {**_proposal_arguments(), "humanApprovalRequired": False},
+        {**_proposal_arguments(), "target": 42},
+        {**_proposal_arguments(), "reload": True},
+    ),
+)
+async def test_nginx_proposal_tool_rejects_incomplete_or_extra_arguments(
+    arguments: dict[str, object],
+) -> None:
+    client = NginxTimeoutEvidenceMcpClient(_observation())
+
+    with pytest.raises(McpClientError, match="proposal arguments are invalid"):
+        await client.call_tool("ProposeNginxTimeoutMitigation", arguments)
+
+
+@pytest.mark.asyncio
+async def test_nginx_read_tools_still_reject_proposal_arguments() -> None:
+    client = NginxTimeoutEvidenceMcpClient(_observation())
+
+    with pytest.raises(McpClientError, match="evidence arguments are invalid"):
+        await client.call_tool("InspectNginxRequestTimeline", _proposal_arguments())
 
 
 def test_nginx_live_config_refuses_non_fixture_ports() -> None:
