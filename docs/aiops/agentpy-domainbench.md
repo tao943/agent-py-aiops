@@ -74,6 +74,44 @@ PostgreSQL repository 和本地项目配置。它会调用所配置的真实 Cha
 消耗模型额度；运行前需要 PostgreSQL 已启动、Alembic 已升级，并在 Git 忽略的
 本地配置中提供有效模型配置。
 
+### 证据驱动诊断工作流
+
+`evidence-driven-v2` 不再按固定步骤直接生成结论。每轮工具观测先形成结构化
+Evidence，再更新公开候选假设，判断当前证据是否足以区分根因；证据缺口明确且预算
+仍可用时才进入 gap-targeted replanner。
+
+```mermaid
+flowchart TD
+    P["Planner"] --> X["Evidence Executor"]
+    X --> E["Evidence Evaluator"]
+    E --> S{"Sufficiency Gate"}
+    S -->|"insufficient"| R["Replanner"]
+    R --> X
+    S -->|"sufficient or bounded stop"| D["Root Cause Decision"]
+    D --> V{"Decision Validator"}
+    V -->|"invalid and budget remains"| R
+    V -->|"valid"| RP["Recovery Planner"]
+    V -->|"invalid and cannot replan"| RP
+    RP --> G["Policy Gate"]
+    G --> O["Report and public artifact"]
+    O -.-> SC["External deterministic scorer"]
+```
+
+初始计划最多 4 步；所有已持久化的 Executor 尝试合计最多 6 次，重复步骤、参数校验
+失败和工具失败同样消耗预算；最多允许 2 次 replan。Decision Validator 同时检查
+结构合法性与证据支持。v2 运行缺少 `decision_validation=valid` 时，Artifact 不导出
+候选根因，避免中断或无效结论进入评分。
+
+Recovery Planner 只生成结构化建议。`proposal_only` 工具必须由本次请求显式加入
+白名单、符合发现到的 JSON Schema，并且要求人工审批；Policy Gate 的 `allowed` 只表示
+“无副作用提案已记录并完成审计”，`executionPermitted` 始终为 `false`，不代表配置写入、
+reload、restart 或其他基础设施变更获批。PostgreSQL 与 Redis 的真实恢复仍由 Agent 图
+之外的确定性 Live Recovery Policy 重新校验和执行。
+
+确定性 scorer 位于 LangGraph 之外，只读取完成后的结构化 Artifact 与 evaluator 私有
+答案；它不会把 ground truth、评分失败或恢复 oracle 反馈给 Planner、RAG、Prompt、
+Checkpoint 或报告。
+
 ```powershell
 cd apps/backend
 uv run alembic upgrade head

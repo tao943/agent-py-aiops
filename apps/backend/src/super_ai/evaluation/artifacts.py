@@ -145,38 +145,53 @@ def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
 
 
 def _decision_from_steps(steps: Sequence[DiagnosticStepRecord]) -> RootCauseDecision | None:
-    for step in reversed(steps):
-        if step.phase != "decision":
-            continue
-        payload = step.payload.get("rootCauseDecision")
-        if not isinstance(payload, Mapping):
+    decision_index = next(
+        (index for index in range(len(steps) - 1, -1, -1) if steps[index].phase == "decision"),
+        None,
+    )
+    if decision_index is None:
+        return None
+    evidence_driven_v2 = any(
+        step.phase == "planner"
+        and step.payload.get("workflowVersion") == "evidence-driven-v2"
+        for step in steps
+    )
+    if evidence_driven_v2:
+        validations = [
+            step
+            for step in steps[decision_index + 1 :]
+            if step.phase == "decision_validation"
+        ]
+        if not validations or validations[-1].payload.get("status") != "valid":
             return None
-        decision = cast(Mapping[str, object], payload)
-        component = decision.get("component")
-        mechanism = decision.get("mechanism")
-        trigger = decision.get("trigger")
-        causal_chain = decision.get("causalChain")
-        evidence_ids = decision.get("evidenceIds")
-        confidence = decision.get("confidence")
-        causal_chain_items = _string_list(causal_chain)
-        evidence_id_items = _string_list(evidence_ids)
-        if (
-            isinstance(component, str)
-            and isinstance(mechanism, str)
-            and isinstance(trigger, str)
-            and causal_chain_items is not None
-            and evidence_id_items is not None
-            and isinstance(confidence, (int, float))
-            and not isinstance(confidence, bool)
-        ):
-            return RootCauseDecision(
-                component=component,
-                mechanism=mechanism,
-                trigger=trigger,
-                causal_chain=tuple(causal_chain_items),
-                evidence_ids=tuple(evidence_id_items),
-                confidence=float(confidence),
-            )
+
+    payload = steps[decision_index].payload.get("rootCauseDecision")
+    if not isinstance(payload, Mapping):
+        return None
+    decision = cast(Mapping[str, object], payload)
+    component = decision.get("component")
+    mechanism = decision.get("mechanism")
+    trigger = decision.get("trigger")
+    causal_chain_items = _string_list(decision.get("causalChain"))
+    evidence_id_items = _string_list(decision.get("evidenceIds"))
+    confidence = decision.get("confidence")
+    if (
+        isinstance(component, str)
+        and isinstance(mechanism, str)
+        and isinstance(trigger, str)
+        and causal_chain_items is not None
+        and evidence_id_items is not None
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+    ):
+        return RootCauseDecision(
+            component=component,
+            mechanism=mechanism,
+            trigger=trigger,
+            causal_chain=tuple(causal_chain_items),
+            evidence_ids=tuple(evidence_id_items),
+            confidence=float(confidence),
+        )
     return None
 
 
@@ -249,11 +264,7 @@ def _observation_decisions_from_steps(
 
 
 def _plan_step_count(steps: Sequence[DiagnosticStepRecord]) -> int:
-    for step in steps:
-        if step.phase == "planner":
-            plan = step.payload.get("plan")
-            return len(cast(list[object], plan)) if isinstance(plan, list) else 0
-    return 0
+    return sum(1 for step in steps if step.phase == "executor")
 
 
 def _required_task_text(payload: JsonDict, key: str) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from langchain_core.tools import StructuredTool
@@ -46,6 +46,15 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         "benchmarkMode": "live",
         "decisionVocabulary": _decision_vocabulary(scenario),
     }
+
+
+def proposal_tool_policies_for_scenario(
+    scenario: LiveScenario,
+) -> Mapping[str, Literal["proposal_only"]] | None:
+    """Expose the Nginx proposal recorder only for its matching Live scenario."""
+    if scenario.driver != "nginx_timeout":
+        return None
+    return {"ProposeNginxTimeoutMitigation": "proposal_only"}
 
 
 def _decision_vocabulary(scenario: LiveScenario) -> JsonDict:
@@ -343,6 +352,7 @@ class ApplicationLiveDiagnosticAdapter:
                 if scope is not None
                 else None
             ),
+            tool_policies=proposal_tool_policies_for_scenario(scenario),
         )
         async for _ in service.stream(
             task=task,

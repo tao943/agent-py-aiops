@@ -2,12 +2,24 @@
 
 from .cases import DiagnosisCasePersistor
 from .diagnostics import AiopsDiagnosticService
-from .reasoning import HypothesisState, ObservationDecision, RootCauseDecision
+from .reasoning import (
+    EvidenceSufficiencyDecision,
+    HypothesisState,
+    ObservationDecision,
+    RecoveryPlan,
+    RecoveryPolicyDecision,
+    RootCauseDecision,
+    RootCauseValidationDecision,
+)
 
 __all__ = [
     "AiopsDiagnosticService",
     "DiagnosisCasePersistor",
+    "EvidenceSufficiencyDecision",
     "HypothesisState",
     "ObservationDecision",
+    "RecoveryPlan",
+    "RecoveryPolicyDecision",
     "RootCauseDecision",
+    "RootCauseValidationDecision",
 ]

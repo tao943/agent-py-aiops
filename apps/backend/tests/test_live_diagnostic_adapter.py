@@ -21,6 +21,7 @@ from super_ai.evaluation.live.diagnostics import (
     append_live_outcome,
     build_live_diagnostic_input,
     build_live_evidence_client,
+    proposal_tool_policies_for_scenario,
 )
 from super_ai.evaluation.live.domain import (
     LiveCheck,
@@ -34,6 +35,31 @@ from super_ai.evaluation.live.scenarios import load_live_scenario
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
+
+
+def test_only_nginx_live_scenario_enables_the_proposal_policy() -> None:
+    nginx = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-NGINX-TIMEOUT-001")
+    postgres = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+    redis = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-REDIS-MAXCLIENTS-001")
+
+    assert proposal_tool_policies_for_scenario(nginx) == {
+        "ProposeNginxTimeoutMitigation": "proposal_only"
+    }
+    assert proposal_tool_policies_for_scenario(postgres) is None
+    assert proposal_tool_policies_for_scenario(redis) is None
+
+
+def test_diagnostic_service_rejects_unknown_tool_policy_values() -> None:
+    with pytest.raises(ValueError, match="Unsupported tool policy"):
+        AiopsDiagnosticService(
+            repositories=cast(Any, object()),
+            llm_provider=cast(Any, object()),
+            retrieval_tool=cast(Any, object()),
+            mcp_client=cast(Any, object()),
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_policies=cast(Any, {"DangerousTool": "execute"}),
+        )
 
 
 @pytest.mark.asyncio
