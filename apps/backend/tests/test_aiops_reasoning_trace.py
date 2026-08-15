@@ -8,6 +8,7 @@ import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
+    _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _supported_refinement_index,  # pyright: ignore[reportPrivateUsage]
     normalize_tool_plan_steps,
 )
@@ -128,6 +129,146 @@ def test_supported_refinement_ignores_non_supported_candidates() -> None:
         plan_index=0,
         supported_hypotheses={"postgres_deadlock"},
         executed_fingerprints=set(),
+    ) is None
+
+
+def _one_item_deadlock_decision(
+    *,
+    component: str = "order-service",
+    mechanism: str = "opposite_order_transaction_deadlock",
+    evidence_ids: tuple[str, ...] = ("ev-error", "ev-cycle", "ev-order"),
+    causal_chain: tuple[str, ...] = ("One combined narrative.",),
+) -> RootCauseDecision:
+    return RootCauseDecision(
+        component=component,
+        mechanism=mechanism,
+        trigger="Transactions acquired resources in opposite orders.",
+        causal_chain=causal_chain,
+        evidence_ids=evidence_ids,
+        confidence=0.97,
+    )
+
+
+def _repair_deadlock_chain(
+    decision: RootCauseDecision,
+    *,
+    hypothesis_states: list[dict[str, object]] | None = None,
+    observation_decisions: list[dict[str, object]] | None = None,
+) -> RootCauseDecision | None:
+    return _repair_grounded_causal_chain(
+        decision,
+        public_hypotheses=[
+            {
+                "id": "postgres_deadlock",
+                "description": "Concurrent transactions formed a cycle.",
+            },
+            {
+                "id": "postgres_lock_wait",
+                "description": "A long transaction blocks valid work.",
+            },
+        ],
+        hypothesis_states=hypothesis_states
+        or [
+            {
+                "id": "postgres_deadlock",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+            }
+        ],
+        observation_decisions=observation_decisions
+        or [
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-error"],
+                "summary": "PostgreSQL emitted SQLSTATE 40P01.",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-cycle"],
+                "summary": "The wait graph contained a two-session cycle.",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-order"],
+                "summary": "Transactions acquired shared resources in opposite order.",
+            },
+        ],
+        decision_vocabulary={
+            "labelsByHypothesis": {
+                "postgres_deadlock": {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                },
+                "postgres_lock_wait": {
+                    "component": "order-service",
+                    "mechanism": "long_transaction_lock_blocking",
+                },
+            }
+        },
+    )
+
+
+def test_grounded_causal_chain_repair_replaces_only_chain() -> None:
+    original = _one_item_deadlock_decision()
+
+    repaired = _repair_deadlock_chain(original)
+
+    assert repaired is not None
+    assert repaired.causal_chain == (
+        "PostgreSQL emitted SQLSTATE 40P01.",
+        "The wait graph contained a two-session cycle.",
+        "Transactions acquired shared resources in opposite order.",
+    )
+    assert repaired.component == original.component
+    assert repaired.mechanism == original.mechanism
+    assert repaired.trigger == original.trigger
+    assert repaired.evidence_ids == original.evidence_ids
+    assert repaired.confidence == original.confidence
+
+
+def test_grounded_causal_chain_repair_fails_closed_for_unsafe_inputs() -> None:
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(causal_chain=("first", "second"))
+    ) is None
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(component="postgres")
+    ) is None
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(),
+        hypothesis_states=[
+            {
+                "id": "postgres_deadlock",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+            },
+            {
+                "id": "postgres_lock_wait",
+                "status": "supported",
+                "confidence": 0.95,
+                "evidenceIds": ["ev-error", "ev-cycle"],
+            },
+        ],
+    ) is None
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(),
+        observation_decisions=[
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-error"],
+                "summary": "Only one linked summary.",
+            }
+        ],
+    ) is None
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(evidence_ids=("ev-error", "ev-cycle"))
+    ) is None
+    assert _repair_deadlock_chain(
+        _one_item_deadlock_decision(
+            component="postgres",
+            mechanism="deadlock",
+        )
     ) is None
 
 

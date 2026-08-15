@@ -321,6 +321,50 @@ def build_grounded_fallback_decision(
     )
 
 
+def _repair_grounded_causal_chain(
+    decision: RootCauseDecision,
+    *,
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    decision_vocabulary: JsonDict,
+) -> RootCauseDecision | None:
+    gaps = _deterministic_decision_gaps(
+        decision,
+        decision_vocabulary=decision_vocabulary,
+    )
+    if set(gaps) != {"causalChain"}:
+        return None
+    fallback = build_grounded_fallback_decision(
+        public_hypotheses=public_hypotheses,
+        hypothesis_states=hypothesis_states,
+        observation_decisions=observation_decisions,
+        decision_vocabulary=decision_vocabulary,
+    )
+    if (
+        fallback is None
+        or fallback.component != decision.component
+        or fallback.mechanism != decision.mechanism
+        or not set(fallback.evidence_ids).issubset(set(decision.evidence_ids))
+        or not 2 <= len(fallback.causal_chain) <= 6
+    ):
+        return None
+    repaired = RootCauseDecision(
+        component=decision.component,
+        mechanism=decision.mechanism,
+        trigger=decision.trigger,
+        causal_chain=fallback.causal_chain,
+        evidence_ids=decision.evidence_ids,
+        confidence=decision.confidence,
+    )
+    if _deterministic_decision_gaps(
+        repaired,
+        decision_vocabulary=decision_vocabulary,
+    ):
+        return None
+    return repaired
+
+
 class AiopsDiagnosticService:
     """Run a bounded Plan-Execute-Replan workflow for one owned task."""
 
