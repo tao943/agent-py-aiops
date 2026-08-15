@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from super_ai.evaluation.live.cli import build_live_evidence_runtime
-from super_ai.evaluation.live.domain import LiveFaultObservation
+from super_ai.evaluation.live.domain import LiveCheck, LiveFaultObservation
 from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
 
 pytestmark = pytest.mark.live_cls
@@ -35,7 +35,13 @@ async def test_real_cls_upload_and_search_are_run_scoped() -> None:
     context = await preparer.prepare(
         identity=validate_run_id(run_id),
         scenario=load_live_scenario(LIVE_SCENARIO),
-        observation=LiveFaultObservation(101, 102, True, True),
+        observation=LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (
+                LiveCheck("waiter_has_lock_event", True),
+                LiveCheck("blocker_edge_confirmed", True),
+            ),
+        ),
     )
 
     assert context.source == "cls"

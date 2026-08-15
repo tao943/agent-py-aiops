@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,7 @@ class ScenarioOracle:
     forbidden_claims: tuple[str, ...]
     root_cause_semantics: RootCauseSemantics | None = None
     cls_required_evidence: tuple[EvidenceMilestone, ...] = ()
+    recovery_expectation: Literal["executed_recovery", "proposal_only"] | None = None
 
 
 @dataclass(frozen=True, slots=True)

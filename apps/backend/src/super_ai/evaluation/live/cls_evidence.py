@@ -37,6 +37,27 @@ class ClsSearchBoundary(Protocol):
     async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]: ...
 
 
+def build_cls_search_arguments(
+    scope: LiveClsScope,
+    *,
+    limit: int = 20,
+) -> dict[str, object]:
+    """Build the one official MCP query owned by a prepared Live scope."""
+    if not 1 <= limit <= 100:
+        raise ValueError("CLS search limit must be between 1 and 100.")
+    return {
+        "Region": scope.region,
+        "TopicId": scope.topic_id,
+        "From": scope.from_ms,
+        "To": scope.to_ms,
+        "Query": (
+            f'run_id:"{scope.run_id}" AND scenario_id:"{scope.scenario_id}" '
+            f'AND incident_id:"{scope.incident_id}"'
+        ),
+        "Limit": limit,
+    }
+
+
 class McpClsSearcher:
     """Query readiness through the same official MCP boundary used by the Agent."""
 
@@ -49,17 +70,7 @@ class McpClsSearcher:
     async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]:
         output = await self._client.call_tool(
             "SearchLog",
-            {
-                "Region": scope.region,
-                "TopicId": scope.topic_id,
-                "From": scope.from_ms,
-                "To": scope.to_ms,
-                "Query": (
-                    f'run_id:"{scope.run_id}" AND scenario_id:"{scope.scenario_id}" '
-                    f'AND incident_id:"{scope.incident_id}"'
-                ),
-                "Limit": self._limit,
-            },
+            build_cls_search_arguments(scope, limit=self._limit),
         )
         return parse_cls_search_records(output)
 
@@ -72,36 +83,46 @@ def build_live_cls_records(
     now: datetime,
 ) -> tuple[dict[str, str], ...]:
     """Build safe business symptoms without exposing the evaluator-only cause."""
+    templates = {
+        "APY-LIVE-PG-LOCK-001": (
+            "order-service",
+            "postgresql",
+            ("request_received", "database_contention", "alert_fired"),
+        ),
+        "APY-LIVE-PG-DEADLOCK-001": (
+            "order-service",
+            "postgresql",
+            ("request_received", "database_contention", "alert_fired"),
+        ),
+        "APY-LIVE-REDIS-MAXCLIENTS-001": (
+            "cache-client",
+            "live-eval-redis",
+            ("request_received", "connection_rejected", "alert_fired"),
+        ),
+        "APY-LIVE-NGINX-TIMEOUT-001": (
+            "gateway",
+            "live-eval-upstream",
+            ("request_received", "upstream_timeout", "alert_fired"),
+        ),
+    }
+    template = templates.get(scenario_id)
+    if template is None:
+        raise ValueError("CLS Live scenario does not have a safe event template.")
+    service, component, events = template
     timestamp = now.astimezone(timezone.utc).isoformat()
     common = {
         "run_id": run_id,
         "scenario_id": scenario_id,
         "incident_id": incident_id,
-        "service": "order-service",
+        "service": service,
         "environment": "live-eval",
-        "trace_id": f"{run_id}-order-status-update",
-        "component": "orders-api",
+        "trace": f"{run_id}-live-request",
+        "component": component,
         "timestamp": timestamp,
     }
-    return (
-        {
-            **common,
-            "event": "order_update_received",
-            "level": "INFO",
-            "message": "Order status update request was accepted.",
-        },
-        {
-            **common,
-            "event": "order_update_timeout",
-            "level": "ERROR",
-            "message": "Order status update exceeded the bounded database response timeout.",
-        },
-        {
-            **common,
-            "event": "benchmark_alert_emitted",
-            "level": "WARN",
-            "message": "Order update latency alert was emitted for investigation.",
-        },
+    return tuple(
+        {**common, "event": event, "level": level}
+        for event, level in zip(events, ("INFO", "ERROR", "WARN"), strict=True)
     )
 
 
@@ -226,7 +247,7 @@ class LiveClsEvidencePreparer:
         try:
             uploaded_count = await self._uploader.put(
                 records,
-                filename="agentpy-live-postgres.log",
+                filename="agentpy-live-evidence.log",
             )
         except asyncio.CancelledError:
             raise

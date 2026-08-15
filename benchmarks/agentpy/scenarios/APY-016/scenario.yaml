@@ -1,0 +1,20 @@
+id: APY-016
+title: HTTP 429 responses and total request volume are rising together.
+symptom_family: http_rate_limit_amplification
+difficulty: hard
+modes: [snapshot]
+alert:
+  alertname: HttpRateLimitAmplificationHigh
+  service: checkout-client
+  severity: critical
+  summary: HTTP 429 responses and total request volume are rising together.
+hypotheses:
+  - id: client_retry_storm
+    description: Clients are retrying rate-limited requests without effective backoff.
+  - id: expected_rate_limiting
+    description: The limiter is rejecting a stable excess load as configured.
+  - id: malicious_traffic
+    description: Untrusted callers are deliberately generating excess requests.
+  - id: downstream_saturation
+    description: A slow dependency is increasing concurrent work and retries.
+snapshot_file: snapshot/tool_responses.yaml

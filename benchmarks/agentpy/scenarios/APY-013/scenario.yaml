@@ -1,0 +1,18 @@
+id: APY-013
+title: Order transactions are rolling back during concurrent updates.
+symptom_family: postgresql_transaction_failure
+difficulty: hard
+modes: [snapshot]
+alert:
+  alertname: PostgresTransactionRollbackHigh
+  service: order-service
+  severity: critical
+  summary: Order transactions are rolling back during concurrent updates.
+hypotheses:
+  - id: postgres_deadlock
+    description: Concurrent transactions formed a cyclic dependency.
+  - id: postgres_lock_wait
+    description: A long transaction is blocking otherwise valid work.
+  - id: postgres_slow_query
+    description: Expensive statements are exceeding the request deadline.
+snapshot_file: snapshot/tool_responses.yaml

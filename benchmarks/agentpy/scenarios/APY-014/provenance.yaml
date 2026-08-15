@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - Public Redis client and server configuration documentation
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://redis.io/docs/latest/operate/oss_and_stack/management/config/
+  - https://redis.io/docs/latest/commands/client-list/
+license_notes:
+  - Redis documentation license applies to the referenced pages.
+  - Scenario text and frozen observations are original AgentPy material.
+accessed: 2026-08-14
+created: 2026-08-14

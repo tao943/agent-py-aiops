@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
+    LiveCleanupResult,
     LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
@@ -18,10 +19,23 @@ LIVE_ROOT = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "li
 
 
 class RecordingDriver:
-    def __init__(self, *, confirmed: bool = True, fail_at: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        confirmed: bool = True,
+        fail_at: str | None = None,
+        cleanup_passed: bool = True,
+    ) -> None:
         self.events: list[str] = []
         self.fail_at = fail_at
-        self.observation = LiveFaultObservation(101, 102, confirmed, confirmed)
+        self.cleanup_passed = cleanup_passed
+        self.observation = LiveFaultObservation(
+            scenario_id="APY-LIVE-PG-LOCK-001",
+            checks=(
+                LiveCheck("waiter_has_lock_event", confirmed),
+                LiveCheck("blocker_edge_confirmed", confirmed),
+            ),
+        )
 
     async def _step(self, name: str) -> None:
         self.events.append(name)
@@ -44,23 +58,44 @@ class RecordingDriver:
     async def verify(self, identity: object) -> LiveVerification:
         del identity
         await self._step("verify")
-        return LiveVerification(True, True, True, True, True, True)
+        return LiveVerification(
+            checks=(
+                LiveCheck("blocker_gone", True),
+                LiveCheck("waiter_unblocked", True),
+                LiveCheck("lock_graph_clear", True),
+                LiveCheck("probe_succeeded", True),
+                LiveCheck("postgres_healthy", True),
+                LiveCheck("unrelated_sessions_untouched", True),
+            )
+        )
 
-    async def cleanup(self, identity: object) -> None:
+    async def cleanup(self, identity: object) -> LiveCleanupResult:
         del identity
         await self._step("cleanup")
+        return LiveCleanupResult(
+            checks=(LiveCheck("scoped_fixture_removed", self.cleanup_passed),)
+        )
 
 
 class RecordingDiagnostic:
-    def __init__(self, events: list[str], *, cancelled: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        cancelled: bool = False,
+        failed: bool = False,
+    ) -> None:
         self.events = events
         self.cancelled = cancelled
+        self.failed = failed
 
     async def diagnose(self, **values: object) -> object:
         del values
         self.events.append("diagnose")
         if self.cancelled:
             raise asyncio.CancelledError
+        if self.failed:
+            raise RuntimeError("secret-diagnostic-failure")
         return {"decision": "row_lock_blocking"}
 
 
@@ -78,13 +113,25 @@ class RecordingEvidencePreparer:
 
 
 class RecordingRecovery:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        record: LiveRecoveryRecord | None = None,
+    ) -> None:
         self.events = events
+        self.record = record
 
     async def recover(self, **values: object) -> LiveRecoveryRecord:
         del values
         self.events.append("recover")
-        return LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
+        return self.record or LiveRecoveryRecord(
+            action="terminate_postgres_backend",
+            target_ref="synthetic_blocker",
+            expectation="executed_recovery",
+            authorized=True,
+            executed=True,
+            authorization_code="authorized",
+        )
 
 
 class RecordingEvaluator:
@@ -160,6 +207,29 @@ async def test_runner_cleans_up_and_redacts_driver_failure() -> None:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "fault_injection_failed"
+    assert captured.value.stage == "inject"
+    assert "secret" not in str(captured.value)
+    assert driver.events[-1] == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_runner_classifies_a_diagnostic_boundary_without_raw_error() -> None:
+    driver = RecordingDriver()
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events, failed=True),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "diagnostic_failed"
+    assert captured.value.stage == "diagnose"
+    assert captured.value.authorization_code is None
     assert "secret" not in str(captured.value)
     assert driver.events[-1] == "cleanup"
 
@@ -201,13 +271,70 @@ async def test_cleanup_failure_is_a_hard_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_cleanup_result_is_a_hard_failure() -> None:
+    driver = RecordingDriver(cleanup_passed=False)
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "cleanup_failed"
+    assert captured.value.stage == "cleanup"
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_recovery_record_that_disagrees_with_oracle() -> None:
+    driver = RecordingDriver()
+    proposal = LiveRecoveryRecord(
+        action="propose_upstream_recovery",
+        target_ref="live-eval-upstream",
+        expectation="proposal_only",
+        authorized=True,
+        executed=False,
+        authorization_code="approval_required",
+        proposal_checks=(LiveCheck("human_approval_required", True),),
+    )
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events, proposal),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "recovery_denied"
+    assert captured.value.stage == "recover"
+    assert captured.value.authorization_code == "approval_required"
+
+
+@pytest.mark.asyncio
 async def test_failed_post_recovery_verification_does_not_reach_evaluator() -> None:
     driver = RecordingDriver()
 
     async def failed_verify(identity: object) -> LiveVerification:
         del identity
         driver.events.append("verify")
-        return replace(LiveVerification(True, True, True, True, True, True), probe_succeeded=False)
+        return LiveVerification(
+            checks=(
+                LiveCheck("blocker_gone", True),
+                LiveCheck("waiter_unblocked", True),
+                LiveCheck("lock_graph_clear", True),
+                LiveCheck("probe_succeeded", False),
+                LiveCheck("postgres_healthy", True),
+                LiveCheck("unrelated_sessions_untouched", True),
+            )
+        )
 
     driver.verify = failed_verify  # type: ignore[method-assign]
     runner = LiveBenchmarkRunner(

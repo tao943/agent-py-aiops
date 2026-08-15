@@ -132,6 +132,21 @@ def build_generic_live_plan(
     ]
 
 
+def bind_trusted_tool_arguments(
+    plan: Sequence[JsonDict],
+    trusted: Mapping[str, Mapping[str, object]],
+) -> list[JsonDict]:
+    """Copy a plan while binding execution-owned arguments for selected tools."""
+    bound: list[JsonDict] = []
+    for source in plan:
+        step = dict(source)
+        tool_name = step.get("tool")
+        if isinstance(tool_name, str) and tool_name in trusted:
+            step["arguments"] = dict(trusted[tool_name])
+        bound.append(step)
+    return bound
+
+
 def plan_matches_tool_contracts(
     plan: Sequence[JsonDict],
     tool_definitions: Sequence[McpToolDefinition],
@@ -241,6 +256,7 @@ class AiopsDiagnosticService:
         mcp_client_provider: McpConnectionService | None = None,
         cls_region: str,
         cls_topic_id: str,
+        trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
     ) -> None:
         self._repositories = repositories
@@ -252,6 +268,10 @@ class AiopsDiagnosticService:
             raise ValueError("An MCP client or provider is required.")
         self._cls_region = cls_region
         self._cls_topic_id = cls_topic_id
+        self._trusted_tool_arguments = {
+            name: dict(arguments)
+            for name, arguments in (trusted_tool_arguments or {}).items()
+        }
         self._case_persistor = case_persistor
 
     async def stream(
@@ -1054,6 +1074,10 @@ class AiopsDiagnosticService:
         )
         if not generic_plan and "SearchLog" in available_tools:
             generic_plan = [self._generic_search_log_step(query)]
+        generic_plan = bind_trusted_tool_arguments(
+            generic_plan,
+            self._trusted_tool_arguments,
+        )
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
@@ -1074,6 +1098,7 @@ class AiopsDiagnosticService:
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
+        plan = bind_trusted_tool_arguments(plan, self._trusted_tool_arguments)
         if not plan or not plan_matches_tool_contracts(plan, tool_definitions):
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"

@@ -1,0 +1,13 @@
+type: agentpy-original
+origin:
+  - Public PostgreSQL deadlock detection and transaction retry documentation
+  - AgentPy-synthesized alert, observations, distractors, and answer
+transformation: Only public failure mechanisms were referenced; all scenario data is project-synthesized.
+validation_references:
+  - https://www.postgresql.org/docs/current/explicit-locking.html
+  - https://www.postgresql.org/docs/current/errcodes-appendix.html
+license_notes:
+  - PostgreSQL documentation license applies to the referenced pages.
+  - Scenario text and frozen observations are original AgentPy material.
+accessed: 2026-08-14
+created: 2026-08-14

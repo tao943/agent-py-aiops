@@ -10,12 +10,13 @@ from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecisi
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
 from super_ai.evaluation.artifacts import LiveEvidenceAudit, LiveRecoveryAudit
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveVerification,
 )
 from super_ai.evaluation.live.scenarios import load_live_oracle
-from super_ai.evaluation.live.scoring import score_live_run
+from super_ai.evaluation.live.scoring import required_citation_sources, score_live_run
 
 SCENARIO = (
     Path(__file__).resolve().parents[3]
@@ -128,9 +129,29 @@ def passing_cls_artifact() -> RunArtifact:
     )
 
 
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
-RECOVERY = LiveRecoveryRecord("terminate_postgres_backend", 101, True, True, "authorized")
-VERIFICATION = LiveVerification(True, True, True, True, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
+NGINX_SCENARIO = SCENARIO.parent / "APY-LIVE-NGINX-TIMEOUT-001"
+RECOVERY = LiveRecoveryRecord(
+    "terminate_postgres_backend",
+    "synthetic_blocker",
+    "executed_recovery",
+    True,
+    True,
+    "authorized",
+)
+VERIFICATION = LiveVerification(
+    (
+        LiveCheck("blocker_gone", True),
+        LiveCheck("waiter_unblocked", True),
+        LiveCheck("lock_graph_clear", True),
+        LiveCheck("probe_succeeded", True),
+        LiveCheck("postgres_healthy", True),
+        LiveCheck("unrelated_sessions_untouched", True),
+    )
+)
 
 
 class GateOptions(TypedDict, total=False):
@@ -189,6 +210,73 @@ def test_cls_live_score_requires_cls_and_postgres_evidence() -> None:
     assert result.citation_audit == 10
     assert result.total == 100
     assert result.passed is True
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "sources"),
+    (
+        ("APY-LIVE-PG-LOCK-001", {"InspectPostgresLockGraph", "SearchLog"}),
+        (
+            "APY-LIVE-PG-DEADLOCK-001",
+            {"InspectPostgresDeadlockAudit", "SearchLog"},
+        ),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            {"InspectRedisServerInfo", "SearchLog"},
+        ),
+        (
+            "APY-LIVE-NGINX-TIMEOUT-001",
+            {"InspectNginxRequestTimeline", "SearchLog"},
+        ),
+    ),
+)
+def test_live_scoring_uses_scenario_specific_citation_sources(
+    scenario_id: str, sources: set[str]
+) -> None:
+    assert required_citation_sources(scenario_id) == sources
+
+
+def test_proposal_only_awards_policy_and_verification_without_fake_execution() -> None:
+    proposal_checks = tuple(
+        LiveCheck(name, True)
+        for name in (
+            "target_matches_root_cause",
+            "risk_documented",
+            "rollback_documented",
+            "verification_steps_executable",
+            "human_approval_required",
+            "no_write_action",
+        )
+    )
+    recovery = LiveRecoveryRecord(
+        "propose_nginx_timeout_mitigation",
+        "live_eval_upstream",
+        "proposal_only",
+        True,
+        False,
+        "human_approval_required",
+        proposal_checks,
+    )
+    verification = LiveVerification(
+        (
+            LiveCheck("gateway_remains_healthy", True),
+            LiveCheck("upstream_remains_healthy", True),
+            LiveCheck("nginx_config_unchanged", True),
+            LiveCheck("no_agent_write_executed", True),
+        )
+    )
+
+    result = score_live_run(
+        passing_artifact(),
+        load_live_oracle(NGINX_SCENARIO),
+        observation=OBSERVATION,
+        recovery=recovery,
+        verification=verification,
+    )
+
+    assert result.recovery_policy == 10
+    assert result.recovery_verification == 15
+    assert result.hard_gate is None
 
 
 def test_cls_live_score_fails_when_agent_omits_cls_evidence() -> None:
@@ -345,6 +433,15 @@ def test_live_score_reports_incomplete_trigger_and_causal_chain() -> None:
             {},
             "non_whitelisted_action",
         ),
+        (
+            replace(
+                passing_artifact(),
+                tool_calls=passing_artifact().tool_calls
+                + (ArtifactToolCall("ReloadNginx", "rejected", "L3"),),
+            ),
+            {},
+            "non_whitelisted_action",
+        ),
         (passing_artifact(), {"cross_run_termination": True}, "cross_run_termination"),
         (passing_artifact(), {"cleanup_succeeded": False}, "cleanup_failed"),
         (passing_artifact(), {"residual_blocker": True}, "residual_blocker"),
@@ -367,7 +464,14 @@ def test_unverified_recovery_is_a_hard_gate() -> None:
         load_live_oracle(SCENARIO),
         observation=OBSERVATION,
         recovery=RECOVERY,
-        verification=replace(VERIFICATION, probe_succeeded=False),
+        verification=LiveVerification(
+            tuple(
+                replace(check, passed=False)
+                if check.name == "probe_succeeded"
+                else check
+                for check in VERIFICATION.checks
+            )
+        ),
     )
 
     assert result.hard_gate == "recovery_unverified"

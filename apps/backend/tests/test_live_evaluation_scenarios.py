@@ -17,6 +17,66 @@ from super_ai.evaluation.live.scenarios import (
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
 
+def test_repository_contains_exactly_four_live_scenarios() -> None:
+    assert sorted(path.name for path in LIVE_SCENARIOS.iterdir() if path.is_dir()) == [
+        "APY-LIVE-NGINX-TIMEOUT-001",
+        "APY-LIVE-PG-DEADLOCK-001",
+        "APY-LIVE-PG-LOCK-001",
+        "APY-LIVE-REDIS-MAXCLIENTS-001",
+    ]
+    assert all(
+        (path / "scenario.yaml").is_file()
+        and (path / "ground_truth.yaml").is_file()
+        and (path / "provenance.yaml").is_file()
+        for path in LIVE_SCENARIOS.iterdir()
+        if path.is_dir()
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "driver", "mechanism", "expectation"),
+    [
+        (
+            "APY-LIVE-PG-DEADLOCK-001",
+            "postgres_deadlock",
+            "opposite_order_transaction_deadlock",
+            "executed_recovery",
+        ),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            "redis_maxclients",
+            "benchmark_clients_exhausted_maxclients",
+            "executed_recovery",
+        ),
+        (
+            "APY-LIVE-NGINX-TIMEOUT-001",
+            "nginx_timeout",
+            "upstream_response_exceeded_proxy_read_timeout",
+            "proposal_only",
+        ),
+    ],
+)
+def test_loads_expansion_live_scenarios_with_private_recovery_policy(
+    scenario_id: str,
+    driver: str,
+    mechanism: str,
+    expectation: str,
+) -> None:
+    root = LIVE_SCENARIOS / scenario_id
+    public = load_live_scenario(root)
+    oracle = load_live_oracle(root)
+
+    assert public.id == scenario_id
+    assert public.driver == driver
+    assert oracle.primary_cause.mechanism == mechanism
+    assert oracle.recovery_expectation == expectation
+    assert oracle.root_cause_semantics is not None
+    assert len(oracle.root_cause_semantics.causal_milestones) == 3
+    assert "recovery_expectation" not in root.joinpath("scenario.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_loads_answer_free_postgres_lock_live_scenario() -> None:
     scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
 
@@ -44,6 +104,37 @@ def test_oracle_is_loaded_only_by_the_evaluator_boundary() -> None:
     assert [
         item.id for item in oracle.root_cause_semantics.causal_milestones
     ] == ["lock_held", "update_waits", "probe_times_out"]
+    assert oracle.recovery_expectation == "executed_recovery"
+
+
+def test_live_oracle_requires_a_known_recovery_expectation(tmp_path: Path) -> None:
+    scenario_dir = _copy_live_scenario(tmp_path)
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    payload["recovery_expectation"] = "automatic_restart"
+    _write_oracle(scenario_dir, payload)
+
+    with pytest.raises(ValueError, match="recovery_expectation"):
+        load_live_oracle(scenario_dir)
+
+
+def test_live_oracle_rejects_missing_recovery_expectation(tmp_path: Path) -> None:
+    scenario_dir = _copy_live_scenario(tmp_path)
+    payload = cast(
+        dict[str, object],
+        yaml.safe_load(
+            scenario_dir.joinpath("ground_truth.yaml").read_text(encoding="utf-8")
+        ),
+    )
+    payload.pop("recovery_expectation", None)
+    _write_oracle(scenario_dir, payload)
+
+    with pytest.raises(ValueError, match="recovery_expectation"):
+        load_live_oracle(scenario_dir)
 
 
 def _copy_live_scenario(tmp_path: Path) -> Path:

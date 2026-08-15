@@ -91,6 +91,20 @@ def test_postgres_live_eval_is_isolated_and_does_not_mount_docker_socket() -> No
     assert "./postgres/init:/docker-entrypoint-initdb.d:ro" in compose
 
 
+def test_live_eval_profile_is_disabled_by_default_and_isolated() -> None:
+    compose = _read("compose.yaml")
+
+    for service in ("live-eval-redis:", "live-eval-upstream:", "live-eval-nginx:"):
+        assert service in compose
+    assert compose.count('profiles: ["live-eval"]') == 3
+    assert '"127.0.0.1:16379:6379"' in compose
+    assert '"127.0.0.1:18080:80"' in compose
+    assert '"--maxclients", "16"' in compose
+    assert "docker.sock" not in compose.lower()
+    assert (INFRA_DIR / "live-eval" / "nginx.conf").is_file()
+    assert (INFRA_DIR / "live-eval" / "upstream.py").is_file()
+
+
 def test_infra_docs_define_manual_docker_live_operation_and_defer_cls() -> None:
     documentation = _read("README.md")
 

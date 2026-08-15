@@ -1,0 +1,19 @@
+id: APY-LIVE-NGINX-TIMEOUT-001
+title: The isolated gateway establishes an upstream connection and then returns HTTP 504.
+symptom_family: nginx-upstream-timeout
+difficulty: hard
+modes: [live]
+driver: nginx_timeout
+alert:
+  name: NginxUpstreamTimeoutHigh
+  severity: critical
+  summary: The isolated gateway establishes an upstream connection and then returns HTTP 504.
+hypotheses:
+  - id: nginx_upstream_response_timeout
+    description: The upstream accepts a connection but exceeds the response deadline.
+  - id: nginx_upstream_unavailable
+    description: The upstream process or listening port is unavailable.
+  - id: nginx_route_mismatch
+    description: The gateway routes to an incorrect host, port, or protocol.
+  - id: nginx_gateway_pressure
+    description: Gateway resource pressure delays request processing.

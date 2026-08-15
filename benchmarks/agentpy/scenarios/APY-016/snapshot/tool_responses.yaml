@@ -1,0 +1,73 @@
+tools:
+  - name: InspectHttpAttempts
+    description: Read frozen logical-request and attempt counts for a client cohort.
+    input_schema:
+      type: object
+      required: [client, windowMinutes]
+      additionalProperties: false
+      properties:
+        client: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {client: checkout-client, windowMinutes: 15}
+        evidence_id: http-attempts-per-request-rise
+        result:
+          logicalRequests: 1200
+          totalAttempts: 5900
+          attemptsPerLogicalRequest: 4.92
+          previousAttemptsPerLogicalRequest: 1.08
+  - name: InspectRateLimitTimeline
+    description: Read frozen bounded rate-limit responses and aggregate volume.
+    input_schema:
+      type: object
+      required: [route, windowMinutes]
+      additionalProperties: false
+      properties:
+        route: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {route: checkout, windowMinutes: 15}
+        evidence_id: http-429-and-volume-rise
+        result:
+          status429Percent: 61
+          requestVolumeChangePercent: 310
+          limiterRuleMatched: true
+  - name: InspectClientRetryPolicy
+    description: Read a frozen effective retry-policy summary and sampled timing.
+    input_schema:
+      type: object
+      required: [client, view]
+      additionalProperties: false
+      properties:
+        client: {type: string}
+        view: {type: string}
+    calls:
+      - arguments: {client: checkout-client, view: effective-policy}
+        evidence_id: http-retry-after-ignored
+        result:
+          retryAfterObservedSeconds: 2
+          retryAfterHonored: false
+          exponentialBackoffEnabled: false
+          jitterEnabled: false
+      - arguments: {client: checkout-client, view: sampled-timeline}
+        evidence_id: http-zero-backoff-timeline
+        result:
+          sampledRetryDelaysMs: [0, 0, 1, 0]
+          circuitBreakerOpen: false
+  - name: InspectTrafficAndDependencyHealth
+    description: Read frozen caller attribution and downstream health distractors.
+    input_schema:
+      type: object
+      required: [route, windowMinutes]
+      additionalProperties: false
+      properties:
+        route: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {route: checkout, windowMinutes: 15}
+        evidence_id: http-alternative-causes-weak
+        result:
+          untrustedTrafficSharePercent: 3
+          callerConcentration: checkout-client
+          downstreamHealthStatus: healthy
+          downstreamP95Ms: 38

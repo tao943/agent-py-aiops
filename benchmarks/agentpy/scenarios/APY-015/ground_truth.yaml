@@ -1,0 +1,21 @@
+primary_cause:
+  component: live-eval-upstream
+  mechanism: upstream_response_exceeded_proxy_read_timeout
+  trigger: bounded_slow_response_exceeded_gateway_read_deadline
+contributing_causes: []
+causal_chain:
+  - the gateway established an upstream connection promptly
+  - the upstream did not send a response before the configured read deadline
+  - Nginx closed the request with HTTP 504 while the upstream health endpoint remained available
+required_evidence:
+  - id: connect-succeeded
+    alternatives:
+      - [nginx-upstream-connect-fast, upstream-health-passed]
+  - id: response-timeout
+    alternatives:
+      - [nginx-504-read-timeout, upstream-response-time-exceeded]
+required_rule_outs:
+  - nginx_upstream_unavailable
+  - nginx_route_mismatch
+forbidden_claims:
+  - nginx_gateway_pressure

@@ -11,9 +11,11 @@ import pytest
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     McpClsSearcher,
+    build_cls_search_arguments,
     build_live_cls_records,
 )
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveClsScope,
     LiveFaultObservation,
     LiveInfrastructureError,
@@ -24,8 +26,51 @@ from super_ai.mcp_client import McpToolDefinition
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 SCENARIO = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
 IDENTITY = validate_run_id("run-1")
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
 NOW = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
+
+
+def test_cls_search_arguments_are_derived_from_the_exact_live_scope() -> None:
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_700_000_000_000,
+        to_ms=1_700_000_090_000,
+        run_id="run-1",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        incident_id="APY-LIVE-PG-LOCK-001-run-1",
+    )
+
+    assert build_cls_search_arguments(scope) == {
+        "Region": "ap-guangzhou",
+        "TopicId": "topic-live",
+        "From": 1_700_000_000_000,
+        "To": 1_700_000_090_000,
+        "Query": (
+            'run_id:"run-1" AND scenario_id:"APY-LIVE-PG-LOCK-001" '
+            'AND incident_id:"APY-LIVE-PG-LOCK-001-run-1"'
+        ),
+        "Limit": 20,
+    }
+
+
+@pytest.mark.parametrize("limit", (0, 101))
+def test_cls_search_arguments_reject_an_unbounded_limit(limit: int) -> None:
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_700_000_000_000,
+        to_ms=1_700_000_090_000,
+        run_id="run-1",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        incident_id="APY-LIVE-PG-LOCK-001-run-1",
+    )
+
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        build_cls_search_arguments(scope, limit=limit)
 
 
 class RecordingUploader:
@@ -42,7 +87,7 @@ class RecordingUploader:
     async def put(
         self, records: Sequence[Mapping[str, str]], *, filename: str
     ) -> int:
-        assert filename == "agentpy-live-postgres.log"
+        assert filename == "agentpy-live-evidence.log"
         if self.error is not None:
             raise self.error
         self.records = tuple(records)
@@ -108,20 +153,44 @@ def _preparer(
     )
 
 
-def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
+@pytest.mark.parametrize(
+    ("scenario_id", "events"),
+    (
+        (
+            "APY-LIVE-PG-LOCK-001",
+            {"request_received", "database_contention", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-PG-DEADLOCK-001",
+            {"request_received", "database_contention", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            {"request_received", "connection_rejected", "alert_fired"},
+        ),
+        (
+            "APY-LIVE-NGINX-TIMEOUT-001",
+            {"request_received", "upstream_timeout", "alert_fired"},
+        ),
+    ),
+)
+def test_live_cls_records_are_scenario_scoped_without_revealing_oracle(
+    scenario_id: str, events: set[str]
+) -> None:
     records = build_live_cls_records(
         run_id=IDENTITY.run_id,
-        scenario_id=SCENARIO.id,
-        incident_id=f"{SCENARIO.id}-{IDENTITY.run_id}",
+        scenario_id=scenario_id,
+        incident_id=f"{scenario_id}-{IDENTITY.run_id}",
         now=NOW,
     )
 
     assert len(records) == 3
     assert {record["run_id"] for record in records} == {"run-1"}
-    assert {record["scenario_id"] for record in records} == {SCENARIO.id}
+    assert {record["scenario_id"] for record in records} == {scenario_id}
     assert {record["incident_id"] for record in records} == {
-        f"{SCENARIO.id}-run-1"
+        f"{scenario_id}-run-1"
     }
+    assert {record["event"] for record in records} == events
     assert all(
         {
             "run_id",
@@ -131,9 +200,8 @@ def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
             "environment",
             "event",
             "level",
-            "trace_id",
+            "trace",
             "component",
-            "message",
             "timestamp",
         }
         <= set(record)
@@ -142,6 +210,8 @@ def test_live_cls_records_are_scoped_without_revealing_oracle() -> None:
     serialized = json.dumps(records)
     assert "row_lock_blocking" not in serialized
     assert "blocker" not in serialized
+    assert "benchmark_clients_exhausted_maxclients" not in serialized
+    assert "upstream_response_exceeded_proxy_read_timeout" not in serialized
 
 
 @pytest.mark.asyncio

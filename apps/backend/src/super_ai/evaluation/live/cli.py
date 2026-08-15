@@ -16,13 +16,37 @@ from super_ai.evaluation.live.cls_evidence import (
     LiveClsLogUploader,
     McpClsSearcher,
 )
-from super_ai.evaluation.live.diagnostics import ApplicationLiveDiagnosticAdapter
+from super_ai.evaluation.live.diagnostics import (
+    ApplicationLiveDiagnosticAdapter,
+    LivePostgresEvidenceMcpClient,
+)
 from super_ai.evaluation.live.domain import EvidenceSource
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
+from super_ai.evaluation.live.nginx_timeout import (
+    NginxProposalRecoveryService,
+    NginxTimeoutEvidenceMcpClient,
+    NginxTimeoutLiveConfig,
+    NginxTimeoutScenarioDriver,
+)
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
+)
+from super_ai.evaluation.live.postgres_deadlock import (
+    PostgresDeadlockEvidenceMcpClient,
+    PostgresDeadlockRecoveryService,
+    PostgresDeadlockScenarioDriver,
+)
+from super_ai.evaluation.live.redis_maxclients import (
+    RedisLiveConfig,
+    RedisMaxclientsEvidenceMcpClient,
+    RedisMaxclientsRecoveryService,
+    RedisMaxclientsScenarioDriver,
+)
+from super_ai.evaluation.live.registry import (
+    LiveScenarioComponents,
+    LiveScenarioRegistry,
 )
 from super_ai.evaluation.live.runner import (
     LiveBenchmarkError,
@@ -61,6 +85,8 @@ _SAFE_RESULT_FIELDS = frozenset(
         "evidenceSource",
         "validity",
         "failureCategory",
+        "failureStage",
+        "authorizationCode",
     }
 )
 
@@ -138,8 +164,11 @@ async def _run_live_command(
         evidence_source=evidence_source,
         config_path=config_path,
     )
+    components = build_live_scenario_registry().resolve(
+        cast(str, arguments.scenario)
+    )
     engine = create_memory_engine(config_path=config_path)
-    driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+    driver = components.driver
     try:
         repositories = create_sqlalchemy_memory_repositories(
             create_memory_session_factory(engine)
@@ -157,13 +186,14 @@ async def _run_live_command(
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
             cls_mcp_client=cls_mcp_client,
+            component_evidence_factory=components.component_evidence_factory,
         )
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
             driver=driver,
             evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
-            recovery=PostgresLiveRecoveryService(driver),
+            recovery=components.recovery,
             evaluator=_LiveScoringEvaluator(evidence_source),
         )
         try:
@@ -172,20 +202,11 @@ async def _run_live_command(
                 run_id=cast(str, arguments.run_id),
             )
         except LiveBenchmarkError as exc:
-            status, validity, exit_code = classify_live_failure(
-                exc.category,
-                evidence_source=evidence_source,
-            )
-            payload = safe_output(
-                command="run",
+            payload, exit_code = _live_failure_payload(
                 scenario_id=cast(str, arguments.scenario),
                 run_id=cast(str, arguments.run_id),
-                status=status,
-                result={
-                    "evidenceSource": evidence_source,
-                    "validity": validity,
-                    "failureCategory": exc.category,
-                },
+                evidence_source=evidence_source,
+                error=exc,
             )
             write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
             return payload, exit_code
@@ -273,6 +294,38 @@ def classify_live_failure(
     return "failed", "VALID_FAIL", 1
 
 
+def _live_failure_payload(
+    *,
+    scenario_id: str,
+    run_id: str,
+    evidence_source: EvidenceSource,
+    error: LiveBenchmarkError,
+) -> tuple[dict[str, object], int]:
+    status, validity, exit_code = classify_live_failure(
+        error.category,
+        evidence_source=evidence_source,
+    )
+    result: dict[str, object] = {
+        "evidenceSource": evidence_source,
+        "validity": validity,
+        "failureCategory": error.category,
+    }
+    if error.stage is not None:
+        result["failureStage"] = error.stage
+    if error.authorization_code is not None:
+        result["authorizationCode"] = error.authorization_code
+    return (
+        safe_output(
+            command="run",
+            scenario_id=scenario_id,
+            run_id=run_id,
+            status=status,
+            result=result,
+        ),
+        exit_code,
+    )
+
+
 def build_live_evidence_runtime(
     *,
     evidence_source: EvidenceSource,
@@ -314,27 +367,96 @@ def build_live_evidence_runtime(
     return preparer, cls_client
 
 
+def build_live_scenario_registry() -> LiveScenarioRegistry:
+    """Build explicitly supported Live runtimes without a default fallback."""
+    registry = LiveScenarioRegistry()
+
+    def postgres_lock_components() -> LiveScenarioComponents:
+        driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="postgres_lock_wait",
+            driver=driver,
+            recovery=PostgresLiveRecoveryService(driver),
+            component_evidence_factory=LivePostgresEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-PG-LOCK-001", postgres_lock_components)
+
+    def postgres_deadlock_components() -> LiveScenarioComponents:
+        driver = PostgresDeadlockScenarioDriver(_postgres_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="postgres_deadlock",
+            driver=driver,
+            recovery=PostgresDeadlockRecoveryService(driver),
+            component_evidence_factory=PostgresDeadlockEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-PG-DEADLOCK-001", postgres_deadlock_components)
+
+    def redis_maxclients_components() -> LiveScenarioComponents:
+        driver = RedisMaxclientsScenarioDriver(_redis_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="redis_maxclients",
+            driver=driver,
+            recovery=RedisMaxclientsRecoveryService(driver),
+            component_evidence_factory=RedisMaxclientsEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-REDIS-MAXCLIENTS-001", redis_maxclients_components)
+
+    def nginx_timeout_components() -> LiveScenarioComponents:
+        driver = NginxTimeoutScenarioDriver(_nginx_config_from_environment())
+        return LiveScenarioComponents(
+            driver_name="nginx_timeout",
+            driver=driver,
+            recovery=NginxProposalRecoveryService(),
+            component_evidence_factory=NginxTimeoutEvidenceMcpClient,
+        )
+
+    registry.register("APY-LIVE-NGINX-TIMEOUT-001", nginx_timeout_components)
+    return registry
+
+
 async def _run_infrastructure_command(
     command: str,
     scenario_id: str,
     run_id: str,
 ) -> tuple[dict[str, object], int]:
     identity = validate_run_id(run_id)
-    driver = PostgresLockScenarioDriver(_postgres_config_from_environment())
+    components = build_live_scenario_registry().resolve(scenario_id)
     if command == "cleanup":
-        await driver.cleanup(identity)
-    audit = await driver.audit(identity)
+        cleanup = await components.driver.cleanup(identity)
+        verification_passed = cleanup.passed
+        cleanup_succeeded: bool | None = cleanup.passed
+    else:
+        report = read_safe_report(LIVE_REPORT_ROOT / f"{identity.run_id}.json")
+        result = report.get("result")
+        typed_result: Mapping[str, object]
+        if isinstance(result, Mapping):
+            typed_result = cast(Mapping[str, object], result)
+        else:
+            typed_result = cast(Mapping[str, object], {})
+        report_matches = (
+            report.get("scenarioId") == scenario_id
+            and report.get("runId") == identity.run_id
+        )
+        verification_passed = (
+            report_matches
+            and typed_result.get("verificationPassed") is True
+            and typed_result.get("cleanupSucceeded") is True
+        )
+        cleanup_succeeded = None
     payload = safe_output(
         command=command,
         scenario_id=scenario_id,
         run_id=run_id,
-        status="clean" if audit.clean else "residual_detected",
+        status="clean" if verification_passed else "residual_detected",
         result={
-            "verificationPassed": audit.clean,
-            "cleanupSucceeded": audit.clean if command == "cleanup" else None,
+            "verificationPassed": verification_passed,
+            "cleanupSucceeded": cleanup_succeeded,
         },
     )
-    return payload, 0 if audit.clean else 1
+    return payload, 0 if verification_passed else 1
 
 
 def _postgres_config_from_environment() -> PostgresConnectionConfig:
@@ -344,6 +466,23 @@ def _postgres_config_from_environment() -> PostgresConnectionConfig:
         user=os.getenv("LIVE_POSTGRES_USER", "agent_py"),
         password=os.getenv("LIVE_POSTGRES_PASSWORD", "agent_py_dev"),
         database="agent_py_live_eval",
+    )
+
+
+def _redis_config_from_environment() -> RedisLiveConfig:
+    return RedisLiveConfig(
+        url=os.getenv("LIVE_REDIS_URL", "redis://127.0.0.1:16379/0")
+    )
+
+
+def _nginx_config_from_environment() -> NginxTimeoutLiveConfig:
+    return NginxTimeoutLiveConfig(
+        gateway_url=os.getenv(
+            "LIVE_NGINX_GATEWAY_URL", "http://127.0.0.1:18080"
+        ),
+        upstream_url=os.getenv(
+            "LIVE_NGINX_UPSTREAM_URL", "http://127.0.0.1:18081"
+        ),
     )
 
 

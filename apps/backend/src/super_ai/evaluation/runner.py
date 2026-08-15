@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,7 +17,13 @@ from super_ai.evaluation.snapshot import SnapshotMcpClient
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
 from super_ai.memory.repositories import EvaluationFailureStatus, JsonDict, MemoryRepositories
-from super_ai.retrieval import KnowledgeRetrievalToolRunner
+from super_ai.retrieval import (
+    DEFAULT_RETRIEVAL_TOP_K,
+    MAX_RETRIEVAL_TOP_K,
+    KnowledgeRetrievalToolInput,
+    KnowledgeRetrievalToolResult,
+    KnowledgeRetrievalToolRunner,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +44,27 @@ class BenchmarkRunError(RuntimeError):
         super().__init__("Benchmark run failed at a classified production boundary.")
         self.status = status
         self.category = category
+
+
+class NullKnowledgeRetrievalTool:
+    """RAG-off boundary that never constructs or calls retrieval dependencies."""
+
+    async def run(
+        self,
+        input: KnowledgeRetrievalToolInput,
+        *,
+        owner_user_id: str,
+        accessible_knowledge_base_ids: Sequence[str],
+    ) -> KnowledgeRetrievalToolResult:
+        del owner_user_id, accessible_knowledge_base_ids
+        top_k = input.top_k if input.top_k is not None else DEFAULT_RETRIEVAL_TOP_K
+        bounded_top_k = min(max(top_k, 1), MAX_RETRIEVAL_TOP_K)
+        return KnowledgeRetrievalToolResult(
+            query=input.query,
+            top_k=bounded_top_k,
+            results=[],
+            citations=[],
+        )
 
 
 class DiagnosticRunAdapter(Protocol):
@@ -110,10 +138,14 @@ class ApplicationDiagnosticAdapter:
         repositories: MemoryRepositories,
         llm_provider: LlmProvider,
         retrieval_tool: KnowledgeRetrievalToolRunner,
+        owner_user_id: str | None = None,
+        accessible_knowledge_base_ids: Sequence[str] = (),
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
+        self._owner_user_id = owner_user_id
+        self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
 
     async def run(
         self,
@@ -122,7 +154,7 @@ class ApplicationDiagnosticAdapter:
         scenario: PublicScenario,
         mcp_client: RuntimeMcpClient,
     ) -> RunArtifact:
-        owner_user_id = f"benchmark:{run_id}"
+        owner_user_id = self._owner_user_id or f"benchmark:{run_id}"
         task_id = f"diagnostic_{uuid4().hex}"
         task = await self._repositories.diagnostics.create_task(
             owner_user_id=owner_user_id,
@@ -140,7 +172,10 @@ class ApplicationDiagnosticAdapter:
             cls_region="snapshot",
             cls_topic_id="snapshot",
         )
-        async for _event in service.stream(task=task, accessible_knowledge_base_ids=()):
+        async for _event in service.stream(
+            task=task,
+            accessible_knowledge_base_ids=self._knowledge_base_ids,
+        ):
             pass
 
         completed = await self._repositories.diagnostics.get_task(

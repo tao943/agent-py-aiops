@@ -1,0 +1,20 @@
+id: APY-015
+title: Gateway requests wait for a bounded interval and then return HTTP 504.
+symptom_family: nginx_gateway_timeout
+difficulty: hard
+modes: [snapshot]
+alert:
+  alertname: NginxGatewayTimeoutHigh
+  service: api-gateway
+  severity: critical
+  summary: Gateway requests wait for a bounded interval and then return HTTP 504.
+hypotheses:
+  - id: nginx_upstream_response_timeout
+    description: The upstream accepts connections but does not respond before the read deadline.
+  - id: nginx_upstream_unavailable
+    description: The upstream process or listening port is unavailable.
+  - id: nginx_route_mismatch
+    description: The gateway is routing to an incorrect host, port, or protocol.
+  - id: nginx_gateway_pressure
+    description: Gateway resource pressure is delaying request processing.
+snapshot_file: snapshot/tool_responses.yaml

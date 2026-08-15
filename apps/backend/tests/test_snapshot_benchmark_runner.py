@@ -12,14 +12,28 @@ from super_ai.evaluation.domain import PublicScenario
 from super_ai.evaluation.runner import (
     AgentVersion,
     BenchmarkRunError,
+    NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
     build_application_diagnostic_input,
 )
 from super_ai.evaluation.scenarios import load_public_scenario
 from super_ai.evaluation.scoring import EvaluationResult
 from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.retrieval import KnowledgeRetrievalToolInput
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+@pytest.mark.asyncio
+async def test_rag_off_returns_no_hits_or_citations() -> None:
+    result = await NullKnowledgeRetrievalTool().run(
+        KnowledgeRetrievalToolInput(query="public symptom", top_k=3),
+        owner_user_id="owner-a",
+        accessible_knowledge_base_ids=("kb-owner-a",),
+    )
+
+    assert result.results == []
+    assert result.citations == []
 
 
 class RecordingScriptedDiagnosticAdapter:

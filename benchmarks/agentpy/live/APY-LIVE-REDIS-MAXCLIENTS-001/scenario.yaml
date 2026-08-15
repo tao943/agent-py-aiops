@@ -1,0 +1,19 @@
+id: APY-LIVE-REDIS-MAXCLIENTS-001
+title: New Redis connections are rejected while established operations still succeed.
+symptom_family: redis-maxclients
+difficulty: hard
+modes: [live]
+driver: redis_maxclients
+alert:
+  name: RedisConnectionRejectedHigh
+  severity: critical
+  summary: New Redis connections are rejected while established operations still succeed.
+hypotheses:
+  - id: redis_maxclients
+    description: Redis has exhausted its configured client slots.
+  - id: redis_process_unavailable
+    description: The Redis process is stopped or not listening.
+  - id: host_file_descriptor_exhaustion
+    description: The host cannot allocate additional file descriptors.
+  - id: redis_stale_client_pool
+    description: An application pool is retaining unusable connections.

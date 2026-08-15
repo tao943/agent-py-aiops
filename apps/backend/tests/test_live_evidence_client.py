@@ -7,6 +7,7 @@ import pytest
 
 from super_ai.evaluation.live.diagnostics import LivePostgresEvidenceMcpClient
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveClsScope,
     LiveEvidenceContext,
     LiveEvidenceReadiness,
@@ -31,7 +32,10 @@ CLS_CONTEXT = LiveEvidenceContext(
     readiness=LiveEvidenceReadiness(3, 3, 1, 2_000, 3_000),
 )
 LOCAL_CONTEXT = LiveEvidenceContext.local(incident_id=SCOPE.incident_id)
-OBSERVATION = LiveFaultObservation(101, 102, True, True)
+OBSERVATION = LiveFaultObservation(
+    "APY-LIVE-PG-LOCK-001",
+    (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
+)
 
 
 def _record(*, run_id: str = "run-1") -> dict[str, object]:
@@ -139,6 +143,66 @@ async def test_cls_search_filters_cross_run_records_and_tags_evidence() -> None:
     serialized = json.dumps(result)
     assert '"run_id": "run-1"' in serialized
     assert "run-2" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "evidence_id"),
+    (
+        ("APY-LIVE-PG-LOCK-001", "cls-live-request-timeout"),
+        ("APY-LIVE-PG-DEADLOCK-001", "cls-live-database-deadlock"),
+        (
+            "APY-LIVE-REDIS-MAXCLIENTS-001",
+            "cls-live-redis-connection-rejected",
+        ),
+        ("APY-LIVE-NGINX-TIMEOUT-001", "cls-live-nginx-upstream-timeout"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cls_search_tags_each_scenario_with_its_own_evidence_id(
+    scenario_id: str, evidence_id: str
+) -> None:
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_000,
+        to_ms=10_000,
+        run_id="run-1",
+        scenario_id=scenario_id,
+        incident_id=f"{scenario_id}-run-1",
+    )
+    context = LiveEvidenceContext(
+        source="cls",
+        incident_id=scope.incident_id,
+        cls_scope=scope,
+        readiness=LiveEvidenceReadiness(3, 3, 1, 2_000, 3_000),
+    )
+    record = {
+        "run_id": scope.run_id,
+        "scenario_id": scope.scenario_id,
+        "incident_id": scope.incident_id,
+    }
+    client = LiveCompositeEvidenceMcpClient(
+        postgres_client=LivePostgresEvidenceMcpClient(OBSERVATION),
+        cls_client=FakeClsClient(_official_output(record)),
+        context=context,
+    )
+    result = await client.call_tool(
+        "SearchLog",
+        {
+            "Region": scope.region,
+            "TopicId": scope.topic_id,
+            "From": scope.from_ms,
+            "To": scope.to_ms,
+            "Query": (
+                f'run_id:"{scope.run_id}" AND scenario_id:"{scope.scenario_id}" '
+                f'AND incident_id:"{scope.incident_id}"'
+            ),
+            "Limit": 20,
+        },
+    )
+
+    assert isinstance(result, dict)
+    assert result["benchmarkEvidenceId"] == evidence_id
 
 
 @pytest.mark.parametrize(

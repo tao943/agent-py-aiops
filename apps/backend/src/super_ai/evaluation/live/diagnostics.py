@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any, cast
 from uuid import uuid4
@@ -16,6 +16,7 @@ from super_ai.evaluation.artifacts import (
     RunArtifact,
     build_run_artifact,
 )
+from super_ai.evaluation.live.cls_evidence import build_cls_search_arguments
 from super_ai.evaluation.live.domain import (
     LiveEvidenceContext,
     LiveFaultObservation,
@@ -43,33 +44,81 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "live",
-        "decisionVocabulary": {
-            "componentAliases": {
-                "postgres": "postgresql",
-                "postgresql": "postgresql",
-            },
-            "mechanismAliases": {
-                "postgres_lock_blocking": "row_lock_blocking",
-                "row_lock_blocking": "row_lock_blocking",
-                "postgres_slow_query_without_lock": "slow_query_without_lock",
-                "slow_query_without_lock": "slow_query_without_lock",
-                "postgres_connectivity_failure": "connectivity_failure",
-                "connectivity_failure": "connectivity_failure",
-            },
-            "labelsByHypothesis": {
-                "postgres_lock_blocking": {
-                    "component": "postgresql",
-                    "mechanism": "row_lock_blocking",
-                },
-                "postgres_slow_query_without_lock": {
-                    "component": "postgresql",
-                    "mechanism": "slow_query_without_lock",
-                },
-                "postgres_connectivity_failure": {
-                    "component": "postgresql",
-                    "mechanism": "connectivity_failure",
-                },
-            },
+        "decisionVocabulary": _decision_vocabulary(scenario),
+    }
+
+
+def _decision_vocabulary(scenario: LiveScenario) -> JsonDict:
+    labels_by_driver: dict[str, dict[str, tuple[str, str]]] = {
+        "postgres_lock_wait": {
+            "postgres_lock_blocking": ("postgresql", "row_lock_blocking"),
+            "postgres_slow_query_without_lock": (
+                "postgresql",
+                "slow_query_without_lock",
+            ),
+            "postgres_connectivity_failure": ("postgresql", "connectivity_failure"),
+        },
+        "postgres_deadlock": {
+            "postgres_deadlock": (
+                "postgresql",
+                "opposite_order_transaction_deadlock",
+            ),
+            "postgres_long_lock_wait": ("postgresql", "row_lock_blocking"),
+            "postgres_slow_statement": ("postgresql", "slow_query_without_lock"),
+        },
+        "redis_maxclients": {
+            "redis_maxclients": (
+                "live-eval-redis",
+                "benchmark_clients_exhausted_maxclients",
+            ),
+            "redis_process_unavailable": (
+                "live-eval-redis",
+                "connectivity_failure",
+            ),
+            "host_file_descriptor_exhaustion": (
+                "host",
+                "file_descriptor_exhaustion",
+            ),
+            "redis_stale_client_pool": ("application", "stale_client_pool"),
+        },
+        "nginx_timeout": {
+            "nginx_upstream_response_timeout": (
+                "live-eval-upstream",
+                "upstream_response_exceeded_proxy_read_timeout",
+            ),
+            "nginx_upstream_unavailable": (
+                "live-eval-upstream",
+                "upstream_unavailable",
+            ),
+            "nginx_route_mismatch": ("nginx", "route_mismatch"),
+            "nginx_gateway_pressure": ("nginx", "gateway_resource_pressure"),
+        },
+    }
+    labels = labels_by_driver.get(scenario.driver)
+    if labels is None or set(labels) != {item.id for item in scenario.hypotheses}:
+        raise ValueError("Live scenario decision vocabulary is incomplete.")
+    component_aliases = {
+        alias: canonical
+        for canonical in {component for component, _ in labels.values()}
+        for alias in (canonical,)
+    }
+    if scenario.driver.startswith("postgres"):
+        component_aliases["postgres"] = "postgresql"
+    if scenario.driver == "redis_maxclients":
+        component_aliases["redis"] = "live-eval-redis"
+    if scenario.driver == "nginx_timeout":
+        component_aliases["upstream"] = "live-eval-upstream"
+    mechanism_aliases = {
+        alias: mechanism
+        for hypothesis, (_, mechanism) in labels.items()
+        for alias in (hypothesis, mechanism)
+    }
+    return {
+        "componentAliases": component_aliases,
+        "mechanismAliases": mechanism_aliases,
+        "labelsByHypothesis": {
+            hypothesis: {"component": component, "mechanism": mechanism}
+            for hypothesis, (component, mechanism) in labels.items()
         },
     }
 
@@ -138,14 +187,18 @@ class LivePostgresEvidenceMcpClient:
             return {
                 "waitingSession": "waiter",
                 "waitEventType": (
-                    "Lock" if self._observation.waiter_has_lock_event else None
+                    "Lock"
+                    if self._observation.check_passed("waiter_has_lock_event")
+                    else None
                 ),
                 "benchmarkEvidenceId": "postgres-wait-event-lock",
             }
         if name == "InspectPostgresLockGraph":
             return {
                 "edge": "blocker->waiter",
-                "blockerEdgeConfirmed": self._observation.blocker_edge_confirmed,
+                "blockerEdgeConfirmed": self._observation.check_passed(
+                    "blocker_edge_confirmed"
+                ),
                 "benchmarkEvidenceId": "postgres-blocking-pid-edge",
             }
         if name == "VerifyServiceHealth":
@@ -185,10 +238,11 @@ def build_live_evidence_client(
     observation: LiveFaultObservation,
     evidence_context: LiveEvidenceContext,
     cls_client: LiveMcpClient | None,
+    component_client: LiveMcpClient | None = None,
 ) -> LiveCompositeEvidenceMcpClient:
     """Compose the production tool boundary selected by prepared evidence mode."""
     return LiveCompositeEvidenceMcpClient(
-        postgres_client=LivePostgresEvidenceMcpClient(observation),
+        postgres_client=component_client or LivePostgresEvidenceMcpClient(observation),
         cls_client=cls_client if evidence_context.source == "cls" else None,
         context=evidence_context,
     )
@@ -241,6 +295,9 @@ class ApplicationLiveDiagnosticAdapter:
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
         cls_mcp_client: LiveMcpClient | None = None,
+        component_evidence_factory: Callable[
+            [LiveFaultObservation], LiveMcpClient
+        ] = LivePostgresEvidenceMcpClient,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
@@ -248,6 +305,7 @@ class ApplicationLiveDiagnosticAdapter:
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
         self._cls_mcp_client = cls_mcp_client
+        self._component_evidence_factory = component_evidence_factory
 
     async def diagnose(
         self,
@@ -276,9 +334,15 @@ class ApplicationLiveDiagnosticAdapter:
                 observation=observation,
                 evidence_context=evidence_context,
                 cls_client=self._cls_mcp_client,
+                component_client=self._component_evidence_factory(observation),
             ),
             cls_region=scope.region if scope is not None else "docker-live",
             cls_topic_id=scope.topic_id if scope is not None else "local-postgres",
+            trusted_tool_arguments=(
+                {"SearchLog": build_cls_search_arguments(scope)}
+                if scope is not None
+                else None
+            ),
         )
         async for _ in service.stream(
             task=task,
@@ -355,7 +419,7 @@ def append_live_outcome(
         artifact,
         live_recovery=LiveRecoveryAudit(
             action=recovery.action,
-            target_ref="synthetic_blocker",
+            target_ref=recovery.target_ref,
             approved=recovery.authorized,
             executed=recovery.executed,
             verified=verification.passed,

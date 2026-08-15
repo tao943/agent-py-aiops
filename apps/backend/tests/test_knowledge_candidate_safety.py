@@ -5,6 +5,11 @@ import pytest
 
 KNOWLEDGE = Path(__file__).resolve().parents[3] / "docs" / "knowledge-candidates"
 DIFFERENTIAL_CARDS = tuple(sorted(path.name for path in KNOWLEDGE.glob("*.md")))
+DOCKER_VERIFIED_CARDS = {
+    "nginx-upstream-timeout.md",
+    "postgres-deadlock.md",
+    "redis-maxclients-pressure.md",
+}
 REQUIRED_HEADINGS = (
     "## 适用现象",
     "## 候选原因",
@@ -33,6 +38,13 @@ SENSITIVE_FIELD_PATTERN = re.compile(
 )
 
 
+def test_expansion_does_not_create_snapshot_answer_cards() -> None:
+    cards = sorted(KNOWLEDGE.glob("*.md"))
+
+    assert len(cards) == 30
+    assert not any(card.name.casefold().startswith("apy-") for card in cards)
+
+
 @pytest.mark.parametrize("filename", DIFFERENTIAL_CARDS)
 def test_differential_card_has_reviewed_structure_and_no_benchmark_answers(
     filename: str,
@@ -44,4 +56,11 @@ def test_differential_card_has_reviewed_structure_and_no_benchmark_answers(
     assert SENSITIVE_FIELD_PATTERN.search(text) is None
     assert text.count("https://") >= 2
     assert "content_type: agentpy-original-summary" in text
-    assert "docker_validation: pending" in text
+    if filename in DOCKER_VERIFIED_CARDS:
+        assert "docker_validation: verified" in text
+        assert "docker_validation_date: 2026-08-14" in text
+        assert "docker_validation_scope: isolated_live_eval_fixture" in text
+        assert "docker_validation: pending" not in text
+    else:
+        assert "docker_validation: pending" in text
+        assert "docker_validation: verified" not in text

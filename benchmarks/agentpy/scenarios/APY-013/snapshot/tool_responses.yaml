@@ -1,0 +1,67 @@
+tools:
+  - name: InspectPostgresErrors
+    description: Read frozen structured PostgreSQL errors for one service window.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: order-service, windowMinutes: 15}
+        evidence_id: postgres-40p01-deadlock-record
+        result:
+          sqlstate: 40P01
+          message: deadlock detected
+          abortedTransactions: 7
+          statementTimeouts: 0
+  - name: InspectTransactionResourceOrder
+    description: Inspect frozen resource acquisition order for bounded transaction traces.
+    input_schema:
+      type: object
+      required: [service, windowMinutes]
+      additionalProperties: false
+      properties:
+        service: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {service: order-service, windowMinutes: 15}
+        evidence_id: postgres-opposite-resource-order
+        result:
+          transactionA: [order-row, inventory-row]
+          transactionB: [inventory-row, order-row]
+          sharedResourcePairs: 7
+  - name: InspectPostgresWaitGraph
+    description: Read a frozen sanitized wait graph without changing sessions.
+    input_schema:
+      type: object
+      required: [database, windowMinutes]
+      additionalProperties: false
+      properties:
+        database: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {database: agent_py, windowMinutes: 15}
+        evidence_id: postgres-deadlock-cycle
+        result:
+          cycleDetected: true
+          cycleLength: 2
+          ordinaryLongBlockerPresent: false
+  - name: GetDatabaseMetrics
+    description: Read frozen bounded database latency and capacity metrics.
+    input_schema:
+      type: object
+      required: [database, windowMinutes]
+      additionalProperties: false
+      properties:
+        database: {type: string}
+        windowMinutes: {type: integer}
+    calls:
+      - arguments: {database: agent_py, windowMinutes: 15}
+        evidence_id: postgres-capacity-distractor
+        result:
+          cpuPercent: 38
+          connectionUsePercent: 51
+          p95QueryMs: 24
+          oldestTransactionSeconds: 3

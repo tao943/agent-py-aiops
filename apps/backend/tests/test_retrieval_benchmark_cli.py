@@ -106,10 +106,10 @@ async def test_run_queries_uses_explicit_scope_and_returns_safe_report() -> None
         model_configuration={"embeddingModel": "embed", "rerankModel": "rerank"},
     )
 
-    assert len(tool.calls) == 60
+    assert len(tool.calls) == 64
     assert all(call[1:] == ("owner-a", ("kb-owner-a",)) for call in tool.calls)
-    assert payload["metrics"]["queryCount"] == 60
-    assert payload["metrics"]["answerableQueryCount"] == 54
+    assert payload["metrics"]["queryCount"] == 64
+    assert payload["metrics"]["answerableQueryCount"] == 58
     assert payload["metrics"]["noAnswerProbeCount"] == 6
     serialized = json.dumps(payload)
     assert "secret chunk content" not in serialized
