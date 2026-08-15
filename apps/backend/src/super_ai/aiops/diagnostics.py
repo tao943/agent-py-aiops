@@ -24,11 +24,13 @@ from super_ai.aiops.reasoning import (
     HypothesisState,
     ObservationDecision,
     RootCauseDecision,
+    RootCauseValidationDecision,
     normalize_root_cause_decision,
     parse_evidence_sufficiency,
     parse_observation_decision,
     parse_plan,
     parse_root_cause_decision,
+    parse_root_cause_validation,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
@@ -70,11 +72,14 @@ class AiopsDiagnosticState(TypedDict, total=False):
     hypothesis_states: list[JsonDict]
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
+    decision_validation: JsonDict
     current_evidence_id: str
     current_evidence_summary: str
     current_plan_step: JsonDict
     evidence_sufficiency: JsonDict
-    next_route: Literal["executor", "replanner", "decision"]
+    next_route: Literal[
+        "executor", "replanner", "decision", "report", "recovery_planner"
+    ]
     replan_count: int
     max_replans: int
     max_total_steps: int
@@ -390,6 +395,7 @@ class AiopsDiagnosticService:
         graph.add_node("sufficiency_gate", self._sufficiency_gate)
         graph.add_node("replanner", self._replanner)
         graph.add_node("decision", self._decision)
+        graph.add_node("decision_validator", self._decision_validator)
         graph.add_node("report", self._report)
         graph.add_edge(START, "planner")
         graph.add_edge("planner", "executor")
@@ -405,7 +411,12 @@ class AiopsDiagnosticService:
             self._route_after_replanner,
             {"executor": "executor", "decision": "decision"},
         )
-        graph.add_edge("decision", "report")
+        graph.add_edge("decision", "decision_validator")
+        graph.add_conditional_edges(
+            "decision_validator",
+            self._route_after_decision_validation,
+            {"replanner": "replanner", "report": "report"},
+        )
         graph.add_edge("report", END)
         return graph.compile()
 
@@ -968,6 +979,12 @@ class AiopsDiagnosticService:
         }
         attempt_count = int(state.get("executor_attempt_count") or 0)
         remaining_budget = max(0, int(state.get("max_total_steps") or 6) - attempt_count)
+        validation_gap = _json_dict(state.get("decision_validation"))
+        replan_reason = (
+            "decision_validation_gap"
+            if validation_gap.get("status") == "invalid"
+            else "evidence_gap"
+        )
         prompt = (
             "Return JSON only for a gap-targeted diagnostic replan with a `steps` array. "
             "Each step has id, tool, arguments, purpose, and testsHypotheses. Use only the "
@@ -975,6 +992,7 @@ class AiopsDiagnosticService:
             "arguments pair. "
             "Evidence gap: "
             f"{json.dumps(state.get('evidence_sufficiency') or {}, ensure_ascii=False)}. "
+            f"Decision validation gap: {json.dumps(validation_gap, ensure_ascii=False)}. "
             "Discovered contracts: "
             f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
             f"Public hypotheses: {json.dumps(sorted(known_hypotheses))}. "
@@ -1011,7 +1029,7 @@ class AiopsDiagnosticService:
         replan_count = int(state.get("replan_count") or 0) + 1
         termination_reason = "" if accepted else "no_useful_step"
         payload: JsonDict = {
-            "reason": "evidence_gap",
+            "reason": replan_reason,
             "addedStepCount": len(accepted),
             "replanCount": replan_count,
             "remainingAttemptBudget": remaining_budget,
@@ -1133,6 +1151,115 @@ class AiopsDiagnosticService:
             ],
         }
 
+    async def _decision_validator(
+        self,
+        state: AiopsDiagnosticState,
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+        deterministic_gaps = (
+            _deterministic_decision_gaps(
+                candidate,
+                decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+            )
+            if candidate is not None
+            else ()
+        )
+        if candidate is None:
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=(),
+                unsupported_fields=(),
+                missing_evidence=("No grounded root-cause decision was available.",),
+                summary="Decision validation failed closed because no candidate was available.",
+            )
+        elif deterministic_gaps:
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=candidate.evidence_ids,
+                unsupported_fields=cast(
+                    tuple[
+                        Literal["component", "mechanism", "trigger", "causalChain"], ...
+                    ],
+                    deterministic_gaps,
+                ),
+                missing_evidence=(
+                    "The candidate root-cause structure is not fully supported.",
+                ),
+                summary="Deterministic root-cause validation rejected the candidate.",
+            )
+        else:
+            prompt = (
+                "Return one JSON root-cause validation decision with status, evidenceIds, "
+                "unsupportedFields, missingEvidence, and summary. Judge only whether the "
+                "candidate component, mechanism, trigger, and causalChain are supported by the "
+                "public structured observations. Do not compare against hidden answers and do "
+                "not include private chain-of-thought. "
+                f"Candidate: {json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
+                "Public hypotheses: "
+                f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
+                "Hypothesis states: "
+                f"{json.dumps(state.get('hypothesis_states') or [], ensure_ascii=False)}. "
+                "Structured observations: "
+                f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
+                f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
+            )
+            try:
+                response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+                validation = parse_root_cause_validation(
+                    _model_text(response),
+                    available_evidence_ids=set(evidence_ids),
+                )
+            except Exception:
+                validation = RootCauseValidationDecision(
+                    status="invalid",
+                    evidence_ids=candidate.evidence_ids,
+                    unsupported_fields=(),
+                    missing_evidence=("Structured root-cause validation was unavailable.",),
+                    summary="Decision validation failed closed.",
+                )
+        payload = _root_cause_validation_payload(validation)
+        can_replan = (
+            candidate is not None
+            and validation.status == "invalid"
+            and bool(validation.missing_evidence)
+            and _can_replan(state)
+        )
+        route = "replanner" if can_replan else "report"
+        termination_reason = str(state.get("termination_reason") or "")
+        root_cause_payload = state.get("root_cause_decision")
+        if validation.status == "invalid" and not can_replan:
+            root_cause_payload = None
+            termination_reason = "unsupported_decision"
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="decision_validation",
+            status="completed",
+            payload={**payload, "nextRoute": route},
+        )
+        await self._save_checkpoint(
+            state,
+            "decision_validation",
+            {**payload, "nextRoute": route},
+        )
+        return {
+            "decision_validation": payload,
+            "root_cause_decision": root_cause_payload,
+            "next_route": cast(Literal["replanner", "report"], route),
+            "termination_reason": termination_reason,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Decision Validator: {validation.status}.",
+                    87,
+                )
+            ],
+        }
+
     async def _report(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
@@ -1156,6 +1283,7 @@ class AiopsDiagnosticService:
             "reportGeneration": report_generation,
             "status": status,
             "rootCauseDecision": state.get("root_cause_decision"),
+            "decisionValidation": state.get("decision_validation"),
             "evidenceSufficiency": state.get("evidence_sufficiency"),
             "terminationReason": str(state.get("termination_reason") or ""),
         }
@@ -1260,6 +1388,9 @@ class AiopsDiagnosticService:
         attempts = int(state.get("executor_attempt_count") or 0)
         maximum = int(state.get("max_total_steps") or 6)
         return "executor" if plan_index < len(plan) and attempts < maximum else "decision"
+
+    def _route_after_decision_validation(self, state: AiopsDiagnosticState) -> str:
+        return str(state.get("next_route") or "report")
 
     async def _create_plan(
         self,
@@ -1601,6 +1732,78 @@ def _root_cause_decision_payload(decision: RootCauseDecision) -> JsonDict:
         "causalChain": list(decision.causal_chain),
         "evidenceIds": list(decision.evidence_ids),
         "confidence": decision.confidence,
+    }
+
+
+def _root_cause_decision_from_payload(value: object) -> RootCauseDecision | None:
+    payload = _json_dict(value)
+    component = payload.get("component")
+    mechanism = payload.get("mechanism")
+    trigger = payload.get("trigger")
+    causal_chain = payload.get("causalChain")
+    evidence_ids = payload.get("evidenceIds")
+    confidence = payload.get("confidence")
+    if (
+        not isinstance(component, str)
+        or not isinstance(mechanism, str)
+        or not isinstance(trigger, str)
+        or not isinstance(causal_chain, list)
+        or not all(isinstance(item, str) for item in causal_chain)
+        or not isinstance(evidence_ids, list)
+        or not all(isinstance(item, str) for item in evidence_ids)
+        or not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+    ):
+        return None
+    return RootCauseDecision(
+        component=component,
+        mechanism=mechanism,
+        trigger=trigger,
+        causal_chain=tuple(cast(list[str], causal_chain)),
+        evidence_ids=tuple(cast(list[str], evidence_ids)),
+        confidence=float(confidence),
+    )
+
+
+def _deterministic_decision_gaps(
+    decision: RootCauseDecision,
+    *,
+    decision_vocabulary: Mapping[str, object],
+) -> tuple[str, ...]:
+    gaps: list[str] = []
+    if not decision.trigger.strip():
+        gaps.append("trigger")
+    if len(decision.causal_chain) < 2 or len(decision.causal_chain) > 6:
+        gaps.append("causalChain")
+    labels = _json_dict(decision_vocabulary.get("labelsByHypothesis"))
+    if labels and not _decision_uses_public_label(decision, labels):
+        gaps.extend(["component", "mechanism"])
+    return tuple(dict.fromkeys(gaps))
+
+
+def _decision_uses_public_label(
+    decision: RootCauseDecision,
+    labels: Mapping[str, object],
+) -> bool:
+    for value in labels.values():
+        candidate = _json_dict(value)
+        if (
+            candidate.get("component") == decision.component
+            and candidate.get("mechanism") == decision.mechanism
+        ):
+            return True
+    return False
+
+
+def _root_cause_validation_payload(
+    decision: RootCauseValidationDecision,
+) -> JsonDict:
+    return {
+        "status": decision.status,
+        "evidenceIds": list(decision.evidence_ids),
+        "unsupportedFields": list(decision.unsupported_fields),
+        "missingEvidence": list(decision.missing_evidence),
+        "summary": decision.summary,
     }
 
 

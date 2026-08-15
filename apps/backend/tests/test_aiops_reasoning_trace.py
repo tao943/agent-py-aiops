@@ -265,6 +265,17 @@ class ReasoningChatModel:
                     "confidence": 0.95,
                 }
             )
+        if "root-cause validation decision" in prompt:
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            return json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": evidence_ids,
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "The structured observations support the candidate decision.",
+                }
+            )
         return """# 告警分析报告
 
 ## 📋 活跃告警清单
@@ -395,6 +406,17 @@ class ReplanningChatModel:
                     "confidence": 0.95,
                 }
             )
+        if "root-cause validation decision" in prompt:
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            return json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": evidence_ids,
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "The trigger and causal chain are supported by the observations.",
+                }
+            )
         return (
             "# 告警分析报告\n\n## 📋 活跃告警清单\n\n"
             "- CheckoutUpstream5xxHigh\n\n## 📊 结论\n\n证据充分。"
@@ -441,6 +463,63 @@ class DuplicateStepLlmProvider:
         self.model = DuplicateStepChatModel()
 
     def create_chat_model(self) -> DuplicateStepChatModel:
+        return self.model
+
+
+class ValidationGapChatModel(ReplanningChatModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.validation_count = 0
+
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "evidence sufficiency decision" in prompt:
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            return json.dumps(
+                {
+                    "status": "sufficient",
+                    "evidenceIds": evidence_ids,
+                    "supportedHypotheses": ["upstream_process_down"],
+                    "refutedHypotheses": [
+                        "upstream_port_mismatch",
+                        "dns_resolution_failure",
+                    ],
+                    "unresolvedHypotheses": [],
+                    "missingEvidence": [],
+                    "recommendedTools": [],
+                    "summary": "A candidate decision can be attempted.",
+                }
+            )
+        if "root-cause validation decision" in prompt:
+            self.validation_count += 1
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            if self.validation_count == 1:
+                return json.dumps(
+                    {
+                        "status": "invalid",
+                        "evidenceIds": evidence_ids,
+                        "unsupportedFields": ["trigger", "causalChain"],
+                        "missingEvidence": ["Inspect the gateway route and connection result."],
+                        "summary": "Impact is visible but the causal path is incomplete.",
+                    }
+                )
+            return json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": evidence_ids,
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "The added gateway evidence supports the causal path.",
+                }
+            )
+        return await super().ainvoke(input)
+
+
+class ValidationGapLlmProvider:
+    def __init__(self) -> None:
+        self.model = ValidationGapChatModel()
+
+    def create_chat_model(self) -> ValidationGapChatModel:
         return self.model
 
 
@@ -508,12 +587,15 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
         "evidence_evaluation",
         "sufficiency_gate",
         "decision",
+        "decision_validation",
         "report",
     ]
     replanner = next(step for step in steps if step.phase == "replanner")
     assert replanner.payload["reason"] == "evidence_gap"
     assert replanner.payload["addedStepCount"] == 1
     assert replanner.payload["replanCount"] == 1
+    validation = next(step for step in steps if step.phase == "decision_validation")
+    assert validation.payload["status"] == "valid"
 
 
 @pytest.mark.asyncio
@@ -564,6 +646,60 @@ async def test_duplicate_plan_step_consumes_budget_without_repeating_mcp_call(
     assert [item.tool_name for item in snapshot.observations] == ["InspectContainer"]
     assert len(executor_steps) == 2
     assert executor_steps[1].payload["errorCategory"] == "duplicate_step"
+
+
+@pytest.mark.asyncio
+async def test_invalid_decision_validation_replans_before_reporting(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-003")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-003" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-validation-replan",
+            status="accepted",
+            query="Investigate checkout HTTP 502",
+            input_payload={
+                "alert": scenario.alert,
+                "hypotheses": [
+                    {"id": item.id, "description": item.description}
+                    for item in scenario.hypotheses
+                ],
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, ValidationGapLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        async for _ in service.stream(task=task, accessible_knowledge_base_ids=()):
+            pass
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    validations = [step for step in steps if step.phase == "decision_validation"]
+    replanner = next(step for step in steps if step.phase == "replanner")
+    assert [item.payload["status"] for item in validations] == ["invalid", "valid"]
+    assert replanner.payload["reason"] == "decision_validation_gap"
+    assert [item.tool_name for item in snapshot.observations] == [
+        "InspectContainer",
+        "InspectNginx",
+    ]
 
 
 @pytest.mark.asyncio
@@ -635,6 +771,7 @@ async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
         "sufficiency_gate",
         "replanner",
         "decision",
+        "decision_validation",
         "report",
     ]
     decision = cast(dict[str, object], reports[0].payload["rootCauseDecision"])
