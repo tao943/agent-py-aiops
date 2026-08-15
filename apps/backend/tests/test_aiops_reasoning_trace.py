@@ -22,6 +22,7 @@ from super_ai.aiops.reasoning import (
     parse_root_cause_validation,
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
+from super_ai.evaluation.runner import build_application_diagnostic_input
 from super_ai.llm import LlmProvider
 from super_ai.mcp.tool_arguments import constrain_tool_definitions, tool_step_fingerprint
 from super_ai.mcp_client import McpToolDefinition
@@ -1015,66 +1016,53 @@ class PostgresContractAcceptanceChatModel:
                 {
                     "steps": [
                         {
-                            "id": f"errors-{window}",
+                            "id": "errors",
                             "tool": "InspectPostgresErrors",
                             "arguments": {
                                 "service": "order-service",
-                                "windowMinutes": window,
+                                "windowMinutes": 30,
                             },
                             "purpose": "Inspect structured PostgreSQL errors.",
                             "testsHypotheses": ["postgres_deadlock"],
-                        }
-                        for window in (30, 60)
-                    ]
-                    + [
+                        },
                         {
-                            "id": f"resource-order-{window}",
-                            "tool": "InspectTransactionResourceOrder",
-                            "arguments": {
-                                "service": "order-service",
-                                "windowMinutes": window,
-                            },
-                            "purpose": "Compare transaction resource order.",
-                            "testsHypotheses": ["postgres_deadlock"],
-                        }
-                        for window in (30, 60)
-                    ]
-                }
-            )
-        if "gap-targeted diagnostic replan" in prompt:
-            return json.dumps(
-                {
-                    "steps": [
-                        {
-                            "id": f"wait-graph-{window}",
+                            "id": "wait-graph",
                             "tool": "InspectPostgresWaitGraph",
                             "arguments": {
                                 "database": "order-service",
-                                "windowMinutes": window,
+                                "windowMinutes": 60,
                             },
                             "purpose": "Inspect the PostgreSQL wait graph.",
                             "testsHypotheses": [
                                 "postgres_deadlock",
                                 "postgres_lock_wait",
                             ],
-                        }
-                        for window in (30, 60)
-                    ]
-                    + [
+                        },
                         {
-                            "id": f"metrics-{window}",
+                            "id": "metrics",
                             "tool": "GetDatabaseMetrics",
                             "arguments": {
                                 "database": "order-service",
-                                "windowMinutes": window,
+                                "windowMinutes": 30,
                             },
                             "purpose": "Rule out database capacity and slow-query pressure.",
                             "testsHypotheses": ["postgres_slow_query"],
-                        }
-                        for window in (30, 60)
+                        },
+                        {
+                            "id": "resource-order",
+                            "tool": "InspectTransactionResourceOrder",
+                            "arguments": {
+                                "service": "order-service",
+                                "windowMinutes": 60,
+                            },
+                            "purpose": "Compare transaction resource order.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                        },
                     ]
                 }
             )
+        if "gap-targeted diagnostic replan" in prompt:
+            return json.dumps({"steps": []})
         if "observation decision" in prompt:
             if "InspectPostgresWaitGraph" in prompt:
                 return json.dumps(
@@ -1104,7 +1092,7 @@ class PostgresContractAcceptanceChatModel:
             )
         if "evidence sufficiency decision" in prompt:
             self.sufficiency_count += 1
-            sufficient = self.sufficiency_count >= 4
+            sufficient = self.sufficiency_count >= 2
             return json.dumps(
                 {
                     "status": "sufficient" if sufficient else "insufficient",
@@ -1500,7 +1488,7 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
 
 
 @pytest.mark.asyncio
-async def test_apy_013_wrong_scope_retries_become_four_exact_calls_and_a_decision(
+async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_a_decision(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-013")
@@ -1517,13 +1505,7 @@ async def test_apy_013_wrong_scope_retries_become_four_exact_calls_and_a_decisio
             task_id="diagnostic-apy-013-contract-regression",
             status="accepted",
             query=scenario.title,
-            input_payload={
-                "alert": scenario.alert,
-                "hypotheses": [
-                    {"id": item.id, "description": item.description}
-                    for item in scenario.hypotheses
-                ],
-            },
+            input_payload=build_application_diagnostic_input(scenario),
         )
         service = AiopsDiagnosticService(
             repositories=repositories,
@@ -1551,21 +1533,32 @@ async def test_apy_013_wrong_scope_retries_become_four_exact_calls_and_a_decisio
     assert completed is not None
     assert [observation.tool_name for observation in snapshot.observations] == [
         "InspectPostgresErrors",
-        "InspectTransactionResourceOrder",
         "InspectPostgresWaitGraph",
-        "GetDatabaseMetrics",
+        "InspectTransactionResourceOrder",
     ]
     assert all(
         observation.arguments["windowMinutes"] == 15
         for observation in snapshot.observations
     )
-    assert snapshot.observations[2].arguments["database"] == "agent_py"
+    assert snapshot.observations[1].arguments["database"] == "agent_py"
+    assert {item.evidence_id for item in snapshot.observations} == {
+        "postgres-40p01-deadlock-record",
+        "postgres-deadlock-cycle",
+        "postgres-opposite-resource-order",
+    }
+    assert all(item.tool_name != "GetDatabaseMetrics" for item in snapshot.observations)
     assert not any(
         step.phase == "executor" and "errorCategory" in step.payload
         for step in steps
     )
     assert not any(
         step.payload.get("terminationReason") == "step_budget_exhausted"
+        for step in steps
+    )
+    assert any(
+        step.phase == "sufficiency_gate"
+        and step.payload.get("refinementReason")
+        == "supported_hypothesis_plan_step_remaining"
         for step in steps
     )
     decision = next(step for step in steps if step.phase == "decision")
