@@ -20,10 +20,12 @@ from langgraph.graph import END, START, StateGraph
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.reasoning import (
     DiagnosticPlanStep,
+    EvidenceSufficiencyDecision,
     HypothesisState,
     ObservationDecision,
     RootCauseDecision,
     normalize_root_cause_decision,
+    parse_evidence_sufficiency,
     parse_observation_decision,
     parse_plan,
     parse_root_cause_decision,
@@ -62,6 +64,7 @@ class AiopsDiagnosticState(TypedDict, total=False):
     plan: list[JsonDict]
     plan_origin: str
     plan_index: int
+    tool_definitions: tuple[McpToolDefinition, ...]
     public_hypotheses: list[JsonDict]
     decision_vocabulary: JsonDict
     hypothesis_states: list[JsonDict]
@@ -70,7 +73,14 @@ class AiopsDiagnosticState(TypedDict, total=False):
     current_evidence_id: str
     current_evidence_summary: str
     current_plan_step: JsonDict
-    continue_execution: bool
+    evidence_sufficiency: JsonDict
+    next_route: Literal["executor", "replanner", "decision"]
+    replan_count: int
+    max_replans: int
+    max_total_steps: int
+    executor_attempt_count: int
+    executed_step_fingerprints: Annotated[list[str], add]
+    termination_reason: str
     execution_failed: bool
     report_id: str
     events: Annotated[list[dict[str, object]], add]
@@ -317,6 +327,12 @@ class AiopsDiagnosticService:
             "observation_decisions": [],
             "accessible_knowledge_base_ids": tuple(accessible_knowledge_base_ids),
             "plan_index": 0,
+            "replan_count": 0,
+            "max_replans": 2,
+            "max_total_steps": 6,
+            "executor_attempt_count": 0,
+            "executed_step_fingerprints": [],
+            "termination_reason": "",
             "execution_failed": False,
             "events": [],
             "evidence": [],
@@ -371,13 +387,19 @@ class AiopsDiagnosticService:
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
         graph.add_node("evidence_evaluator", self._evidence_evaluator)
+        graph.add_node("sufficiency_gate", self._sufficiency_gate)
         graph.add_node("replanner", self._replanner)
         graph.add_node("decision", self._decision)
         graph.add_node("report", self._report)
         graph.add_edge(START, "planner")
         graph.add_edge("planner", "executor")
         graph.add_edge("executor", "evidence_evaluator")
-        graph.add_edge("evidence_evaluator", "replanner")
+        graph.add_edge("evidence_evaluator", "sufficiency_gate")
+        graph.add_conditional_edges(
+            "sufficiency_gate",
+            self._route_after_sufficiency,
+            {"executor": "executor", "replanner": "replanner", "decision": "decision"},
+        )
         graph.add_conditional_edges(
             "replanner",
             self._route_after_replanner,
@@ -514,6 +536,7 @@ class AiopsDiagnosticService:
             )
         )
         planner_payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v2",
             "noSopMatched": no_sop_matched,
             "sopHits": sop_hits,
             "plan": plan,
@@ -564,6 +587,7 @@ class AiopsDiagnosticService:
             "no_sop_matched": no_sop_matched,
             "plan": plan,
             "plan_origin": plan_origin,
+            "tool_definitions": tuple(discovered_tools),
             "hypothesis_states": cast(
                 list[JsonDict], state.get("hypothesis_states") or []
             ),
@@ -576,12 +600,50 @@ class AiopsDiagnosticService:
         owner_user_id = str(state["owner_user_id"])
         plan = cast(list[JsonDict], state.get("plan") or [])
         plan_index = int(state.get("plan_index") or 0)
+        attempt_count = int(state.get("executor_attempt_count") or 0)
+        max_total_steps = int(state.get("max_total_steps") or 6)
+        if attempt_count >= max_total_steps:
+            return {
+                "current_evidence_id": "",
+                "termination_reason": "step_budget_exhausted",
+                "events": [],
+            }
         if plan_index >= len(plan):
-            return {"events": []}
+            return {"current_evidence_id": "", "events": []}
 
         step = plan[plan_index]
         tool_name = str(step.get("tool") or "")
         arguments = _json_dict(step.get("arguments"))
+        fingerprint = _step_fingerprint(step)
+        if fingerprint in set(state.get("executed_step_fingerprints") or []):
+            payload: JsonDict = {
+                "planStep": step,
+                "tool": tool_name,
+                "errorCategory": "duplicate_step",
+            }
+            await self._create_step(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                phase="executor",
+                status="failed",
+                payload=payload,
+            )
+            await self._save_checkpoint(state, "executor", payload)
+            return {
+                "plan_index": plan_index + 1,
+                "executor_attempt_count": attempt_count + 1,
+                "executed_step_fingerprints": [fingerprint],
+                "current_evidence_id": "",
+                "current_plan_step": step,
+                "events": [
+                    _task_status_event(
+                        task_id,
+                        "running",
+                        "Executor: rejected a duplicate diagnostic step.",
+                        55,
+                    )
+                ],
+            }
         audit_id = f"tool_{uuid4().hex}"
         events = [
             _task_status_event(
@@ -663,6 +725,8 @@ class AiopsDiagnosticService:
             await self._save_checkpoint(state, "executor", {"evidence": evidence})
             return {
                 "plan_index": plan_index + 1,
+                "executor_attempt_count": attempt_count + 1,
+                "executed_step_fingerprints": [fingerprint],
                 "execution_failed": True,
                 "evidence": [evidence],
                 "evidence_ids": [evidence_record.id],
@@ -726,6 +790,8 @@ class AiopsDiagnosticService:
         await self._save_checkpoint(state, "executor", {"evidence": evidence})
         return {
             "plan_index": plan_index + 1,
+            "executor_attempt_count": attempt_count + 1,
+            "executed_step_fingerprints": [fingerprint],
             "evidence": [evidence],
             "evidence_ids": [evidence_record.id],
             "current_evidence_id": evidence_record.id,
@@ -803,48 +869,176 @@ class AiopsDiagnosticService:
             ],
         }
 
-    async def _replanner(self, state: AiopsDiagnosticState) -> dict[str, object]:
+    async def _sufficiency_gate(
+        self,
+        state: AiopsDiagnosticState,
+    ) -> dict[str, object]:
         task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
         plan = cast(list[JsonDict], state.get("plan") or [])
         plan_index = int(state.get("plan_index") or 0)
-        execution_failed = bool(state.get("execution_failed"))
-        continue_execution = plan_index < len(plan) and not execution_failed
-        decision = (
-            "continuing with the next bounded step"
-            if continue_execution
-            else "moving to Decision"
+        evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        public_hypotheses = cast(list[JsonDict], state.get("public_hypotheses") or [])
+        known_hypotheses = {
+            str(item.get("id")) for item in public_hypotheses if item.get("id")
+        }
+        tool_definitions = tuple(state.get("tool_definitions") or ())
+        available_tools = {definition.name for definition in tool_definitions}
+        prompt = (
+            "Return one JSON evidence sufficiency decision with status, evidenceIds, "
+            "supportedHypotheses, refutedHypotheses, unresolvedHypotheses, missingEvidence, "
+            "recommendedTools, and summary. Use only public IDs and discovered read tools. "
+            "Do not include private chain-of-thought. "
+            f"Public hypotheses: {json.dumps(public_hypotheses, ensure_ascii=False)}. "
+            "Hypothesis states: "
+            f"{json.dumps(state.get('hypothesis_states') or [], ensure_ascii=False)}. "
+            "Structured observations: "
+            f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
+            f"Persisted evidence IDs: {json.dumps(evidence_ids)}. "
+            "Bounded evidence summaries: "
+            f"{json.dumps(state.get('evidence') or [], ensure_ascii=False)}. "
+            f"Discovered tools: {json.dumps(sorted(available_tools))}."
         )
-        events = [
-            _task_status_event(
-                task_id,
-                "running",
-                f"Replanner: {decision} based on recorded execution evidence.",
-                70 if continue_execution else 80,
+        try:
+            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            decision = parse_evidence_sufficiency(
+                _model_text(response),
+                available_evidence_ids=set(evidence_ids),
+                known_hypotheses=known_hypotheses,
+                available_tools=available_tools,
             )
-        ]
+        except Exception:
+            decision = _fallback_evidence_sufficiency(
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                evidence_ids=evidence_ids,
+            )
+        payload = _evidence_sufficiency_payload(decision)
+        attempt_count = int(state.get("executor_attempt_count") or 0)
+        max_total_steps = int(state.get("max_total_steps") or 6)
+        if decision.status == "sufficient":
+            next_route: Literal["executor", "replanner", "decision"] = "decision"
+            termination_reason = "evidence_sufficient"
+        elif plan_index < len(plan) and attempt_count < max_total_steps:
+            next_route = "executor"
+            termination_reason = ""
+        elif _can_replan(state):
+            next_route = "replanner"
+            termination_reason = ""
+        else:
+            next_route = "decision"
+            termination_reason = _budget_termination_reason(state)
         await self._create_step(
-            owner_user_id=str(state["owner_user_id"]),
+            owner_user_id=owner_user_id,
             task_id=task_id,
-            phase="replanner",
+            phase="sufficiency_gate",
             status="completed",
-            payload={
-                "planIndex": plan_index,
-                "planLength": len(plan),
-                "executionFailed": execution_failed,
-                "decision": "executor" if continue_execution else "decision",
-            },
+            payload={**payload, "nextRoute": next_route},
         )
         await self._save_checkpoint(
             state,
-            "replanner",
-            {
-                "planIndex": plan_index,
-                "planLength": len(plan),
-                "executionFailed": execution_failed,
-                "decision": "executor" if continue_execution else "decision",
-            },
+            "sufficiency_gate",
+            {**payload, "nextRoute": next_route},
         )
-        return {"continue_execution": continue_execution, "events": events}
+        return {
+            "evidence_sufficiency": payload,
+            "next_route": next_route,
+            "termination_reason": termination_reason,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Sufficiency Gate: routed to {next_route} from persisted evidence.",
+                    70,
+                )
+            ],
+        }
+
+    async def _replanner(self, state: AiopsDiagnosticState) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        current_plan = cast(list[JsonDict], state.get("plan") or [])
+        tool_definitions = tuple(state.get("tool_definitions") or ())
+        available_tools = {definition.name for definition in tool_definitions}
+        known_hypotheses = {
+            str(item.get("id"))
+            for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
+            if item.get("id")
+        }
+        attempt_count = int(state.get("executor_attempt_count") or 0)
+        remaining_budget = max(0, int(state.get("max_total_steps") or 6) - attempt_count)
+        prompt = (
+            "Return JSON only for a gap-targeted diagnostic replan with a `steps` array. "
+            "Each step has id, tool, arguments, purpose, and testsHypotheses. Use only the "
+            "discovered contracts and public hypothesis IDs. Do not repeat an executed tool and "
+            "arguments pair. "
+            "Evidence gap: "
+            f"{json.dumps(state.get('evidence_sufficiency') or {}, ensure_ascii=False)}. "
+            "Discovered contracts: "
+            f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
+            f"Public hypotheses: {json.dumps(sorted(known_hypotheses))}. "
+            f"Executed fingerprints: {json.dumps(state.get('executed_step_fingerprints') or [])}. "
+            f"Remaining executor attempt budget: {remaining_budget}."
+        )
+        parsed_steps: list[JsonDict] = []
+        try:
+            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            parsed = parse_plan(
+                _model_text(response),
+                available_tools=available_tools,
+                known_hypotheses=known_hypotheses,
+            )
+            parsed_steps = [_diagnostic_plan_step_payload(step) for step in parsed]
+        except Exception:
+            parsed_steps = []
+        parsed_steps = bind_trusted_tool_arguments(
+            parsed_steps, self._trusted_tool_arguments
+        )
+        executed = set(state.get("executed_step_fingerprints") or [])
+        accepted: list[JsonDict] = []
+        for step in parsed_steps:
+            fingerprint = _step_fingerprint(step)
+            if fingerprint in executed or any(
+                _step_fingerprint(existing) == fingerprint for existing in accepted
+            ):
+                continue
+            if not plan_matches_tool_contracts([step], tool_definitions):
+                continue
+            accepted.append(step)
+            if len(accepted) >= remaining_budget:
+                break
+        replan_count = int(state.get("replan_count") or 0) + 1
+        termination_reason = "" if accepted else "no_useful_step"
+        payload: JsonDict = {
+            "reason": "evidence_gap",
+            "addedStepCount": len(accepted),
+            "replanCount": replan_count,
+            "remainingAttemptBudget": remaining_budget,
+            "plan": accepted,
+            "terminationReason": termination_reason,
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="replanner",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "replanner", payload)
+        return {
+            "plan": [*current_plan, *accepted],
+            "replan_count": replan_count,
+            "termination_reason": termination_reason,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Replanner: added {len(accepted)} gap-targeted step(s).",
+                    75,
+                )
+            ],
+        }
 
     async def _decision(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -953,6 +1147,7 @@ class AiopsDiagnosticService:
         ]
         report_content, report_generation = await self._generate_report_content(state)
         report_payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v2",
             "noSopMatched": no_sop_matched,
             "plan": _json_list(state.get("plan")),
             "planOrigin": str(state.get("plan_origin") or "generic"),
@@ -961,6 +1156,8 @@ class AiopsDiagnosticService:
             "reportGeneration": report_generation,
             "status": status,
             "rootCauseDecision": state.get("root_cause_decision"),
+            "evidenceSufficiency": state.get("evidence_sufficiency"),
+            "terminationReason": str(state.get("termination_reason") or ""),
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -1054,8 +1251,15 @@ class AiopsDiagnosticService:
         report = _clean_markdown_report(_model_text(response))
         return (report, "llm") if report is not None else (fallback, "fallback")
 
+    def _route_after_sufficiency(self, state: AiopsDiagnosticState) -> str:
+        return str(state.get("next_route") or "decision")
+
     def _route_after_replanner(self, state: AiopsDiagnosticState) -> str:
-        return "executor" if state.get("continue_execution") else "decision"
+        plan = cast(list[JsonDict], state.get("plan") or [])
+        plan_index = int(state.get("plan_index") or 0)
+        attempts = int(state.get("executor_attempt_count") or 0)
+        maximum = int(state.get("max_total_steps") or 6)
+        return "executor" if plan_index < len(plan) and attempts < maximum else "decision"
 
     async def _create_plan(
         self,
@@ -1081,7 +1285,8 @@ class AiopsDiagnosticService:
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
-            "steps and only the tools and argument schemas in these discovered contracts: "
+            "steps and only the tools and argument schemas in these discovered contracts. "
+            "The initial plan must contain at most four steps: "
             f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
             f"User query: {query}. Alert: "
             f"{json.dumps(alert)}. SOP evidence: {json.dumps(list(sop_hits))}. "
@@ -1095,6 +1300,8 @@ class AiopsDiagnosticService:
                 available_tools=set(available_tools),
                 known_hypotheses=set(known_hypotheses),
             )
+            if len(parsed_plan) > 4:
+                raise ValueError("Initial diagnostic plan cannot contain more than four steps.")
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
@@ -1207,6 +1414,84 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
         "arguments": step.arguments,
         "purpose": step.purpose,
         "testsHypotheses": list(step.tests_hypotheses),
+    }
+
+
+def _step_fingerprint(step: Mapping[str, object]) -> str:
+    canonical = {
+        "tool": str(step.get("tool") or ""),
+        "arguments": _json_dict(step.get("arguments")),
+    }
+    return json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _can_replan(state: AiopsDiagnosticState) -> bool:
+    return (
+        int(state.get("replan_count") or 0) < int(state.get("max_replans") or 2)
+        and int(state.get("executor_attempt_count") or 0)
+        < int(state.get("max_total_steps") or 6)
+    )
+
+
+def _budget_termination_reason(state: AiopsDiagnosticState) -> str:
+    if int(state.get("executor_attempt_count") or 0) >= int(
+        state.get("max_total_steps") or 6
+    ):
+        return "step_budget_exhausted"
+    if int(state.get("replan_count") or 0) >= int(state.get("max_replans") or 2):
+        return "replan_limit_reached"
+    return "no_useful_step"
+
+
+def _fallback_evidence_sufficiency(
+    *,
+    hypothesis_states: Sequence[JsonDict],
+    evidence_ids: Sequence[str],
+) -> EvidenceSufficiencyDecision:
+    supported = tuple(
+        str(item.get("id"))
+        for item in hypothesis_states
+        if item.get("id") and item.get("status") == "supported"
+    )
+    refuted = tuple(
+        str(item.get("id"))
+        for item in hypothesis_states
+        if item.get("id") and item.get("status") == "refuted"
+    )
+    unresolved = tuple(
+        str(item.get("id"))
+        for item in hypothesis_states
+        if item.get("id") and item.get("status") not in {"supported", "refuted"}
+    )
+    return EvidenceSufficiencyDecision(
+        status="insufficient",
+        evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
+        supported_hypotheses=supported[:6],
+        refuted_hypotheses=refuted[:6],
+        unresolved_hypotheses=unresolved[:6],
+        missing_evidence=("Structured sufficiency assessment was unavailable.",),
+        recommended_tools=(),
+        summary="Evidence sufficiency could not be confirmed.",
+    )
+
+
+def _evidence_sufficiency_payload(
+    decision: EvidenceSufficiencyDecision,
+) -> JsonDict:
+    return {
+        "status": decision.status,
+        "evidenceIds": list(decision.evidence_ids),
+        "supportedHypotheses": list(decision.supported_hypotheses),
+        "refutedHypotheses": list(decision.refuted_hypotheses),
+        "unresolvedHypotheses": list(decision.unresolved_hypotheses),
+        "missingEvidence": list(decision.missing_evidence),
+        "recommendedTools": list(decision.recommended_tools),
+        "summary": decision.summary,
     }
 
 

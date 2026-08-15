@@ -284,6 +284,288 @@ class ReasoningLlmProvider:
         return self.model
 
 
+class ReplanningChatModel:
+    def __init__(self) -> None:
+        self.observation_count = 0
+        self.sufficiency_count = 0
+
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "bounded diagnostic plan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-container",
+                            "tool": "InspectContainer",
+                            "arguments": {"service": "checkout-service"},
+                            "purpose": "Check whether the checkout process is running.",
+                            "testsHypotheses": [
+                                "upstream_process_down",
+                                "upstream_port_mismatch",
+                            ],
+                        }
+                    ]
+                }
+            )
+        if "gap-targeted diagnostic replan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-nginx-after-gap",
+                            "tool": "InspectNginx",
+                            "arguments": {"route": "checkout"},
+                            "purpose": "Resolve the remaining route and DNS alternatives.",
+                            "testsHypotheses": [
+                                "upstream_port_mismatch",
+                                "dns_resolution_failure",
+                            ],
+                        }
+                    ]
+                }
+            )
+        if "observation decision" in prompt:
+            self.observation_count += 1
+            if self.observation_count == 1:
+                return json.dumps(
+                    {
+                        "purpose": "Check whether the checkout process is running.",
+                        "supports": ["upstream_process_down"],
+                        "refutes": [],
+                        "summary": "The checkout container is exited and has no listener.",
+                    }
+                )
+            return json.dumps(
+                {
+                    "purpose": "Resolve the remaining route and DNS alternatives.",
+                    "supports": ["upstream_process_down"],
+                    "refutes": ["upstream_port_mismatch", "dns_resolution_failure"],
+                    "summary": (
+                        "Nginx resolves checkout on port 8080 but the connection is refused."
+                    ),
+                }
+            )
+        if "evidence sufficiency decision" in prompt:
+            self.sufficiency_count += 1
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            if self.sufficiency_count == 1:
+                return json.dumps(
+                    {
+                        "status": "insufficient",
+                        "evidenceIds": evidence_ids,
+                        "supportedHypotheses": ["upstream_process_down"],
+                        "refutedHypotheses": [],
+                        "unresolvedHypotheses": [
+                            "upstream_port_mismatch",
+                            "dns_resolution_failure",
+                        ],
+                        "missingEvidence": ["Inspect the gateway route and DNS result."],
+                        "recommendedTools": ["InspectNginx"],
+                        "summary": "The process is down but gateway alternatives remain open.",
+                    }
+                )
+            return json.dumps(
+                {
+                    "status": "sufficient",
+                    "evidenceIds": evidence_ids,
+                    "supportedHypotheses": ["upstream_process_down"],
+                    "refutedHypotheses": [
+                        "upstream_port_mismatch",
+                        "dns_resolution_failure",
+                    ],
+                    "unresolvedHypotheses": [],
+                    "missingEvidence": [],
+                    "recommendedTools": [],
+                    "summary": "The process failure is supported and alternatives are refuted.",
+                }
+            )
+        if "root-cause decision" in prompt:
+            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            return json.dumps(
+                {
+                    "component": "checkout-service",
+                    "mechanism": "process_unavailable",
+                    "trigger": "benchmark_container_stopped",
+                    "causalChain": [
+                        "checkout container stopped",
+                        "nginx upstream connection was refused",
+                    ],
+                    "evidenceIds": evidence_ids[-2:],
+                    "confidence": 0.95,
+                }
+            )
+        return (
+            "# 告警分析报告\n\n## 📋 活跃告警清单\n\n"
+            "- CheckoutUpstream5xxHigh\n\n## 📊 结论\n\n证据充分。"
+        )
+
+
+class ReplanningLlmProvider:
+    def __init__(self) -> None:
+        self.model = ReplanningChatModel()
+
+    def create_chat_model(self) -> ReplanningChatModel:
+        return self.model
+
+
+class DuplicateStepChatModel(ReplanningChatModel):
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "bounded diagnostic plan" in prompt:
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "inspect-container-first",
+                            "tool": "InspectContainer",
+                            "arguments": {"service": "checkout-service"},
+                            "purpose": "Check the checkout process.",
+                            "testsHypotheses": ["upstream_process_down"],
+                        },
+                        {
+                            "id": "inspect-container-duplicate",
+                            "tool": "InspectContainer",
+                            "arguments": {"service": "checkout-service"},
+                            "purpose": "Repeat the same process check.",
+                            "testsHypotheses": ["upstream_process_down"],
+                        },
+                    ]
+                }
+            )
+        return await super().ainvoke(input)
+
+
+class DuplicateStepLlmProvider:
+    def __init__(self) -> None:
+        self.model = DuplicateStepChatModel()
+
+    def create_chat_model(self) -> DuplicateStepChatModel:
+        return self.model
+
+
+@pytest.mark.asyncio
+async def test_workflow_replans_from_an_explicit_evidence_gap(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-003")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-003" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-gap-replan",
+            status="accepted",
+            query="Investigate checkout HTTP 502",
+            input_payload={
+                "alert": scenario.alert,
+                "hypotheses": [
+                    {"id": item.id, "description": item.description}
+                    for item in scenario.hypotheses
+                ],
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, ReplanningLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        events = [
+            event
+            async for event in service.stream(
+                task=task,
+                accessible_knowledge_base_ids=(),
+            )
+        ]
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert events[-1]["type"] == "complete"
+    assert [item.tool_name for item in snapshot.observations] == [
+        "InspectContainer",
+        "InspectNginx",
+    ]
+    assert [step.phase for step in steps] == [
+        "planner",
+        "executor",
+        "evidence_evaluation",
+        "sufficiency_gate",
+        "replanner",
+        "executor",
+        "evidence_evaluation",
+        "sufficiency_gate",
+        "decision",
+        "report",
+    ]
+    replanner = next(step for step in steps if step.phase == "replanner")
+    assert replanner.payload["reason"] == "evidence_gap"
+    assert replanner.payload["addedStepCount"] == 1
+    assert replanner.payload["replanCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_plan_step_consumes_budget_without_repeating_mcp_call(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-003")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-003" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="diagnostic-duplicate-step",
+            status="accepted",
+            query="Investigate checkout HTTP 502",
+            input_payload={
+                "alert": scenario.alert,
+                "hypotheses": [
+                    {"id": item.id, "description": item.description}
+                    for item in scenario.hypotheses
+                ],
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, DuplicateStepLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        async for _ in service.stream(task=task, accessible_knowledge_base_ids=()):
+            pass
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    executor_steps = [step for step in steps if step.phase == "executor"]
+    assert [item.tool_name for item in snapshot.observations] == ["InspectContainer"]
+    assert len(executor_steps) == 2
+    assert executor_steps[1].payload["errorCategory"] == "duplicate_step"
+
+
 @pytest.mark.asyncio
 async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
     migrated_database_url: str,
@@ -347,9 +629,10 @@ async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
         "planner",
         "executor",
         "evidence_evaluation",
-        "replanner",
+        "sufficiency_gate",
         "executor",
         "evidence_evaluation",
+        "sufficiency_gate",
         "replanner",
         "decision",
         "report",
