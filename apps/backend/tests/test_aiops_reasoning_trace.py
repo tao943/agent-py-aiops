@@ -757,6 +757,125 @@ class SufficientGateLlmProvider:
         return SufficientGateChatModel()
 
 
+class OneStringDecisionChatModel:
+    async def ainvoke(self, input: object) -> str:
+        del input
+        return json.dumps(
+            {
+                "component": "order-service",
+                "mechanism": "opposite_order_transaction_deadlock",
+                "trigger": "Transactions acquired resources in opposite orders.",
+                "causalChain": "One combined causal narrative.",
+                "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+                "confidence": 0.97,
+            }
+        )
+
+
+class OneStringDecisionLlmProvider:
+    def create_chat_model(self) -> OneStringDecisionChatModel:
+        return OneStringDecisionChatModel()
+
+
+@pytest.mark.asyncio
+async def test_decision_node_repairs_grounded_causal_chain(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="decision-grounded-causal-chain-repair",
+            status="running",
+            query=scenario.title,
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, OneStringDecisionLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        update = await service._decision(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "evidence_ids": ["ev-error", "ev-cycle", "ev-order"],
+                    "public_hypotheses": [
+                        {
+                            "id": "postgres_deadlock",
+                            "description": "Concurrent transactions formed a cycle.",
+                        }
+                    ],
+                    "hypothesis_states": [
+                        {
+                            "id": "postgres_deadlock",
+                            "status": "supported",
+                            "confidence": 1.0,
+                            "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+                        }
+                    ],
+                    "observation_decisions": [
+                        {
+                            "supports": ["postgres_deadlock"],
+                            "evidenceIds": ["ev-error"],
+                            "summary": "PostgreSQL emitted SQLSTATE 40P01.",
+                        },
+                        {
+                            "supports": ["postgres_deadlock"],
+                            "evidenceIds": ["ev-cycle"],
+                            "summary": "The wait graph contained a two-session cycle.",
+                        },
+                        {
+                            "supports": ["postgres_deadlock"],
+                            "evidenceIds": ["ev-order"],
+                            "summary": "Transactions acquired resources in opposite order.",
+                        },
+                    ],
+                    "decision_vocabulary": {
+                        "labelsByHypothesis": {
+                            "postgres_deadlock": {
+                                "component": "order-service",
+                                "mechanism": "opposite_order_transaction_deadlock",
+                            }
+                        }
+                    },
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    decision_payload = cast(dict[str, object], update["root_cause_decision"])
+    assert decision_payload["trigger"] == "Transactions acquired resources in opposite orders."
+    assert decision_payload["confidence"] == 0.97
+    assert decision_payload["evidenceIds"] == ["ev-error", "ev-cycle", "ev-order"]
+    assert decision_payload["causalChain"] == [
+        "PostgreSQL emitted SQLSTATE 40P01.",
+        "The wait graph contained a two-session cycle.",
+        "Transactions acquired resources in opposite order.",
+    ]
+    decision_step = steps[-1]
+    assert decision_step.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
+    assert decision_step.payload["decisionErrorCategory"] is None
+
+
 @pytest.mark.asyncio
 async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason(
     migrated_database_url: str,

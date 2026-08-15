@@ -1325,6 +1325,22 @@ class AiopsDiagnosticService:
                     ),
                 )
                 decision_origin = "llm"
+                repaired = _repair_grounded_causal_chain(
+                    decision,
+                    public_hypotheses=cast(
+                        list[JsonDict], state.get("public_hypotheses") or []
+                    ),
+                    hypothesis_states=cast(
+                        list[JsonDict], state.get("hypothesis_states") or []
+                    ),
+                    observation_decisions=cast(
+                        list[JsonDict], state.get("observation_decisions") or []
+                    ),
+                    decision_vocabulary=decision_vocabulary,
+                )
+                if repaired is not None:
+                    decision = repaired
+                    decision_origin = "llm_grounded_causal_chain_repair"
             except Exception:
                 decision_error_category = "invalid_model_output"
         if decision is None:
