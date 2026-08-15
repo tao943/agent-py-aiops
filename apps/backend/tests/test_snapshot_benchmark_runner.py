@@ -15,13 +15,14 @@ from super_ai.evaluation import (
     RunArtifact,
     SnapshotMcpClient,
 )
-from super_ai.evaluation.domain import PublicScenario
+from super_ai.evaluation.domain import PublicDecisionLabel, PublicHypothesis, PublicScenario
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
     BenchmarkRunError,
     NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
+    _snapshot_decision_vocabulary,
     build_application_diagnostic_input,
 )
 from super_ai.evaluation.scenarios import load_public_scenario
@@ -217,17 +218,51 @@ def process_down_artifact() -> RunArtifact:
 
 
 def test_application_diagnostic_input_contains_only_public_scenario_fields() -> None:
-    scenario = load_public_scenario(SCENARIOS / "APY-003")
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
 
     payload = build_application_diagnostic_input(scenario)
     serialized = json.dumps(payload)
+    vocabulary = cast(dict[str, object], payload["decisionVocabulary"])
+    labels = cast(dict[str, dict[str, str]], vocabulary["labelsByHypothesis"])
+    mechanisms = cast(dict[str, str], vocabulary["mechanismAliases"])
+    components = cast(dict[str, str], vocabulary["componentAliases"])
 
-    assert payload["benchmarkScenarioId"] == "APY-003"
+    assert payload["benchmarkScenarioId"] == "APY-013"
     assert payload["benchmarkMode"] == "snapshot"
-    assert payload["query"] == "Checkout requests through the gateway are returning HTTP 502."
+    assert payload["query"] == "Order transactions are rolling back during concurrent updates."
+    assert set(labels) == {item.id for item in scenario.hypotheses}
+    assert labels["postgres_deadlock"] == {
+        "component": "order-service",
+        "mechanism": "opposite_order_transaction_deadlock",
+    }
+    assert mechanisms["postgres_deadlock"] == "opposite_order_transaction_deadlock"
+    assert components == {"order-service": "order-service"}
     assert "ground_truth" not in serialized
-    assert "process_unavailable" not in serialized
-    assert "benchmark_container_stopped" not in serialized
+    assert "evidence" not in json.dumps(vocabulary).lower()
+    assert "oracle" not in json.dumps(vocabulary).lower()
+    assert "concurrent_updates_acquired_order_and_inventory_rows_in_reverse_order" not in serialized
+
+
+def test_snapshot_decision_vocabulary_rejects_conflicting_mechanism_aliases() -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    conflicting = replace(
+        scenario,
+        hypotheses=(
+            PublicHypothesis(
+                id="shared",
+                description="First candidate.",
+                decision_label=PublicDecisionLabel("service-a", "mechanism-a"),
+            ),
+            PublicHypothesis(
+                id="mechanism-a",
+                description="Second candidate.",
+                decision_label=PublicDecisionLabel("service-b", "mechanism-b"),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="conflicting mechanism alias"):
+        _snapshot_decision_vocabulary(conflicting)
 
 
 @pytest.mark.asyncio
@@ -249,7 +284,7 @@ async def test_runner_keeps_oracle_outside_agent_and_writes_scorecard() -> None:
 
     assert result.passed is True
     assert "ground_truth" not in json.dumps(adapter.received_context)
-    assert "process_unavailable" not in json.dumps(adapter.received_context)
+    assert "benchmark_container_stopped" not in json.dumps(adapter.received_context)
     assert adapter.received_tools == {"InspectContainer", "InspectNginx"}
     assert len(persistence.created) == 1
     assert persistence.failed == []

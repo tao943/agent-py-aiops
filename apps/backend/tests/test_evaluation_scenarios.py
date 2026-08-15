@@ -40,6 +40,22 @@ def test_repository_contains_exactly_ten_snapshot_scenarios() -> None:
     assert all((path / "snapshot" / "tool_responses.yaml").is_file() for path in scenario_dirs)
 
 
+def test_all_snapshot_candidates_declare_public_decision_labels() -> None:
+    for scenario_dir in sorted(path for path in SCENARIOS.iterdir() if path.is_dir()):
+        scenario = load_public_scenario(scenario_dir)
+
+        assert scenario.hypotheses
+        assert all(item.decision_label is not None for item in scenario.hypotheses)
+        assert all(
+            item.decision_label is not None and item.decision_label.component
+            for item in scenario.hypotheses
+        )
+        assert all(
+            item.decision_label is not None and item.decision_label.mechanism
+            for item in scenario.hypotheses
+        )
+
+
 @pytest.mark.parametrize(
     ("scenario_id", "mechanism", "required_ids"),
     [
@@ -76,7 +92,11 @@ def test_expansion_scenarios_require_discriminating_evidence(
     assert required_ids <= {milestone.id for milestone in oracle.required_evidence}
     assert len(asyncio.run(client.discover_tools())) >= 3
     public_text = (root / "scenario.yaml").read_text(encoding="utf-8").casefold()
-    assert mechanism.casefold() not in public_text
+    assert any(
+        item.decision_label is not None
+        and item.decision_label.mechanism == mechanism
+        for item in public.hypotheses
+    )
     assert "primary_cause" not in public_text
     validate_scenario_bundle(ScenarioBundle(public=public, oracle=oracle, root=root))
 
@@ -98,6 +118,9 @@ alert:
 hypotheses:
   - id: upstream_process_down
     description: The upstream process is unavailable.
+    decision_label:
+      component: checkout-service
+      mechanism: process_unavailable
 snapshot_file: snapshot/tool_responses.yaml
 """.lstrip(),
         encoding="utf-8",
@@ -130,8 +153,42 @@ def test_public_scenario_excludes_ground_truth(valid_scenario_dir: Path) -> None
     serialized = repr(scenario)
     assert scenario.id == "APY-003"
     assert scenario.symptom_family == "nginx_upstream_5xx"
-    assert "process_unavailable" not in serialized
+    assert scenario.hypotheses[0].decision_label is not None
+    assert scenario.hypotheses[0].decision_label.mechanism == "process_unavailable"
     assert "benchmark_container_stopped" not in serialized
+
+
+@pytest.mark.parametrize(
+    "decision_label",
+    (None, {"component": "checkout-service"}, {"mechanism": "process_unavailable"}),
+)
+def test_snapshot_loader_requires_complete_candidate_decision_label(
+    valid_scenario_dir: Path,
+    decision_label: object,
+) -> None:
+    scenario_file = valid_scenario_dir / "scenario.yaml"
+    payload = yaml.safe_load(scenario_file.read_text(encoding="utf-8"))
+    hypothesis = payload["hypotheses"][0]
+    if decision_label is None:
+        hypothesis.pop("decision_label")
+    else:
+        hypothesis["decision_label"] = decision_label
+    scenario_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="decision_label|component|mechanism"):
+        load_public_scenario(valid_scenario_dir)
+
+
+def test_loader_rejects_oracle_nested_in_candidate_decision_label(
+    valid_scenario_dir: Path,
+) -> None:
+    scenario_file = valid_scenario_dir / "scenario.yaml"
+    payload = yaml.safe_load(scenario_file.read_text(encoding="utf-8"))
+    payload["hypotheses"][0]["decision_label"]["oracle"] = "leaked"
+    scenario_file.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ground-truth keys"):
+        load_public_scenario(valid_scenario_dir)
 
 
 def test_oracle_requires_primary_component_mechanism_and_trigger(
@@ -254,7 +311,11 @@ def test_new_scenario_has_isolated_evidence_rule_out_and_four_tools(
     assert len(oracle.required_evidence) >= 2
     assert len(oracle.required_rule_outs) == 1
     assert len(asyncio.run(client.discover_tools())) == 4
-    assert oracle.primary_cause.mechanism not in serialized_public
+    assert any(
+        item.decision_label is not None
+        and item.decision_label.mechanism == oracle.primary_cause.mechanism
+        for item in public.hypotheses
+    )
     assert oracle.primary_cause.trigger not in serialized_public
     assert all(item.id not in serialized_public for item in oracle.required_evidence)
     validate_scenario_bundle(

@@ -10,6 +10,7 @@ import yaml
 
 from super_ai.evaluation.domain import (
     EvidenceMilestone,
+    PublicDecisionLabel,
     PublicHypothesis,
     PublicScenario,
     RootCause,
@@ -38,11 +39,7 @@ def load_public_scenario(path: Path) -> PublicScenario:
         raise ValueError(f"Public scenario contains ground-truth keys: {names}.")
 
     hypotheses = tuple(
-        PublicHypothesis(
-            id=_required_str(_as_mapping(item, "hypothesis"), "id"),
-            description=_required_str(_as_mapping(item, "hypothesis"), "description"),
-        )
-        for item in _required_sequence(payload, "hypotheses")
+        _public_hypothesis(item) for item in _required_sequence(payload, "hypotheses")
     )
     hypothesis_ids = [item.id for item in hypotheses]
     if len(set(hypothesis_ids)) != len(hypothesis_ids):
@@ -158,6 +155,19 @@ def _root_cause(payload: Mapping[str, object]) -> RootCause:
         component=_required_str(payload, "component"),
         mechanism=_required_str(payload, "mechanism"),
         trigger=_required_str(payload, "trigger"),
+    )
+
+
+def _public_hypothesis(value: object) -> PublicHypothesis:
+    payload = _as_mapping(value, "hypothesis")
+    decision_label = _required_mapping(payload, "decision_label")
+    return PublicHypothesis(
+        id=_required_str(payload, "id"),
+        description=_required_str(payload, "description"),
+        decision_label=PublicDecisionLabel(
+            component=_required_str(decision_label, "component"),
+            mechanism=_required_str(decision_label, "mechanism"),
+        ),
     )
 
 

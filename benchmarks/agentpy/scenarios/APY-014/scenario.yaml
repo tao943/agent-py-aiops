@@ -11,10 +11,22 @@ alert:
 hypotheses:
   - id: redis_maxclients
     description: Redis has no remaining client connection slots.
+    decision_label:
+      component: live-eval-redis
+      mechanism: benchmark_clients_exhausted_maxclients
   - id: redis_process_unavailable
     description: The Redis process is stopped or no longer listening.
+    decision_label:
+      component: live-eval-redis
+      mechanism: connectivity_failure
   - id: host_file_descriptor_exhaustion
     description: The host cannot allocate additional file descriptors.
+    decision_label:
+      component: host
+      mechanism: file_descriptor_exhaustion
   - id: redis_stale_client_pool
     description: The application pool is retaining unusable old connections.
+    decision_label:
+      component: application
+      mechanism: stale_client_pool
 snapshot_file: snapshot/tool_responses.yaml

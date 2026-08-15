@@ -11,10 +11,22 @@ alert:
 hypotheses:
   - id: nginx_upstream_response_timeout
     description: The upstream accepts connections but does not respond before the read deadline.
+    decision_label:
+      component: live-eval-upstream
+      mechanism: upstream_response_exceeded_proxy_read_timeout
   - id: nginx_upstream_unavailable
     description: The upstream process or listening port is unavailable.
+    decision_label:
+      component: live-eval-upstream
+      mechanism: upstream_unavailable
   - id: nginx_route_mismatch
     description: The gateway is routing to an incorrect host, port, or protocol.
+    decision_label:
+      component: nginx
+      mechanism: route_mismatch
   - id: nginx_gateway_pressure
     description: Gateway resource pressure is delaying request processing.
+    decision_label:
+      component: nginx
+      mechanism: gateway_resource_pressure
 snapshot_file: snapshot/tool_responses.yaml

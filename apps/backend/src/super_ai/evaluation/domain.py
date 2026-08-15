@@ -8,11 +8,20 @@ from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
+class PublicDecisionLabel:
+    """Canonical public output labels for one candidate hypothesis."""
+
+    component: str
+    mechanism: str
+
+
+@dataclass(frozen=True, slots=True)
 class PublicHypothesis:
     """A candidate explanation intentionally visible to the diagnostic Agent."""
 
     id: str
     description: str
+    decision_label: PublicDecisionLabel | None = None
 
 
 @dataclass(frozen=True, slots=True)

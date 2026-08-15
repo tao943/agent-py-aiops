@@ -127,7 +127,56 @@ def build_application_diagnostic_input(scenario: PublicScenario) -> JsonDict:
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "snapshot",
+        "decisionVocabulary": _snapshot_decision_vocabulary(scenario),
     }
+
+
+def _snapshot_decision_vocabulary(scenario: PublicScenario) -> JsonDict:
+    """Build equal candidate-wide output labels from public scenario data only."""
+    if any(item.decision_label is None for item in scenario.hypotheses):
+        raise ValueError("Snapshot hypotheses require decision labels.")
+    labels: dict[str, JsonDict] = {}
+    component_aliases: dict[str, str] = {}
+    mechanism_aliases: dict[str, str] = {}
+    for item in scenario.hypotheses:
+        label = item.decision_label
+        if label is None:  # pragma: no cover - narrowed by the complete-contract check above
+            raise ValueError("Snapshot hypotheses require decision labels.")
+        labels[item.id] = {
+            "component": label.component,
+            "mechanism": label.mechanism,
+        }
+        _bind_public_alias(
+            component_aliases,
+            alias=label.component,
+            canonical=label.component,
+            label="component",
+        )
+        for alias in (item.id, label.mechanism):
+            _bind_public_alias(
+                mechanism_aliases,
+                alias=alias,
+                canonical=label.mechanism,
+                label="mechanism",
+            )
+    return {
+        "componentAliases": component_aliases,
+        "mechanismAliases": mechanism_aliases,
+        "labelsByHypothesis": labels,
+    }
+
+
+def _bind_public_alias(
+    aliases: dict[str, str],
+    *,
+    alias: str,
+    canonical: str,
+    label: str,
+) -> None:
+    existing = aliases.get(alias)
+    if existing is not None and existing != canonical:
+        raise ValueError(f"Snapshot candidates contain a conflicting {label} alias.")
+    aliases[alias] = canonical
 
 
 class ApplicationDiagnosticAdapter:
