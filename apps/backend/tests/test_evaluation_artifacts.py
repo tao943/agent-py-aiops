@@ -141,6 +141,57 @@ def test_v2_artifact_keeps_only_a_validated_decision() -> None:
     assert artifact.decision.mechanism == "row_lock_blocking"
 
 
+@pytest.mark.parametrize(
+    "validation_origin",
+    ["llm_confirmed", "deterministic_grounded_fallback"],
+)
+def test_v3_artifact_keeps_a_valid_decision_with_an_allowed_origin(
+    validation_origin: str,
+) -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v3", "plan": []}),
+            _step(2, "decision", _decision_payload()),
+            _step(
+                3,
+                "decision_validation",
+                {
+                    "status": "valid",
+                    "validationOrigin": validation_origin,
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.decision is not None
+
+
+@pytest.mark.parametrize("validation_origin", [None, "none", "unknown_origin"])
+def test_v3_artifact_rejects_a_valid_decision_without_an_allowed_origin(
+    validation_origin: str | None,
+) -> None:
+    validation: dict[str, object] = {"status": "valid"}
+    if validation_origin is not None:
+        validation["validationOrigin"] = validation_origin
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v3", "plan": []}),
+            _step(2, "decision", _decision_payload()),
+            _step(3, "decision_validation", validation),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.decision is None
+
+
 def test_legacy_artifact_keeps_a_decision_without_validation() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

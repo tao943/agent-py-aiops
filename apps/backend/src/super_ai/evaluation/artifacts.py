@@ -151,18 +151,23 @@ def _decision_from_steps(steps: Sequence[DiagnosticStepRecord]) -> RootCauseDeci
     )
     if decision_index is None:
         return None
-    evidence_driven_v2 = any(
-        step.phase == "planner"
-        and step.payload.get("workflowVersion") == "evidence-driven-v2"
+    workflow_versions = [
+        step.payload.get("workflowVersion")
         for step in steps
-    )
-    if evidence_driven_v2:
+        if step.phase == "planner"
+    ]
+    workflow_version = workflow_versions[-1] if workflow_versions else None
+    if workflow_version in {"evidence-driven-v2", "evidence-driven-v3"}:
         validations = [
             step
             for step in steps[decision_index + 1 :]
             if step.phase == "decision_validation"
         ]
         if not validations or validations[-1].payload.get("status") != "valid":
+            return None
+        if workflow_version == "evidence-driven-v3" and validations[-1].payload.get(
+            "validationOrigin"
+        ) not in {"llm_confirmed", "deterministic_grounded_fallback"}:
             return None
 
     payload = steps[decision_index].payload.get("rootCauseDecision")
