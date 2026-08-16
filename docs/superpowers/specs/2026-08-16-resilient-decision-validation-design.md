@@ -36,6 +36,8 @@ Observation summaries 修复的三段 causal chain，且
 - 不新增数据库表或列；审计信息写入现有 step/checkpoint JSONB payload。
 - 不新增依赖、外部服务、前端字段或 HTTP/SSE 合同。
 - 保持 Python 3.10、strict Pyright、Ruff 和现有 LangGraph 编排。
+- 新合同写入 `workflowVersion=evidence-driven-v3`；历史 v2 Artifact 继续按原合同读取，
+  避免旧 Run 因缺少新字段而失去可评分性。
 
 ## 复用决策
 
@@ -71,7 +73,9 @@ LLM RootCauseDecision
 3. candidate 的 component 和 mechanism 与 supported hypothesis 在公开
    `decisionVocabulary.labelsByHypothesis` 中的标签完全匹配。
 4. candidate 的全部 Evidence ID 均已持久化且属于当前诊断任务。
-5. supported hypothesis 至少绑定两份不同的正证据。
+5. supported hypothesis 至少绑定两份不同的正证据，且 candidate 的全部 Evidence ID 必须
+   属于支持该 hypothesis 的 Observation Evidence ID 集合；Alert、Knowledge reference 或
+   未支持该 hypothesis 的 Evidence 不能混入 candidate。
 6. 至少两条 Observation decision 明确支持该 hypothesis，并引用 candidate 的持久化证据。
 7. causal chain 包含 2 至 6 条非空内容，且每一条都来自上述证据绑定 Observation summary；允许
    保持 Observation 顺序，但不允许拆分或发明模型叙述。
@@ -165,7 +169,9 @@ Pydantic schema 请求 `RootCauseValidationDecision`。
 - Validator unavailable 且确定性证据充分时保留根因并标记降级。
 - Validator unavailable 且证据不足时清除根因。
 - 降级路径不调用无关 Metrics、不重复 Decision、不自动授权 Recovery。
-- Task result、Report、Checkpoint 与 Benchmark Artifact 使用一致的最终验证状态。
+- Task result、Report、Checkpoint 与 Benchmark Artifact 使用一致的最终验证状态。新 Run 写入
+  `workflowVersion=evidence-driven-v3`；Artifact 只对 v3 强制 validation origin allowlist，
+  历史 v2 继续要求原有的 `status=valid`。
 
 ### 回归与真实验收
 
