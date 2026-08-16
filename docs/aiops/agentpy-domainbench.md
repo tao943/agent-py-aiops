@@ -76,7 +76,7 @@ PostgreSQL repository 和本地项目配置。它会调用所配置的真实 Cha
 
 ### 证据驱动诊断工作流
 
-`evidence-driven-v2` 不再按固定步骤直接生成结论。每轮工具观测先形成结构化
+`evidence-driven-v3` 不再按固定步骤直接生成结论。每轮工具观测先形成结构化
 Evidence，再更新公开候选假设，判断当前证据是否足以区分根因；证据缺口明确且预算
 仍可用时才进入 gap-targeted replanner。
 
@@ -89,18 +89,28 @@ flowchart TD
     R --> X
     S -->|"sufficient or bounded stop"| D["Root Cause Decision"]
     D --> V{"Decision Validator"}
-    V -->|"invalid and budget remains"| R
-    V -->|"valid"| RP["Recovery Planner"]
+    V -->|"explicit evidence gap and budget remains"| R
+    V -->|"llm_confirmed"| RP["Recovery Planner"]
+    V -->|"deterministic_grounded_fallback"| MR["Manual Review Recovery"]
     V -->|"invalid and cannot replan"| RP
     RP --> G["Policy Gate"]
+    MR --> G
     G --> O["Report and public artifact"]
     O -.-> SC["External deterministic scorer"]
 ```
 
 初始计划最多 4 步；所有已持久化的 Executor 尝试合计最多 6 次，重复步骤、参数校验
-失败和工具失败同样消耗预算；最多允许 2 次 replan。Decision Validator 同时检查
-结构合法性与证据支持。v2 运行缺少 `decision_validation=valid` 时，Artifact 不导出
-候选根因，避免中断或无效结论进入评分。
+失败和工具失败同样消耗预算；最多允许 2 次 replan。Decision Validator 先执行公开、
+确定性的证据绑定检查，再调用结构化 LLM Validator。模型调用失败、格式错误、明确拒绝和
+候选缺失分别记录为 `model_call_failed`、`invalid_model_output` / `retry_exhausted`、
+`model_rejected` 和 `candidate_missing`，不得把基础设施故障伪装成证据缺口。
+
+v3 只有两种可进入 Artifact 的有效来源：`llm_confirmed`，或候选通过全部公开确定性检查后
+因 Validator 不可用形成的 `deterministic_grounded_fallback`。后者必须进入
+`manual_review`，Policy Gate 保持 `executionPermitted=false`；如果候选混入 Alert、RAG、
+其他任务或非 supporting Observation 的 Evidence ID，则禁止降级并 fail closed。历史
+`evidence-driven-v2` 仍按 `decision_validation.status=valid` 读取，旧运行不会因新增 origin
+字段而失去可评分性。
 
 Recovery Planner 只生成结构化建议。`proposal_only` 工具必须由本次请求显式加入
 白名单、符合发现到的 JSON Schema，并且要求人工审批；Policy Gate 的 `allowed` 只表示
