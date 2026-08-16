@@ -19,6 +19,12 @@ from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
+from super_ai.aiops.decision_validation import (
+    can_replan_deterministic_gap,
+    deterministic_checks_payload,
+    invoke_structured_root_cause_validation,
+    validate_grounded_candidate,
+)
 from super_ai.aiops.reasoning import (
     DiagnosticPlanStep,
     EvidenceSufficiencyDecision,
@@ -34,7 +40,6 @@ from super_ai.aiops.reasoning import (
     parse_plan,
     parse_recovery_plan,
     parse_root_cause_decision,
-    parse_root_cause_validation,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
@@ -683,7 +688,7 @@ class AiopsDiagnosticService:
             )
         )
         planner_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v2",
+            "workflowVersion": "evidence-driven-v3",
             "noSopMatched": no_sop_matched,
             "sopHits": sop_hits,
             "plan": plan,
@@ -1398,7 +1403,34 @@ class AiopsDiagnosticService:
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
         candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
-        deterministic_gaps = (
+        validation_origin = "none"
+        validation_error_category: str | None = None
+        validation_attempts = 0
+        validation_warning: str | None = None
+        deterministic_result = None
+        deterministic_replan_allowed = False
+        validation = RootCauseValidationDecision(
+            status="invalid",
+            evidence_ids=(),
+            unsupported_fields=(),
+            missing_evidence=("No grounded root-cause decision was available.",),
+            summary="Decision validation failed closed because no candidate was available.",
+        )
+        if candidate is None:
+            validation_error_category = "candidate_missing"
+        else:
+            deterministic_result = validate_grounded_candidate(
+                candidate=candidate,
+                available_evidence_ids=set(evidence_ids),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+            )
+        structural_gaps = (
             _deterministic_decision_gaps(
                 candidate,
                 decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
@@ -1406,15 +1438,32 @@ class AiopsDiagnosticService:
             if candidate is not None
             else ()
         )
-        if candidate is None:
-            validation = RootCauseValidationDecision(
-                status="invalid",
-                evidence_ids=(),
-                unsupported_fields=(),
-                missing_evidence=("No grounded root-cause decision was available.",),
-                summary="Decision validation failed closed because no candidate was available.",
+        if deterministic_result is not None:
+            sufficiency = _json_dict(state.get("evidence_sufficiency"))
+            recommended_tools = _unique_strings(
+                [
+                    item
+                    for item in cast(
+                        list[object], sufficiency.get("recommendedTools") or []
+                    )
+                    if isinstance(item, str)
+                ]
             )
-        elif deterministic_gaps:
+            available_tools = {
+                definition.name for definition in state.get("tool_definitions") or ()
+            }
+            executed_tools = {
+                tool
+                for item in cast(list[JsonDict], state.get("evidence") or [])
+                if isinstance((tool := item.get("tool")), str)
+            }
+            deterministic_replan_allowed = can_replan_deterministic_gap(
+                deterministic_result,
+                recommended_tools=recommended_tools,
+                available_tools=available_tools,
+                executed_tools=executed_tools,
+            )
+        if candidate is not None and deterministic_result is not None and structural_gaps:
             validation = RootCauseValidationDecision(
                 status="invalid",
                 evidence_ids=candidate.evidence_ids,
@@ -1422,14 +1471,26 @@ class AiopsDiagnosticService:
                     tuple[
                         Literal["component", "mechanism", "trigger", "causalChain"], ...
                     ],
-                    deterministic_gaps,
+                    structural_gaps,
                 ),
-                missing_evidence=(
-                    "The candidate root-cause structure is not fully supported.",
-                ),
+                missing_evidence=(),
                 summary="Deterministic root-cause validation rejected the candidate.",
             )
-        else:
+            validation_error_category = "deterministic_gap"
+        elif (
+            candidate is not None
+            and deterministic_result is not None
+            and deterministic_replan_allowed
+        ):
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=candidate.evidence_ids,
+                unsupported_fields=(),
+                missing_evidence=deterministic_result.missing_evidence,
+                summary="The deterministic evidence contract identified a targeted gap.",
+            )
+            validation_error_category = "deterministic_gap"
+        elif candidate is not None and deterministic_result is not None:
             prompt = (
                 "Return one JSON root-cause validation decision with status, evidenceIds, "
                 "unsupportedFields, missingEvidence, and summary. Judge only whether the "
@@ -1445,25 +1506,56 @@ class AiopsDiagnosticService:
                 f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
                 f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
             )
-            try:
-                response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-                validation = parse_root_cause_validation(
-                    _model_text(response),
-                    available_evidence_ids=set(evidence_ids),
+            outcome = await invoke_structured_root_cause_validation(
+                model=self._llm_provider.create_chat_model(),
+                prompt=prompt,
+                available_evidence_ids=set(evidence_ids),
+            )
+            validation_attempts = outcome.attempts
+            validation_error_category = outcome.error_category
+            if outcome.decision is not None:
+                validation = outcome.decision
+                if validation.status == "valid":
+                    validation_origin = "llm_confirmed"
+            elif deterministic_result.passed:
+                validation = RootCauseValidationDecision(
+                    status="valid",
+                    evidence_ids=candidate.evidence_ids,
+                    unsupported_fields=(),
+                    missing_evidence=(),
+                    summary=(
+                        "The candidate passed every public deterministic evidence check; "
+                        "the LLM Validator was unavailable."
+                    ),
                 )
-            except Exception:
+                validation_origin = "deterministic_grounded_fallback"
+                validation_warning = "llm_validator_unavailable"
+            else:
                 validation = RootCauseValidationDecision(
                     status="invalid",
                     evidence_ids=candidate.evidence_ids,
-                    unsupported_fields=(),
-                    missing_evidence=("Structured root-cause validation was unavailable.",),
-                    summary="Decision validation failed closed.",
+                    unsupported_fields=deterministic_result.unsupported_fields,
+                    missing_evidence=deterministic_result.missing_evidence,
+                    summary=(
+                        "The LLM Validator was unavailable and the candidate did not pass "
+                        "the deterministic fallback contract."
+                    ),
                 )
+                validation_warning = "llm_validator_unavailable"
         payload = _root_cause_validation_payload(validation)
         can_replan = (
             candidate is not None
             and validation.status == "invalid"
-            and bool(validation.missing_evidence)
+            and (
+                (
+                    validation_error_category == "model_rejected"
+                    and bool(validation.missing_evidence or validation.unsupported_fields)
+                )
+                or (
+                    validation_error_category == "deterministic_gap"
+                    and deterministic_replan_allowed
+                )
+            )
             and _can_replan(state)
         )
         route = "replanner" if can_replan else "recovery_planner"
@@ -1477,15 +1569,51 @@ class AiopsDiagnosticService:
             task_id=task_id,
             phase="decision_validation",
             status="completed",
-            payload={**payload, "nextRoute": route},
+            payload={
+                **payload,
+                "validationOrigin": validation_origin,
+                "validationErrorCategory": validation_error_category,
+                "validationAttempts": validation_attempts,
+                "validationWarning": validation_warning,
+                "deterministicChecks": (
+                    deterministic_checks_payload(deterministic_result)
+                    if deterministic_result is not None
+                    else []
+                ),
+                "nextRoute": route,
+            },
         )
         await self._save_checkpoint(
             state,
             "decision_validation",
-            {**payload, "nextRoute": route},
+            {
+                **payload,
+                "validationOrigin": validation_origin,
+                "validationErrorCategory": validation_error_category,
+                "validationAttempts": validation_attempts,
+                "validationWarning": validation_warning,
+                "deterministicChecks": (
+                    deterministic_checks_payload(deterministic_result)
+                    if deterministic_result is not None
+                    else []
+                ),
+                "nextRoute": route,
+            },
         )
+        validation_payload: JsonDict = {
+            **payload,
+            "validationOrigin": validation_origin,
+            "validationErrorCategory": validation_error_category,
+            "validationAttempts": validation_attempts,
+            "validationWarning": validation_warning,
+            "deterministicChecks": (
+                deterministic_checks_payload(deterministic_result)
+                if deterministic_result is not None
+                else []
+            ),
+        }
         return {
-            "decision_validation": payload,
+            "decision_validation": validation_payload,
             "root_cause_decision": root_cause_payload,
             "next_route": cast(Literal["replanner", "recovery_planner"], route),
             "termination_reason": termination_reason,
@@ -1515,6 +1643,14 @@ class AiopsDiagnosticService:
         proposal_tools = {definition.name for definition in proposal_definitions}
         if candidate is None:
             plan = _fallback_recovery_plan(None, proposal_tools=proposal_tools)
+        elif _json_dict(state.get("decision_validation")).get(
+            "validationOrigin"
+        ) == "deterministic_grounded_fallback":
+            plan = _fallback_recovery_plan(
+                candidate,
+                proposal_tools=proposal_tools,
+                force_manual_review=True,
+            )
         else:
             prompt = (
                 "Return one JSON structured recovery plan with mode, action, target, rationale, "
@@ -1721,7 +1857,7 @@ class AiopsDiagnosticService:
         ]
         report_content, report_generation = await self._generate_report_content(state)
         report_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v2",
+            "workflowVersion": "evidence-driven-v3",
             "noSopMatched": no_sop_matched,
             "plan": _json_list(state.get("plan")),
             "planOrigin": str(state.get("plan_origin") or "generic"),
@@ -2286,6 +2422,7 @@ def _fallback_recovery_plan(
     decision: RootCauseDecision | None,
     *,
     proposal_tools: set[str],
+    force_manual_review: bool = False,
 ) -> RecoveryPlan:
     if decision is None:
         return RecoveryPlan(
@@ -2303,7 +2440,11 @@ def _fallback_recovery_plan(
             human_approval_required=False,
         )
     return RecoveryPlan(
-        mode="manual_review" if proposal_tools else "external_policy_required",
+        mode=(
+            "manual_review"
+            if force_manual_review or proposal_tools
+            else "external_policy_required"
+        ),
         action="review_validated_diagnosis",
         target=decision.component,
         rationale="Recovery planning model output was unavailable or invalid.",

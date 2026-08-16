@@ -3,6 +3,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 
@@ -1443,6 +1444,125 @@ class PostgresContractAcceptanceLlmProvider:
         return self.model
 
 
+class UnavailablePostgresValidatorChatModel(PostgresContractAcceptanceChatModel):
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "observation decision" in prompt and "InspectPostgresErrors" in prompt:
+            return json.dumps(
+                {
+                    "purpose": "Inspect structured PostgreSQL errors.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": ["postgres_slow_query"],
+                    "summary": "PostgreSQL emitted SQLSTATE 40P01 without statement timeouts.",
+                }
+            )
+        if "root-cause validation decision" in prompt:
+            raise TimeoutError("validator provider timeout")
+        if "root-cause decision" in prompt:
+            evidence_ids = list(
+                dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt))
+            )[:3]
+            return json.dumps(
+                {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                    "trigger": "concurrent_updates_acquired_rows_in_reverse_order",
+                    "causalChain": "One combined causal narrative.",
+                    "evidenceIds": evidence_ids,
+                    "confidence": 0.96,
+                }
+            )
+        return await super().ainvoke(input)
+
+
+class UnavailablePostgresValidatorLlmProvider:
+    def __init__(self) -> None:
+        self.model = UnavailablePostgresValidatorChatModel()
+
+    def create_chat_model(self) -> UnavailablePostgresValidatorChatModel:
+        return self.model
+
+
+class MissingPostgresCandidateChatModel(PostgresContractAcceptanceChatModel):
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "evidence sufficiency decision" in prompt:
+            evidence_ids = list(
+                dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt))
+            )
+            return json.dumps(
+                {
+                    "status": "sufficient",
+                    "evidenceIds": evidence_ids,
+                    "supportedHypotheses": [
+                        "postgres_deadlock",
+                        "postgres_slow_query",
+                    ],
+                    "refutedHypotheses": ["postgres_lock_wait"],
+                    "unresolvedHypotheses": [],
+                    "missingEvidence": [],
+                    "recommendedTools": [],
+                    "summary": "Two causes remain supported, so no unique candidate exists.",
+                }
+            )
+        if "observation decision" in prompt:
+            return json.dumps(
+                {
+                    "purpose": "Keep two public causes equally supported.",
+                    "supports": ["postgres_deadlock", "postgres_slow_query"],
+                    "refutes": [],
+                    "summary": "The observation leaves two competing causes supported.",
+                }
+            )
+        if "root-cause decision" in prompt:
+            return "not-json"
+        return await super().ainvoke(input)
+
+
+class MissingPostgresCandidateLlmProvider:
+    def __init__(self) -> None:
+        self.model = MissingPostgresCandidateChatModel()
+
+    def create_chat_model(self) -> MissingPostgresCandidateChatModel:
+        return self.model
+
+
+class UngroundedUnavailableValidatorChatModel(
+    UnavailablePostgresValidatorChatModel
+):
+    async def ainvoke(self, input: object) -> str:
+        prompt = str(input)
+        if "root-cause validation decision" in prompt:
+            raise TimeoutError("validator provider timeout")
+        if "root-cause decision" in prompt:
+            evidence_ids = list(
+                dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt))
+            )
+            return json.dumps(
+                {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                    "trigger": "concurrent_updates_acquired_rows_in_reverse_order",
+                    "causalChain": [
+                        "PostgreSQL emitted SQLSTATE 40P01 without statement timeouts.",
+                        "A two-session cycle exists without an ordinary blocker.",
+                        "The observation contains direct cyclic-dependency evidence.",
+                    ],
+                    "evidenceIds": evidence_ids,
+                    "confidence": 0.96,
+                }
+            )
+        return await super().ainvoke(input)
+
+
+class UngroundedUnavailableValidatorLlmProvider:
+    def __init__(self) -> None:
+        self.model = UngroundedUnavailableValidatorChatModel()
+
+    def create_chat_model(self) -> UngroundedUnavailableValidatorChatModel:
+        return self.model
+
+
 class DuplicateStepChatModel(ReplanningChatModel):
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
@@ -1752,6 +1872,202 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
 
 
 @pytest.mark.asyncio
+async def test_apy_013_validator_unavailable_uses_grounded_fallback(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=f"diagnostic-apy-013-validator-unavailable-{uuid4().hex}",
+            status="accepted",
+            query=scenario.title,
+            input_payload=build_application_diagnostic_input(scenario),
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, UnavailablePostgresValidatorLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        async for _ in service.stream(
+            task=task,
+            accessible_knowledge_base_ids=(),
+        ):
+            pass
+        completed = await repositories.diagnostics.get_task(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert completed is not None
+    assert [item.tool_name for item in snapshot.observations] == [
+        "InspectPostgresErrors",
+        "InspectPostgresWaitGraph",
+        "InspectTransactionResourceOrder",
+    ]
+    assert not any(
+        item.tool_name == "GetDatabaseMetrics" for item in snapshot.observations
+    )
+    assert len([step for step in steps if step.phase == "decision"]) == 1
+    assert not any(
+        step.phase == "replanner"
+        and step.payload.get("reason") == "decision_validation_gap"
+        for step in steps
+    )
+    validation = next(step for step in steps if step.phase == "decision_validation")
+    assert validation.payload["status"] == "valid"
+    assert (
+        validation.payload["validationOrigin"]
+        == "deterministic_grounded_fallback"
+    )
+    assert validation.payload["validationErrorCategory"] == "model_call_failed"
+    assert validation.payload["validationAttempts"] == 1
+    assert validation.payload["validationWarning"] == "llm_validator_unavailable"
+    assert completed.result_payload["rootCauseDecision"] is not None
+    recovery_plan = cast(dict[str, object], completed.result_payload["recoveryPlan"])
+    recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
+    assert recovery_plan["mode"] == "manual_review"
+    assert recovery_policy["executionPermitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_apy_013_missing_candidate_fails_closed_without_replanning(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=f"diagnostic-apy-013-candidate-missing-{uuid4().hex}",
+            status="accepted",
+            query=scenario.title,
+            input_payload=build_application_diagnostic_input(scenario),
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(LlmProvider, MissingPostgresCandidateLlmProvider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        async for _ in service.stream(
+            task=task,
+            accessible_knowledge_base_ids=(),
+        ):
+            pass
+        completed = await repositories.diagnostics.get_task(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert completed is not None
+    validation = next(step for step in steps if step.phase == "decision_validation")
+    assert validation.payload["status"] == "invalid"
+    assert validation.payload["validationOrigin"] == "none"
+    assert validation.payload["validationErrorCategory"] == "candidate_missing"
+    assert validation.payload["nextRoute"] == "recovery_planner"
+    assert completed.result_payload["rootCauseDecision"] is None
+    assert not any(step.phase == "replanner" for step in steps)
+    recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
+    assert recovery_policy["executionPermitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_apy_013_unavailable_validator_rejects_ungrounded_candidate(
+    migrated_database_url: str,
+) -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / scenario.snapshot_file
+    )
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=f"diagnostic-apy-013-ungrounded-{uuid4().hex}",
+            status="accepted",
+            query=scenario.title,
+            input_payload=build_application_diagnostic_input(scenario),
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(
+                LlmProvider,
+                UngroundedUnavailableValidatorLlmProvider(),
+            ),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=snapshot,
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_argument_contracts=snapshot.tool_argument_contracts,
+        )
+
+        async for _ in service.stream(
+            task=task,
+            accessible_knowledge_base_ids=(),
+        ):
+            pass
+        completed = await repositories.diagnostics.get_task(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert completed is not None
+    validation = next(step for step in steps if step.phase == "decision_validation")
+    assert validation.payload["status"] == "invalid"
+    assert validation.payload["validationOrigin"] == "none"
+    assert validation.payload["validationErrorCategory"] == "model_call_failed"
+    assert validation.payload["nextRoute"] == "recovery_planner"
+    assert completed.result_payload["rootCauseDecision"] is None
+    assert not any(step.phase == "replanner" for step in steps)
+    recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
+    assert recovery_policy["executionPermitted"] is False
+
+
+@pytest.mark.asyncio
 async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_a_decision(
     migrated_database_url: str,
 ) -> None:
@@ -1949,6 +2265,12 @@ async def test_invalid_decision_validation_replans_before_reporting(
     validations = [step for step in steps if step.phase == "decision_validation"]
     replanner = next(step for step in steps if step.phase == "replanner")
     assert [item.payload["status"] for item in validations] == ["invalid", "valid"]
+    assert validations[0].payload["validationErrorCategory"] == "model_rejected"
+    assert (
+        validations[0].payload["missingEvidence"]
+        or validations[0].payload["unsupportedFields"]
+    )
+    assert len([step for step in steps if step.phase == "replanner"]) == 1
     assert replanner.payload["reason"] == "decision_validation_gap"
     assert [item.tool_name for item in snapshot.observations] == [
         "InspectContainer",

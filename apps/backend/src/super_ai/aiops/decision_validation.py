@@ -83,6 +83,30 @@ _CORRECTION_SUFFIX = (
     "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
     "and summary. Schema errors: invalid_json_or_schema."
 )
+_REPLANABLE_DETERMINISTIC_GAPS: frozenset[DeterministicCheckCode] = frozenset(
+    {
+        "no_open_competitor",
+        "independent_positive_evidence",
+        "supporting_observations",
+    }
+)
+
+
+def can_replan_deterministic_gap(
+    result: DeterministicValidationResult,
+    *,
+    recommended_tools: Sequence[str],
+    available_tools: Set[str],
+    executed_tools: Set[str],
+) -> bool:
+    """Allow only concrete, unexecuted tools for evidence-remediable gaps."""
+    failed_codes = {check.code for check in result.checks if not check.passed}
+    if not failed_codes or not failed_codes.issubset(_REPLANABLE_DETERMINISTIC_GAPS):
+        return False
+    return any(
+        tool in available_tools and tool not in executed_tools
+        for tool in recommended_tools
+    )
 
 
 async def invoke_structured_root_cause_validation(

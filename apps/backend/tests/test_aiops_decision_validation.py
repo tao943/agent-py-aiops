@@ -7,6 +7,7 @@ import pytest
 
 from super_ai.aiops.decision_validation import (
     _RootCauseValidationSchema,  # pyright: ignore[reportPrivateUsage]
+    can_replan_deterministic_gap,
     deterministic_checks_payload,
     invoke_structured_root_cause_validation,
     validate_grounded_candidate,
@@ -413,3 +414,47 @@ async def test_structured_validator_rejects_unknown_envelope_evidence_after_retr
     assert outcome.error_category == "retry_exhausted"
     assert outcome.attempts == 2
     assert model.structured.calls == 2
+
+
+def test_deterministic_evidence_gap_replans_only_with_unexecuted_discovered_tool() -> None:
+    result = _validate(
+        replace(
+            _decision(),
+            causal_chain=(
+                "PostgreSQL emitted SQLSTATE 40P01.",
+                "PostgreSQL emitted SQLSTATE 40P01.",
+            ),
+            evidence_ids=("ev-error",),
+        ),
+        observations=[_observations()[0]],
+    )
+
+    assert can_replan_deterministic_gap(
+        result,
+        recommended_tools=("InspectPostgresWaitGraph",),
+        available_tools={"InspectPostgresWaitGraph"},
+        executed_tools={"InspectPostgresErrors"},
+    ) is True
+    assert can_replan_deterministic_gap(
+        result,
+        recommended_tools=(),
+        available_tools={"InspectPostgresWaitGraph"},
+        executed_tools={"InspectPostgresErrors"},
+    ) is False
+    assert can_replan_deterministic_gap(
+        result,
+        recommended_tools=("InspectPostgresWaitGraph",),
+        available_tools={"InspectPostgresWaitGraph"},
+        executed_tools={"InspectPostgresWaitGraph"},
+    ) is False
+
+
+def test_deterministic_integrity_gap_never_replans_for_an_evidence_tool() -> None:
+    result = _validate(replace(_decision(), mechanism="unpublished_mechanism"))
+
+    assert can_replan_deterministic_gap(
+        result,
+        recommended_tools=("InspectPostgresWaitGraph",),
+        available_tools={"InspectPostgresWaitGraph"},
+        executed_tools=set(),
+    ) is False
