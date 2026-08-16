@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
-from super_ai.aiops.reasoning import RootCauseDecision
+from pydantic import BaseModel, ConfigDict, Field
+
+from super_ai.aiops.reasoning import (
+    RootCauseDecision,
+    RootCauseValidationDecision,
+    parse_root_cause_validation,
+)
+from super_ai.llm import ChatModel
 
 DecisionValidationErrorCategory = Literal[
     "candidate_missing",
@@ -44,6 +52,122 @@ class DeterministicValidationResult:
     checks: tuple[DeterministicCheck, ...]
     unsupported_fields: tuple[RootCauseField, ...]
     missing_evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredValidationOutcome:
+    decision: RootCauseValidationDecision | None
+    error_category: DecisionValidationErrorCategory | None
+    attempts: int
+    error_codes: tuple[str, ...]
+
+
+class _RootCauseValidationSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    status: Literal["valid", "invalid"]
+    evidence_ids: list[str] = Field(alias="evidenceIds")
+    unsupported_fields: list[RootCauseField] = Field(alias="unsupportedFields")
+    missing_evidence: list[str] = Field(alias="missingEvidence")
+    summary: str = Field(min_length=1)
+
+
+class _AsyncInvoker(Protocol):
+    async def ainvoke(self, input: object) -> object:
+        """Invoke a structured or raw chat model."""
+        ...
+
+
+_CORRECTION_SUFFIX = (
+    "\n\nThe previous response did not match the required validation schema. "
+    "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
+    "and summary. Schema errors: invalid_json_or_schema."
+)
+
+
+async def invoke_structured_root_cause_validation(
+    *,
+    model: ChatModel,
+    prompt: str,
+    available_evidence_ids: Set[str],
+) -> StructuredValidationOutcome:
+    """Invoke one Validator with one format-only correction and safe audit output."""
+    structured = _structured_invoker(model)
+    invoker: _AsyncInvoker = structured or model
+    current_prompt = prompt
+    for attempt in (1, 2):
+        try:
+            response = await invoker.ainvoke(current_prompt)
+        except Exception:
+            return StructuredValidationOutcome(
+                decision=None,
+                error_category="model_call_failed",
+                attempts=attempt,
+                error_codes=("model_call_failed",),
+            )
+        try:
+            decision = _validation_decision_from_response(
+                response,
+                structured=structured is not None,
+                available_evidence_ids=available_evidence_ids,
+            )
+        except (TypeError, ValueError):
+            if attempt == 1:
+                current_prompt = prompt + _CORRECTION_SUFFIX
+                continue
+            return StructuredValidationOutcome(
+                decision=None,
+                error_category="retry_exhausted",
+                attempts=attempt,
+                error_codes=("invalid_json_or_schema",),
+            )
+        return StructuredValidationOutcome(
+            decision=decision,
+            error_category="model_rejected" if decision.status == "invalid" else None,
+            attempts=attempt,
+            error_codes=(),
+        )
+    raise AssertionError("The bounded validation loop must return within two attempts.")
+
+
+def _structured_invoker(model: ChatModel) -> _AsyncInvoker | None:
+    method_value = getattr(model, "with_structured_output", None)
+    if not callable(method_value):
+        return None
+    return cast(
+        _AsyncInvoker,
+        method_value(
+            _RootCauseValidationSchema,
+            method="function_calling",
+            include_raw=True,
+        ),
+    )
+
+
+def _validation_decision_from_response(
+    response: object,
+    *,
+    structured: bool,
+    available_evidence_ids: Set[str],
+) -> RootCauseValidationDecision:
+    if structured:
+        if not isinstance(response, Mapping):
+            raise ValueError("Structured validation response must be an envelope.")
+        envelope = cast(Mapping[object, object], response)
+        if envelope.get("parsing_error") is not None:
+            raise ValueError("Structured validation envelope contains a parsing error.")
+        parsed = envelope.get("parsed")
+        if isinstance(parsed, _RootCauseValidationSchema):
+            schema = parsed
+        else:
+            schema = _RootCauseValidationSchema.model_validate(parsed)
+        text = json.dumps(schema.model_dump(by_alias=True), ensure_ascii=False)
+    else:
+        text = _model_text(response)
+    return parse_root_cause_validation(
+        text,
+        available_evidence_ids=available_evidence_ids,
+    )
 
 
 def validate_grounded_candidate(
@@ -197,3 +321,17 @@ def _mapping(value: object) -> Mapping[str, object]:
         for key, item in cast(Mapping[object, object], value).items()
         if isinstance(key, str)
     }
+
+
+def _model_text(response: object) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(cast(Mapping[object, object], item).get("text", ""))
+            if isinstance(item, Mapping)
+            else str(item)
+            for item in cast(list[object], content)
+        )
+    return str(content)

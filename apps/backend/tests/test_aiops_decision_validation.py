@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
 from super_ai.aiops.decision_validation import (
+    _RootCauseValidationSchema,  # pyright: ignore[reportPrivateUsage]
     deterministic_checks_payload,
+    invoke_structured_root_cause_validation,
     validate_grounded_candidate,
 )
 from super_ai.aiops.reasoning import RootCauseDecision
@@ -222,3 +225,191 @@ def test_knowledge_like_available_id_cannot_count_as_positive_evidence() -> None
     assert "supporting_evidence_only" in {
         check.code for check in result.checks if not check.passed
     }
+
+
+VALIDATION_JSON = (
+    '{"status":"valid","evidenceIds":["ev-1","ev-2"],'
+    '"unsupportedFields":[],"missingEvidence":[],'
+    '"summary":"The public observations support every field."}'
+)
+
+
+class RaisingChatModel:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def ainvoke(self, input: object) -> object:
+        _ = input
+        self.calls += 1
+        raise self.error
+
+
+class SequenceChatModel:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    async def ainvoke(self, input: object) -> object:
+        _ = input
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
+class StructuredRunnable:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    async def ainvoke(self, input: object) -> object:
+        _ = input
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
+class StructuredCapableChatModel:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.structured = StructuredRunnable(responses)
+        self.raw_calls = 0
+        self.wrapper_calls = 0
+
+    def with_structured_output(
+        self,
+        _schema: type[object],
+        **kwargs: Any,
+    ) -> StructuredRunnable:
+        assert kwargs == {"method": "function_calling", "include_raw": True}
+        self.wrapper_calls += 1
+        return self.structured
+
+    async def ainvoke(self, input: object) -> object:
+        _ = input
+        self.raw_calls += 1
+        raise AssertionError("Raw fallback must not run for a structured-capable model.")
+
+
+def _validation_schema(*, evidence_ids: list[str] | None = None):
+    return _RootCauseValidationSchema(
+        status="valid",
+        evidenceIds=evidence_ids or ["ev-1", "ev-2"],
+        unsupportedFields=[],
+        missingEvidence=[],
+        summary="The public observations support every field.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_classifies_provider_failure_without_retry() -> None:
+    model = RaisingChatModel(TimeoutError("provider timeout"))
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.attempts == 1
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_reasks_once_after_parse_failure() -> None:
+    model = SequenceChatModel(["not-json", VALIDATION_JSON])
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.error_category is None
+    assert outcome.attempts == 2
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_stops_after_one_format_retry() -> None:
+    model = SequenceChatModel(["not-json", "still-not-json"])
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "retry_exhausted"
+    assert outcome.attempts == 2
+    assert outcome.error_codes == ("invalid_json_or_schema",)
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_preserves_explicit_model_rejection() -> None:
+    model = SequenceChatModel(
+        [
+            (
+                '{"status":"invalid","evidenceIds":["ev-1","ev-2"],'
+                '"unsupportedFields":["trigger"],'
+                '"missingEvidence":["Trigger evidence is missing."],'
+                '"summary":"The trigger is unsupported."}'
+            )
+        ]
+    )
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.decision.status == "invalid"
+    assert outcome.error_category == "model_rejected"
+    assert outcome.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_unpacks_langchain_envelope() -> None:
+    model = StructuredCapableChatModel(
+        [{"raw": object(), "parsed": _validation_schema(), "parsing_error": None}]
+    )
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.decision.status == "valid"
+    assert outcome.error_category is None
+    assert outcome.attempts == 1
+    assert model.wrapper_calls == 1
+    assert model.structured.calls == 1
+    assert model.raw_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_rejects_unknown_envelope_evidence_after_retry() -> None:
+    invalid_envelope = {
+        "raw": object(),
+        "parsed": _validation_schema(evidence_ids=["ev-foreign"]),
+        "parsing_error": None,
+    }
+    model = StructuredCapableChatModel([invalid_envelope, invalid_envelope])
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "retry_exhausted"
+    assert outcome.attempts == 2
+    assert model.structured.calls == 2
