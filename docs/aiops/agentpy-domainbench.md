@@ -365,6 +365,25 @@ Executor 使用同一规范化和 JSON Schema 校验路径。模型仍负责选�
 真实模型验收必须按顺序执行：先运行 `APY-013`；只有它达到既有阈值，才依次抽验
 `APY-014`、`APY-015` 和 `APY-016`。不得为通过验收修改答案、评分权重或阈值。
 
+### APY-013 resilient validation 验收（2026-08-16）
+
+在 30 个 `ready/indexed` 知识文档和 RAG on 条件下只运行一次真实 `APY-013`，未自动
+重试。运行耗时 336,212 ms，总分 89，`validity=valid`、`passed=true` 且无 hard gate。
+三个必需证据里程碑、独立正证据、根因 component/mechanism 和安全边界均通过。
+
+本次 LLM Validator 调用不可用，但候选通过全部十项公开确定性检查，因此审计记录为
+`validationOrigin=deterministic_grounded_fallback`、
+`validationErrorCategory=model_call_failed`。Workflow 没有进入无关 Replan，Recovery 被
+强制为 `manual_review`，Policy Gate 记录 `manual_review_required` 且
+`executionPermitted=false`，验证了降级闭环不会授权自动恢复。
+
+剩余扣分为 `trigger_wrong` 和 `causal_chain_incomplete`，属于生成语义与评分标签的后续
+调优范围。`observations_evaluated` 也未得分：本次有四个 Executor / Evidence Evaluation，
+但 Artifact 同时把一次 `knowledge_retrieval` 审计计入五个 completed tool calls，现有规则
+要求 Observation 数量不少于全部 completed tool calls，因而产生口径偏差；该评分口径需
+在独立变更中区分知识检索与可形成 Observation 的诊断工具，不能通过修改本次答案或阈值
+处理。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、

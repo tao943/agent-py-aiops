@@ -17,6 +17,6 @@
 
 ## 4. 验证与真实验收
 
-- [ ] 4.1 运行目标 pytest、Ruff、strict Pyright 和普通离线全量测试
+- [x] 4.1 运行目标 pytest、Ruff、strict Pyright 和普通离线全量测试
 - [x] 4.2 运行 OpenSpec strict/all 验证并更新 DomainBench 文档
-- [ ] 4.3 只运行一次真实 APY-013；若失败则停止重试并用结构化审计诊断
+- [x] 4.3 只运行一次真实 APY-013；若失败则停止重试并用结构化审计诊断
