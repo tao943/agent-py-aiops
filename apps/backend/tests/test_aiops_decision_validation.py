@@ -757,7 +757,7 @@ def _schema_error(payload: object) -> ValidationError:
     raise AssertionError("Test payload must fail schema validation.")
 
 
-def _structured_parse_case(code: str) -> object:
+def _structured_parse_case(code: str) -> dict[str, object]:
     base = {
         "status": "valid",
         "evidenceIds": ["ev-1", "ev-2"],

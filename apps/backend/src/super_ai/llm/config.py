@@ -61,8 +61,9 @@ def load_llm_provider_config(
             raise ProjectConfigurationError(
                 "Project config field must be an object: modelCapabilities"
             )
+        typed_model_capabilities = cast(Mapping[object, object], model_capabilities)
         model_profile, structured_output_method = _model_capability_profile(
-            model_capabilities,
+            typed_model_capabilities,
             chat_model,
             config_field="chatModel",
         )
@@ -73,7 +74,7 @@ def load_llm_provider_config(
             )
         validator_model = validator_model_raw.strip()
         _, validator_structured_output_method = _model_capability_profile(
-            model_capabilities,
+            typed_model_capabilities,
             validator_model,
             config_field="validatorModel",
         )

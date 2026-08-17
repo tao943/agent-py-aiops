@@ -2115,11 +2115,11 @@ class RecordingDiagnosticsRepository:
         return cast(list[object], self.steps)
 
     async def create_step(self, **kwargs: object) -> object:
-        self.steps.append(cast(dict[str, object], kwargs))
+        self.steps.append(kwargs)
         return object()
 
     async def save_checkpoint(self, **kwargs: object) -> object:
-        self.checkpoints.append(cast(dict[str, object], kwargs))
+        self.checkpoints.append(kwargs)
         return object()
 
 
@@ -2582,7 +2582,7 @@ async def test_apy_013_routes_only_validation_to_dedicated_validator(
     trigger = "Concurrent transactions acquired rows in opposite order."
     mechanism = "A two-session wait cycle formed."
     impact = "PostgreSQL emitted SQLSTATE 40P01."
-    state = {
+    state: dict[str, object] = {
         "owner_user_id": "benchmark-user",
         "task_id": "diagnostic-dedicated-validator",
         "evidence_ids": ["evidence_a1", "evidence_b2", "evidence_c3"],
