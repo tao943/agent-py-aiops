@@ -343,7 +343,7 @@ def test_grounded_fallback_requires_one_high_confidence_cause_and_two_evidence()
                 "id": "postgres_lock_blocking",
                 "status": "supported",
                 "confidence": 1.0,
-                "evidenceIds": ["ev-wait", "ev-graph"],
+                "evidenceIds": ["ev-trigger", "ev-graph", "ev-impact"],
             },
             {
                 "id": "postgres_connectivity_failure",
@@ -356,14 +356,23 @@ def test_grounded_fallback_requires_one_high_confidence_cause_and_two_evidence()
             {
                 "supports": ["postgres_lock_blocking"],
                 "refutes": [],
-                "summary": "A lock wait event was observed.",
-                "evidenceIds": ["ev-wait"],
+                "summary": "A transaction retained a required row lock.",
+                "evidenceIds": ["ev-trigger"],
+                "causalRole": "trigger",
             },
             {
                 "supports": ["postgres_lock_blocking"],
                 "refutes": [],
                 "summary": "A blocker-to-waiter edge was observed.",
                 "evidenceIds": ["ev-graph"],
+                "causalRole": "mechanism",
+            },
+            {
+                "supports": ["postgres_lock_blocking"],
+                "refutes": [],
+                "summary": "A lock wait event affected the waiting transaction.",
+                "evidenceIds": ["ev-impact"],
+                "causalRole": "impact",
             },
         ),
         decision_vocabulary={
@@ -383,12 +392,13 @@ def test_grounded_fallback_requires_one_high_confidence_cause_and_two_evidence()
     assert decision is not None
     assert decision.component == "postgresql"
     assert decision.mechanism == "row_lock_blocking"
-    assert decision.trigger == "A transaction holds a required row lock."
+    assert decision.trigger == "A transaction retained a required row lock."
     assert decision.causal_chain == (
-        "A lock wait event was observed.",
+        "A transaction retained a required row lock.",
         "A blocker-to-waiter edge was observed.",
+        "A lock wait event affected the waiting transaction.",
     )
-    assert decision.evidence_ids == ("ev-wait", "ev-graph")
+    assert decision.evidence_ids == ("ev-trigger", "ev-graph", "ev-impact")
 
 
 def test_grounded_fallback_refuses_ambiguous_high_confidence_causes() -> None:

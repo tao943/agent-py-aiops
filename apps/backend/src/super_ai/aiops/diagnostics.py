@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from operator import add
@@ -1445,6 +1445,15 @@ class AiopsDiagnosticService:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        decision_evidence_ids = _supporting_decision_evidence_ids(
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            observation_decisions=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+            persisted_evidence_ids=evidence_ids,
+        )
         decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
         prompt = (
             "Return JSON only for one root-cause decision with component, mechanism, trigger, "
@@ -1464,14 +1473,15 @@ class AiopsDiagnosticService:
             "Use the canonical component and mechanism labels declared by this public "
             "decision vocabulary when it contains a matching alias: "
             f"{json.dumps(decision_vocabulary, ensure_ascii=False)}. "
-            f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
+            "Supporting observation evidence IDs: "
+            f"{json.dumps(decision_evidence_ids)}."
         )
         decision: RootCauseDecision | None = None
         decision_origin = "none"
         decision_outcome = await invoke_structured_root_cause_decision(
             model=self._llm_provider.create_chat_model(),
             prompt=prompt,
-            available_evidence_ids=set(evidence_ids),
+            available_evidence_ids=set(decision_evidence_ids),
         )
         decision = decision_outcome.decision
         decision_error_category = decision_outcome.error_category
@@ -1652,6 +1662,19 @@ class AiopsDiagnosticService:
                 unsupported_fields=(),
                 missing_evidence=deterministic_result.missing_evidence,
                 summary="The deterministic evidence contract identified a targeted gap.",
+            )
+            validation_error_category = "deterministic_gap"
+        elif (
+            candidate is not None
+            and deterministic_result is not None
+            and not deterministic_result.passed
+        ):
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=candidate.evidence_ids,
+                unsupported_fields=deterministic_result.unsupported_fields,
+                missing_evidence=deterministic_result.missing_evidence,
+                summary="The candidate failed the deterministic evidence contract.",
             )
             validation_error_category = "deterministic_gap"
         elif candidate is not None and deterministic_result is not None:
@@ -2339,31 +2362,6 @@ def _step_fingerprint(step: Mapping[str, object]) -> str:
     )
 
 
-def _supported_refinement_index(
-    *,
-    plan: Sequence[JsonDict],
-    plan_index: int,
-    supported_hypotheses: Collection[str],
-    executed_fingerprints: Collection[str],
-) -> int | None:
-    supported = set(supported_hypotheses)
-    executed = set(executed_fingerprints)
-    if not supported:
-        return None
-    for index in range(max(plan_index, 0), len(plan)):
-        step = plan[index]
-        raw_tests = step.get("testsHypotheses")
-        tested = (
-            {item for item in raw_tests if isinstance(item, str)}
-            if isinstance(raw_tests, list)
-            else set()
-        )
-        if supported.isdisjoint(tested) or _step_fingerprint(step) in executed:
-            continue
-        return index
-    return None
-
-
 def _can_replan(state: AiopsDiagnosticState) -> bool:
     return (
         int(state.get("replan_count") or 0) < int(state.get("max_replans") or 2)
@@ -2473,6 +2471,39 @@ def _plan_causal_coverage_payload(plan: Sequence[JsonDict]) -> JsonDict:
         "missingCausalRoles": list(coverage.missing_roles),
         "ambiguousTrigger": coverage.ambiguous_trigger,
     }
+
+
+def _supporting_decision_evidence_ids(
+    *,
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    persisted_evidence_ids: Sequence[str],
+) -> list[str]:
+    supported = [
+        str(item["id"])
+        for item in hypothesis_states
+        if item.get("status") == "supported" and item.get("id")
+    ]
+    if len(supported) != 1:
+        return []
+    supported_id = supported[0]
+    persisted = set(persisted_evidence_ids)
+    return _unique_strings(
+        [
+            evidence_id
+            for observation in observation_decisions
+            if supported_id
+            in {
+                item
+                for item in cast(list[object], observation.get("supports") or [])
+                if isinstance(item, str)
+            }
+            for evidence_id in cast(
+                list[object], observation.get("evidenceIds") or []
+            )
+            if isinstance(evidence_id, str) and evidence_id in persisted
+        ]
+    )
 
 
 def _observation_decision_payload(

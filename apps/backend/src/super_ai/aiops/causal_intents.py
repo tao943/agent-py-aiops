@@ -162,6 +162,7 @@ def repair_plan_causal_coverage(
 
     trigger_count = sum(step.get("causalIntent") == "trigger" for step in original)
     ambiguous_trigger = trigger_count > 1
+    missing_roles: tuple[CoreCausalRole, ...]
     if ambiguous_trigger:
         missing_roles = _CORE_ROLES
     else:
@@ -211,8 +212,8 @@ def supported_causal_coverage(
                 )
             ):
                 continue
-            counts[cast(CoreCausalRole, role)] += 1
-    missing = tuple(
+            counts[role] += 1
+    missing: tuple[CoreCausalRole, ...] = tuple(
         role
         for role in _CORE_ROLES
         if (counts[role] != 1 if role == "trigger" else counts[role] < 1)

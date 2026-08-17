@@ -11,7 +11,6 @@ from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
-    _supported_refinement_index,  # pyright: ignore[reportPrivateUsage]
     build_grounded_fallback_decision,
     normalize_tool_plan_steps,
 )
@@ -57,89 +56,6 @@ def _refinement_step(
         "testsHypotheses": hypotheses,
         "causalIntent": intents.get(tool, "context"),
     }
-
-
-def test_supported_refinement_selects_first_remaining_matching_step() -> None:
-    metrics = _refinement_step("metrics", "GetDatabaseMetrics", ["postgres_slow_query"])
-    resource_order = _refinement_step(
-        "resource-order",
-        "InspectTransactionResourceOrder",
-        ["postgres_deadlock"],
-    )
-    second_match = _refinement_step(
-        "second-match",
-        "InspectPostgresWaitGraph",
-        ["postgres_deadlock"],
-    )
-
-    assert _supported_refinement_index(
-        plan=[metrics, resource_order, second_match],
-        plan_index=0,
-        supported_hypotheses={"postgres_deadlock"},
-        executed_fingerprints=set(),
-    ) == 1
-
-
-def test_supported_refinement_skips_executed_match() -> None:
-    executed = _refinement_step(
-        "resource-order",
-        "InspectTransactionResourceOrder",
-        ["postgres_deadlock"],
-    )
-    remaining = _refinement_step(
-        "wait-graph",
-        "InspectPostgresWaitGraph",
-        ["postgres_deadlock"],
-    )
-
-    assert _supported_refinement_index(
-        plan=[executed, remaining],
-        plan_index=0,
-        supported_hypotheses={"postgres_deadlock"},
-        executed_fingerprints={
-            tool_step_fingerprint("InspectTransactionResourceOrder", {"scope": "resource-order"})
-        },
-    ) == 1
-
-
-def test_supported_refinement_does_not_revisit_plan_prefix() -> None:
-    previous = _refinement_step(
-        "previous",
-        "InspectPostgresErrors",
-        ["postgres_deadlock"],
-    )
-    unrelated = _refinement_step(
-        "metrics",
-        "GetDatabaseMetrics",
-        ["postgres_slow_query"],
-    )
-
-    assert _supported_refinement_index(
-        plan=[previous, unrelated],
-        plan_index=1,
-        supported_hypotheses={"postgres_deadlock"},
-        executed_fingerprints=set(),
-    ) is None
-
-
-def test_supported_refinement_ignores_non_supported_candidates() -> None:
-    lock_wait = _refinement_step(
-        "lock-wait",
-        "InspectPostgresWaitGraph",
-        ["postgres_lock_wait"],
-    )
-    slow_query = _refinement_step(
-        "metrics",
-        "GetDatabaseMetrics",
-        ["postgres_slow_query"],
-    )
-
-    assert _supported_refinement_index(
-        plan=[lock_wait, slow_query],
-        plan_index=0,
-        supported_hypotheses={"postgres_deadlock"},
-        executed_fingerprints=set(),
-    ) is None
 
 
 def _one_item_deadlock_decision(
@@ -1793,7 +1709,7 @@ class PostgresContractAcceptanceChatModel:
                 {
                     "purpose": "Inspect deadlock evidence.",
                     "supports": ["postgres_deadlock"],
-                    "refutes": [],
+                    "refutes": ["postgres_slow_query"],
                     "causalRole": "impact",
                     "summary": "PostgreSQL aborted one transaction with SQLSTATE 40P01.",
                 }
@@ -2292,7 +2208,6 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
     assert events[-1]["type"] == "complete"
     assert [item.tool_name for item in snapshot.observations] == [
         "InspectContainer",
-        "InspectNginx",
     ]
     assert [step.phase for step in steps] == [
         "planner",
@@ -2300,9 +2215,6 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
         "evidence_evaluation",
         "sufficiency_gate",
         "replanner",
-        "executor",
-        "evidence_evaluation",
-        "sufficiency_gate",
         "decision",
         "decision_validation",
         "recovery_planning",
@@ -2311,14 +2223,12 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
     ]
     replanner = next(step for step in steps if step.phase == "replanner")
     assert replanner.payload["reason"] == "evidence_gap"
-    assert replanner.payload["addedStepCount"] == 1
+    assert replanner.payload["addedStepCount"] == 0
     assert replanner.payload["replanCount"] == 1
     validation = next(step for step in steps if step.phase == "decision_validation")
-    assert validation.payload["status"] == "valid"
-    recovery = next(step for step in steps if step.phase == "recovery_planning")
+    assert validation.payload["status"] == "invalid"
+    assert validation.payload["validationErrorCategory"] == "deterministic_gap"
     policy = next(step for step in steps if step.phase == "policy_gate")
-    assert recovery.payload["mode"] == "external_policy_required"
-    assert policy.payload["status"] == "deferred"
     assert policy.payload["executionPermitted"] is False
 
 
@@ -2456,7 +2366,10 @@ async def test_apy_013_missing_candidate_fails_closed_without_replanning(
     assert validation.payload["validationErrorCategory"] == "candidate_missing"
     assert validation.payload["nextRoute"] == "recovery_planner"
     assert completed.result_payload["rootCauseDecision"] is None
-    assert not any(step.phase == "replanner" for step in steps)
+    replanners = [step for step in steps if step.phase == "replanner"]
+    assert len(replanners) == 2
+    assert all(step.payload["reason"] == "evidence_gap" for step in replanners)
+    assert all(step.payload["addedStepCount"] == 0 for step in replanners)
     recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
     assert recovery_policy["executionPermitted"] is False
 
@@ -2514,7 +2427,7 @@ async def test_apy_013_unavailable_validator_rejects_ungrounded_candidate(
     validation = next(step for step in steps if step.phase == "decision_validation")
     assert validation.payload["status"] == "invalid"
     assert validation.payload["validationOrigin"] == "none"
-    assert validation.payload["validationErrorCategory"] == "model_call_failed"
+    assert validation.payload["validationErrorCategory"] == "deterministic_gap"
     assert validation.payload["nextRoute"] == "recovery_planner"
     assert completed.result_payload["rootCauseDecision"] is None
     assert not any(step.phase == "replanner" for step in steps)
@@ -2593,7 +2506,7 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
     assert any(
         step.phase == "sufficiency_gate"
         and step.payload.get("refinementReason")
-        == "supported_hypothesis_plan_step_remaining"
+        == "missing_causal_role_plan_step_remaining"
         for step in steps
     )
     decision = next(step for step in steps if step.phase == "decision")
@@ -2614,7 +2527,9 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
         "PostgreSQL aborted one transaction with SQLSTATE 40P01.",
     ]
     assert len(cast(list[object], root_cause["causalChain"])) == 3
-    assert validations[0].payload["status"] == "valid"
+    assert validations[0].payload["status"] == "valid", validations[0].payload[
+        "deterministicChecks"
+    ]
     assert completed.status == "succeeded"
 
 
@@ -2666,14 +2581,13 @@ async def test_duplicate_plan_step_is_filtered_before_executor(
     executor_steps = [step for step in steps if step.phase == "executor"]
     assert [item.tool_name for item in snapshot.observations] == [
         "InspectContainer",
-        "InspectNginx",
     ]
-    assert len(executor_steps) == 2
+    assert len(executor_steps) == 1
     assert all("errorCategory" not in step.payload for step in executor_steps)
 
 
 @pytest.mark.asyncio
-async def test_invalid_decision_validation_replans_before_reporting(
+async def test_invalid_causal_coverage_cannot_be_overridden_by_validator(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-003")
@@ -2718,22 +2632,21 @@ async def test_invalid_decision_validation_replans_before_reporting(
 
     validations = [step for step in steps if step.phase == "decision_validation"]
     replanner = next(step for step in steps if step.phase == "replanner")
-    assert [item.payload["status"] for item in validations] == ["invalid", "valid"]
-    assert validations[0].payload["validationErrorCategory"] == "model_rejected"
+    assert [item.payload["status"] for item in validations] == ["invalid"]
+    assert validations[0].payload["validationErrorCategory"] == "deterministic_gap"
     assert (
         validations[0].payload["missingEvidence"]
         or validations[0].payload["unsupportedFields"]
     )
     assert len([step for step in steps if step.phase == "replanner"]) == 1
-    assert replanner.payload["reason"] == "decision_validation_gap"
+    assert replanner.payload["reason"] == "evidence_gap"
     assert [item.tool_name for item in snapshot.observations] == [
         "InspectContainer",
-        "InspectNginx",
     ]
 
 
 @pytest.mark.asyncio
-async def test_policy_gate_records_only_a_whitelisted_proposal_tool(
+async def test_policy_gate_does_not_record_proposal_without_grounded_cause(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
@@ -2778,23 +2691,15 @@ async def test_policy_gate_records_only_a_whitelisted_proposal_tool(
         await engine.dispose()
 
     policy = next(step for step in steps if step.phase == "policy_gate")
-    assert [name for name, _ in client.calls] == ["InspectSignal", "ProposeMitigation"]
-    assert policy.payload["status"] == "allowed"
-    assert policy.payload["authorizationCode"] == "proposal_recorded"
+    assert [name for name, _ in client.calls] == ["InspectSignal"]
+    assert policy.payload["status"] == "deferred"
+    assert policy.payload["authorizationCode"] == "no_grounded_action"
     assert policy.payload["executionPermitted"] is False
-    assert policy.payload["proposalRecorded"] is True
+    assert policy.payload["proposalRecorded"] is False
     assert [audit.tool_name for audit in audits] == [
         "knowledge_retrieval",
         "InspectSignal",
-        "ProposeMitigation",
     ]
-    forbidden_terms = ("write", "reload", "restart", "switch", "signal", "apply")
-    assert not any(
-        term in audit.tool_name.casefold()
-        for audit in audits
-        if audit.tool_name == "ProposeMitigation"
-        for term in forbidden_terms
-    )
 
 
 @pytest.mark.asyncio
@@ -2864,7 +2769,7 @@ async def test_policy_gate_denies_a_proposal_without_a_request_policy(
 
 
 @pytest.mark.asyncio
-async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
+async def test_workflow_persists_updates_and_rejects_incomplete_causal_decision(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-003")
@@ -2907,10 +2812,6 @@ async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
             owner_user_id=task.owner_user_id,
             task_id=task.id,
         )
-        evidence = await repositories.diagnostics.list_evidence(
-            owner_user_id=task.owner_user_id,
-            task_id=task.id,
-        )
         reports = await repositories.diagnostics.list_reports(
             owner_user_id=task.owner_user_id,
             task_id=task.id,
@@ -2937,9 +2838,10 @@ async def test_workflow_persists_hypothesis_updates_and_grounded_decision(
         "policy_gate",
         "report",
     ]
-    decision = cast(dict[str, object], reports[0].payload["rootCauseDecision"])
-    assert decision["mechanism"] == "process_unavailable"
-    assert set(cast(list[str], decision["evidenceIds"])) <= {item.id for item in evidence}
+    assert reports[0].payload["rootCauseDecision"] is None
+    validation = next(step for step in steps if step.phase == "decision_validation")
+    assert validation.payload["status"] == "invalid"
+    assert validation.payload["validationErrorCategory"] == "deterministic_gap"
     assert all(
         cast(list[str], step.payload["evidenceIds"])
         for step in steps
