@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+import openai
 from pydantic import BaseModel, ConfigDict, Field
 
 from super_ai.aiops.reasoning import (
@@ -37,6 +38,23 @@ DeterministicCheckCode = Literal[
     "confidence_in_range",
 ]
 RootCauseField = Literal["component", "mechanism", "trigger", "causalChain"]
+ValidationErrorCode = Literal[
+    "timeout",
+    "connection",
+    "authentication",
+    "permission_denied",
+    "rate_limit",
+    "provider_4xx",
+    "provider_5xx",
+    "structured_output_unsupported",
+    "unknown",
+]
+ValidationErrorPhase = Literal[
+    "structured_invoker_setup",
+    "model_invoke",
+    "structured_parse",
+]
+ValidationHttpStatusClass = Literal["4xx", "5xx"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +73,23 @@ class DeterministicValidationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SafeModelFailure:
+    code: ValidationErrorCode
+    phase: ValidationErrorPhase
+    retryable: bool
+    http_status_class: ValidationHttpStatusClass | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StructuredValidationOutcome:
     decision: RootCauseValidationDecision | None
     error_category: DecisionValidationErrorCategory | None
     attempts: int
     error_codes: tuple[str, ...]
+    error_code: ValidationErrorCode | None = None
+    error_phase: ValidationErrorPhase | None = None
+    retryable: bool | None = None
+    http_status_class: ValidationHttpStatusClass | None = None
 
 
 class _RootCauseValidationSchema(BaseModel):
@@ -116,19 +146,19 @@ async def invoke_structured_root_cause_validation(
     available_evidence_ids: Set[str],
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
-    structured = _structured_invoker(model)
+    try:
+        structured = _structured_invoker(model)
+    except Exception as exc:
+        failure = classify_model_failure(exc, phase="structured_invoker_setup")
+        return _model_failure_outcome(failure, attempts=0)
     invoker: _AsyncInvoker = structured or model
     current_prompt = prompt
     for attempt in (1, 2):
         try:
             response = await invoker.ainvoke(current_prompt)
-        except Exception:
-            return StructuredValidationOutcome(
-                decision=None,
-                error_category="model_call_failed",
-                attempts=attempt,
-                error_codes=("model_call_failed",),
-            )
+        except Exception as exc:
+            failure = classify_model_failure(exc, phase="model_invoke")
+            return _model_failure_outcome(failure, attempts=attempt)
         try:
             decision = _validation_decision_from_response(
                 response,
@@ -144,6 +174,8 @@ async def invoke_structured_root_cause_validation(
                 error_category="retry_exhausted",
                 attempts=attempt,
                 error_codes=("invalid_json_or_schema",),
+                error_phase="structured_parse",
+                retryable=False,
             )
         return StructuredValidationOutcome(
             decision=decision,
@@ -152,6 +184,56 @@ async def invoke_structured_root_cause_validation(
             error_codes=(),
         )
     raise AssertionError("The bounded validation loop must return within two attempts.")
+
+
+def classify_model_failure(
+    exc: Exception,
+    *,
+    phase: ValidationErrorPhase,
+) -> SafeModelFailure:
+    """Map exception identity to an allowlisted record without reading its message."""
+    if phase == "structured_invoker_setup" and isinstance(
+        exc, (NotImplementedError, TypeError)
+    ):
+        return SafeModelFailure("structured_output_unsupported", phase, False)
+    if isinstance(exc, (TimeoutError, openai.APITimeoutError)):
+        return SafeModelFailure("timeout", phase, True)
+    if isinstance(exc, openai.AuthenticationError):
+        return SafeModelFailure("authentication", phase, False, "4xx")
+    if isinstance(exc, openai.PermissionDeniedError):
+        return SafeModelFailure("permission_denied", phase, False, "4xx")
+    if isinstance(exc, openai.RateLimitError):
+        return SafeModelFailure("rate_limit", phase, True, "4xx")
+    if isinstance(exc, openai.APIConnectionError):
+        return SafeModelFailure("connection", phase, True)
+    if isinstance(exc, openai.APIStatusError):
+        status_class: ValidationHttpStatusClass = (
+            "5xx" if exc.status_code >= 500 else "4xx"
+        )
+        return SafeModelFailure(
+            "provider_5xx" if status_class == "5xx" else "provider_4xx",
+            phase,
+            status_class == "5xx",
+            status_class,
+        )
+    return SafeModelFailure("unknown", phase, False)
+
+
+def _model_failure_outcome(
+    failure: SafeModelFailure,
+    *,
+    attempts: int,
+) -> StructuredValidationOutcome:
+    return StructuredValidationOutcome(
+        decision=None,
+        error_category="model_call_failed",
+        attempts=attempts,
+        error_codes=(failure.code,),
+        error_code=failure.code,
+        error_phase=failure.phase,
+        retryable=failure.retryable,
+        http_status_class=failure.http_status_class,
+    )
 
 
 def _structured_invoker(model: ChatModel) -> _AsyncInvoker | None:

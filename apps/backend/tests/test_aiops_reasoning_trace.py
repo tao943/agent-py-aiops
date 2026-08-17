@@ -1939,6 +1939,10 @@ async def test_apy_013_validator_unavailable_uses_grounded_fallback(
         == "deterministic_grounded_fallback"
     )
     assert validation.payload["validationErrorCategory"] == "model_call_failed"
+    assert validation.payload["validationErrorCode"] == "timeout"
+    assert validation.payload["validationErrorPhase"] == "model_invoke"
+    assert validation.payload["validationRetryable"] is True
+    assert validation.payload["validationHttpStatusClass"] is None
     assert validation.payload["validationAttempts"] == 1
     assert validation.payload["validationWarning"] == "llm_validator_unavailable"
     assert completed.result_payload["rootCauseDecision"] is not None

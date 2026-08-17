@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
 from super_ai.aiops.decision_validation import (
     _RootCauseValidationSchema,  # pyright: ignore[reportPrivateUsage]
     can_replan_deterministic_gap,
+    classify_model_failure,
     deterministic_checks_payload,
     invoke_structured_root_cause_validation,
     validate_grounded_candidate,
@@ -291,6 +294,20 @@ class StructuredCapableChatModel:
         raise AssertionError("Raw fallback must not run for a structured-capable model.")
 
 
+class FailingStructuredSetupChatModel:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.raw_calls = 0
+
+    def with_structured_output(self, _schema: type[object], **_kwargs: Any) -> object:
+        raise self.error
+
+    async def ainvoke(self, input: object) -> object:
+        _ = input
+        self.raw_calls += 1
+        raise AssertionError("Raw fallback must not run after structured setup failure.")
+
+
 def _validation_schema(*, evidence_ids: list[str] | None = None):
     return _RootCauseValidationSchema(
         status="valid",
@@ -313,8 +330,96 @@ async def test_structured_validator_classifies_provider_failure_without_retry() 
 
     assert outcome.decision is None
     assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == "timeout"
+    assert outcome.error_phase == "model_invoke"
+    assert outcome.retryable is True
+    assert outcome.http_status_class is None
     assert outcome.attempts == 1
     assert model.calls == 1
+
+
+def _status_error(
+    error_type: type[openai.APIStatusError],
+    status_code: int,
+) -> openai.APIStatusError:
+    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx.Response(status_code, request=request)
+    return error_type("secret provider body", response=response, body=None)
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "retryable", "status_class"),
+    (
+        (TimeoutError("secret timeout text"), "timeout", True, None),
+        (
+            openai.APIConnectionError(
+                request=httpx.Request("POST", "https://provider.test")
+            ),
+            "connection",
+            True,
+            None,
+        ),
+        (_status_error(openai.AuthenticationError, 401), "authentication", False, "4xx"),
+        (
+            _status_error(openai.PermissionDeniedError, 403),
+            "permission_denied",
+            False,
+            "4xx",
+        ),
+        (_status_error(openai.RateLimitError, 429), "rate_limit", True, "4xx"),
+        (_status_error(openai.BadRequestError, 400), "provider_4xx", False, "4xx"),
+        (
+            _status_error(openai.InternalServerError, 500),
+            "provider_5xx",
+            True,
+            "5xx",
+        ),
+        (RuntimeError("api-key-and-response-body"), "unknown", False, None),
+    ),
+)
+def test_model_failure_classification_is_allowlisted(
+    error: Exception,
+    code: str,
+    retryable: bool,
+    status_class: str | None,
+) -> None:
+    result = classify_model_failure(error, phase="model_invoke")
+
+    assert result.code == code
+    assert result.retryable is retryable
+    assert result.http_status_class == status_class
+    assert "api-key" not in repr(result)
+    assert "response-body" not in repr(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "code"),
+    (
+        (NotImplementedError("secret unsupported details"), "structured_output_unsupported"),
+        (RuntimeError("secret setup failure"), "unknown"),
+    ),
+)
+async def test_structured_validator_classifies_setup_failure_safely(
+    error: Exception,
+    code: str,
+) -> None:
+    model = FailingStructuredSetupChatModel(error)
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == code
+    assert outcome.error_phase == "structured_invoker_setup"
+    assert outcome.retryable is False
+    assert outcome.http_status_class is None
+    assert "secret" not in repr(outcome)
+    assert model.raw_calls == 0
 
 
 @pytest.mark.asyncio

@@ -1405,6 +1405,10 @@ class AiopsDiagnosticService:
         candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
         validation_origin = "none"
         validation_error_category: str | None = None
+        validation_error_code: str | None = None
+        validation_error_phase: str | None = None
+        validation_retryable: bool | None = None
+        validation_http_status_class: str | None = None
         validation_attempts = 0
         validation_warning: str | None = None
         deterministic_result = None
@@ -1513,6 +1517,10 @@ class AiopsDiagnosticService:
             )
             validation_attempts = outcome.attempts
             validation_error_category = outcome.error_category
+            validation_error_code = outcome.error_code
+            validation_error_phase = outcome.error_phase
+            validation_retryable = outcome.retryable
+            validation_http_status_class = outcome.http_status_class
             if outcome.decision is not None:
                 validation = outcome.decision
                 if validation.status == "valid":
@@ -1573,6 +1581,10 @@ class AiopsDiagnosticService:
                 **payload,
                 "validationOrigin": validation_origin,
                 "validationErrorCategory": validation_error_category,
+                "validationErrorCode": validation_error_code,
+                "validationErrorPhase": validation_error_phase,
+                "validationRetryable": validation_retryable,
+                "validationHttpStatusClass": validation_http_status_class,
                 "validationAttempts": validation_attempts,
                 "validationWarning": validation_warning,
                 "deterministicChecks": (
@@ -1590,6 +1602,10 @@ class AiopsDiagnosticService:
                 **payload,
                 "validationOrigin": validation_origin,
                 "validationErrorCategory": validation_error_category,
+                "validationErrorCode": validation_error_code,
+                "validationErrorPhase": validation_error_phase,
+                "validationRetryable": validation_retryable,
+                "validationHttpStatusClass": validation_http_status_class,
                 "validationAttempts": validation_attempts,
                 "validationWarning": validation_warning,
                 "deterministicChecks": (
@@ -1604,6 +1620,10 @@ class AiopsDiagnosticService:
             **payload,
             "validationOrigin": validation_origin,
             "validationErrorCategory": validation_error_category,
+            "validationErrorCode": validation_error_code,
+            "validationErrorPhase": validation_error_phase,
+            "validationRetryable": validation_retryable,
+            "validationHttpStatusClass": validation_http_status_class,
             "validationAttempts": validation_attempts,
             "validationWarning": validation_warning,
             "deterministicChecks": (
