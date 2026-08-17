@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from super_ai.aiops.decision_validation import invoke_structured_root_cause_decision
 from super_ai.llm import (
     LlmConfigurationError,
     QwenOpenAIProvider,
@@ -28,6 +29,26 @@ async def test_live_chat_readiness(live_provider: QwenOpenAIProvider) -> None:
 
     assert result.ok, result.error
     assert result.model == live_provider.config.chat_model
+
+
+@pytest.mark.asyncio
+async def test_live_structured_decision_readiness(
+    live_provider: QwenOpenAIProvider,
+) -> None:
+    outcome = await invoke_structured_root_cause_decision(
+        model=live_provider.create_chat_model(),
+        prompt=(
+            "Return JSON only with component, mechanism, trigger, causalChain, "
+            "evidenceIds, and confidence. Use component demo-service, mechanism "
+            "bounded_test, trigger synthetic trigger, causalChain [synthetic trigger, "
+            "synthetic impact], evidenceIds [ev-trigger, ev-impact], confidence 1.0."
+        ),
+        available_evidence_ids={"ev-trigger", "ev-impact"},
+        structured_output_method=live_provider.config.structured_output_method,
+    )
+
+    assert outcome.decision is not None, repr(outcome)
+    assert outcome.error_category is None
 
 
 @pytest.mark.asyncio

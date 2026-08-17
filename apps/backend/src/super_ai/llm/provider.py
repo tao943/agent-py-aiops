@@ -10,7 +10,11 @@ from typing import Protocol, cast
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from super_ai.llm.config import LlmProviderConfig, load_llm_provider_config
+from super_ai.llm.config import (
+    LlmProviderConfig,
+    StructuredOutputMethod,
+    load_llm_provider_config,
+)
 from super_ai.llm.rerank import QwenVlRerankModel, RerankModel
 
 QWEN_EMBEDDING_BATCH_SIZE = 10
@@ -39,6 +43,11 @@ RerankFactory = Callable[[LlmProviderConfig], RerankModel]
 
 class LlmProvider(Protocol):
     """Provider interface for swappable OpenAI-compatible models."""
+
+    @property
+    def structured_output_method(self) -> StructuredOutputMethod:
+        """Return the configured structured-output steering method."""
+        ...
 
     def create_chat_model(self) -> ChatModel:
         """Create a configured chat model."""
@@ -88,6 +97,11 @@ class QwenOpenAIProvider:
     def config(self) -> LlmProviderConfig:
         """Return the provider configuration."""
         return self._config
+
+    @property
+    def structured_output_method(self) -> StructuredOutputMethod:
+        """Return the configured structured-output steering method."""
+        return self._config.structured_output_method
 
     def create_chat_model(self) -> ChatModel:
         """Create a configured Qwen chat model."""

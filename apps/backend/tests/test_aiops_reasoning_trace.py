@@ -1358,7 +1358,14 @@ class ReasoningChatModel:
                 }
             )
         if "root-cause decision" in prompt:
-            evidence_ids = list(dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt)))
+            supporting_ids = re.search(
+                r"Supporting observation evidence IDs: (\[[^\]]*\])", prompt
+            )
+            evidence_ids = (
+                cast(list[str], json.loads(supporting_ids.group(1)))
+                if supporting_ids is not None
+                else []
+            )
             return json.dumps(
                 {
                     "component": "checkout-service",
@@ -1368,7 +1375,7 @@ class ReasoningChatModel:
                         "checkout container stopped",
                         "nginx upstream connection was refused",
                     ],
-                    "evidenceIds": evidence_ids[-2:],
+                    "evidenceIds": evidence_ids,
                     "confidence": 0.95,
                 }
             )

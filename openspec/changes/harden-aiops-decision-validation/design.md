@@ -30,6 +30,11 @@
 Evidence-linked Observation decisions。第二层使用现有 LangChain/Qwen structured output 做语义
 复核；格式错误最多纠正一次，模型调用失败不做格式重试。
 
+模型 capability profile 显式声明 `structuredOutputMethod`。Decision 与 Validator 通过现有
+LangChain `with_structured_output` 适配器使用该方法；当前 DashScope Qwen profile 使用
+`json_mode`，旧 profile 缺失字段时保持 `function_calling` 兼容。最小 Live readiness 必须覆盖
+真实 structured Decision 请求，避免普通 Chat readiness 掩盖方法级 4xx。
+
 ### 确定性证据合同
 
 候选必须同时满足：恰好一个 supported hypothesis、无 open 竞争根因、公开 component/mechanism

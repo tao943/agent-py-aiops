@@ -51,6 +51,7 @@ from super_ai.aiops.reasoning import (
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
+from super_ai.llm.config import StructuredOutputMethod
 from super_ai.mcp.cached_client import RuntimeMcpClient
 from super_ai.mcp.tool_arguments import (
     ToolArgumentContract,
@@ -127,6 +128,15 @@ AIOPS_REPORT_REQUIRED_HEADINGS = (
     "## 📋 活跃告警清单",
     "## 📊 结论",
 )
+
+
+def _provider_structured_output_method(
+    provider: LlmProvider,
+) -> StructuredOutputMethod:
+    value = getattr(provider, "structured_output_method", "function_calling")
+    if value not in {"function_calling", "json_mode", "json_schema"}:
+        raise ValueError("Unsupported structured-output method configured by provider.")
+    return cast(StructuredOutputMethod, value)
 
 
 def build_generic_live_plan(
@@ -1495,6 +1505,9 @@ class AiopsDiagnosticService:
             model=self._llm_provider.create_chat_model(),
             prompt=prompt,
             available_evidence_ids=set(decision_evidence_ids),
+            structured_output_method=_provider_structured_output_method(
+                self._llm_provider
+            ),
         )
         decision = decision_outcome.decision
         decision_error_category = decision_outcome.error_category
@@ -1710,6 +1723,9 @@ class AiopsDiagnosticService:
                 model=self._llm_provider.create_chat_model(),
                 prompt=prompt,
                 available_evidence_ids=set(evidence_ids),
+                structured_output_method=_provider_structured_output_method(
+                    self._llm_provider
+                ),
             )
             validation_attempts = outcome.attempts
             validation_error_category = outcome.error_category

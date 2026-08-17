@@ -336,17 +336,23 @@ class StructuredRunnable:
 
 
 class StructuredCapableChatModel:
-    def __init__(self, responses: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        responses: list[dict[str, object]],
+        *,
+        expected_method: str = "function_calling",
+    ) -> None:
         self.structured = StructuredRunnable(responses)
         self.raw_calls = 0
         self.wrapper_calls = 0
+        self.expected_method = expected_method
 
     def with_structured_output(
         self,
         _schema: type[object],
         **kwargs: Any,
     ) -> StructuredRunnable:
-        assert kwargs == {"method": "function_calling", "include_raw": True}
+        assert kwargs == {"method": self.expected_method, "include_raw": True}
         self.wrapper_calls += 1
         return self.structured
 
@@ -413,6 +419,26 @@ async def test_structured_decision_unpacks_langchain_envelope() -> None:
 
     assert outcome.decision is not None
     assert outcome.attempts == 1
+    assert outcome.error_category is None
+    assert model.wrapper_calls == 1
+    assert model.raw_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_uses_configured_json_mode() -> None:
+    model = StructuredCapableChatModel(
+        [{"raw": object(), "parsed": _decision_schema(), "parsing_error": None}],
+        expected_method="json_mode",
+    )
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+        structured_output_method="json_mode",
+    )
+
+    assert outcome.decision is not None
     assert outcome.error_category is None
     assert model.wrapper_calls == 1
     assert model.raw_calls == 0

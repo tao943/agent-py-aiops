@@ -75,6 +75,7 @@ def test_loads_offline_qwen_configuration(offline_config: LlmProviderConfig) -> 
     assert config.rerank_model == "qwen3-vl-rerank"
     assert config.rerank_url == "https://example.test/rerank"
     assert config.context_window_tokens == 1_000_000
+    assert config.structured_output_method == "json_mode"
     assert config.temperature == 0.2
     assert config.timeout_seconds == 30.0
     assert config.max_retries == 2
@@ -279,6 +280,7 @@ def _write_config(
     rerank_model: str = "qwen3-vl-rerank",
     rerank_url: str = "https://example.test/rerank",
     context_window_tokens: int = 1_000_000,
+    structured_output_method: str = "json_mode",
     temperature: float = 0.2,
     timeout_seconds: int = 30,
     max_retries: int = 2,
@@ -297,7 +299,10 @@ def _write_config(
                     "rerankModel": rerank_model,
                     "rerankUrl": rerank_url,
                     "modelCapabilities": {
-                        chat_model: {"contextWindowTokens": context_window_tokens}
+                        chat_model: {
+                            "contextWindowTokens": context_window_tokens,
+                            "structuredOutputMethod": structured_output_method,
+                        }
                     },
                     "temperature": temperature,
                     "timeoutSeconds": timeout_seconds,

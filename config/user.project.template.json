@@ -8,7 +8,8 @@
     "embeddingModel": "text-embedding-v4",
     "modelCapabilities": {
       "qwen3.7-max": {
-        "contextWindowTokens": 1000000
+        "contextWindowTokens": 1000000,
+        "structuredOutputMethod": "json_mode"
       }
     }
   },

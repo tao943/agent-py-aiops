@@ -50,3 +50,13 @@ allowlisted error category、尝试次数、warning 和 deterministic check resu
 - **WHEN** v3 Workflow 保留 deterministic fallback candidate
 - **THEN** Recovery Plan MUST 使用 `manual_review`
 - **AND** Policy Gate MUST 返回 `executionPermitted=false`
+
+### Requirement: Structured-output steering follows model capability
+
+后端 SHALL 从当前 Chat Model 的 capability profile 选择 LangChain structured-output 方法，且 SHALL
+以不含凭据、真实日志或隐藏答案的最小 Live readiness 验证该请求形态。
+
+#### Scenario: Model profile selects JSON mode
+- **WHEN** 当前模型 capability 声明 `structuredOutputMethod=json_mode`
+- **THEN** Decision 与 Validator MUST 使用 `json_mode` 构造 structured invoker
+- **AND** Workflow MUST 保留既有 schema 校验、一次格式纠正和安全错误分类

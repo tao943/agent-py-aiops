@@ -17,6 +17,7 @@ from super_ai.aiops.reasoning import (
     parse_root_cause_validation,
 )
 from super_ai.llm import ChatModel
+from super_ai.llm.config import StructuredOutputMethod
 
 DecisionValidationErrorCategory = Literal[
     "candidate_missing",
@@ -175,10 +176,15 @@ async def invoke_structured_root_cause_validation(
     model: ChatModel,
     prompt: str,
     available_evidence_ids: Set[str],
+    structured_output_method: StructuredOutputMethod = "function_calling",
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
     try:
-        structured = _structured_invoker(model, _RootCauseValidationSchema)
+        structured = _structured_invoker(
+            model,
+            _RootCauseValidationSchema,
+            method=structured_output_method,
+        )
     except Exception as exc:
         failure = classify_model_failure(exc, phase="structured_invoker_setup")
         return _model_failure_outcome(failure, attempts=0)
@@ -222,10 +228,15 @@ async def invoke_structured_root_cause_decision(
     model: ChatModel,
     prompt: str,
     available_evidence_ids: Set[str],
+    structured_output_method: StructuredOutputMethod = "function_calling",
 ) -> StructuredDecisionOutcome:
     """Generate one bounded structured decision with secret-safe failure metadata."""
     try:
-        structured = _structured_invoker(model, _RootCauseDecisionSchema)
+        structured = _structured_invoker(
+            model,
+            _RootCauseDecisionSchema,
+            method=structured_output_method,
+        )
     except Exception as exc:
         failure = classify_model_failure(exc, phase="structured_invoker_setup")
         return _decision_model_failure_outcome(failure, attempts=0)
@@ -334,6 +345,8 @@ def _decision_model_failure_outcome(
 def _structured_invoker(
     model: ChatModel,
     schema: type[BaseModel],
+    *,
+    method: StructuredOutputMethod,
 ) -> _AsyncInvoker | None:
     method_value = getattr(model, "with_structured_output", None)
     if not callable(method_value):
@@ -342,7 +355,7 @@ def _structured_invoker(
         _AsyncInvoker,
         method_value(
             schema,
-            method="function_calling",
+            method=method,
             include_raw=True,
         ),
     )

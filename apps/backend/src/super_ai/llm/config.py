@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from super_ai.project_config import (
     ProjectConfigurationError,
@@ -18,6 +18,12 @@ from super_ai.project_config import (
 
 class LlmConfigurationError(RuntimeError):
     """Raised when an LLM provider cannot be configured."""
+
+
+StructuredOutputMethod = Literal["function_calling", "json_mode", "json_schema"]
+_STRUCTURED_OUTPUT_METHODS: frozenset[str] = frozenset(
+    {"function_calling", "json_mode", "json_schema"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +39,7 @@ class LlmProviderConfig:
     rerank_model: str
     rerank_url: str
     context_window_tokens: int
+    structured_output_method: StructuredOutputMethod
     temperature: float
     timeout_seconds: float
     max_retries: int
@@ -61,6 +68,17 @@ def load_llm_provider_config(
             str(key): value
             for key, value in cast(Mapping[object, object], model_profile_raw).items()
         }
+        structured_output_method = model_profile.get(
+            "structuredOutputMethod", "function_calling"
+        )
+        if (
+            not isinstance(structured_output_method, str)
+            or structured_output_method not in _STRUCTURED_OUTPUT_METHODS
+        ):
+            raise ProjectConfigurationError(
+                "Project config field must be one of function_calling, json_mode, "
+                "or json_schema: structuredOutputMethod"
+            )
 
         return LlmProviderConfig(
             provider=required_str(raw_config, "provider"),
@@ -72,6 +90,9 @@ def load_llm_provider_config(
             rerank_model=required_str(raw_config, "rerankModel"),
             rerank_url=required_str(raw_config, "rerankUrl"),
             context_window_tokens=required_int(model_profile, "contextWindowTokens"),
+            structured_output_method=cast(
+                StructuredOutputMethod, structured_output_method
+            ),
             temperature=required_float(raw_config, "temperature"),
             timeout_seconds=required_float(raw_config, "timeoutSeconds"),
             max_retries=required_int(raw_config, "maxRetries"),

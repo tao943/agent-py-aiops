@@ -9,6 +9,7 @@
 - [x] 2.1 以失败测试覆盖 LangChain envelope、调用失败、格式纠错、明确拒绝和候选缺失
 - [x] 2.2 实现一次格式纠错和安全错误分类，不持久化原始模型内容
 - [x] 2.3 集成 v3 validation origin、定向 Replan、fail-closed 和人工恢复限制
+- [x] 2.4 以模型 capability 选择 structured-output 方法并增加最小 Live readiness
 
 ## 3. Artifact 与兼容性
 
