@@ -1,7 +1,7 @@
 # AIOps 因果意图路由与结构化 Decision 设计
 
 **日期：** 2026-08-17  
-**状态：** 已批准方案，待书面复核  
+**状态：** 已确认
 **范围：** AIOps LangGraph Planner、Evidence Evaluation、Sufficiency Gate、Replanner、Decision
 
 ## 背景与问题
@@ -76,11 +76,14 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]: ...
 能力描述通用观测语义，而非某个场景答案。首版采用显式允许列表与安全默认值：
 
 - 顺序、配置变更、部署变更、重试策略类工具：`trigger | mechanism`；
-- wait graph、lock graph、依赖拓扑类工具：`mechanism`；
+- wait graph 类工具：`mechanism`；
+- lock graph 类工具：`trigger | mechanism`；
 - 错误、状态码和告警结果类工具：`mechanism | impact`；
-- 容量、健康度、基线和一般指标类工具：`context | mechanism`；
+- 容量、基线和一般指标类工具：`context | mechanism`；
+- 只读会话/健康检查工具：`context | mechanism | impact` 中与其通用语义相符的子集；
 - 未分类诊断工具：只允许 `context`，并在审计中暴露 `unknown_tool_capability`；
-- 知识检索、恢复和验证工具不允许进入诊断 Plan causal intent 合同。
+- 知识检索、写操作恢复和恢复提案工具不允许进入诊断 Plan causal intent 合同；只读健康验证
+  可以作为 context 或 impact。
 
 `_tool_contracts_payload` 向 Planner/Replanner 公开 `allowedCausalIntents`，不把这些字段写回
 MCP server schema。
