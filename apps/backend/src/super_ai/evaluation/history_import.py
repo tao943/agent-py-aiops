@@ -80,6 +80,14 @@ async def import_history(
     )
     counts = {key: 0 for key in count_names}
     entries: list[HistoryImportEntry] = []
+    database_by_run: dict[
+        str, tuple[EvaluationRunRecord, EvaluationResultRecord | None]
+    ] = {}
+    list_runs = getattr(repository, "list_runs_with_results", None)
+    if list_runs is not None:
+        database_by_run = {
+            run.run_id: (run, result) for run, result in await list_runs()
+        }
     for source, path in _source_files(sources):
         source_root = source.resolve(strict=True)
         if source_root.is_dir() and not path.resolve(strict=True).is_relative_to(source_root):
@@ -100,6 +108,16 @@ async def import_history(
             entries.append(HistoryImportEntry(str(path), None, "rejected"))
             continue
         for envelope in envelopes:
+            database_row = database_by_run.get(envelope.run_id)
+            if database_row is not None:
+                canonical = _database_envelope(*database_row)
+                if not _same_legacy_result(envelope, canonical):
+                    counts["conflicts"] += 1
+                    entries.append(
+                        HistoryImportEntry(str(path), envelope.run_id, "conflict")
+                    )
+                    continue
+                envelope = canonical
             try:
                 existing = archive.load(envelope.run_id)
             except FileNotFoundError:
@@ -118,14 +136,28 @@ async def import_history(
                 counts["duplicates"] += 1
                 state = "duplicate"
             try:
-                await repository.start_envelope(running_from_terminal(envelope))
-                if envelope.status != "running":
-                    await repository.finalize_envelope(
-                        envelope, artifact_checksum=artifact_checksum(envelope)
-                    )
+                if database_row is not None:
+                    database_run, _database_result = database_row
+                    checksum = artifact_checksum(envelope)
+                    if database_run.artifact_checksum not in {None, checksum}:
+                        raise ValueError("Database checksum conflicts with imported artifact.")
+                    if database_run.artifact_checksum is None:
+                        await repository.attach_artifact_checksum(
+                            run_id=envelope.run_id,
+                            artifact_checksum=checksum,
+                        )
+                else:
+                    await repository.start_envelope(running_from_terminal(envelope))
+                    if envelope.status != "running":
+                        await repository.finalize_envelope(
+                            envelope, artifact_checksum=artifact_checksum(envelope)
+                        )
             except EvaluationDatabaseUnavailable:
                 counts["database_pending"] += 1
                 state = "database_pending"
+            except ValueError:
+                counts["conflicts"] += 1
+                state = "conflict"
             entries.append(HistoryImportEntry(str(path), envelope.run_id, state))
         del source
     return HistoryImportReport(entries=tuple(entries), **counts)
@@ -140,6 +172,12 @@ async def reconcile_history(
     now = datetime.now(timezone.utc)
     entries: list[HistoryImportEntry] = []
     pending = conflicts = 0
+    database_rows: list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]
+    try:
+        database_rows = await repository.list_runs_with_results()
+    except AttributeError:
+        database_rows = []
+    database_by_run = {run.run_id: (run, result) for run, result in database_rows}
     for stored in list(archive.iter_envelopes()):
         envelope = stored
         if stored.status == "running" and now - stored.started_at > stale_after:
@@ -150,6 +188,28 @@ async def reconcile_history(
             )
             archive.finalize(envelope)
         elif stored.status == "running":
+            continue
+        database_row = database_by_run.get(envelope.run_id)
+        if database_row is not None:
+            database_run, _database_result = database_row
+            checksum = artifact_checksum(envelope)
+            if database_run.artifact_checksum not in {None, checksum}:
+                conflicts += 1
+                entries.append(HistoryImportEntry("archive", envelope.run_id, "conflict"))
+                continue
+            if database_run.artifact_checksum is None:
+                try:
+                    await repository.attach_artifact_checksum(
+                        run_id=envelope.run_id,
+                        artifact_checksum=checksum,
+                    )
+                except EvaluationDatabaseUnavailable:
+                    pending += 1
+                    entries.append(
+                        HistoryImportEntry("archive", envelope.run_id, "database_pending")
+                    )
+                    continue
+            entries.append(HistoryImportEntry("archive", envelope.run_id, "synchronized"))
             continue
         try:
             await repository.start_envelope(running_from_terminal(envelope))
@@ -165,9 +225,7 @@ async def reconcile_history(
         else:
             state = envelope.status
         entries.append(HistoryImportEntry("archive", envelope.run_id, state))
-    list_runs = getattr(repository, "list_runs_with_results", None)
-    if list_runs is not None:
-        database_rows = await list_runs()
+    if database_rows:
         for run, result in database_rows:
             try:
                 archive_envelope = archive.load(run.run_id)
@@ -444,3 +502,23 @@ def _database_envelope(
         failure_category=run.failure_category,
         completed_at=run.completed_at or started_at,
     )
+
+
+def _same_legacy_result(
+    imported: EvaluationRunEnvelope,
+    database: EvaluationRunEnvelope,
+) -> bool:
+    if (
+        imported.evaluation_kind != database.evaluation_kind
+        or imported.scenario_id != database.scenario_id
+        or imported.status != database.status
+        or imported.passed is not database.passed
+    ):
+        return False
+    for key in ("total", "rawTotal"):
+        imported_value = imported.metrics.get(key)
+        database_value = database.metrics.get(key)
+        if imported_value is not None and database_value is not None:
+            if imported_value != database_value:
+                return False
+    return True

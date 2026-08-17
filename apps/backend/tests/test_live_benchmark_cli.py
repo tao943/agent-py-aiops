@@ -70,7 +70,7 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     async def execute():
         raise LiveBenchmarkError("recovery_denied", stage="recover")
 
-    payload, exit_code = await live_cli._run_live_once(
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
         run_id="live-recovery-denied",
         evidence_source="local",
@@ -91,7 +91,7 @@ async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
     async def execute():
         raise LiveBenchmarkError("cls_index_timeout", stage="evidence")
 
-    payload, exit_code = await live_cli._run_live_once(
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
         run_id="live-cls-timeout",
         evidence_source="cls",
@@ -112,7 +112,7 @@ async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await live_cli._run_live_once(
+        await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
             scenario_id="APY-LIVE-PG-LOCK-001",
             run_id="live-cancelled",
             evidence_source="local",

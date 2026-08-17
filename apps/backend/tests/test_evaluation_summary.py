@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 
 from super_ai.evaluation.history import (
+    EvaluationKind,
+    EvaluationProvenance,
+    EvaluationRunEnvelope,
     artifact_checksum,
     running_envelope,
     terminal_envelope,
@@ -8,7 +11,12 @@ from super_ai.evaluation.history import (
 from super_ai.evaluation.summary import build_history_summary
 
 
-def envelope(run_id: str, *, kind="retrieval", provenance="native"):
+def envelope(
+    run_id: str,
+    *,
+    kind: EvaluationKind = "retrieval",
+    provenance: EvaluationProvenance = "native",
+) -> EvaluationRunEnvelope:
     now = datetime(2026, 8, 17, tzinfo=timezone.utc)
     metadata = (
         {"workflowVersion": "retrieval-v1", "datasetChecksum": "a" * 64}

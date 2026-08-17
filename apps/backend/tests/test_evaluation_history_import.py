@@ -4,18 +4,29 @@ from pathlib import Path
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.history import EvaluationRunEnvelope
 from super_ai.evaluation.history_import import import_history
+from super_ai.memory.repositories import EvaluationResultRecord, EvaluationRunRecord
 
 
 class Repository:
-    async def start_envelope(self, envelope):
+    async def start_envelope(self, envelope: EvaluationRunEnvelope) -> None:
         del envelope
 
-    async def finalize_envelope(self, envelope, *, artifact_checksum):
+    async def finalize_envelope(
+        self, envelope: EvaluationRunEnvelope, *, artifact_checksum: str
+    ) -> None:
         del envelope, artifact_checksum
 
-    async def attach_artifact_checksum(self, *, run_id, artifact_checksum):
+    async def attach_artifact_checksum(
+        self, *, run_id: str, artifact_checksum: str
+    ) -> None:
         del run_id, artifact_checksum
+
+    async def list_runs_with_results(
+        self,
+    ) -> list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]:
+        return []
 
 
 @pytest.mark.asyncio
