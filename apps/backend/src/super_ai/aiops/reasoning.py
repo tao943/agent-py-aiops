@@ -32,6 +32,7 @@ class ObservationDecision:
     supports: tuple[str, ...]
     refutes: tuple[str, ...]
     summary: str
+    evidence_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

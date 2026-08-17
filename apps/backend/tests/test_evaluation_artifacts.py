@@ -266,7 +266,62 @@ def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
 
     assert artifact.evidence[0].source == "SearchLog"
     assert artifact.evidence[0].claim_id == "cls-live-request-timeout"
+    assert artifact.evidence[0].tool_call_id == "call-1"
+    assert artifact.tool_calls[0].audit_id == "call-1"
     assert artifact.tool_calls[0].arguments == {
         "Region": "ap-guangzhou",
         "TopicId": "topic-live",
     }
+
+
+def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
+    evidence = DiagnosticEvidenceRecord(
+        id="ev-1",
+        owner_user_id="eval-user",
+        task_id="task-v2",
+        step_id="step-1",
+        tool_call_id="call-1",
+        kind="tool_result",
+        source="InspectPostgresErrors",
+        summary="PostgreSQL emitted SQLSTATE 40P01.",
+        payload={"output": {"benchmarkEvidenceId": "postgres-40p01"}},
+        created_at=NOW,
+    )
+    tool_call = AgentToolCallAuditRecord(
+        id="call-1",
+        owner_user_id="eval-user",
+        chat_session_id=None,
+        diagnostic_task_id="task-v2",
+        tool_name="InspectPostgresErrors",
+        status="completed",
+        arguments={},
+        result_summary=evidence.summary,
+        error_message=None,
+        started_at=NOW,
+        completed_at=NOW,
+        duration_ms=1,
+        created_at=NOW,
+    )
+    steps = (
+        _step(
+            1,
+            "evidence_evaluation",
+            {
+                "observationDecision": {
+                    "purpose": "Inspect structured errors.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": [],
+                    "summary": evidence.summary,
+                    "evidenceIds": [evidence.id],
+                }
+            },
+        ),
+    )
+
+    artifact = build_run_artifact(
+        _benchmark_task(), steps, (evidence,), (tool_call,), ()
+    )
+
+    assert artifact.observation_decisions[0].evidence_ids == ("ev-1",)
+    assert artifact.evidence[0].tool_call_id == "call-1"
+    assert artifact.tool_calls[0].audit_id == "call-1"

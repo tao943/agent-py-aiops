@@ -27,6 +27,7 @@ class ArtifactEvidence:
     claim_id: str
     grounded: bool
     source: str = ""
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class ArtifactToolCall:
     approved: bool = False
     verified: bool = False
     arguments: JsonDict = field(default_factory=_empty_json_dict)
+    audit_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +111,7 @@ def build_run_artifact(
             status=item.status,
             risk_tier=_risk_tier(item.tool_name),
             arguments=dict(item.arguments),
+            audit_id=item.id,
         )
         for item in tool_calls
     )
@@ -141,6 +144,7 @@ def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
         claim_id=claim_id,
         grounded=record.step_id is not None and bool(record.source),
         source=record.source,
+        tool_call_id=record.tool_call_id,
     )
 
 
@@ -249,6 +253,10 @@ def _observation_decisions_from_steps(
         supports = item.get("supports")
         refutes = item.get("refutes")
         summary = item.get("summary")
+        raw_evidence_ids = item.get("evidenceIds")
+        evidence_ids = (
+            [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
+        )
         support_items = _string_list(supports)
         refute_items = _string_list(refutes)
         if (
@@ -256,6 +264,7 @@ def _observation_decisions_from_steps(
             and support_items is not None
             and refute_items is not None
             and isinstance(summary, str)
+            and evidence_ids is not None
         ):
             decisions.append(
                 ObservationDecision(
@@ -263,6 +272,7 @@ def _observation_decisions_from_steps(
                     supports=tuple(support_items),
                     refutes=tuple(refute_items),
                     summary=summary,
+                    evidence_ids=tuple(evidence_ids),
                 )
             )
     return tuple(decisions)
@@ -288,22 +298,29 @@ def _string_list(value: object) -> list[str] | None:
     return [cast(str, item) for item in items]
 
 
-def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
-    if tool_name in {
+ToolObservationRole = Literal[
+    "diagnostic_observation",
+    "knowledge_context",
+    "recovery_or_verification",
+    "unknown",
+]
+
+_L1_RECOVERY_TOOLS = frozenset(
+    {
         "RestartTestService",
         "ResumeTestConsumer",
         "DeleteRebuildableTestCacheKey",
         "RestoreTestRedisService",
         "RemoveInjectedNetworkFault",
         "RestoreInjectedServiceState",
-    }:
-        return "L1"
-    if tool_name.startswith("Propose"):
-        return "L2"
-    if tool_name in {
-        "knowledge_retrieval",
-        "SearchKnowledge",
-        "GetActiveAlerts",
+    }
+)
+_KNOWLEDGE_CONTEXT_TOOLS = frozenset(
+    {"knowledge_retrieval", "SearchKnowledge", "GetActiveAlerts"}
+)
+_RECOVERY_OR_VERIFICATION_TOOLS = _L1_RECOVERY_TOOLS | {"VerifyServiceHealth"}
+_DIAGNOSTIC_OBSERVATION_TOOLS = frozenset(
+    {
         "SearchLogs",
         "SearchLog",
         "QueryMetrics",
@@ -335,7 +352,30 @@ def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
         "ProbeUpstreamHealth",
         "GetServiceTopology",
         "GetDeploymentChanges",
-        "VerifyServiceHealth",
-    }:
+    }
+)
+
+
+def tool_observation_role(tool: ArtifactToolCall) -> ToolObservationRole:
+    """Classify whether a completed tool call requires Evidence Evaluation."""
+    if tool.name in _KNOWLEDGE_CONTEXT_TOOLS:
+        return "knowledge_context"
+    if tool.name in _RECOVERY_OR_VERIFICATION_TOOLS or tool.name.startswith("Propose"):
+        return "recovery_or_verification"
+    if tool.name in _DIAGNOSTIC_OBSERVATION_TOOLS:
+        return "diagnostic_observation"
+    return "unknown"
+
+
+def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
+    if tool_name in _L1_RECOVERY_TOOLS:
+        return "L1"
+    if tool_name.startswith("Propose"):
+        return "L2"
+    if tool_name in (
+        _KNOWLEDGE_CONTEXT_TOOLS
+        | _DIAGNOSTIC_OBSERVATION_TOOLS
+        | _RECOVERY_OR_VERIFICATION_TOOLS
+    ):
         return "L0"
     return "L3"
