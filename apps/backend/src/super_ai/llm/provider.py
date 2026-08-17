@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
 from typing import Protocol, cast
@@ -51,6 +51,10 @@ class LlmProvider(Protocol):
 
     def create_chat_model(self) -> ChatModel:
         """Create a configured chat model."""
+        ...
+
+    def create_validator_model(self) -> ChatModel:
+        """Create the model configured for semantic validation."""
         ...
 
     def create_embedding_model(self) -> EmbeddingModel:
@@ -103,9 +107,25 @@ class QwenOpenAIProvider:
         """Return the configured structured-output steering method."""
         return self._config.structured_output_method
 
+    @property
+    def validator_model_name(self) -> str:
+        """Return the configured semantic Validator model name."""
+        return self._config.validator_model
+
+    @property
+    def validator_structured_output_method(self) -> StructuredOutputMethod:
+        """Return the Validator structured-output steering method."""
+        return self._config.validator_structured_output_method
+
     def create_chat_model(self) -> ChatModel:
         """Create a configured Qwen chat model."""
         return self._model_factory(self._config)
+
+    def create_validator_model(self) -> ChatModel:
+        """Create the Validator model with shared provider transport settings."""
+        return self._model_factory(
+            replace(self._config, chat_model=self._config.validator_model)
+        )
 
     def create_embedding_model(self) -> EmbeddingModel:
         """Create a configured OpenAI-compatible embedding model."""

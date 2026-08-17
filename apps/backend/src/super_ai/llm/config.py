@@ -40,6 +40,8 @@ class LlmProviderConfig:
     rerank_url: str
     context_window_tokens: int
     structured_output_method: StructuredOutputMethod
+    validator_model: str
+    validator_structured_output_method: StructuredOutputMethod
     temperature: float
     timeout_seconds: float
     max_retries: int
@@ -59,26 +61,22 @@ def load_llm_provider_config(
             raise ProjectConfigurationError(
                 "Project config field must be an object: modelCapabilities"
             )
-        model_profile_raw = cast(Mapping[object, object], model_capabilities).get(chat_model)
-        if not isinstance(model_profile_raw, Mapping):
-            raise ProjectConfigurationError(
-                f"No model capability profile configured for chatModel: {chat_model}"
-            )
-        model_profile = {
-            str(key): value
-            for key, value in cast(Mapping[object, object], model_profile_raw).items()
-        }
-        structured_output_method = model_profile.get(
-            "structuredOutputMethod", "function_calling"
+        model_profile, structured_output_method = _model_capability_profile(
+            model_capabilities,
+            chat_model,
+            config_field="chatModel",
         )
-        if (
-            not isinstance(structured_output_method, str)
-            or structured_output_method not in _STRUCTURED_OUTPUT_METHODS
-        ):
+        validator_model_raw = raw_config.get("validatorModel", chat_model)
+        if not isinstance(validator_model_raw, str) or not validator_model_raw.strip():
             raise ProjectConfigurationError(
-                "Project config field must be one of function_calling, json_mode, "
-                "or json_schema: structuredOutputMethod"
+                "Project config field must be a non-empty string: validatorModel"
             )
+        validator_model = validator_model_raw.strip()
+        _, validator_structured_output_method = _model_capability_profile(
+            model_capabilities,
+            validator_model,
+            config_field="validatorModel",
+        )
 
         return LlmProviderConfig(
             provider=required_str(raw_config, "provider"),
@@ -93,9 +91,38 @@ def load_llm_provider_config(
             structured_output_method=cast(
                 StructuredOutputMethod, structured_output_method
             ),
+            validator_model=validator_model,
+            validator_structured_output_method=cast(
+                StructuredOutputMethod, validator_structured_output_method
+            ),
             temperature=required_float(raw_config, "temperature"),
             timeout_seconds=required_float(raw_config, "timeoutSeconds"),
             max_retries=required_int(raw_config, "maxRetries"),
         )
     except ProjectConfigurationError as exc:
         raise LlmConfigurationError(str(exc)) from exc
+
+
+def _model_capability_profile(
+    model_capabilities: Mapping[object, object],
+    model_name: str,
+    *,
+    config_field: str,
+) -> tuple[dict[str, object], str]:
+    profile_raw = model_capabilities.get(model_name)
+    if not isinstance(profile_raw, Mapping):
+        raise ProjectConfigurationError(
+            f"No model capability profile configured for {config_field}: {model_name}"
+        )
+    profile = {
+        str(key): value
+        for key, value in cast(Mapping[object, object], profile_raw).items()
+    }
+    required_int(profile, "contextWindowTokens")
+    method = profile.get("structuredOutputMethod", "function_calling")
+    if not isinstance(method, str) or method not in _STRUCTURED_OUTPUT_METHODS:
+        raise ProjectConfigurationError(
+            "Project config field must be one of function_calling, json_mode, "
+            "or json_schema: structuredOutputMethod"
+        )
+    return profile, method
