@@ -1,8 +1,8 @@
 ## 1. 规格与安全归档
 
 - [x] 1.1 同步 active WIKI 并通过 OpenSpec strict 校验
-- [ ] 1.2 以失败测试定义统一 Envelope、字段允许列表、答案隔离和稳定 checksum
-- [ ] 1.3 实现只从本地 JSON 配置读取的 worktree 外原子归档
+- [x] 1.2 以失败测试定义统一 Envelope、字段允许列表、答案隔离和稳定 checksum
+- [x] 1.3 实现只从本地 JSON 配置读取的 worktree 外原子归档
 
 ## 2. PostgreSQL 与共享 Recorder
 

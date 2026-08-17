@@ -3,6 +3,9 @@
     "env": "development",
     "projectName": "agent-py"
   },
+  "evaluation": {
+    "archiveDir": ""
+  },
   "backend": {
     "host": "127.0.0.1",
     "port": 8000,

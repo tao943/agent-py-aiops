@@ -1,4 +1,7 @@
 {
+  "evaluation": {
+    "archiveDir": ""
+  },
   "llm": {
     "apiKey": "",
     "chatModel": "qwen3.7-max",
