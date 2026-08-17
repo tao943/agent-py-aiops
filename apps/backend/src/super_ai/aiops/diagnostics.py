@@ -50,7 +50,7 @@ from super_ai.aiops.reasoning import (
     parse_recovery_plan,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
-from super_ai.llm import LlmProvider
+from super_ai.llm import ChatModel, LlmProvider
 from super_ai.llm.config import StructuredOutputMethod
 from super_ai.mcp.cached_client import RuntimeMcpClient
 from super_ai.mcp.tool_arguments import (
@@ -136,6 +136,35 @@ def _provider_structured_output_method(
     value = getattr(provider, "structured_output_method", "function_calling")
     if value not in {"function_calling", "json_mode", "json_schema"}:
         raise ValueError("Unsupported structured-output method configured by provider.")
+    return cast(StructuredOutputMethod, value)
+
+
+def _validator_chat_model(provider: LlmProvider) -> ChatModel:
+    factory = getattr(provider, "create_validator_model", None)
+    if callable(factory):
+        return cast(ChatModel, factory())
+    return provider.create_chat_model()
+
+
+def _validator_model_name(provider: LlmProvider) -> str:
+    value = getattr(provider, "validator_model_name", None)
+    if callable(value):
+        value = value()
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,120}", value):
+        return value
+    return "legacy-main-model"
+
+
+def _validator_structured_output_method(
+    provider: LlmProvider,
+) -> StructuredOutputMethod:
+    value = getattr(provider, "validator_structured_output_method", None)
+    if callable(value):
+        value = value()
+    if value is None:
+        return _provider_structured_output_method(provider)
+    if value not in {"function_calling", "json_mode", "json_schema"}:
+        raise ValueError("Unsupported Validator structured-output method configured by provider.")
     return cast(StructuredOutputMethod, value)
 
 
@@ -1665,11 +1694,13 @@ class AiopsDiagnosticService:
         validation_origin = "none"
         validation_error_category: str | None = None
         validation_error_code: str | None = None
+        validation_error_codes: tuple[str, ...] = ()
         validation_error_phase: str | None = None
         validation_retryable: bool | None = None
         validation_http_status_class: str | None = None
         validation_attempts = 0
         validation_warning: str | None = None
+        validation_model = _validator_model_name(self._llm_provider)
         deterministic_result = None
         deterministic_replan_allowed = False
         validation = RootCauseValidationDecision(
@@ -1767,12 +1798,24 @@ class AiopsDiagnosticService:
             )
             validation_error_category = "deterministic_gap"
         elif candidate is not None and deterministic_result is not None:
+            response_example = json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": list(candidate.evidence_ids),
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "Public evidence supports every candidate field.",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             prompt = (
-                "Return one JSON root-cause validation decision with status, evidenceIds, "
+                "Return JSON only for one root-cause validation decision with status, evidenceIds, "
                 "unsupportedFields, missingEvidence, and summary. Judge only whether the "
                 "candidate component, mechanism, trigger, and causalChain are supported by the "
                 "public structured observations. Do not compare against hidden answers and do "
-                "not include private chain-of-thought. "
+                "not include private chain-of-thought. Follow this JSON shape example: "
+                f"{response_example}. "
                 f"Candidate: {json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
                 "Public hypotheses: "
                 f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
@@ -1783,16 +1826,17 @@ class AiopsDiagnosticService:
                 f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
             )
             outcome = await invoke_structured_root_cause_validation(
-                model=self._llm_provider.create_chat_model(),
+                model=_validator_chat_model(self._llm_provider),
                 prompt=prompt,
                 available_evidence_ids=set(evidence_ids),
-                structured_output_method=_provider_structured_output_method(
+                structured_output_method=_validator_structured_output_method(
                     self._llm_provider
                 ),
             )
             validation_attempts = outcome.attempts
             validation_error_category = outcome.error_category
             validation_error_code = outcome.error_code
+            validation_error_codes = outcome.error_codes
             validation_error_phase = outcome.error_phase
             validation_retryable = outcome.retryable
             validation_http_status_class = outcome.http_status_class
@@ -1857,10 +1901,12 @@ class AiopsDiagnosticService:
                 "validationOrigin": validation_origin,
                 "validationErrorCategory": validation_error_category,
                 "validationErrorCode": validation_error_code,
+                "validationErrorCodes": list(validation_error_codes),
                 "validationErrorPhase": validation_error_phase,
                 "validationRetryable": validation_retryable,
                 "validationHttpStatusClass": validation_http_status_class,
                 "validationAttempts": validation_attempts,
+                "validationModel": validation_model,
                 "validationWarning": validation_warning,
                 "deterministicChecks": (
                     deterministic_checks_payload(deterministic_result)
@@ -1878,10 +1924,12 @@ class AiopsDiagnosticService:
                 "validationOrigin": validation_origin,
                 "validationErrorCategory": validation_error_category,
                 "validationErrorCode": validation_error_code,
+                "validationErrorCodes": list(validation_error_codes),
                 "validationErrorPhase": validation_error_phase,
                 "validationRetryable": validation_retryable,
                 "validationHttpStatusClass": validation_http_status_class,
                 "validationAttempts": validation_attempts,
+                "validationModel": validation_model,
                 "validationWarning": validation_warning,
                 "deterministicChecks": (
                     deterministic_checks_payload(deterministic_result)
@@ -1896,10 +1944,12 @@ class AiopsDiagnosticService:
             "validationOrigin": validation_origin,
             "validationErrorCategory": validation_error_category,
             "validationErrorCode": validation_error_code,
+            "validationErrorCodes": list(validation_error_codes),
             "validationErrorPhase": validation_error_phase,
             "validationRetryable": validation_retryable,
             "validationHttpStatusClass": validation_http_status_class,
             "validationAttempts": validation_attempts,
+            "validationModel": validation_model,
             "validationWarning": validation_warning,
             "deterministicChecks": (
                 deterministic_checks_payload(deterministic_result)

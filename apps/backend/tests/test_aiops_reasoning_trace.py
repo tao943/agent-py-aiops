@@ -14,6 +14,9 @@ from super_ai.aiops.diagnostics import (
     _normalize_grounded_decision,  # pyright: ignore[reportPrivateUsage]
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
+    _validator_chat_model,  # pyright: ignore[reportPrivateUsage]
+    _validator_model_name,  # pyright: ignore[reportPrivateUsage]
+    _validator_structured_output_method,  # pyright: ignore[reportPrivateUsage]
     build_grounded_fallback_decision,
     normalize_tool_plan_steps,
 )
@@ -2044,6 +2047,99 @@ class PostgresContractAcceptanceLlmProvider:
         return self.model
 
 
+class RecordingPostgresMainModel(PostgresContractAcceptanceChatModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: list[str] = []
+
+    async def ainvoke(self, input: object) -> str:
+        self.inputs.append(str(input))
+        return await super().ainvoke(input)
+
+
+class RecordingDedicatedValidatorModel:
+    def __init__(self) -> None:
+        self.inputs: list[str] = []
+        self.wrapper_calls = 0
+
+    def with_structured_output(
+        self,
+        _schema: type[object],
+        **kwargs: object,
+    ) -> "RecordingDedicatedValidatorModel":
+        assert kwargs == {"method": "json_mode", "include_raw": True}
+        self.wrapper_calls += 1
+        return self
+
+    async def ainvoke(self, input: object) -> object:
+        prompt = str(input)
+        self.inputs.append(prompt)
+        evidence_ids = list(
+            dict.fromkeys(re.findall(r"evidence_[0-9a-f]+", prompt))
+        )
+        return {
+            "raw": object(),
+            "parsed": {
+                "status": "valid",
+                "evidenceIds": evidence_ids,
+                "unsupportedFields": [],
+                "missingEvidence": [],
+                "summary": "Public evidence supports the candidate.",
+            },
+            "parsing_error": None,
+        }
+
+
+class DedicatedValidatorLlmProvider:
+    structured_output_method = "function_calling"
+    validator_structured_output_method = "json_mode"
+    validator_model_name = "qwen3.8-max"
+
+    def __init__(self) -> None:
+        self.main_model = RecordingPostgresMainModel()
+        self.validator_model = RecordingDedicatedValidatorModel()
+
+    def create_chat_model(self) -> RecordingPostgresMainModel:
+        return self.main_model
+
+    def create_validator_model(self) -> RecordingDedicatedValidatorModel:
+        return self.validator_model
+
+
+class RecordingDiagnosticsRepository:
+    def __init__(self) -> None:
+        self.steps: list[dict[str, object]] = []
+        self.checkpoints: list[dict[str, object]] = []
+
+    async def list_steps(self, **_kwargs: object) -> list[object]:
+        return cast(list[object], self.steps)
+
+    async def create_step(self, **kwargs: object) -> object:
+        self.steps.append(cast(dict[str, object], kwargs))
+        return object()
+
+    async def save_checkpoint(self, **kwargs: object) -> object:
+        self.checkpoints.append(cast(dict[str, object], kwargs))
+        return object()
+
+
+class RecordingMemoryRepositories:
+    def __init__(self) -> None:
+        self.diagnostics = RecordingDiagnosticsRepository()
+        self.tool_call_audits = None
+
+
+def test_legacy_provider_uses_main_model_for_validation_without_exposing_metadata() -> None:
+    provider = PostgresContractAcceptanceLlmProvider()
+
+    assert _validator_chat_model(cast(LlmProvider, provider)) is provider.model
+    assert _validator_model_name(cast(LlmProvider, provider)) == "legacy-main-model"
+    assert (
+        _validator_structured_output_method(cast(LlmProvider, provider))
+        == "function_calling"
+    )
+
+
 class UnavailablePostgresValidatorChatModel(PostgresContractAcceptanceChatModel):
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
@@ -2471,6 +2567,108 @@ async def test_workflow_replans_from_an_explicit_evidence_gap(
 
 
 @pytest.mark.asyncio
+async def test_apy_013_routes_only_validation_to_dedicated_validator(
+) -> None:
+    provider = DedicatedValidatorLlmProvider()
+    repositories = RecordingMemoryRepositories()
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, repositories),
+        llm_provider=cast(LlmProvider, provider),
+        retrieval_tool=cast(Any, EmptyRetrieval()),
+        mcp_client=cast(Any, object()),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+    trigger = "Concurrent transactions acquired rows in opposite order."
+    mechanism = "A two-session wait cycle formed."
+    impact = "PostgreSQL emitted SQLSTATE 40P01."
+    state = {
+        "owner_user_id": "benchmark-user",
+        "task_id": "diagnostic-dedicated-validator",
+        "evidence_ids": ["evidence_a1", "evidence_b2", "evidence_c3"],
+        "root_cause_decision": {
+            "component": "order-service",
+            "mechanism": "opposite_order_transaction_deadlock",
+            "trigger": trigger,
+            "causalChain": [trigger, mechanism, impact],
+            "evidenceIds": ["evidence_a1", "evidence_b2", "evidence_c3"],
+            "confidence": 0.96,
+        },
+        "public_hypotheses": [
+            {"id": "postgres_deadlock"},
+            {"id": "postgres_lock_wait"},
+            {"id": "postgres_slow_query"},
+        ],
+        "hypothesis_states": [
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_lock_wait", "status": "refuted"},
+            {"id": "postgres_slow_query", "status": "refuted"},
+        ],
+        "observation_decisions": [
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["evidence_a1"],
+                "summary": trigger,
+                "causalRole": "trigger",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["evidence_b2"],
+                "summary": mechanism,
+                "causalRole": "mechanism",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["evidence_c3"],
+                "summary": impact,
+                "causalRole": "impact",
+            },
+        ],
+        "decision_vocabulary": {
+            "labelsByHypothesis": {
+                "postgres_deadlock": {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                }
+            }
+        },
+        "evidence_sufficiency": {"recommendedTools": []},
+        "tool_definitions": (),
+        "evidence": [],
+        "replan_count": 0,
+        "max_replans": 0,
+        "plan_index": 0,
+        "plan": [],
+    }
+
+    result = await service._decision_validator(cast(Any, state))  # pyright: ignore[reportPrivateUsage]
+
+    assert provider.validator_model.wrapper_calls == 1
+    assert len(provider.validator_model.inputs) == 1
+    assert not any(
+        "root-cause validation decision" in prompt
+        for prompt in provider.main_model.inputs
+    )
+    validator_prompt = provider.validator_model.inputs[0]
+    assert "JSON" in validator_prompt
+    assert '"status":"valid"' in validator_prompt
+    assert "ground_truth" not in validator_prompt.casefold()
+    assert "oracle" not in validator_prompt.casefold()
+    step_payload = cast(dict[str, object], repositories.diagnostics.steps[0]["payload"])
+    assert step_payload["validationModel"] == "qwen3.8-max"
+    assert step_payload["validationErrorCodes"] == []
+    checkpoint_payload = cast(
+        dict[str, object],
+        repositories.diagnostics.checkpoints[0]["checkpoint_payload"],
+    )
+    assert checkpoint_payload["validationModel"] == "qwen3.8-max"
+    assert checkpoint_payload["validationErrorCodes"] == []
+    returned = cast(dict[str, object], result["decision_validation"])
+    assert returned["validationModel"] == "qwen3.8-max"
+    assert returned["validationErrorCodes"] == []
+
+
+@pytest.mark.asyncio
 async def test_apy_013_validator_unavailable_uses_grounded_fallback(
     migrated_database_url: str,
 ) -> None:
@@ -2543,6 +2741,8 @@ async def test_apy_013_validator_unavailable_uses_grounded_fallback(
     assert validation.payload["validationRetryable"] is True
     assert validation.payload["validationHttpStatusClass"] is None
     assert validation.payload["validationAttempts"] == 1
+    assert validation.payload["validationModel"] == "legacy-main-model"
+    assert validation.payload["validationErrorCodes"] == ["timeout"]
     assert validation.payload["validationWarning"] == "llm_validator_unavailable"
     assert completed.result_payload["rootCauseDecision"] is not None
     recovery_plan = cast(dict[str, object], completed.result_payload["recoveryPlan"])
