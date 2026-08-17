@@ -253,6 +253,7 @@ def _observation_decisions_from_steps(
         supports = item.get("supports")
         refutes = item.get("refutes")
         summary = item.get("summary")
+        causal_role = item.get("causalRole", "context")
         raw_evidence_ids = item.get("evidenceIds")
         evidence_ids = (
             [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
@@ -265,6 +266,7 @@ def _observation_decisions_from_steps(
             and refute_items is not None
             and isinstance(summary, str)
             and evidence_ids is not None
+            and causal_role in {"trigger", "mechanism", "impact", "context"}
         ):
             decisions.append(
                 ObservationDecision(
@@ -273,6 +275,10 @@ def _observation_decisions_from_steps(
                     refutes=tuple(refute_items),
                     summary=summary,
                     evidence_ids=tuple(evidence_ids),
+                    causal_role=cast(
+                        Literal["trigger", "mechanism", "impact", "context"],
+                        causal_role,
+                    ),
                 )
             )
     return tuple(decisions)

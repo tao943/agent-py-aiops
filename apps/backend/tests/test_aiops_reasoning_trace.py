@@ -11,6 +11,7 @@ from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _supported_refinement_index,  # pyright: ignore[reportPrivateUsage]
+    build_grounded_fallback_decision,
     normalize_tool_plan_steps,
 )
 from super_ai.aiops.reasoning import (
@@ -29,7 +30,7 @@ from super_ai.llm import LlmProvider
 from super_ai.mcp.tool_arguments import constrain_tool_definitions, tool_step_fingerprint
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.repositories import DiagnosticStepRecord
+from super_ai.memory.repositories import DiagnosticStepRecord, JsonDict
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
@@ -182,16 +183,19 @@ def _repair_deadlock_chain(
             {
                 "supports": ["postgres_deadlock"],
                 "evidenceIds": ["ev-error"],
+                "causalRole": "impact",
                 "summary": "PostgreSQL emitted SQLSTATE 40P01.",
             },
             {
                 "supports": ["postgres_deadlock"],
                 "evidenceIds": ["ev-cycle"],
+                "causalRole": "mechanism",
                 "summary": "The wait graph contained a two-session cycle.",
             },
             {
                 "supports": ["postgres_deadlock"],
                 "evidenceIds": ["ev-order"],
+                "causalRole": "trigger",
                 "summary": "Transactions acquired shared resources in opposite order.",
             },
         ],
@@ -217,13 +221,13 @@ def test_grounded_causal_chain_repair_replaces_only_chain() -> None:
 
     assert repaired is not None
     assert repaired.causal_chain == (
-        "PostgreSQL emitted SQLSTATE 40P01.",
-        "The wait graph contained a two-session cycle.",
         "Transactions acquired shared resources in opposite order.",
+        "The wait graph contained a two-session cycle.",
+        "PostgreSQL emitted SQLSTATE 40P01.",
     )
     assert repaired.component == original.component
     assert repaired.mechanism == original.mechanism
-    assert repaired.trigger == original.trigger
+    assert repaired.trigger == "Transactions acquired shared resources in opposite order."
     assert repaired.evidence_ids == original.evidence_ids
     assert repaired.confidence == original.confidence
 
@@ -271,6 +275,113 @@ def test_grounded_causal_chain_repair_fails_closed_for_unsafe_inputs() -> None:
             mechanism="deadlock",
         )
     ) is None
+
+
+def test_grounded_fallback_deduplicates_and_preserves_terminal_impact() -> None:
+    observations: list[JsonDict] = [
+        {
+            "supports": ["postgres_deadlock"],
+            "evidenceIds": ["ev-order"],
+            "causalRole": "trigger",
+            "summary": "Transactions acquire resources in opposite order.",
+        },
+        *[
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-cycle"],
+                "causalRole": "mechanism",
+                "summary": f"Mechanism fact {index} confirms the wait cycle.",
+            }
+            for index in range(1, 7)
+        ],
+        {
+            "supports": ["postgres_deadlock"],
+            "evidenceIds": ["ev-cycle"],
+            "causalRole": "mechanism",
+            "summary": "Mechanism fact 1 confirms the wait cycle.",
+        },
+        {
+            "supports": ["postgres_deadlock"],
+            "evidenceIds": ["ev-error"],
+            "causalRole": "impact",
+            "summary": "PostgreSQL aborts one transaction with SQLSTATE 40P01.",
+        },
+    ]
+
+    decision = build_grounded_fallback_decision(
+        public_hypotheses=[
+            {"id": "postgres_deadlock", "description": "A cyclic dependency exists."}
+        ],
+        hypothesis_states=[
+            {
+                "id": "postgres_deadlock",
+                "status": "supported",
+                "confidence": 0.99,
+                "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+            }
+        ],
+        observation_decisions=observations,
+        decision_vocabulary={
+            "labelsByHypothesis": {
+                "postgres_deadlock": {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                }
+            }
+        },
+    )
+
+    assert decision is not None
+    assert len(decision.causal_chain) == 6
+    assert decision.causal_chain[0] == "Transactions acquire resources in opposite order."
+    assert decision.causal_chain[-1] == (
+        "PostgreSQL aborts one transaction with SQLSTATE 40P01."
+    )
+    assert len(set(decision.causal_chain)) == len(decision.causal_chain)
+
+
+def test_grounded_fallback_rejects_ambiguous_triggers() -> None:
+    decision = build_grounded_fallback_decision(
+        public_hypotheses=[{"id": "postgres_deadlock", "description": "Deadlock."}],
+        hypothesis_states=[
+            {
+                "id": "postgres_deadlock",
+                "status": "supported",
+                "confidence": 0.99,
+                "evidenceIds": ["ev-order", "ev-deploy", "ev-cycle"],
+            }
+        ],
+        observation_decisions=[
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-order"],
+                "causalRole": "trigger",
+                "summary": "Transactions acquired resources in opposite order.",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-deploy"],
+                "causalRole": "trigger",
+                "summary": "A deployment changed the transaction order.",
+            },
+            {
+                "supports": ["postgres_deadlock"],
+                "evidenceIds": ["ev-cycle"],
+                "causalRole": "mechanism",
+                "summary": "The wait graph formed a cycle.",
+            },
+        ],
+        decision_vocabulary={
+            "labelsByHypothesis": {
+                "postgres_deadlock": {
+                    "component": "order-service",
+                    "mechanism": "opposite_order_transaction_deadlock",
+                }
+            }
+        },
+    )
+
+    assert decision is None
 
 
 @pytest.mark.asyncio
@@ -556,6 +667,25 @@ def test_root_cause_decision_requires_available_evidence_ids() -> None:
         )
 
 
+def test_observation_decision_preserves_allowlisted_causal_role() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":["process-down"],"refutes":[],'
+        '"summary":"the process stopped","causalRole":"trigger"}',
+        known_hypotheses={"process-down"},
+    )
+
+    assert decision.causal_role == "trigger"
+
+
+def test_observation_decision_rejects_unknown_causal_role() -> None:
+    with pytest.raises(ValueError, match="causalRole"):
+        parse_observation_decision(
+            '{"purpose":"check","supports":["process-down"],"refutes":[],'
+            '"summary":"the process stopped","causalRole":"oracle"}',
+            known_hypotheses={"process-down"},
+        )
+
+
 def test_root_cause_decision_accepts_string_causal_chain_as_one_item() -> None:
     decision = parse_root_cause_decision(
         json.dumps(
@@ -832,16 +962,19 @@ async def test_decision_node_repairs_grounded_causal_chain(
                         {
                             "supports": ["postgres_deadlock"],
                             "evidenceIds": ["ev-error"],
+                            "causalRole": "impact",
                             "summary": "PostgreSQL emitted SQLSTATE 40P01.",
                         },
                         {
                             "supports": ["postgres_deadlock"],
                             "evidenceIds": ["ev-cycle"],
+                            "causalRole": "mechanism",
                             "summary": "The wait graph contained a two-session cycle.",
                         },
                         {
                             "supports": ["postgres_deadlock"],
                             "evidenceIds": ["ev-order"],
+                            "causalRole": "trigger",
                             "summary": "Transactions acquired resources in opposite order.",
                         },
                     ],
@@ -864,13 +997,15 @@ async def test_decision_node_repairs_grounded_causal_chain(
         await engine.dispose()
 
     decision_payload = cast(dict[str, object], update["root_cause_decision"])
-    assert decision_payload["trigger"] == "Transactions acquired resources in opposite orders."
+    assert decision_payload["trigger"] == (
+        "Transactions acquired resources in opposite order."
+    )
     assert decision_payload["confidence"] == 0.97
     assert decision_payload["evidenceIds"] == ["ev-error", "ev-cycle", "ev-order"]
     assert decision_payload["causalChain"] == [
-        "PostgreSQL emitted SQLSTATE 40P01.",
-        "The wait graph contained a two-session cycle.",
         "Transactions acquired resources in opposite order.",
+        "The wait graph contained a two-session cycle.",
+        "PostgreSQL emitted SQLSTATE 40P01.",
     ]
     decision_step = steps[-1]
     assert decision_step.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
@@ -1330,12 +1465,15 @@ class PostgresContractAcceptanceChatModel:
         if "gap-targeted diagnostic replan" in prompt:
             return json.dumps({"steps": []})
         if "observation decision" in prompt:
+            assert "causalRole" in prompt
+            assert "trigger, mechanism, impact, or context" in prompt
             if "InspectPostgresWaitGraph" in prompt:
                 return json.dumps(
                     {
                         "purpose": "Inspect the PostgreSQL wait graph.",
                         "supports": ["postgres_deadlock"],
                         "refutes": ["postgres_lock_wait"],
+                        "causalRole": "mechanism",
                         "summary": "A two-session cycle exists without an ordinary blocker.",
                     }
                 )
@@ -1345,7 +1483,21 @@ class PostgresContractAcceptanceChatModel:
                         "purpose": "Rule out database capacity and slow-query pressure.",
                         "supports": [],
                         "refutes": ["postgres_slow_query"],
+                        "causalRole": "context",
                         "summary": "Latency and capacity remain within the bounded baseline.",
+                    }
+                )
+            if "InspectTransactionResourceOrder" in prompt:
+                return json.dumps(
+                    {
+                        "purpose": "Compare transaction resource order.",
+                        "supports": ["postgres_deadlock"],
+                        "refutes": [],
+                        "causalRole": "trigger",
+                        "summary": (
+                            "Concurrent transactions acquired order rows and inventory "
+                            "rows in opposite order."
+                        ),
                     }
                 )
             return json.dumps(
@@ -1353,7 +1505,8 @@ class PostgresContractAcceptanceChatModel:
                     "purpose": "Inspect deadlock evidence.",
                     "supports": ["postgres_deadlock"],
                     "refutes": [],
-                    "summary": "The observation contains direct cyclic-dependency evidence.",
+                    "causalRole": "impact",
+                    "summary": "PostgreSQL aborted one transaction with SQLSTATE 40P01.",
                 }
             )
         if "evidence sufficiency decision" in prompt:
@@ -1388,6 +1541,10 @@ class PostgresContractAcceptanceChatModel:
                 }
             )
         if "root-cause decision" in prompt:
+            assert "direct triggering condition" in prompt
+            assert "2 to 6 ordered atomic causal facts" in prompt
+            assert "map to a supporting structured observation" in prompt
+            assert "root_cause_semantics" not in prompt
             return json.dumps(
                 {
                     "component": "order-service",
@@ -1448,11 +1605,13 @@ class UnavailablePostgresValidatorChatModel(PostgresContractAcceptanceChatModel)
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
         if "observation decision" in prompt and "InspectPostgresErrors" in prompt:
+            assert "causalRole" in prompt
             return json.dumps(
                 {
                     "purpose": "Inspect structured PostgreSQL errors.",
                     "supports": ["postgres_deadlock"],
                     "refutes": ["postgres_slow_query"],
+                    "causalRole": "impact",
                     "summary": "PostgreSQL emitted SQLSTATE 40P01 without statement timeouts.",
                 }
             )
@@ -2156,13 +2315,12 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
         for step in steps
     )
     root_cause = cast(dict[str, object], decision.payload["rootCauseDecision"])
-    observation_summaries = [
-        cast(dict[str, object], step.payload["observationDecision"])["summary"]
-        for step in steps
-        if step.phase == "evidence_evaluation"
-    ]
     assert decision.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
-    assert root_cause["causalChain"] == observation_summaries
+    assert root_cause["causalChain"] == [
+        "Concurrent transactions acquired order rows and inventory rows in opposite order.",
+        "A two-session cycle exists without an ordinary blocker.",
+        "PostgreSQL aborted one transaction with SQLSTATE 40P01.",
+    ]
     assert len(cast(list[object], root_cause["causalChain"])) == 3
     assert validations[0].payload["status"] == "valid"
     assert completed.status == "succeeded"

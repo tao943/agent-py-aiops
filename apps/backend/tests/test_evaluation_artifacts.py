@@ -313,6 +313,7 @@ def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
                     "refutes": [],
                     "summary": evidence.summary,
                     "evidenceIds": [evidence.id],
+                    "causalRole": "impact",
                 }
             },
         ),
@@ -323,5 +324,6 @@ def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
     )
 
     assert artifact.observation_decisions[0].evidence_ids == ("ev-1",)
+    assert artifact.observation_decisions[0].causal_role == "impact"
     assert artifact.evidence[0].tool_call_id == "call-1"
     assert artifact.tool_calls[0].audit_id == "call-1"

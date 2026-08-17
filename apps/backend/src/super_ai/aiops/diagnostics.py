@@ -292,7 +292,6 @@ def build_grounded_fallback_decision(
     )
     if public_hypothesis is None:
         return None
-    description = public_hypothesis.get("description")
     labels = _json_dict(
         _json_dict(decision_vocabulary.get("labelsByHypothesis")).get(hypothesis_id)
     )
@@ -300,30 +299,85 @@ def build_grounded_fallback_decision(
     mechanism = labels.get("mechanism")
     if not all(
         isinstance(item, str) and item.strip()
-        for item in (description, component, mechanism)
+        for item in (component, mechanism)
     ):
         return None
 
     evidence_set = set(evidence_ids)
-    causal_chain = tuple(
-        summary.strip()
-        for observation in observation_decisions
-        if hypothesis_id in cast(list[object], observation.get("supports") or [])
-        and evidence_set.intersection(
-            item
-            for item in cast(list[object], observation.get("evidenceIds") or [])
-            if isinstance(item, str)
-        )
-        if isinstance((summary := observation.get("summary")), str) and summary.strip()
+    grounded_observations = _ordered_grounded_observations(
+        observation_decisions,
+        hypothesis_id=hypothesis_id,
+        evidence_ids=evidence_set,
     )
+    trigger = _grounded_trigger(grounded_observations)
+    causal_chain = tuple(
+        cast(str, observation["summary"]).strip()
+        for observation in grounded_observations
+    )
+    if trigger is None or not 2 <= len(causal_chain) <= _MAX_CAUSAL_CHAIN_ITEMS:
+        return None
     return RootCauseDecision(
         component=cast(str, component).strip(),
         mechanism=cast(str, mechanism).strip(),
-        trigger=cast(str, description).strip(),
+        trigger=trigger,
         causal_chain=causal_chain,
         evidence_ids=evidence_ids,
         confidence=confidence,
     )
+
+
+_MAX_CAUSAL_CHAIN_ITEMS = 6
+
+
+def _ordered_grounded_observations(
+    observations: Sequence[JsonDict],
+    *,
+    hypothesis_id: str,
+    evidence_ids: set[str],
+) -> tuple[JsonDict, ...]:
+    supported: list[JsonDict] = []
+    seen_summaries: set[str] = set()
+    for observation in observations:
+        if hypothesis_id not in cast(list[object], observation.get("supports") or []):
+            continue
+        linked_evidence = {
+            item
+            for item in cast(list[object], observation.get("evidenceIds") or [])
+            if isinstance(item, str)
+        }
+        summary = observation.get("summary")
+        if not evidence_ids.intersection(linked_evidence) or not isinstance(summary, str):
+            continue
+        normalized_summary = " ".join(summary.casefold().split())
+        if not normalized_summary or normalized_summary in seen_summaries:
+            continue
+        seen_summaries.add(normalized_summary)
+        supported.append(observation)
+
+    triggers = [item for item in supported if item.get("causalRole") == "trigger"]
+    mechanisms = [
+        item for item in supported if item.get("causalRole") == "mechanism"
+    ]
+    impacts = [item for item in supported if item.get("causalRole") == "impact"]
+    contexts = [item for item in supported if item.get("causalRole") == "context"]
+    terminal = impacts[-1:] if impacts else []
+    mechanism_limit = _MAX_CAUSAL_CHAIN_ITEMS - len(triggers) - len(terminal)
+    selected = [*triggers, *mechanisms[:mechanism_limit]]
+    context_limit = _MAX_CAUSAL_CHAIN_ITEMS - len(selected) - len(terminal)
+    selected.extend(contexts[:context_limit])
+    selected.extend(terminal)
+    return tuple(selected)
+
+
+def _grounded_trigger(observations: Sequence[JsonDict]) -> str | None:
+    triggers = [
+        cast(str, item["summary"]).strip()
+        for item in observations
+        if item.get("causalRole") == "trigger"
+        and isinstance(item.get("summary"), str)
+        and cast(str, item["summary"]).strip()
+    ]
+    return triggers[0] if len(triggers) == 1 else None
 
 
 def _repair_grounded_causal_chain(
@@ -357,7 +411,7 @@ def _repair_grounded_causal_chain(
     repaired = RootCauseDecision(
         component=decision.component,
         mechanism=decision.mechanism,
-        trigger=decision.trigger,
+        trigger=fallback.trigger,
         causal_chain=fallback.causal_chain,
         evidence_ids=decision.evidence_ids,
         confidence=decision.confidence,
@@ -1021,8 +1075,10 @@ class AiopsDiagnosticService:
         }
         summary = str(state.get("current_evidence_summary") or "")
         prompt = (
-            "Return one JSON observation decision with purpose, supports, refutes, and "
-            "summary. Use only known hypothesis IDs. Do not include hidden reasoning. "
+            "Return one JSON observation decision with purpose, supports, refutes, summary, "
+            "and causalRole. causalRole must be one of trigger, mechanism, impact, or context "
+            "and describes the public causal function of this observation, not private "
+            "reasoning. Use only known hypothesis IDs. Do not include hidden reasoning. "
             f"Known hypotheses: {json.dumps(public_hypotheses, ensure_ascii=False)}. "
             f"Plan step: {json.dumps(plan_step, ensure_ascii=False)}. "
             f"Persisted evidence ID: {evidence_id}. Observation: {summary}."
@@ -1293,8 +1349,12 @@ class AiopsDiagnosticService:
         decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
         prompt = (
             "Return JSON only for one root-cause decision with component, mechanism, trigger, "
-            "causalChain, evidenceIds, and confidence. This is a structured root-cause "
-            "decision, not private chain-of-thought. Use only persisted evidence IDs. "
+            "causalChain, evidenceIds, and confidence. Trigger must state the direct "
+            "triggering condition, not repeat the alert symptom or the broad hypothesis "
+            "description. causalChain must contain 2 to 6 ordered atomic causal facts, and "
+            "every fact must map to a supporting structured observation. This is a "
+            "structured public decision, not private chain-of-thought. Use only persisted "
+            "evidence IDs. "
             f"Alert: {json.dumps(_json_dict(state.get('alert')), ensure_ascii=False)}. "
             "Public hypotheses: "
             f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
@@ -2304,6 +2364,7 @@ def _observation_decision_payload(
         "refutes": list(decision.refutes),
         "summary": decision.summary,
         "evidenceIds": [evidence_id],
+        "causalRole": decision.causal_role,
     }
 
 

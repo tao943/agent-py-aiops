@@ -26,6 +26,9 @@ class HypothesisState:
     evidence_ids: tuple[str, ...]
 
 
+CausalRole = Literal["trigger", "mechanism", "impact", "context"]
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationDecision:
     purpose: str
@@ -33,6 +36,7 @@ class ObservationDecision:
     refutes: tuple[str, ...]
     summary: str
     evidence_ids: tuple[str, ...] = ()
+    causal_role: CausalRole = "context"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,11 +193,17 @@ def parse_observation_decision(
             + ", ".join(sorted(overlap))
             + "."
         )
+    causal_role = payload.get("causalRole", "context")
+    if causal_role not in {"trigger", "mechanism", "impact", "context"}:
+        raise ValueError(
+            "Observation causalRole must be trigger, mechanism, impact, or context."
+        )
     return ObservationDecision(
         purpose=_required_str(payload, "purpose"),
         supports=supports,
         refutes=refutes,
         summary=_required_str(payload, "summary"),
+        causal_role=cast(CausalRole, causal_role),
     )
 
 
