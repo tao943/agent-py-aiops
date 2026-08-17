@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, cast
@@ -69,6 +70,16 @@ class LiveRecoveryAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class ValidationAudit:
+    model: str | None
+    origin: str | None
+    error_category: str | None
+    error_codes: tuple[str, ...]
+    error_phase: str | None
+    attempts: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunArtifact:
     scenario_id: str
     mode: str
@@ -85,6 +96,7 @@ class RunArtifact:
     diagnostic_task_id: str | None = None
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
+    validation_audit: ValidationAudit | None = None
 
 
 def build_run_artifact(
@@ -129,7 +141,101 @@ def build_run_artifact(
         duration_ms=duration_ms,
         safety_events=(),
         diagnostic_task_id=task.id,
+        validation_audit=_validation_audit_from_steps(ordered_steps),
     )
+
+
+_VALIDATION_ORIGINS = frozenset(
+    {"none", "llm_confirmed", "deterministic_grounded_fallback"}
+)
+_VALIDATION_ERROR_CATEGORIES = frozenset(
+    {
+        "candidate_missing",
+        "deterministic_gap",
+        "model_call_failed",
+        "invalid_model_output",
+        "model_rejected",
+        "retry_exhausted",
+    }
+)
+_VALIDATION_ERROR_PHASES = frozenset(
+    {"structured_invoker_setup", "model_invoke", "structured_parse"}
+)
+_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "timeout",
+        "connection",
+        "authentication",
+        "permission_denied",
+        "rate_limit",
+        "provider_4xx",
+        "provider_5xx",
+        "structured_output_unsupported",
+        "unknown",
+        "invalid_json",
+        "structured_envelope_mismatch",
+        "missing_required_field",
+        "invalid_enum",
+        "wrong_container_type",
+        "extra_field",
+        "unknown_evidence_id",
+        "invalid_json_or_schema",
+    }
+)
+_SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+
+
+def _validation_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> ValidationAudit | None:
+    validation = next(
+        (step for step in reversed(steps) if step.phase == "decision_validation"),
+        None,
+    )
+    if validation is None:
+        return None
+    payload = validation.payload
+    model_value = payload.get("validationModel")
+    model = (
+        model_value
+        if isinstance(model_value, str) and _SAFE_MODEL_NAME.fullmatch(model_value)
+        else None
+    )
+    origin = _allowlisted_text(payload.get("validationOrigin"), _VALIDATION_ORIGINS)
+    error_category = _allowlisted_text(
+        payload.get("validationErrorCategory"), _VALIDATION_ERROR_CATEGORIES
+    )
+    error_phase = _allowlisted_text(
+        payload.get("validationErrorPhase"), _VALIDATION_ERROR_PHASES
+    )
+    raw_codes = payload.get("validationErrorCodes")
+    codes: list[str] = []
+    if isinstance(raw_codes, list):
+        for item in cast(list[object], raw_codes):
+            if isinstance(item, str) and item in _VALIDATION_ERROR_CODES and item not in codes:
+                codes.append(item)
+            if len(codes) == 6:
+                break
+    attempts_value = payload.get("validationAttempts")
+    attempts = (
+        attempts_value
+        if isinstance(attempts_value, int)
+        and not isinstance(attempts_value, bool)
+        and 0 <= attempts_value <= 2
+        else 0
+    )
+    return ValidationAudit(
+        model=model,
+        origin=origin,
+        error_category=error_category,
+        error_codes=tuple(codes),
+        error_phase=error_phase,
+        attempts=attempts,
+    )
+
+
+def _allowlisted_text(value: object, allowed: frozenset[str]) -> str | None:
+    return value if isinstance(value, str) and value in allowed else None
 
 
 def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:

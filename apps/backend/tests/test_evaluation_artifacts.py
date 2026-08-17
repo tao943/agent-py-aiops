@@ -204,6 +204,107 @@ def test_legacy_artifact_keeps_a_decision_without_validation() -> None:
     assert artifact.decision is not None
 
 
+def test_artifact_projects_final_validation_audit_safely() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v3", "plan": []}),
+            _step(2, "decision", _decision_payload()),
+            _step(
+                3,
+                "decision_validation",
+                {
+                    "status": "valid",
+                    "validationOrigin": "deterministic_grounded_fallback",
+                    "validationModel": "qwen3.8-max",
+                    "validationErrorCategory": "retry_exhausted",
+                    "validationErrorCodes": ["invalid_json", "missing_required_field"],
+                    "validationErrorPhase": "structured_parse",
+                    "validationAttempts": 2,
+                    "rawResponse": "sentinel-secret-response",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.validation_audit is not None
+    assert artifact.validation_audit.model == "qwen3.8-max"
+    assert artifact.validation_audit.origin == "deterministic_grounded_fallback"
+    assert artifact.validation_audit.error_category == "retry_exhausted"
+    assert artifact.validation_audit.error_codes == (
+        "invalid_json",
+        "missing_required_field",
+    )
+    assert artifact.validation_audit.error_phase == "structured_parse"
+    assert artifact.validation_audit.attempts == 2
+    assert "sentinel" not in repr(artifact.validation_audit)
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "qwen 3.8-max",
+        "qwen/3.8-max",
+        "qwen\\3.8-max",
+        "qwen3.8-max\nsecret",
+        "qwen3.8-max\x00",
+        "x" * 121,
+    ),
+)
+def test_artifact_rejects_unsafe_validation_model_names(model: str) -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "decision_validation",
+                {
+                    "validationModel": model,
+                    "validationOrigin": "unknown-origin",
+                    "validationErrorCategory": "unknown-category",
+                    "validationErrorCodes": ["unknown-code", "invalid_enum"],
+                    "validationErrorPhase": "unknown-phase",
+                    "validationAttempts": 99,
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.validation_audit is not None
+    assert artifact.validation_audit.model is None
+    assert artifact.validation_audit.origin is None
+    assert artifact.validation_audit.error_category is None
+    assert artifact.validation_audit.error_codes == ("invalid_enum",)
+    assert artifact.validation_audit.error_phase is None
+    assert artifact.validation_audit.attempts == 0
+
+
+def test_historical_validation_step_remains_compatible_without_new_audit_fields() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v2", "plan": []}),
+            _step(2, "decision", _decision_payload()),
+            _step(3, "decision_validation", {"status": "valid"}),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.decision is not None
+    assert artifact.validation_audit is not None
+    assert artifact.validation_audit.model is None
+    assert artifact.validation_audit.error_codes == ()
+    assert artifact.validation_audit.attempts == 0
+
+
 def test_artifact_counts_all_six_persisted_executor_attempts() -> None:
     steps = [
         _step(
