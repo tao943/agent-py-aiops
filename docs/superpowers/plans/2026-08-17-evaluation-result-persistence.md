@@ -345,6 +345,7 @@ expected_columns = {
     ("aiops_evaluation_runs", "artifact_schema_version"),
     ("aiops_evaluation_runs", "artifact_checksum"),
     ("aiops_evaluation_runs", "provenance"),
+    ("aiops_evaluation_runs", "run_metadata"),
     ("aiops_evaluation_results", "metrics"),
     ("aiops_evaluation_results", "result_payload"),
 }
@@ -369,7 +370,7 @@ down_revision = "202608110001"
 
 The upgrade must:
 
-1. add `evaluation_kind`, `artifact_schema_version`, `artifact_checksum`, `provenance` to runs;
+1. add `evaluation_kind`, `artifact_schema_version`, `artifact_checksum`, `provenance`, `run_metadata` to runs;
 2. add `metrics` and `result_payload` to results;
 3. make `total`, `raw_total`, and `passed` nullable for non-Snapshot/invalid runs;
 4. backfill existing rows with `evaluation_kind='snapshot'`, `artifact_schema_version='v1'`, `provenance='native'`, empty JSONB metrics/result payload;

@@ -40,7 +40,7 @@ def test_alembic_head_renders_offline_for_postgresql() -> None:
 
     command.upgrade(config, "head", sql=True)
 
-    assert "202608110001" in output_buffer.getvalue()
+    assert "202608170001" in output_buffer.getvalue()
 
 
 def test_chat_skill_metadata_backfill_matches_legacy_python_behavior(
@@ -193,9 +193,12 @@ async def test_alembic_head_exists_in_postgresql(migrated_database_url: str) -> 
         ("aiops_graph_checkpoints", "metadata"),
         ("aiops_evaluation_runs", "agent_version"),
         ("aiops_evaluation_runs", "model_configuration"),
+        ("aiops_evaluation_runs", "run_metadata"),
         ("aiops_evaluation_results", "dimension_scores"),
         ("aiops_evaluation_results", "failures"),
         ("aiops_evaluation_results", "score_reasons"),
+        ("aiops_evaluation_results", "metrics"),
+        ("aiops_evaluation_results", "result_payload"),
     ],
 )
 async def test_json_columns_use_jsonb(
@@ -280,3 +283,37 @@ async def test_evaluation_runs_have_safe_failure_category_column(
         )
     await engine.dispose()
     assert data_type == "character varying"
+
+
+@pytest.mark.parametrize(
+    ("table_name", "column_name", "expected_type"),
+    [
+        ("aiops_evaluation_runs", "evaluation_kind", "character varying"),
+        ("aiops_evaluation_runs", "artifact_schema_version", "character varying"),
+        ("aiops_evaluation_runs", "artifact_checksum", "character varying"),
+        ("aiops_evaluation_runs", "provenance", "character varying"),
+        ("aiops_evaluation_runs", "run_metadata", "jsonb"),
+        ("aiops_evaluation_results", "metrics", "jsonb"),
+        ("aiops_evaluation_results", "result_payload", "jsonb"),
+    ],
+)
+async def test_evaluation_history_columns_exist(
+    migrated_database_url: str,
+    table_name: str,
+    column_name: str,
+    expected_type: str,
+) -> None:
+    engine = create_async_engine(migrated_database_url)
+    try:
+        async with engine.connect() as connection:
+            data_type = await connection.scalar(
+                text(
+                    "select data_type from information_schema.columns "
+                    "where table_schema = 'public' and table_name = :table_name "
+                    "and column_name = :column_name"
+                ),
+                {"table_name": table_name, "column_name": column_name},
+            )
+    finally:
+        await engine.dispose()
+    assert data_type == expected_type

@@ -6,11 +6,20 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import cast
 
+from sqlalchemy.exc import (
+    InterfaceError,
+    OperationalError,
+)
+from sqlalchemy.exc import (
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from super_ai.evaluation.history import EvaluationRunEnvelope
 from super_ai.evaluation.scoring import EvaluationResult
 from super_ai.memory.repositories import (
     EVALUATION_FAILURE_CATEGORIES,
+    DiagnosticTaskRecord,
     EvaluationFailureStatus,
     EvaluationResultRecord,
     EvaluationRunRecord,
@@ -33,11 +42,76 @@ _SECRET_KEYS = frozenset(
 )
 
 
+class EvaluationDatabaseUnavailable(RuntimeError):
+    """The evaluation database cannot currently accept a transaction."""
+
+
 class EvaluationRepository:
     """Persist public run metadata and deterministic results without credentials."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._repository = SQLAlchemyEvaluationRepository(session_factory)
+
+    async def start_envelope(self, envelope: EvaluationRunEnvelope) -> EvaluationRunRecord:
+        if envelope.status != "running":
+            raise ValueError("Only a running evaluation envelope can be started.")
+        try:
+            return await self._repository.start_envelope(
+                run_id=envelope.run_id,
+                evaluation_kind=envelope.evaluation_kind,
+                artifact_schema_version=envelope.artifact_schema_version,
+                provenance=envelope.provenance,
+                run_metadata=envelope.metadata,
+                scenario_id=envelope.scenario_id,
+                suite_version=envelope.suite_version,
+                created_at=envelope.created_at,
+                started_at=envelope.started_at,
+            )
+        except (InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+            raise EvaluationDatabaseUnavailable("Evaluation database is unavailable.") from exc
+
+    async def finalize_envelope(
+        self,
+        envelope: EvaluationRunEnvelope,
+        *,
+        artifact_checksum: str,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None]:
+        if envelope.status == "running" or envelope.completed_at is None:
+            raise ValueError("Only a terminal evaluation envelope can be finalized.")
+        try:
+            return await self._repository.finalize_envelope(
+                run_id=envelope.run_id,
+                artifact_checksum=artifact_checksum,
+                status=envelope.status,
+                validity=envelope.validity,
+                passed=envelope.passed,
+                metrics=envelope.metrics,
+                result_payload=envelope.result_payload,
+                diagnostic_task_id=envelope.diagnostic_task_id,
+                failure_category=envelope.failure_category,
+                completed_at=envelope.completed_at,
+            )
+        except (InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+            raise EvaluationDatabaseUnavailable("Evaluation database is unavailable.") from exc
+
+    async def attach_artifact_checksum(
+        self, *, run_id: str, artifact_checksum: str
+    ) -> EvaluationRunRecord:
+        try:
+            return await self._repository.attach_artifact_checksum(
+                run_id=run_id,
+                artifact_checksum=artifact_checksum,
+            )
+        except (InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+            raise EvaluationDatabaseUnavailable("Evaluation database is unavailable.") from exc
+
+    async def list_runs_with_results(
+        self,
+    ) -> list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]:
+        return await self._repository.list_runs_with_results()
+
+    async def list_benchmark_diagnostic_tasks(self) -> list[DiagnosticTaskRecord]:
+        return await self._repository.list_benchmark_diagnostic_tasks()
 
     async def create_run(
         self,

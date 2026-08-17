@@ -107,7 +107,7 @@ CLI 在调用 LLM、Milvus、CLS 或故障驱动器之前先建立 `running` 记
 
 保留现有 Snapshot 表和 Repository 合同，并把它们扩展为通用 Evaluation Run：
 
-- `aiops_evaluation_runs` 增加测评类型、Artifact schema/checksum 等通用身份字段；
+- `aiops_evaluation_runs` 增加测评类型、Artifact schema/checksum 和安全 `run_metadata` 等通用身份字段；
 - `aiops_evaluation_results` 保留 Snapshot 固定维度，同时允许 Retrieval 和 Live 保存类型化 `metrics`/`result_payload`；
 - 数据库迁移为现有 15 个 Run 回填 `evaluation_kind=snapshot`；
 - Run ID 和一对一 Result 唯一约束继续承担幂等保护；

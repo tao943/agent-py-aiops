@@ -41,7 +41,7 @@ Artifact 使用同目录临时文件、flush/fsync 和原子替换。`running` �
 ### 4. 泛化现有 PostgreSQL 表
 
 复用 `aiops_evaluation_runs` 和 `aiops_evaluation_results`，增加 kind、schema/checksum、provenance、
-metrics 和 result payload。旧 Snapshot 行回填 kind，并按旧 Result passed 状态迁移终态。旧 checksum
+安全 run metadata、metrics 和 result payload。旧 Snapshot 行回填 kind，并按旧 Result passed 状态迁移终态。旧 checksum
 保持 NULL，首次规范导出后在行锁内安全回填。
 
 ### 5. 明确来源的历史恢复

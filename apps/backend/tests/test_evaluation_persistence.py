@@ -6,10 +6,14 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.exc import StatementError
 
+from super_ai.evaluation.history import artifact_checksum, running_envelope, terminal_envelope
 from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.scoring import EvaluationResult, ScoreReason
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.sqlalchemy import SQLAlchemyEvaluationRepository
+from super_ai.memory.sqlalchemy import (
+    SQLAlchemyDiagnosticMemoryRepository,
+    SQLAlchemyEvaluationRepository,
+)
 
 
 def passing_result() -> EvaluationResult:
@@ -28,6 +32,188 @@ def passing_result() -> EvaluationResult:
         hard_gate=None,
         reasons=(ScoreReason("primary_mechanism_correct", 10, 10, ("ev-1",)),),
     )
+
+
+def retrieval_envelopes():
+    started_at = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
+    running = running_envelope(
+        run_id="eval-retrieval-generic",
+        evaluation_kind="retrieval",
+        scenario_id="retrieval-64",
+        suite_version="v1",
+        metadata={
+            "gitSha": "abc123",
+            "workflowVersion": "retrieval-v1",
+            "modelConfiguration": {
+                "embeddingModel": "text-embedding-v4",
+                "rerankModel": "qwen3-vl-rerank",
+            },
+            "datasetChecksum": "d" * 64,
+            "ownerUserId": "eval-owner",
+            "knowledgeBaseId": "kb-eval-owner",
+        },
+        created_at=started_at,
+        started_at=started_at,
+    )
+    terminal = terminal_envelope(
+        running=running,
+        status="failed",
+        validity="VALID_FAIL",
+        passed=False,
+        metrics={
+            "queryCount": 64,
+            "answerableQueryCount": 58,
+            "noAnswerProbeCount": 6,
+            "recallAt1": 0.79,
+            "recallAt3": 0.95,
+            "mrr": 0.85,
+            "forbiddenTopOneRate": 0.0,
+            "citationCompletenessRate": 1.0,
+            "vectorChannelCoverageRate": 1.0,
+            "bm25ChannelCoverageRate": 1.0,
+            "hybridChannelCoverageRate": 1.0,
+        },
+        result_payload={"failures": ["recall_at_1_below_threshold"]},
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=started_at,
+    )
+    return running, terminal
+
+
+@pytest.mark.asyncio
+async def test_generic_retrieval_envelope_round_trips(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    repository = EvaluationRepository(create_memory_session_factory(engine))
+    running, terminal = retrieval_envelopes()
+    checksum = artifact_checksum(terminal)
+    try:
+        started = await repository.start_envelope(running)
+        finalized = await repository.finalize_envelope(
+            terminal,
+            artifact_checksum=checksum,
+        )
+        loaded = await repository.get_run_with_result(running.run_id)
+    finally:
+        await engine.dispose()
+
+    assert started.status == "running"
+    assert started.evaluation_kind == "retrieval"
+    assert started.run_metadata == running.metadata
+    assert finalized[0].status == "failed"
+    assert finalized[0].artifact_checksum == checksum
+    assert finalized[1] is not None
+    assert finalized[1].total is None
+    assert finalized[1].metrics["recallAt1"] == 0.79
+    assert finalized[1].result_payload == terminal.result_payload
+    assert loaded == finalized
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generic_start_is_idempotent(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    first_repository = EvaluationRepository(session_factory)
+    second_repository = EvaluationRepository(session_factory)
+    running, _terminal = retrieval_envelopes()
+    try:
+        first, second = await asyncio.gather(
+            first_repository.start_envelope(running),
+            second_repository.start_envelope(running),
+        )
+    finally:
+        await engine.dispose()
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_generic_finalize_rejects_different_checksum(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    repository = EvaluationRepository(create_memory_session_factory(engine))
+    running, terminal = retrieval_envelopes()
+    try:
+        await repository.start_envelope(running)
+        await repository.finalize_envelope(
+            terminal,
+            artifact_checksum=artifact_checksum(terminal),
+        )
+        with pytest.raises(ValueError, match="different evaluation result"):
+            await repository.finalize_envelope(terminal, artifact_checksum="0" * 64)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_attach_artifact_checksum_only_fills_null_or_same_value(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    repository = EvaluationRepository(create_memory_session_factory(engine))
+    running, _terminal = retrieval_envelopes()
+    try:
+        await repository.start_envelope(running)
+        filled = await repository.attach_artifact_checksum(
+            run_id=running.run_id,
+            artifact_checksum="a" * 64,
+        )
+        repeated = await repository.attach_artifact_checksum(
+            run_id=running.run_id,
+            artifact_checksum="a" * 64,
+        )
+        with pytest.raises(ValueError, match="different artifact checksum"):
+            await repository.attach_artifact_checksum(
+                run_id=running.run_id,
+                artifact_checksum="b" * 64,
+            )
+    finally:
+        await engine.dispose()
+    assert filled == repeated
+    assert filled.artifact_checksum == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_administrative_history_queries_are_complete_and_benchmark_scoped(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    repository = EvaluationRepository(session_factory)
+    diagnostics = SQLAlchemyDiagnosticMemoryRepository(session_factory)
+    running, terminal = retrieval_envelopes()
+    try:
+        await repository.start_envelope(running)
+        finalized = await repository.finalize_envelope(
+            terminal, artifact_checksum=artifact_checksum(terminal)
+        )
+        benchmark_task = await diagnostics.create_task(
+            owner_user_id="eval-owner",
+            task_id="benchmark-task",
+            status="completed",
+            query="benchmark",
+            input_payload={"benchmarkMode": "live"},
+        )
+        await diagnostics.create_task(
+            owner_user_id="eval-owner",
+            task_id="ordinary-task",
+            status="completed",
+            query="ordinary",
+            input_payload={},
+        )
+
+        runs = await repository.list_runs_with_results()
+        tasks = await repository.list_benchmark_diagnostic_tasks()
+    finally:
+        await engine.dispose()
+
+    assert finalized in runs
+    assert benchmark_task in tasks
+    assert all(task.input_payload.get("benchmarkMode") in {"snapshot", "live"} for task in tasks)
 
 
 @pytest.mark.asyncio

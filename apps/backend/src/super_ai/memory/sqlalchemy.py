@@ -1617,6 +1617,194 @@ class SQLAlchemyEvaluationRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    async def start_envelope(
+        self,
+        *,
+        run_id: str,
+        evaluation_kind: str,
+        artifact_schema_version: str,
+        provenance: str,
+        run_metadata: JsonDict,
+        scenario_id: str,
+        suite_version: str,
+        created_at: datetime,
+        started_at: datetime,
+    ) -> EvaluationRunRecord:
+        values = {
+            "run_id": run_id,
+            "evaluation_kind": evaluation_kind,
+            "artifact_schema_version": artifact_schema_version,
+            "provenance": provenance,
+            "run_metadata": run_metadata,
+            "scenario_id": scenario_id,
+            "mode": evaluation_kind,
+            "suite_version": suite_version,
+            "agent_version": {},
+            "model_configuration": {},
+            "status": "running",
+            "created_at": created_at,
+            "started_at": started_at,
+        }
+        async with self._session_factory() as session:
+            await session.execute(
+                postgresql_insert(EvaluationRunModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[EvaluationRunModel.run_id])
+            )
+            await session.commit()
+            row = await session.get(EvaluationRunModel, run_id)
+        if row is None:
+            raise ValueError(f"Evaluation run does not exist after creation: {run_id}")
+        identity = (
+            row.evaluation_kind,
+            row.artifact_schema_version,
+            row.provenance,
+            row.run_metadata,
+            row.scenario_id,
+            row.suite_version,
+            _ensure_utc(row.created_at),
+            _ensure_utc_optional(row.started_at),
+        )
+        requested = (
+            evaluation_kind,
+            artifact_schema_version,
+            provenance,
+            run_metadata,
+            scenario_id,
+            suite_version,
+            _ensure_utc(created_at),
+            _ensure_utc(started_at),
+        )
+        if identity != requested:
+            raise ValueError(f"Run {run_id} has a different evaluation identity.")
+        return _evaluation_run_record(row)
+
+    async def finalize_envelope(
+        self,
+        *,
+        run_id: str,
+        artifact_checksum: str,
+        status: str,
+        validity: str | None,
+        passed: bool | None,
+        metrics: JsonDict,
+        result_payload: JsonDict,
+        diagnostic_task_id: str | None,
+        failure_category: str | None,
+        completed_at: datetime,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None]:
+        async with self._session_factory() as session:
+            async with session.begin():
+                run = (
+                    await session.scalars(
+                        select(EvaluationRunModel)
+                        .where(EvaluationRunModel.run_id == run_id)
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                if run is None:
+                    raise ValueError(f"Evaluation run does not exist: {run_id}")
+                existing = (
+                    await session.scalars(
+                        select(EvaluationResultModel).where(EvaluationResultModel.run_id == run_id)
+                    )
+                ).one_or_none()
+                is_same = (
+                    run.status == status
+                    and run.artifact_checksum == artifact_checksum
+                    and run.diagnostic_task_id == diagnostic_task_id
+                    and run.failure_category == failure_category
+                    and _ensure_utc_optional(run.completed_at) == _ensure_utc(completed_at)
+                    and (
+                        existing is not None
+                        and existing.validity == validity
+                        and existing.passed is passed
+                        and existing.metrics == metrics
+                        and existing.result_payload == result_payload
+                    )
+                )
+                if run.status != "running":
+                    if is_same:
+                        assert existing is not None
+                        return _evaluation_run_record(run), _evaluation_result_record(existing)
+                    raise ValueError(f"Evaluation run {run_id} has a different evaluation result.")
+                if existing is not None:
+                    raise ValueError(f"Evaluation run {run_id} has a different evaluation result.")
+                result = EvaluationResultModel(
+                    result_id=run_id,
+                    run_id=run_id,
+                    dimension_scores={},
+                    total=None,
+                    raw_total=None,
+                    validity=validity or "not_applicable",
+                    passed=passed,
+                    failures=[],
+                    score_reasons=[],
+                    hard_gate=None,
+                    metrics=metrics,
+                    result_payload=result_payload,
+                    created_at=completed_at,
+                )
+                session.add(result)
+                run.status = status
+                run.artifact_checksum = artifact_checksum
+                run.diagnostic_task_id = diagnostic_task_id
+                run.failure_category = failure_category
+                run.completed_at = completed_at
+                await session.flush()
+            return _evaluation_run_record(run), _evaluation_result_record(result)
+
+    async def attach_artifact_checksum(
+        self, *, run_id: str, artifact_checksum: str
+    ) -> EvaluationRunRecord:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.scalars(
+                        select(EvaluationRunModel)
+                        .where(EvaluationRunModel.run_id == run_id)
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                if row is None:
+                    raise ValueError(f"Evaluation run does not exist: {run_id}")
+                if row.artifact_checksum not in {None, artifact_checksum}:
+                    raise ValueError(f"Run {run_id} has a different artifact checksum.")
+                row.artifact_checksum = artifact_checksum
+            return _evaluation_run_record(row)
+
+    async def list_runs_with_results(
+        self,
+    ) -> list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]:
+        statement = (
+            select(EvaluationRunModel, EvaluationResultModel)
+            .outerjoin(
+                EvaluationResultModel,
+                EvaluationResultModel.run_id == EvaluationRunModel.run_id,
+            )
+            .order_by(EvaluationRunModel.created_at.asc(), EvaluationRunModel.run_id.asc())
+        )
+        async with self._session_factory() as session:
+            rows = list((await session.execute(statement)).all())
+        return [
+            (
+                _evaluation_run_record(run),
+                _evaluation_result_record(result) if result is not None else None,
+            )
+            for run, result in rows
+        ]
+
+    async def list_benchmark_diagnostic_tasks(self) -> list[DiagnosticTaskRecord]:
+        benchmark_mode = DiagnosticTaskModel.input_payload["benchmarkMode"].astext
+        statement = (
+            select(DiagnosticTaskModel)
+            .where(benchmark_mode.in_(("snapshot", "live")))
+            .order_by(DiagnosticTaskModel.created_at.asc(), DiagnosticTaskModel.id.asc())
+        )
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(statement)).all())
+        return [_diagnostic_task_record(row) for row in rows]
+
     async def create_run(
         self,
         *,
@@ -2313,6 +2501,11 @@ def _graph_checkpoint_record(row: GraphCheckpointModel) -> GraphCheckpointRecord
 def _evaluation_run_record(row: EvaluationRunModel) -> EvaluationRunRecord:
     return EvaluationRunRecord(
         run_id=row.run_id,
+        evaluation_kind=row.evaluation_kind,
+        artifact_schema_version=row.artifact_schema_version,
+        artifact_checksum=row.artifact_checksum,
+        provenance=row.provenance,
+        run_metadata=_json_dict(row.run_metadata),
         scenario_id=row.scenario_id,
         mode=row.mode,
         suite_version=row.suite_version,
@@ -2339,6 +2532,8 @@ def _evaluation_result_record(row: EvaluationResultModel) -> EvaluationResultRec
         failures=list(row.failures),
         score_reasons=[_json_dict(item) for item in row.score_reasons],
         hard_gate=row.hard_gate,
+        metrics=_json_dict(row.metrics),
+        result_payload=_json_dict(row.result_payload),
         created_at=_ensure_utc(row.created_at),
     )
 

@@ -249,6 +249,11 @@ class GraphCheckpointRecord:
 @dataclass(frozen=True, slots=True)
 class EvaluationRunRecord:
     run_id: str
+    evaluation_kind: str
+    artifact_schema_version: str
+    artifact_checksum: str | None
+    provenance: str
+    run_metadata: JsonDict
     scenario_id: str
     mode: str
     suite_version: str
@@ -267,13 +272,15 @@ class EvaluationResultRecord:
     result_id: str
     run_id: str
     dimension_scores: JsonDict
-    total: int
-    raw_total: int
+    total: int | None
+    raw_total: int | None
     validity: str
-    passed: bool
+    passed: bool | None
     failures: list[str]
     score_reasons: list[JsonDict]
     hard_gate: str | None
+    metrics: JsonDict
+    result_payload: JsonDict
     created_at: datetime
 
 
@@ -1284,6 +1291,45 @@ class EvaluationMemoryRepository(Protocol):
         model_configuration: JsonDict,
         created_at: datetime | None = None,
     ) -> EvaluationRunRecord: ...
+
+    async def start_envelope(
+        self,
+        *,
+        run_id: str,
+        evaluation_kind: str,
+        artifact_schema_version: str,
+        provenance: str,
+        run_metadata: JsonDict,
+        scenario_id: str,
+        suite_version: str,
+        created_at: datetime,
+        started_at: datetime,
+    ) -> EvaluationRunRecord: ...
+
+    async def finalize_envelope(
+        self,
+        *,
+        run_id: str,
+        artifact_checksum: str,
+        status: str,
+        validity: str | None,
+        passed: bool | None,
+        metrics: JsonDict,
+        result_payload: JsonDict,
+        diagnostic_task_id: str | None,
+        failure_category: str | None,
+        completed_at: datetime,
+    ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None]: ...
+
+    async def attach_artifact_checksum(
+        self, *, run_id: str, artifact_checksum: str
+    ) -> EvaluationRunRecord: ...
+
+    async def list_runs_with_results(
+        self,
+    ) -> list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]: ...
+
+    async def list_benchmark_diagnostic_tasks(self) -> list[DiagnosticTaskRecord]: ...
 
     async def fail_run(
         self,
