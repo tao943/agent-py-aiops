@@ -79,6 +79,7 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]: ...
 - wait graph 类工具：`mechanism`；
 - lock graph 类工具：`trigger | mechanism`；
 - 错误、状态码和告警结果类工具：`mechanism | impact`；
+- 通用 `SearchLog/SearchLogs`：`context | mechanism | impact`，不能单独承担 trigger；
 - 容量、基线和一般指标类工具：`context | mechanism`；
 - 只读会话/健康检查工具：`context | mechanism | impact` 中与其通用语义相符的子集；
 - 未分类诊断工具：只允许 `context`，并在审计中暴露 `unknown_tool_capability`；
@@ -112,7 +113,8 @@ Planner Prompt 要求每步包含 `causalIntent`。`parse_plan` 同时验证：
 2. intent 属于该工具的 `allowed_causal_intents`；
 3. 工具、参数和 hypothesis 继续通过原有校验。
 
-单步验证后必须在调用任何诊断工具之前执行计划级覆盖约束。新增纯函数在现有步骤与各工具允许
+单步验证和工具参数合同归一化完成、不可执行步骤被移除后，必须在调用任何诊断工具之前执行
+计划级覆盖约束。新增纯函数在真正可执行的步骤与各工具允许
 角色之间做有界、确定性的分配：优先保留已经形成唯一 trigger、至少一个 mechanism 和至少一个
 impact 的模型计划；覆盖不完整但存在合法分配时，只修改最少数量的 intent，并以步骤顺序稳定
 选择；不存在合法分配时拒绝模型 Plan，进入 generic/fail-closed 路径。该过程只使用工具能力和
@@ -172,6 +174,11 @@ Sufficiency 返回 sufficient 但覆盖不完整，确定性覆盖优先：
 多个 trigger 标记为 `ambiguousTrigger=true`，不得自动选择其中一个；Replanner 只能收集差分
 证据或进入人工复核。
 
+预算耗尽时允许工作流进入 Decision 以生成可审计的失败终态，但不能绕过该约束。确定性
+Validator 的 `trigger_present` 必须同时要求唯一 trigger Observation 且 candidate trigger 等于其
+summary；`grounded_causal_chain` 必须要求 chain 中的 Observation 按 trigger → mechanism →
+impact 顺序出现并覆盖三类角色。缺失角色、多 trigger、trigger 文本不匹配或乱序均拒绝 candidate。
+
 ### Replanner
 
 Replanner Prompt 接收 `missingCausalRoles` 和每个 discovered tool 的允许角色，只能生成能补齐
@@ -186,7 +193,8 @@ evidenceIds、0～1 confidence，`extra="forbid"`。Decision 调用复用 Valida
 invoker 行为：
 
 1. 优先 `with_structured_output(..., method="function_calling", include_raw=True)`；
-2. 不支持时兼容现有 raw model；
+2. 模型没有该接口时兼容现有 raw model；接口存在但 setup 抛出不支持异常时记录脱敏
+   `structured_output_unsupported`，不得静默切换供应商模式；
 3. schema/JSON 错误时只追加固定格式修复提示并重试一次；
 4. 模型调用异常使用已有脱敏错误分类，不读取或保存异常正文；
 5. 成功解析后继续执行 label normalization、grounded chain repair 和确定性 Validator。
@@ -223,10 +231,13 @@ Decision 的错误审计新增允许列表阶段和代码，但不保存 Prompt�
 6. Sufficiency 在缺 trigger 时路由定向 Replanner，而不是 Decision；
 7. Replanner 不能添加与 missing role 无关或工具能力不兼容的步骤；
 8. 多 trigger 保持歧义并 fail-closed；
-9. Decision structured output 成功、一次格式修复、调用失败脱敏和重试耗尽；
-10. Ground Truth、Prompt、原始响应和异常正文不进入 Artifact；
-11. APY-013 脚本化链路得到 trigger → mechanism → impact，并通过确定性 Validator；
-12. Ruff、Pyright、聚焦 OpenSpec 和既有十文件专项回归通过。
+9. 唯一 trigger 参数非法的步骤被移除后，计划保持 incomplete 并定向 Replan；
+10. 通用 SearchLog 不能仅靠覆盖修复形成可接受 trigger；
+11. Decision structured output 成功、raw 兼容、一次格式修复、setup 失败、调用失败脱敏和重试耗尽；
+12. Validator 拒绝缺角色、多 trigger、trigger summary 不匹配和角色乱序的 candidate；
+13. Ground Truth、Prompt、原始响应和异常正文不进入 Artifact；
+14. APY-013 脚本化链路得到 trigger → mechanism → impact，并通过确定性 Validator；
+15. Ruff、Pyright、聚焦 OpenSpec 和受影响专项回归通过。
 
 离线门全部通过后，只允许再运行一次真实 APY-013，不自动重试。验收要求：
 

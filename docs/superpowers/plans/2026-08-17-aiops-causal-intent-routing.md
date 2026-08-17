@@ -48,7 +48,7 @@
 **Interfaces:**
 - Produces: `CausalIntent = Literal["trigger", "mechanism", "impact", "context"]`.
 - Produces: `allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]`.
-- Produces: `PlanCausalCoverage` and `repair_plan_causal_coverage(steps: Sequence[DiagnosticPlanStep]) -> PlanCausalCoverage`.
+- Produces: `PlanCausalCoverage` and `repair_plan_causal_coverage(steps: Sequence[JsonDict]) -> PlanCausalCoverage`; callers invoke it only after argument normalization has removed invalid steps.
 - Extends: `DiagnosticPlanStep.causal_intent` and `DiagnosticPlanStep.causal_intent_origin`.
 - Extends: `parse_plan(..., causal_capabilities: Mapping[str, Collection[CausalIntent]])`.
 
@@ -82,23 +82,23 @@ def test_plan_rejects_intent_outside_tool_capability() -> None:
 
 def test_plan_coverage_minimally_repairs_all_mechanism_plan() -> None:
     steps = (
-        DiagnosticPlanStep("errors", "InspectPostgresErrors", {}, "errors", ("deadlock",), "mechanism"),
-        DiagnosticPlanStep("graph", "InspectPostgresWaitGraph", {}, "graph", ("deadlock",), "mechanism"),
-        DiagnosticPlanStep("order", "InspectTransactionResourceOrder", {}, "order", ("deadlock",), "mechanism"),
+        {"id":"errors", "tool":"InspectPostgresErrors", "arguments":{}, "purpose":"errors", "testsHypotheses":["deadlock"], "causalIntent":"mechanism", "causalIntentOrigin":"model"},
+        {"id":"graph", "tool":"InspectPostgresWaitGraph", "arguments":{}, "purpose":"graph", "testsHypotheses":["deadlock"], "causalIntent":"mechanism", "causalIntentOrigin":"model"},
+        {"id":"order", "tool":"InspectTransactionResourceOrder", "arguments":{}, "purpose":"order", "testsHypotheses":["deadlock"], "causalIntent":"mechanism", "causalIntentOrigin":"model"},
     )
 
     result = repair_plan_causal_coverage(steps)
 
     assert result.complete is True
-    assert [item.causal_intent for item in result.steps] == ["impact", "mechanism", "trigger"]
-    assert [item.causal_intent_origin for item in result.steps] == [
+    assert [item["causalIntent"] for item in result.steps] == ["impact", "mechanism", "trigger"]
+    assert [item["causalIntentOrigin"] for item in result.steps] == [
         "coverage_repair", "model", "coverage_repair"
     ]
 
 
 def test_plan_coverage_does_not_claim_completion_without_capable_tools() -> None:
     result = repair_plan_causal_coverage(
-        (DiagnosticPlanStep("metrics", "GetDatabaseMetrics", {}, "metrics", (), "context"),)
+        ({"id":"metrics", "tool":"GetDatabaseMetrics", "arguments":{}, "purpose":"metrics", "testsHypotheses":[], "causalIntent":"context", "causalIntentOrigin":"model"},)
     )
 
     assert result.complete is False
@@ -162,12 +162,12 @@ _CONTEXT_OR_MECHANISM = frozenset({
 _TRIGGER_OR_MECHANISM |= frozenset({"InspectPostgresLockGraph"})
 _CONTEXT_OR_IMPACT = frozenset({"VerifyServiceHealth"})
 _MECHANISM_OR_IMPACT |= frozenset({"InspectPostgresSessions"})
-_ANY_DIAGNOSTIC_ROLE = frozenset({"SearchLog", "SearchLogs"})
+_LOG_EVIDENCE_ROLES = frozenset({"SearchLog", "SearchLogs"})  # context|mechanism|impact; never trigger
 ```
 
 Unknown tools return `frozenset({"context"})`. Knowledge, write-capable recovery and recovery-proposal tools return an empty set. Read-only health verification remains `context | impact` so the existing Docker Live generic Plan stays compatible.
 
-Implement plan repair by enumerating the product of each step's at-most-four allowed roles. Keep assignments with exactly one trigger, at least one mechanism and at least one impact; minimize changed intents, then select the lexicographically stable role tuple using priority `trigger, mechanism, impact, context`. Because plans are capped at six steps, this remains bounded at `4**6` combinations.
+Implement plan repair over normalized `JsonDict` steps by enumerating the product of each step's at-most-four allowed roles. Keep assignments with exactly one trigger, at least one mechanism and at least one impact; minimize changed intents, then select the lexicographically stable role tuple using priority `trigger, mechanism, impact, context`. Because plans are capped at six steps, this remains bounded at `4**6` combinations. Add a test proving any number of `SearchLog/SearchLogs` steps remains incomplete because those tools are never trigger-capable.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
@@ -239,13 +239,15 @@ Change `_tool_contracts_payload` to add only a local wrapper field:
 }
 ```
 
-Update Planner and Replanner prompts to require `causalIntent`. Pass a capability mapping into `parse_plan`, convert typed steps with `_diagnostic_plan_step_payload`, and then call `repair_plan_causal_coverage` before argument normalization. `_diagnostic_plan_step_payload` must include intent and origin.
+Update Planner and Replanner prompts to require `causalIntent`. Pass a capability mapping into `parse_plan`, convert typed steps with `_diagnostic_plan_step_payload`, normalize trusted arguments and remove invalid steps with `normalize_tool_plan_steps`, and only then call `repair_plan_causal_coverage`. `_diagnostic_plan_step_payload` must include intent and origin. Persist coverage calculated from this executable plan only.
+
+Add a regression where the only trigger-capable step has an invalid argument schema. After normalization removes it, `planCausalCoverageComplete` must be false and `missingCausalRoles` must include trigger; the workflow must not advertise the pre-normalization assignment as complete.
 
 Do not change `normalize_tool_plan_steps`, `tool_step_fingerprint`, MCP schemas or registered arguments. Add coverage status to the Planner and Replanner step payload, not to MCP calls.
 
-- [ ] **Step 4: Make Replanner accept only missing-role steps**
+- [ ] **Step 4: Make Replanner accept only missing-role executable steps**
 
-Read `missingCausalRoles` from `state.evidence_sufficiency`. When non-empty, accept a new step only if its `causalIntent` belongs to that set. Continue rejecting executed fingerprints and enforcing remaining budget. Persist the rejected count only as `causalIntentRejectedStepCount`; do not save rejected model text.
+Read `missingCausalRoles` from `state.evidence_sufficiency`. Normalize arguments first. When roles are non-empty, accept a new executable step only if its `causalIntent` belongs to that set. Continue rejecting executed fingerprints and enforcing remaining budget. Persist the rejected count only as `causalIntentRejectedStepCount`; do not save rejected model text.
 
 - [ ] **Step 5: Run Task 2 tests and verify GREEN**
 
@@ -280,6 +282,7 @@ git commit -m "feat: enforce causal coverage before tool execution"
 - Produces: `next_causal_refinement_index(...) -> int | None`.
 - Extends: `ObservationDecision` with optional `causal_role_origin`, `reported_causal_role`, and `causal_role_corrected` audit fields whose parser defaults do not alter model semantics.
 - Persists: `causalRoleOrigin`, `reportedCausalRole`, `causalRoleCorrected`, `missingCausalRoles`, and `ambiguousTrigger`.
+- Strengthens: existing deterministic `trigger_present` and `grounded_causal_chain` checks so incomplete/ambiguous coverage cannot pass after budget exhaustion.
 
 - [ ] **Step 1: Write failing role-correction and coverage-route tests**
 
@@ -293,6 +296,8 @@ assert observation["causalRoleCorrected"] is True
 ```
 
 Add pure coverage tests: only Evidence-linked Observations supporting the unique supported hypothesis count; one trigger, one mechanism and one impact is complete; two triggers set `ambiguous_trigger=True`.
+
+Add deterministic Validator tests proving it rejects: two trigger Observations; candidate trigger not equal to the unique trigger summary; causal chain missing impact; and chain summaries ordered mechanism before trigger. These cases must fail existing `trigger_present` or `grounded_causal_chain` codes, not add answer-dependent checks.
 
 Add Sufficiency tests for these routes:
 
@@ -342,6 +347,8 @@ class CausalCoverage:
 ```
 
 `supported_causal_coverage` must first require exactly one supported hypothesis, then count only non-empty summaries whose `supports` contains that hypothesis and whose Evidence IDs intersect its state Evidence IDs.
+
+Update `validate_grounded_candidate` without adding Oracle inputs. `trigger_present` now means the candidate trigger exactly equals the sole supporting trigger Observation summary. `grounded_causal_chain` now requires every chain item to map to a supporting Observation and the mapped roles to contain exactly one trigger, at least one mechanism and a terminal impact in nondecreasing trigger→mechanism→context→impact order. Multiple trigger Observations fail both checks.
 
 - [ ] **Step 4: Normalize Observation role to the validated Plan contract**
 
@@ -408,7 +415,7 @@ assert outcome.attempts == 1
 assert outcome.error_category is None
 ```
 
-Add tests for: first parse error followed by success on attempt two; two parse errors produce `retry_exhausted` and `("invalid_json_or_schema",)`; `APITimeoutError` produces only `timeout/model_invoke/retryable=True`; unsupported structured setup returns the existing safe `structured_output_unsupported/structured_invoker_setup/retryable=False` outcome rather than silently changing provider mode. Assert exception messages and raw payloads never appear in `repr(outcome)`.
+Add tests for: a model with no `with_structured_output` method uses the raw parser and succeeds; first parse error followed by success on attempt two; two parse errors produce `retry_exhausted` and `("invalid_json_or_schema",)`; `APITimeoutError` produces only `timeout/model_invoke/retryable=True`; a model with the structured method whose setup raises `NotImplementedError/TypeError` returns `structured_output_unsupported/structured_invoker_setup/retryable=False` rather than silently switching mode. Assert exception messages and raw payloads never appear in `repr(outcome)`.
 
 - [ ] **Step 2: Run structured Decision tests and verify RED**
 
