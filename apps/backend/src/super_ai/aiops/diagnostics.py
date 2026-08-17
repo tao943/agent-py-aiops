@@ -1268,7 +1268,28 @@ class AiopsDiagnosticService:
         max_total_steps = int(state.get("max_total_steps") or 6)
         refinement_index: int | None = None
         refinement_reason = ""
-        if decision.status == "sufficient":
+        if decision.unresolved_hypotheses:
+            if attempt_count < max_total_steps:
+                refinement_index = _next_open_hypothesis_step_index(
+                    plan=plan,
+                    plan_index=plan_index,
+                    open_hypothesis_ids=decision.unresolved_hypotheses,
+                    executed_fingerprints=cast(
+                        list[str], state.get("executed_step_fingerprints") or []
+                    ),
+                )
+            if refinement_index is not None:
+                next_route = "executor"
+                termination_reason = ""
+                refinement_reason = "open_hypothesis_plan_step_remaining"
+            elif _can_replan(state):
+                next_route = "replanner"
+                termination_reason = ""
+                refinement_reason = "open_hypothesis_requires_replan"
+            else:
+                next_route = "decision"
+                termination_reason = _budget_termination_reason(state)
+        elif decision.status == "sufficient":
             supported_hypothesis_id = (
                 decision.supported_hypotheses[0]
                 if len(decision.supported_hypotheses) == 1
@@ -2400,6 +2421,36 @@ def _step_fingerprint(step: Mapping[str, object]) -> str:
     )
 
 
+def _next_open_hypothesis_step_index(
+    *,
+    plan: Sequence[JsonDict],
+    plan_index: int,
+    open_hypothesis_ids: Sequence[str],
+    executed_fingerprints: Sequence[str],
+) -> int | None:
+    open_ids = set(open_hypothesis_ids)
+    if not open_ids:
+        return None
+    executed = set(executed_fingerprints)
+    bounded_index = min(max(plan_index, 0), len(plan))
+    candidate_indices = [
+        *range(bounded_index, len(plan)),
+        *range(0, bounded_index),
+    ]
+    for index in candidate_indices:
+        step = plan[index]
+        if _step_fingerprint(step) in executed:
+            continue
+        tested = {
+            item
+            for item in cast(list[object], step.get("testsHypotheses") or [])
+            if isinstance(item, str)
+        }
+        if tested & open_ids:
+            return index
+    return None
+
+
 def _can_replan(state: AiopsDiagnosticState) -> bool:
     return (
         int(state.get("replan_count") or 0) < int(state.get("max_replans") or 2)
@@ -2483,9 +2534,9 @@ def _project_evidence_sufficiency(
     return EvidenceSufficiencyDecision(
         status="sufficient" if sufficient else "insufficient",
         evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
-        supported_hypotheses=tuple(supported[:6]),
-        refuted_hypotheses=tuple(refuted[:6]),
-        unresolved_hypotheses=tuple(unresolved[:6]),
+        supported_hypotheses=tuple(supported),
+        refuted_hypotheses=tuple(refuted),
+        unresolved_hypotheses=tuple(unresolved),
         missing_evidence=() if sufficient else model_decision.missing_evidence,
         recommended_tools=() if sufficient else model_decision.recommended_tools,
         summary=model_decision.summary,
@@ -2498,9 +2549,9 @@ def _evidence_sufficiency_payload(
     return {
         "status": decision.status,
         "evidenceIds": list(decision.evidence_ids),
-        "supportedHypotheses": list(decision.supported_hypotheses),
-        "refutedHypotheses": list(decision.refuted_hypotheses),
-        "unresolvedHypotheses": list(decision.unresolved_hypotheses),
+        "supportedHypotheses": list(decision.supported_hypotheses[:6]),
+        "refutedHypotheses": list(decision.refuted_hypotheses[:6]),
+        "unresolvedHypotheses": list(decision.unresolved_hypotheses[:6]),
         "missingEvidence": list(decision.missing_evidence),
         "recommendedTools": list(decision.recommended_tools),
         "summary": decision.summary,

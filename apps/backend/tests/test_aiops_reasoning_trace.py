@@ -10,6 +10,7 @@ import pytest
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
+    _next_open_hypothesis_step_index,  # pyright: ignore[reportPrivateUsage]
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
@@ -167,6 +168,40 @@ def _refinement_step(
     }
 
 
+def test_open_hypothesis_route_selects_only_unexecuted_matching_step() -> None:
+    metrics = _refinement_step(
+        "metrics", "GetDatabaseMetrics", ["postgres_slow_query"]
+    )
+    resource_order = _refinement_step(
+        "resource-order",
+        "InspectTransactionResourceOrder",
+        ["postgres_deadlock"],
+    )
+
+    assert _next_open_hypothesis_step_index(
+        plan=[resource_order, metrics],
+        plan_index=0,
+        open_hypothesis_ids=("postgres_slow_query",),
+        executed_fingerprints=(),
+    ) == 1
+    assert (
+        _next_open_hypothesis_step_index(
+            plan=[resource_order, metrics],
+            plan_index=0,
+            open_hypothesis_ids=("postgres_slow_query",),
+            executed_fingerprints=(_step_fingerprint(metrics),),
+        )
+        is None
+    )
+    assert (
+        _next_open_hypothesis_step_index(
+            plan=[resource_order],
+            plan_index=0,
+            open_hypothesis_ids=("postgres_slow_query",),
+            executed_fingerprints=(),
+        )
+        is None
+    )
 def _one_item_deadlock_decision(
     *,
     component: str = "order-service",
@@ -1301,6 +1336,7 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
             candidate_plan: list[dict[str, object]] | None = None,
             linked_evidence_ids: list[str] | None = None,
             observations: list[dict[str, object]] | None = None,
+            hypothesis_states: list[dict[str, object]] | None = None,
         ) -> tuple[dict[str, object], DiagnosticStepRecord]:
             await repositories.diagnostics.create_task(
                 owner_user_id="benchmark-user",
@@ -1322,13 +1358,26 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
                             {"id": item.id, "description": item.description}
                             for item in scenario.hypotheses
                         ],
-                        "hypothesis_states": [
+                        "hypothesis_states": hypothesis_states
+                        or [
                             {
                                 "id": "postgres_deadlock",
                                 "status": "supported",
                                 "confidence": 1.0,
                                 "evidenceIds": linked_evidence_ids or ["ev-cycle"],
-                            }
+                            },
+                            {
+                                "id": "postgres_lock_wait",
+                                "status": "refuted",
+                                "confidence": 0.1,
+                                "evidenceIds": ["ev-cycle"],
+                            },
+                            {
+                                "id": "postgres_slow_query",
+                                "status": "refuted",
+                                "confidence": 0.1,
+                                "evidenceIds": ["ev-cycle"],
+                            },
                         ],
                         "observation_decisions": observations
                         or [
@@ -1387,6 +1436,31 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
                 },
             ],
         )
+        open_competitor, open_competitor_step = await run_gate(
+            "gate-open-competitor",
+            attempts=2,
+            candidate_plan=[resource_order, metrics],
+            hypothesis_states=[
+                {
+                    "id": "postgres_deadlock",
+                    "status": "supported",
+                    "confidence": 1.0,
+                    "evidenceIds": ["ev-cycle"],
+                },
+                {
+                    "id": "postgres_lock_wait",
+                    "status": "refuted",
+                    "confidence": 0.1,
+                    "evidenceIds": ["ev-cycle"],
+                },
+                {
+                    "id": "postgres_slow_query",
+                    "status": "open",
+                    "confidence": 0.5,
+                    "evidenceIds": [],
+                },
+            ],
+        )
     finally:
         await engine.dispose()
 
@@ -1408,6 +1482,15 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
     )
     assert complete["next_route"] == "decision"
     assert complete_step.payload["missingCausalRoles"] == []
+    assert open_competitor["next_route"] == "executor"
+    assert open_competitor["plan_index"] == 1
+    assert open_competitor_step.payload["status"] == "insufficient"
+    assert open_competitor_step.payload["unresolvedHypotheses"] == [
+        "postgres_slow_query"
+    ]
+    assert open_competitor_step.payload["refinementReason"] == (
+        "open_hypothesis_plan_step_remaining"
+    )
 
 
 class ReasoningChatModel:
