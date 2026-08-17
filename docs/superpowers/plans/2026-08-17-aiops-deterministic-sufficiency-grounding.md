@@ -36,7 +36,7 @@
 - Test: `apps/backend/tests/test_aiops_reasoning_trace.py`
 
 **Interfaces:**
-- Produces: `_project_evidence_sufficiency(*, model_decision: EvidenceSufficiencyDecision, hypothesis_states: Sequence[JsonDict], evidence_ids: Sequence[str]) -> EvidenceSufficiencyDecision`.
+- Produces: `_project_evidence_sufficiency(*, model_decision: EvidenceSufficiencyDecision, public_hypotheses: Sequence[JsonDict], hypothesis_states: Sequence[JsonDict], evidence_ids: Sequence[str]) -> EvidenceSufficiencyDecision`.
 - Preserves: allowlisted model `missing_evidence`, `recommended_tools`, and `summary` as advice; replaces status and all three hypothesis lists from persisted state.
 
 - [ ] **Step 1: Write failing pure projection tests**
@@ -53,7 +53,7 @@ assert projected.unresolved_hypotheses == (
 )
 ```
 
-Add the inverse case where exactly one persisted hypothesis is supported and every competitor is refuted; assert `status == "sufficient"`. Add a model-call-failure test proving `_fallback_evidence_sufficiency` produces the same persisted classification rather than always returning insufficient.
+Add the inverse case where exactly one persisted hypothesis is supported and every public competitor is refuted; assert `status == "sufficient"`. Add state-integrity cases proving a missing public state is treated as unresolved, while duplicate state IDs or unknown/non-public IDs force `insufficient` without persisting the unknown ID. Add a model-call-failure test proving `_fallback_evidence_sufficiency` produces the same persisted classification rather than always returning insufficient.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
@@ -67,7 +67,7 @@ Expected: FAIL because the projection does not exist and fallback status is not 
 
 - [ ] **Step 3: Implement the minimal pure projection**
 
-Classify each non-empty persisted `id` by exact status (`supported`, `refuted`, otherwise `open`). Set sufficient only when `len(supported) == 1 and not unresolved`; otherwise set insufficient. Bound public ID/evidence lists with existing `_unique_strings` behavior. Keep model advice only when the projected result is insufficient; clear recommended tools when sufficient. Make `_fallback_evidence_sufficiency` construct safe fallback advice and pass it through this same projection.
+Build the authoritative ID order from `public_hypotheses`, then classify each public ID by its exact persisted status (`supported`, `refuted`, otherwise `open`). Missing public states are open. Duplicate state IDs or states with non-public IDs set a state-integrity failure that forces insufficient; unknown IDs are never copied into the payload. Set sufficient only when state integrity holds, `len(supported) == 1`, and no public ID is unresolved. Keep the complete internal unresolved set for routing and only apply existing payload bounds at the audit serialization boundary. Keep model advice only when the projected result is insufficient; clear recommended tools when sufficient. Make `_fallback_evidence_sufficiency` construct safe fallback advice and pass it through this same projection.
 
 - [ ] **Step 4: Apply the projection after both model success and fallback**
 
@@ -157,7 +157,7 @@ Assert the pre-normalization failing checks are a non-empty subset of:
 {"trigger_present", "grounded_causal_chain"}
 ```
 
-and the normalized result has no failed checks. Add fail-closed cases for an open competitor, wrong labels, outside/non-supporting Evidence, fewer than two positive Evidence IDs, fewer than two supporting Observations, missing or multiple trigger, and missing mechanism or impact.
+and the normalized result has no failed checks. Add fail-closed cases for an open competitor, wrong labels, outside/non-supporting Evidence, fewer than two positive Evidence IDs, fewer than two supporting Observations, missing or multiple trigger, and missing mechanism or impact. Add a distinct case where the Candidate cites two valid supporting Evidence IDs but the canonical chain would copy a third supporting Observation whose Evidence ID is absent; assert normalization returns `None`.
 
 - [ ] **Step 2: Run normalization tests and verify RED**
 
@@ -171,7 +171,7 @@ Expected: FAIL because the existing repair only handles its shallow `causalChain
 
 - [ ] **Step 3: Implement all-or-nothing normalization**
 
-Call `validate_grounded_candidate` on the original candidate with exactly the same public hypotheses, persisted state/evidence, observations, and vocabulary later used by the Decision Validator. Proceed only when every failed check is expression-only (`trigger_present` or `grounded_causal_chain`) and at least one failed. Build the canonical trigger/chain from `_grounded_observations` and `_grounded_trigger`; require a unique supported state, zero open states, matching normalized labels, candidate Evidence ownership, at least two positive Evidence IDs, at least two supporting Observations, and roles sufficient for a 2–6 item chain. Re-run `validate_grounded_candidate`; return the candidate only when all checks pass.
+Call `validate_grounded_candidate` on the original candidate with exactly the same public hypotheses, persisted state/evidence, observations, and vocabulary later used by the Decision Validator. Proceed only when every failed check is expression-only (`trigger_present` or `grounded_causal_chain`) and at least one failed. Build the canonical trigger/chain from `_grounded_observations` and `_grounded_trigger`; require a unique supported state, zero open states, matching normalized labels, candidate Evidence ownership, at least two positive Evidence IDs, at least two supporting Observations, and roles sufficient for a 2–6 item chain. Collect every Evidence ID attached to every Observation used by the canonical trigger/chain and require that set to be a subset of the Candidate Evidence IDs; a Candidate with only a partial supporting subset cannot borrow uncited Observation text. Re-run `validate_grounded_candidate`; return the candidate only when all checks pass.
 
 - [ ] **Step 4: Integrate origin without relaxing fallback**
 
