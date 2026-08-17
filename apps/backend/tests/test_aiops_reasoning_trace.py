@@ -1228,6 +1228,12 @@ async def test_decision_node_repairs_grounded_causal_chain(
     decision_step = steps[-1]
     assert decision_step.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
     assert decision_step.payload["decisionErrorCategory"] is None
+    assert decision_step.payload["decisionAttempts"] == 1
+    assert decision_step.payload["decisionErrorCodes"] == []
+    assert decision_step.payload["decisionErrorCode"] is None
+    assert decision_step.payload["decisionErrorPhase"] is None
+    assert decision_step.payload["decisionRetryable"] is None
+    assert decision_step.payload["decisionHttpStatusClass"] is None
 
 
 @pytest.mark.asyncio

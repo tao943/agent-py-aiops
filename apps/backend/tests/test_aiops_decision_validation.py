@@ -8,10 +8,12 @@ import openai
 import pytest
 
 from super_ai.aiops.decision_validation import (
+    _RootCauseDecisionSchema,  # pyright: ignore[reportPrivateUsage]
     _RootCauseValidationSchema,  # pyright: ignore[reportPrivateUsage]
     can_replan_deterministic_gap,
     classify_model_failure,
     deterministic_checks_payload,
+    invoke_structured_root_cause_decision,
     invoke_structured_root_cause_validation,
     validate_grounded_candidate,
 )
@@ -376,6 +378,142 @@ def _validation_schema(*, evidence_ids: list[str] | None = None):
         missingEvidence=[],
         summary="The public observations support every field.",
     )
+
+
+def _decision_schema(*, evidence_ids: list[str] | None = None):
+    return _RootCauseDecisionSchema(
+        component="order-service",
+        mechanism="opposite_order_transaction_deadlock",
+        trigger="Transactions acquired the same rows in opposite order.",
+        causalChain=[
+            "Transactions acquired the same rows in opposite order.",
+            "The wait graph contained a two-session cycle.",
+            "PostgreSQL emitted SQLSTATE 40P01.",
+        ],
+        evidenceIds=evidence_ids or ["ev-trigger", "ev-mechanism", "ev-impact"],
+        confidence=0.97,
+    )
+
+
+def _decision_json() -> str:
+    return _decision_schema().model_dump_json(by_alias=True)
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_unpacks_langchain_envelope() -> None:
+    model = StructuredCapableChatModel(
+        [{"raw": object(), "parsed": _decision_schema(), "parsing_error": None}]
+    )
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.attempts == 1
+    assert outcome.error_category is None
+    assert model.wrapper_calls == 1
+    assert model.raw_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_keeps_raw_model_compatibility() -> None:
+    model = SequenceChatModel([_decision_json()])
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.attempts == 1
+    assert outcome.error_category is None
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_reasks_once_after_parse_failure() -> None:
+    model = SequenceChatModel(["not-json", _decision_json()])
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.attempts == 2
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_stops_after_one_format_retry() -> None:
+    model = SequenceChatModel(["secret raw response", "still invalid"])
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "retry_exhausted"
+    assert outcome.attempts == 2
+    assert outcome.error_codes == ("invalid_json_or_schema",)
+    assert "secret" not in repr(outcome)
+
+
+@pytest.mark.asyncio
+async def test_structured_decision_classifies_api_timeout_safely() -> None:
+    model = RaisingChatModel(
+        openai.APITimeoutError(
+            request=httpx.Request("POST", "https://provider.test/v1/chat/completions")
+        )
+    )
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == "timeout"
+    assert outcome.error_phase == "model_invoke"
+    assert outcome.retryable is True
+    assert outcome.attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    (
+        NotImplementedError("secret unsupported details"),
+        TypeError("secret schema incompatibility"),
+    ),
+)
+async def test_structured_decision_rejects_unsupported_setup_safely(
+    error: Exception,
+) -> None:
+    model = FailingStructuredSetupChatModel(error)
+
+    outcome = await invoke_structured_root_cause_decision(
+        model=model,
+        prompt="public decision prompt",
+        available_evidence_ids={"ev-trigger", "ev-mechanism", "ev-impact"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == "structured_output_unsupported"
+    assert outcome.error_phase == "structured_invoker_setup"
+    assert outcome.retryable is False
+    assert outcome.attempts == 0
+    assert "secret" not in repr(outcome)
+    assert model.raw_calls == 0
 
 
 @pytest.mark.asyncio

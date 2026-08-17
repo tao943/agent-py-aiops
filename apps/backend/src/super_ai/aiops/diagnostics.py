@@ -29,6 +29,7 @@ from super_ai.aiops.causal_intents import (
 from super_ai.aiops.decision_validation import (
     can_replan_deterministic_gap,
     deterministic_checks_payload,
+    invoke_structured_root_cause_decision,
     invoke_structured_root_cause_validation,
     validate_grounded_candidate,
 )
@@ -47,7 +48,6 @@ from super_ai.aiops.reasoning import (
     parse_observation_decision,
     parse_plan,
     parse_recovery_plan,
-    parse_root_cause_decision,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
@@ -1468,45 +1468,40 @@ class AiopsDiagnosticService:
         )
         decision: RootCauseDecision | None = None
         decision_origin = "none"
-        decision_error_category: str | None = None
-        try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-        except Exception:
-            decision_error_category = "model_call_failed"
-        else:
-            try:
-                decision = parse_root_cause_decision(
-                    _model_text(response),
-                    available_evidence_ids=set(evidence_ids),
-                )
-                decision = normalize_root_cause_decision(
-                    decision,
-                    component_aliases=_string_mapping(
-                        decision_vocabulary.get("componentAliases")
-                    ),
-                    mechanism_aliases=_string_mapping(
-                        decision_vocabulary.get("mechanismAliases")
-                    ),
-                )
-                decision_origin = "llm"
-                repaired = _repair_grounded_causal_chain(
-                    decision,
-                    public_hypotheses=cast(
-                        list[JsonDict], state.get("public_hypotheses") or []
-                    ),
-                    hypothesis_states=cast(
-                        list[JsonDict], state.get("hypothesis_states") or []
-                    ),
-                    observation_decisions=cast(
-                        list[JsonDict], state.get("observation_decisions") or []
-                    ),
-                    decision_vocabulary=decision_vocabulary,
-                )
-                if repaired is not None:
-                    decision = repaired
-                    decision_origin = "llm_grounded_causal_chain_repair"
-            except Exception:
-                decision_error_category = "invalid_model_output"
+        decision_outcome = await invoke_structured_root_cause_decision(
+            model=self._llm_provider.create_chat_model(),
+            prompt=prompt,
+            available_evidence_ids=set(evidence_ids),
+        )
+        decision = decision_outcome.decision
+        decision_error_category = decision_outcome.error_category
+        if decision is not None:
+            decision = normalize_root_cause_decision(
+                decision,
+                component_aliases=_string_mapping(
+                    decision_vocabulary.get("componentAliases")
+                ),
+                mechanism_aliases=_string_mapping(
+                    decision_vocabulary.get("mechanismAliases")
+                ),
+            )
+            decision_origin = "llm"
+            repaired = _repair_grounded_causal_chain(
+                decision,
+                public_hypotheses=cast(
+                    list[JsonDict], state.get("public_hypotheses") or []
+                ),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=decision_vocabulary,
+            )
+            if repaired is not None:
+                decision = repaired
+                decision_origin = "llm_grounded_causal_chain_repair"
         if decision is None:
             decision = build_grounded_fallback_decision(
                 public_hypotheses=cast(
@@ -1531,6 +1526,12 @@ class AiopsDiagnosticService:
             "status": "grounded" if decision is not None else "insufficient_evidence",
             "decisionOrigin": decision_origin,
             "decisionErrorCategory": decision_error_category,
+            "decisionAttempts": decision_outcome.attempts,
+            "decisionErrorCodes": list(decision_outcome.error_codes),
+            "decisionErrorCode": decision_outcome.error_code,
+            "decisionErrorPhase": decision_outcome.error_phase,
+            "decisionRetryable": decision_outcome.retryable,
+            "decisionHttpStatusClass": decision_outcome.http_status_class,
         }
         await self._create_step(
             owner_user_id=owner_user_id,

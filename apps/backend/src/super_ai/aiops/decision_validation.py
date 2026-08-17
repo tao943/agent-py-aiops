@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
     RootCauseValidationDecision,
+    parse_root_cause_decision,
     parse_root_cause_validation,
 )
 from super_ai.llm import ChatModel
@@ -92,6 +93,29 @@ class StructuredValidationOutcome:
     http_status_class: ValidationHttpStatusClass | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StructuredDecisionOutcome:
+    decision: RootCauseDecision | None
+    error_category: DecisionValidationErrorCategory | None
+    attempts: int
+    error_codes: tuple[str, ...]
+    error_code: ValidationErrorCode | None = None
+    error_phase: ValidationErrorPhase | None = None
+    retryable: bool | None = None
+    http_status_class: ValidationHttpStatusClass | None = None
+
+
+class _RootCauseDecisionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    component: str = Field(min_length=1)
+    mechanism: str = Field(min_length=1)
+    trigger: str = Field(min_length=1)
+    causal_chain: list[str] = Field(alias="causalChain", min_length=2, max_length=6)
+    evidence_ids: list[str] = Field(alias="evidenceIds", min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class _RootCauseValidationSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -112,6 +136,11 @@ _CORRECTION_SUFFIX = (
     "\n\nThe previous response did not match the required validation schema. "
     "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
     "and summary. Schema errors: invalid_json_or_schema."
+)
+_DECISION_CORRECTION_SUFFIX = (
+    "\n\nThe previous response did not match the required root-cause decision schema. "
+    "Return JSON only with component, mechanism, trigger, causalChain, evidenceIds, "
+    "and confidence. Schema errors: invalid_json_or_schema."
 )
 _REPLANABLE_DETERMINISTIC_GAPS: frozenset[DeterministicCheckCode] = frozenset(
     {
@@ -149,7 +178,7 @@ async def invoke_structured_root_cause_validation(
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
     try:
-        structured = _structured_invoker(model)
+        structured = _structured_invoker(model, _RootCauseValidationSchema)
     except Exception as exc:
         failure = classify_model_failure(exc, phase="structured_invoker_setup")
         return _model_failure_outcome(failure, attempts=0)
@@ -186,6 +215,53 @@ async def invoke_structured_root_cause_validation(
             error_codes=(),
         )
     raise AssertionError("The bounded validation loop must return within two attempts.")
+
+
+async def invoke_structured_root_cause_decision(
+    *,
+    model: ChatModel,
+    prompt: str,
+    available_evidence_ids: Set[str],
+) -> StructuredDecisionOutcome:
+    """Generate one bounded structured decision with secret-safe failure metadata."""
+    try:
+        structured = _structured_invoker(model, _RootCauseDecisionSchema)
+    except Exception as exc:
+        failure = classify_model_failure(exc, phase="structured_invoker_setup")
+        return _decision_model_failure_outcome(failure, attempts=0)
+    invoker: _AsyncInvoker = structured or model
+    current_prompt = prompt
+    for attempt in (1, 2):
+        try:
+            response = await invoker.ainvoke(current_prompt)
+        except Exception as exc:
+            failure = classify_model_failure(exc, phase="model_invoke")
+            return _decision_model_failure_outcome(failure, attempts=attempt)
+        try:
+            decision = _root_cause_decision_from_response(
+                response,
+                structured=structured is not None,
+                available_evidence_ids=available_evidence_ids,
+            )
+        except (TypeError, ValueError):
+            if attempt == 1:
+                current_prompt = prompt + _DECISION_CORRECTION_SUFFIX
+                continue
+            return StructuredDecisionOutcome(
+                decision=None,
+                error_category="retry_exhausted",
+                attempts=attempt,
+                error_codes=("invalid_json_or_schema",),
+                error_phase="structured_parse",
+                retryable=False,
+            )
+        return StructuredDecisionOutcome(
+            decision=decision,
+            error_category=None,
+            attempts=attempt,
+            error_codes=(),
+        )
+    raise AssertionError("The bounded decision loop must return within two attempts.")
 
 
 def classify_model_failure(
@@ -238,17 +314,63 @@ def _model_failure_outcome(
     )
 
 
-def _structured_invoker(model: ChatModel) -> _AsyncInvoker | None:
+def _decision_model_failure_outcome(
+    failure: SafeModelFailure,
+    *,
+    attempts: int,
+) -> StructuredDecisionOutcome:
+    return StructuredDecisionOutcome(
+        decision=None,
+        error_category="model_call_failed",
+        attempts=attempts,
+        error_codes=(failure.code,),
+        error_code=failure.code,
+        error_phase=failure.phase,
+        retryable=failure.retryable,
+        http_status_class=failure.http_status_class,
+    )
+
+
+def _structured_invoker(
+    model: ChatModel,
+    schema: type[BaseModel],
+) -> _AsyncInvoker | None:
     method_value = getattr(model, "with_structured_output", None)
     if not callable(method_value):
         return None
     return cast(
         _AsyncInvoker,
         method_value(
-            _RootCauseValidationSchema,
+            schema,
             method="function_calling",
             include_raw=True,
         ),
+    )
+
+
+def _root_cause_decision_from_response(
+    response: object,
+    *,
+    structured: bool,
+    available_evidence_ids: Set[str],
+) -> RootCauseDecision:
+    if structured:
+        if not isinstance(response, Mapping):
+            raise ValueError("Structured decision response must be an envelope.")
+        envelope = cast(Mapping[object, object], response)
+        if envelope.get("parsing_error") is not None:
+            raise ValueError("Structured decision envelope contains a parsing error.")
+        parsed = envelope.get("parsed")
+        if isinstance(parsed, _RootCauseDecisionSchema):
+            schema = parsed
+        else:
+            schema = _RootCauseDecisionSchema.model_validate(parsed)
+        text = json.dumps(schema.model_dump(by_alias=True), ensure_ascii=False)
+    else:
+        text = _model_text(response)
+    return parse_root_cause_decision(
+        text,
+        available_evidence_ids=available_evidence_ids,
     )
 
 
