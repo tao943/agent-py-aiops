@@ -687,7 +687,7 @@ async def test_evidence_evaluator_normalizes_role_to_plan_contract(
                 {
                     "purpose": "Inspect transaction resource order.",
                     "supports": ["postgres_deadlock"],
-                    "refutes": [],
+                    "refutes": ["postgres_slow_query"],
                     "summary": "Transactions acquired rows in opposite order.",
                     "causalRole": "mechanism",
                 }
@@ -735,7 +735,11 @@ async def test_evidence_evaluator_normalizes_role_to_plan_contract(
                         "causalIntent": "trigger",
                     },
                     "public_hypotheses": [
-                        {"id": "postgres_deadlock", "description": "Deadlock."}
+                        {"id": "postgres_deadlock", "description": "Deadlock."},
+                        {
+                            "id": "postgres_slow_query",
+                            "description": "Slow query.",
+                        },
                     ],
                     "hypothesis_states": [
                         {
@@ -758,6 +762,7 @@ async def test_evidence_evaluator_normalizes_role_to_plan_contract(
     observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
     assert observation["summary"] == "Transactions acquired rows in opposite order."
     assert observation["supports"] == ["postgres_deadlock"]
+    assert observation["refutes"] == []
     assert observation["evidenceIds"] == ["ev-order"]
     assert observation["causalRole"] == "trigger"
     assert observation["causalRoleOrigin"] == "plan_contract"
@@ -1625,7 +1630,10 @@ class PostgresContractAcceptanceChatModel:
                                 "windowMinutes": 30,
                             },
                             "purpose": "Inspect structured PostgreSQL errors.",
-                            "testsHypotheses": ["postgres_deadlock"],
+                            "testsHypotheses": [
+                                "postgres_deadlock",
+                                "postgres_slow_query",
+                            ],
                             "causalIntent": "impact",
                         },
                         {

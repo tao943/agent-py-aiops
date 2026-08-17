@@ -1114,9 +1114,22 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 known_hypotheses=known_hypotheses,
             )
+            tested_hypotheses = {
+                item
+                for item in cast(
+                    list[object], plan_step.get("testsHypotheses") or []
+                )
+                if isinstance(item, str)
+            }
             reported_role = decision.causal_role
             decision = replace(
                 decision,
+                supports=tuple(
+                    item for item in decision.supports if item in tested_hypotheses
+                ),
+                refutes=tuple(
+                    item for item in decision.refutes if item in tested_hypotheses
+                ),
                 causal_role=plan_intent,
                 causal_role_origin=(
                     "model" if reported_role == plan_intent else "plan_contract"
