@@ -419,6 +419,40 @@ Evidence Evaluation 提供可审计的预期因果角色，并在 Observation �
 一致；角色冲突时进入受限修复或人工复核。该改造需保持 Ground Truth 隔离，不能把 evaluator
 rubric、正确根因或场景答案注入 Agent Prompt。
 
+### APY-013 causal intent routing 验收（2026-08-17）
+
+本轮设计与计划提交为 `10c72c0`、`b631cb7` 和 `ae44108`；实现提交为 `fa888e6`、
+`52be2d0`、`8bac75f`、`ae615a8`、`c947a5d`、`74e9338` 和 `1d5ac82`。Planner/
+Replanner 现在为每个诊断步骤保存 `causalIntent` 及来源，Evidence Evaluation 按 Plan 合同
+归一化 `trigger/mechanism/impact/context`，Sufficiency、Decision 和 Validator 只接受证据绑定
+且角色完整的唯一根因。Observation 的 `supports/refutes` 也被限制在当前步骤
+`testsHypotheses` 内，模型不能越权修改未测试 hypothesis。
+
+本阶段只运行一次真实 `APY-013`，run ID 为
+`eval-247b1751764e40c08fd9a7f0b4cde4f0`，耗时 322,545 ms。结果为
+`validity=valid`、`passed=false`、总分 50，维度为 `12 / 0 / 10 / 8 / 15 / 5`，失败项为
+`missing_root_cause_decision`。三个必要证据、`observations_evaluated=5/5`、Ground Truth 隔离、
+恢复安全和工具预算均通过；Recovery 为 `no_action`，Policy 为 `no_grounded_action`，
+`executionPermitted=false`。
+
+安全步骤审计确认 Planner 已形成完整角色覆盖：PostgreSQL Error 为 impact、Wait Graph 为
+mechanism、Resource Order 为 trigger、Metrics 为 context，前三条 Observation 也正确形成
+impact/mechanism/trigger。随后真实 Sufficiency 仍继续执行 Metrics；Metrics 模型输出越权
+refute 了当前步骤未测试的三个 hypothesis，导致唯一支持假设消失。Decision structured 调用同时
+记录 `model_call_failed/provider_4xx`，Validator 因候选缺失记录 `candidate_missing`。因此这次
+50 分反映两项独立问题：Observation hypothesis 越界更新，以及 structured-output 方法与当前
+DashScope 模型不兼容。
+
+修复后，模型 capability profile 显式声明 `structuredOutputMethod`；当前本地
+`qwen3.7-plus` 使用 LangChain `json_mode`，旧 profile 缺失字段时保持
+`function_calling` 兼容。一个只含合成公开事实的最小真实 structured Decision readiness 在
+24.1 秒内通过，没有读取真实日志、隐藏答案或 Ground Truth。离线 Group A 137 项、Group B
+148 项、provider/Decision/config 57 项均通过，Ruff clean、Pyright 0 errors，聚焦 OpenSpec
+strict valid。Archive 当前为 28 个 artifact、28 个 checksum、0 conflict、0 pending。
+
+上述两项修复完成后没有再次运行 `APY-013`，因此不能宣称真实 Benchmark 已达标；后续真实
+验收必须在新的明确授权下执行，并保留新 run，而不是覆盖或重标本次失败结果。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
