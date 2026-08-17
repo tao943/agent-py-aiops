@@ -3,7 +3,9 @@ import inspect
 from super_ai.aiops import causal_intents
 from super_ai.aiops.causal_intents import (
     allowed_causal_intents,
+    next_causal_refinement_index,
     repair_plan_causal_coverage,
+    supported_causal_coverage,
 )
 from super_ai.memory.repositories import JsonDict
 
@@ -116,3 +118,108 @@ def test_plan_coverage_reports_ambiguous_trigger_when_it_cannot_repair() -> None
     assert result.complete is False
     assert result.missing_roles == ("trigger", "mechanism", "impact")
     assert result.ambiguous_trigger is True
+
+
+def test_supported_coverage_counts_only_linked_observations() -> None:
+    coverage = supported_causal_coverage(
+        hypothesis_states=(
+            {
+                "id": "database_failure",
+                "status": "supported",
+                "evidenceIds": ["ev-trigger", "ev-mechanism", "ev-impact"],
+            },
+        ),
+        observation_decisions=(
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-trigger"],
+                "causalRole": "trigger",
+                "summary": "A bounded trigger was observed.",
+            },
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-mechanism"],
+                "causalRole": "mechanism",
+                "summary": "A bounded mechanism was observed.",
+            },
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-impact"],
+                "causalRole": "impact",
+                "summary": "A bounded impact was observed.",
+            },
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-unlinked"],
+                "causalRole": "trigger",
+                "summary": "This evidence is not linked by the hypothesis state.",
+            },
+        ),
+    )
+
+    assert coverage.trigger_count == 1
+    assert coverage.mechanism_count == 1
+    assert coverage.impact_count == 1
+    assert coverage.complete is True
+    assert coverage.missing_roles == ()
+    assert coverage.ambiguous_trigger is False
+
+
+def test_supported_coverage_rejects_multiple_triggers() -> None:
+    coverage = supported_causal_coverage(
+        hypothesis_states=(
+            {
+                "id": "database_failure",
+                "status": "supported",
+                "evidenceIds": ["ev-trigger-1", "ev-trigger-2", "ev-mechanism"],
+            },
+        ),
+        observation_decisions=(
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-trigger-1"],
+                "causalRole": "trigger",
+                "summary": "First trigger.",
+            },
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-trigger-2"],
+                "causalRole": "trigger",
+                "summary": "Second trigger.",
+            },
+            {
+                "supports": ["database_failure"],
+                "evidenceIds": ["ev-mechanism"],
+                "causalRole": "mechanism",
+                "summary": "Mechanism.",
+            },
+        ),
+    )
+
+    assert coverage.trigger_count == 2
+    assert coverage.complete is False
+    assert coverage.ambiguous_trigger is True
+
+
+def test_causal_refinement_selects_unexecuted_missing_role() -> None:
+    plan = (
+        _step("graph", "InspectPostgresWaitGraph", "mechanism"),
+        _step("order", "InspectTransactionResourceOrder", "trigger"),
+    )
+
+    assert next_causal_refinement_index(
+        plan=plan,
+        plan_index=0,
+        missing_roles=("trigger",),
+        supported_hypothesis_id="postgres_deadlock",
+        executed_fingerprints=(),
+        fingerprint=lambda step: str(step["id"]),
+    ) == 1
+    assert next_causal_refinement_index(
+        plan=plan,
+        plan_index=0,
+        missing_roles=("impact",),
+        supported_hypothesis_id="postgres_deadlock",
+        executed_fingerprints=(),
+        fingerprint=lambda step: str(step["id"]),
+    ) is None

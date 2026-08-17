@@ -118,6 +118,8 @@ _REPLANABLE_DETERMINISTIC_GAPS: frozenset[DeterministicCheckCode] = frozenset(
         "no_open_competitor",
         "independent_positive_evidence",
         "supporting_observations",
+        "grounded_causal_chain",
+        "trigger_present",
     }
 )
 
@@ -319,19 +321,41 @@ def validate_grounded_candidate(
     )
     independent_positive_evidence = len(positive_evidence_ids) >= 2
     enough_supporting_observations = len(supporting_observations) >= 2
-    supporting_summaries = {
-        summary.strip()
+    supporting_roles_by_summary = {
+        summary.strip(): role
         for observation in supporting_observations
-        if isinstance((summary := observation.get("summary")), str) and summary.strip()
+        if isinstance((summary := observation.get("summary")), str)
+        and summary.strip()
+        and (role := observation.get("causalRole"))
+        in {"trigger", "mechanism", "impact", "context"}
     }
+    trigger_summaries = tuple(
+        summary
+        for summary, role in supporting_roles_by_summary.items()
+        if role == "trigger"
+    )
+    chain_roles = tuple(
+        supporting_roles_by_summary.get(item.strip())
+        for item in candidate.causal_chain
+    )
+    role_order = {"trigger": 0, "mechanism": 1, "context": 2, "impact": 3}
     grounded_causal_chain = (
         2 <= len(candidate.causal_chain) <= 6
+        and len(trigger_summaries) == 1
+        and all(role in role_order for role in chain_roles)
+        and chain_roles.count("trigger") == 1
+        and "mechanism" in chain_roles
+        and "impact" in chain_roles
+        and chain_roles[-1] == "impact"
         and all(
-            item.strip() and item.strip() in supporting_summaries
-            for item in candidate.causal_chain
+            role_order[cast(str, left)] <= role_order[cast(str, right)]
+            for left, right in zip(chain_roles, chain_roles[1:], strict=False)
         )
     )
-    trigger_present = bool(candidate.trigger.strip())
+    trigger_present = (
+        len(trigger_summaries) == 1
+        and candidate.trigger.strip() == trigger_summaries[0]
+    )
     confidence_in_range = 0.0 <= candidate.confidence <= 1.0
 
     checks = (

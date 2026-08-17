@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
 from typing import Literal, cast
@@ -77,6 +77,23 @@ class PlanCausalCoverage:
     complete: bool
     missing_roles: tuple[CoreCausalRole, ...]
     ambiguous_trigger: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CausalCoverage:
+    trigger_count: int
+    mechanism_count: int
+    impact_count: int
+    missing_roles: tuple[CoreCausalRole, ...]
+    ambiguous_trigger: bool
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.trigger_count == 1
+            and self.mechanism_count >= 1
+            and self.impact_count >= 1
+        )
 
 
 def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
@@ -160,3 +177,82 @@ def repair_plan_causal_coverage(
         missing_roles=missing_roles,
         ambiguous_trigger=ambiguous_trigger,
     )
+
+
+def supported_causal_coverage(
+    *,
+    hypothesis_states: Sequence[Mapping[str, object]],
+    observation_decisions: Sequence[Mapping[str, object]],
+) -> CausalCoverage:
+    """Count evidence-linked causal roles for one supported public hypothesis."""
+    supported = [
+        state
+        for state in hypothesis_states
+        if state.get("status") == "supported" and isinstance(state.get("id"), str)
+    ]
+    counts: dict[CoreCausalRole, int] = {
+        "trigger": 0,
+        "mechanism": 0,
+        "impact": 0,
+    }
+    if len(supported) == 1:
+        hypothesis_id = cast(str, supported[0]["id"])
+        linked_evidence = _string_set(supported[0].get("evidenceIds"))
+        for observation in observation_decisions:
+            role = observation.get("causalRole")
+            summary = observation.get("summary")
+            if (
+                role not in counts
+                or not isinstance(summary, str)
+                or not summary.strip()
+                or hypothesis_id not in _string_set(observation.get("supports"))
+                or not (
+                    linked_evidence & _string_set(observation.get("evidenceIds"))
+                )
+            ):
+                continue
+            counts[cast(CoreCausalRole, role)] += 1
+    missing = tuple(
+        role
+        for role in _CORE_ROLES
+        if (counts[role] != 1 if role == "trigger" else counts[role] < 1)
+    )
+    return CausalCoverage(
+        trigger_count=counts["trigger"],
+        mechanism_count=counts["mechanism"],
+        impact_count=counts["impact"],
+        missing_roles=missing,
+        ambiguous_trigger=counts["trigger"] > 1,
+    )
+
+
+def next_causal_refinement_index(
+    *,
+    plan: Sequence[JsonDict],
+    plan_index: int,
+    missing_roles: Collection[CoreCausalRole],
+    supported_hypothesis_id: str | None,
+    executed_fingerprints: Collection[str],
+    fingerprint: Callable[[Mapping[str, object]], str],
+) -> int | None:
+    """Select the next unexecuted plan step that can fill a causal-role gap."""
+    if supported_hypothesis_id is None or not missing_roles:
+        return None
+    missing = set(missing_roles)
+    executed = set(executed_fingerprints)
+    for index in range(max(plan_index, 0), len(plan)):
+        step = plan[index]
+        if step.get("causalIntent") not in missing:
+            continue
+        if supported_hypothesis_id not in _string_set(step.get("testsHypotheses")):
+            continue
+        if fingerprint(step) in executed:
+            continue
+        return index
+    return None
+
+
+def _string_set(value: object) -> set[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return set()
+    return {item for item in cast(Sequence[object], value) if isinstance(item, str)}

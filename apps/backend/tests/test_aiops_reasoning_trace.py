@@ -43,12 +43,19 @@ def _refinement_step(
     tool: str,
     hypotheses: list[str],
 ) -> dict[str, object]:
+    intents = {
+        "GetDatabaseMetrics": "context",
+        "InspectPostgresErrors": "impact",
+        "InspectPostgresWaitGraph": "mechanism",
+        "InspectTransactionResourceOrder": "trigger",
+    }
     return {
         "id": step_id,
         "tool": tool,
         "arguments": {"scope": step_id},
         "purpose": f"Inspect {step_id}.",
         "testsHypotheses": hypotheses,
+        "causalIntent": intents.get(tool, "context"),
     }
 
 
@@ -753,6 +760,96 @@ def test_plan_rejects_intent_outside_tool_capability() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_evidence_evaluator_normalizes_role_to_plan_contract(
+    migrated_database_url: str,
+) -> None:
+    class StaticChatModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "purpose": "Inspect transaction resource order.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": [],
+                    "summary": "Transactions acquired rows in opposite order.",
+                    "causalRole": "mechanism",
+                }
+            )
+
+    class StaticLlmProvider:
+        def create_chat_model(self) -> StaticChatModel:
+            return StaticChatModel()
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="causal-role-contract",
+            status="running",
+            query="Inspect a database incident.",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, StaticLlmProvider()),
+            retrieval_tool=cast(Any, object()),
+            mcp_client=cast(Any, object()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        update = await service._evidence_evaluator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "current_evidence_id": "ev-order",
+                    "current_evidence_summary": "bounded observation",
+                    "current_plan_step": {
+                        "id": "resource-order",
+                        "tool": "InspectTransactionResourceOrder",
+                        "arguments": {},
+                        "purpose": "Inspect transaction resource order.",
+                        "testsHypotheses": ["postgres_deadlock"],
+                        "causalIntent": "trigger",
+                    },
+                    "public_hypotheses": [
+                        {"id": "postgres_deadlock", "description": "Deadlock."}
+                    ],
+                    "hypothesis_states": [
+                        {
+                            "id": "postgres_deadlock",
+                            "status": "open",
+                            "confidence": 0.5,
+                            "evidenceIds": [],
+                        }
+                    ],
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
+    assert observation["summary"] == "Transactions acquired rows in opposite order."
+    assert observation["supports"] == ["postgres_deadlock"]
+    assert observation["evidenceIds"] == ["ev-order"]
+    assert observation["causalRole"] == "trigger"
+    assert observation["causalRoleOrigin"] == "plan_contract"
+    assert observation["reportedCausalRole"] == "mechanism"
+    assert observation["causalRoleCorrected"] is True
+    assert steps[-1].payload["observationDecision"] == observation
+
+
 def test_observation_decision_requires_known_hypotheses() -> None:
     with pytest.raises(ValueError, match="unknown hypothesis"):
         parse_observation_decision(
@@ -1165,6 +1262,9 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
             task_id: str,
             *,
             attempts: int,
+            candidate_plan: list[dict[str, object]] | None = None,
+            linked_evidence_ids: list[str] | None = None,
+            observations: list[dict[str, object]] | None = None,
         ) -> tuple[dict[str, object], DiagnosticStepRecord]:
             await repositories.diagnostics.create_task(
                 owner_user_id="benchmark-user",
@@ -1179,15 +1279,30 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
                     {
                         "owner_user_id": "benchmark-user",
                         "task_id": task_id,
-                        "plan": [metrics, resource_order],
+                        "plan": candidate_plan or [metrics, resource_order],
                         "plan_index": 0,
-                        "evidence_ids": ["ev-cycle"],
+                        "evidence_ids": linked_evidence_ids or ["ev-cycle"],
                         "public_hypotheses": [
                             {"id": item.id, "description": item.description}
                             for item in scenario.hypotheses
                         ],
-                        "hypothesis_states": [],
-                        "observation_decisions": [],
+                        "hypothesis_states": [
+                            {
+                                "id": "postgres_deadlock",
+                                "status": "supported",
+                                "confidence": 1.0,
+                                "evidenceIds": linked_evidence_ids or ["ev-cycle"],
+                            }
+                        ],
+                        "observation_decisions": observations
+                        or [
+                            {
+                                "supports": ["postgres_deadlock"],
+                                "evidenceIds": ["ev-cycle"],
+                                "causalRole": "mechanism",
+                                "summary": "A two-session cycle exists.",
+                            }
+                        ],
                         "evidence": [],
                         "tool_definitions": (),
                         "executed_step_fingerprints": [],
@@ -1206,6 +1321,36 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
 
         update, gate_step = await run_gate("gate-with-refinement", attempts=2)
         exhausted, exhausted_step = await run_gate("gate-without-budget", attempts=6)
+        no_match, no_match_step = await run_gate(
+            "gate-requires-replan",
+            attempts=2,
+            candidate_plan=[metrics],
+        )
+        complete, complete_step = await run_gate(
+            "gate-complete-coverage",
+            attempts=3,
+            linked_evidence_ids=["ev-trigger", "ev-cycle", "ev-impact"],
+            observations=[
+                {
+                    "supports": ["postgres_deadlock"],
+                    "evidenceIds": ["ev-trigger"],
+                    "causalRole": "trigger",
+                    "summary": "Opposite resource order was observed.",
+                },
+                {
+                    "supports": ["postgres_deadlock"],
+                    "evidenceIds": ["ev-cycle"],
+                    "causalRole": "mechanism",
+                    "summary": "A two-session cycle exists.",
+                },
+                {
+                    "supports": ["postgres_deadlock"],
+                    "evidenceIds": ["ev-impact"],
+                    "causalRole": "impact",
+                    "summary": "PostgreSQL aborted a transaction.",
+                },
+            ],
+        )
     finally:
         await engine.dispose()
 
@@ -1215,11 +1360,18 @@ async def test_sufficiency_gate_routes_to_supported_refinement_and_audits_reason
     assert gate_step.payload["nextRoute"] == "executor"
     assert (
         gate_step.payload["refinementReason"]
-        == "supported_hypothesis_plan_step_remaining"
+        == "missing_causal_role_plan_step_remaining"
     )
+    assert gate_step.payload["missingCausalRoles"] == ["trigger", "impact"]
     assert exhausted["next_route"] == "decision"
     assert "plan_index" not in exhausted
     assert exhausted_step.payload["refinementReason"] == ""
+    assert no_match["next_route"] == "replanner"
+    assert no_match_step.payload["refinementReason"] == (
+        "missing_causal_role_requires_replan"
+    )
+    assert complete["next_route"] == "decision"
+    assert complete_step.payload["missingCausalRoles"] == []
 
 
 class ReasoningChatModel:

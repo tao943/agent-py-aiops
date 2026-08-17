@@ -45,6 +45,9 @@ class ObservationDecision:
     summary: str
     evidence_ids: tuple[str, ...] = ()
     causal_role: CausalRole = "context"
+    causal_role_origin: Literal["model", "plan_contract"] | None = None
+    reported_causal_role: CausalRole | None = None
+    causal_role_corrected: bool = False
 
 
 @dataclass(frozen=True, slots=True)

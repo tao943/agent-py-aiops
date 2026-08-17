@@ -254,6 +254,9 @@ def _observation_decisions_from_steps(
         refutes = item.get("refutes")
         summary = item.get("summary")
         causal_role = item.get("causalRole", "context")
+        causal_role_origin = item.get("causalRoleOrigin")
+        reported_causal_role = item.get("reportedCausalRole")
+        causal_role_corrected = item.get("causalRoleCorrected", False)
         raw_evidence_ids = item.get("evidenceIds")
         evidence_ids = (
             [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
@@ -267,6 +270,10 @@ def _observation_decisions_from_steps(
             and isinstance(summary, str)
             and evidence_ids is not None
             and causal_role in {"trigger", "mechanism", "impact", "context"}
+            and causal_role_origin in {None, "model", "plan_contract"}
+            and reported_causal_role
+            in {None, "trigger", "mechanism", "impact", "context"}
+            and isinstance(causal_role_corrected, bool)
         ):
             decisions.append(
                 ObservationDecision(
@@ -279,6 +286,16 @@ def _observation_decisions_from_steps(
                         Literal["trigger", "mechanism", "impact", "context"],
                         causal_role,
                     ),
+                    causal_role_origin=cast(
+                        Literal["model", "plan_contract"] | None,
+                        causal_role_origin,
+                    ),
+                    reported_causal_role=cast(
+                        Literal["trigger", "mechanism", "impact", "context"]
+                        | None,
+                        reported_causal_role,
+                    ),
+                    causal_role_corrected=causal_role_corrected,
                 )
             )
     return tuple(decisions)

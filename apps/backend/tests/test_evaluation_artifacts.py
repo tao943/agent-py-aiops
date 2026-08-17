@@ -314,6 +314,10 @@ def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
                     "summary": evidence.summary,
                     "evidenceIds": [evidence.id],
                     "causalRole": "impact",
+                    "causalRoleOrigin": "plan_contract",
+                    "reportedCausalRole": "mechanism",
+                    "causalRoleCorrected": True,
+                    "privateReasoning": "must not be extracted",
                 }
             },
         ),
@@ -325,5 +329,9 @@ def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
 
     assert artifact.observation_decisions[0].evidence_ids == ("ev-1",)
     assert artifact.observation_decisions[0].causal_role == "impact"
+    assert artifact.observation_decisions[0].causal_role_origin == "plan_contract"
+    assert artifact.observation_decisions[0].reported_causal_role == "mechanism"
+    assert artifact.observation_decisions[0].causal_role_corrected is True
+    assert "privateReasoning" not in repr(artifact.observation_decisions[0])
     assert artifact.evidence[0].tool_call_id == "call-1"
     assert artifact.tool_calls[0].audit_id == "call-1"

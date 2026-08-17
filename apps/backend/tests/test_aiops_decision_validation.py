@@ -22,11 +22,11 @@ def _decision(
     *,
     component: str = "order-service",
     mechanism: str = "opposite_order_transaction_deadlock",
-    trigger: str = "Concurrent transactions acquired shared rows in opposite orders.",
+    trigger: str = "Transactions acquired the same rows in opposite order.",
     causal_chain: tuple[str, ...] = (
-        "PostgreSQL emitted SQLSTATE 40P01.",
-        "The wait graph contained a two-session cycle.",
         "Transactions acquired the same rows in opposite order.",
+        "The wait graph contained a two-session cycle.",
+        "PostgreSQL emitted SQLSTATE 40P01.",
     ),
     evidence_ids: tuple[str, ...] = ("ev-error", "ev-cycle", "ev-order"),
     confidence: float = 0.97,
@@ -71,18 +71,21 @@ def _observations() -> list[dict[str, object]]:
             "refutes": ["postgres_slow_query"],
             "evidenceIds": ["ev-error"],
             "summary": "PostgreSQL emitted SQLSTATE 40P01.",
+            "causalRole": "impact",
         },
         {
             "supports": ["postgres_deadlock"],
             "refutes": ["postgres_lock_wait"],
             "evidenceIds": ["ev-cycle"],
             "summary": "The wait graph contained a two-session cycle.",
+            "causalRole": "mechanism",
         },
         {
             "supports": ["postgres_deadlock"],
             "refutes": [],
             "evidenceIds": ["ev-order"],
             "summary": "Transactions acquired the same rows in opposite order.",
+            "causalRole": "trigger",
         },
     ]
 
@@ -134,6 +137,63 @@ def test_grounded_candidate_passes_every_public_evidence_check() -> None:
     assert deterministic_checks_payload(result) == [
         {"code": check.code, "passed": True} for check in result.checks
     ]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "observations", "failed_checks"),
+    [
+        (
+            _decision(),
+            [
+                *_observations(),
+                {
+                    "supports": ["postgres_deadlock"],
+                    "evidenceIds": ["ev-order"],
+                    "summary": "A second trigger summary.",
+                    "causalRole": "trigger",
+                },
+            ],
+            {"trigger_present", "grounded_causal_chain"},
+        ),
+        (
+            replace(_decision(), trigger="A different trigger summary."),
+            _observations(),
+            {"trigger_present"},
+        ),
+        (
+            replace(
+                _decision(),
+                causal_chain=(
+                    "Transactions acquired the same rows in opposite order.",
+                    "The wait graph contained a two-session cycle.",
+                ),
+            ),
+            _observations(),
+            {"grounded_causal_chain"},
+        ),
+        (
+            replace(
+                _decision(),
+                causal_chain=(
+                    "The wait graph contained a two-session cycle.",
+                    "Transactions acquired the same rows in opposite order.",
+                    "PostgreSQL emitted SQLSTATE 40P01.",
+                ),
+            ),
+            _observations(),
+            {"grounded_causal_chain"},
+        ),
+    ],
+)
+def test_grounded_candidate_enforces_unique_ordered_causal_roles(
+    candidate: RootCauseDecision,
+    observations: list[dict[str, object]],
+    failed_checks: set[str],
+) -> None:
+    result = _validate(candidate, observations=observations)
+
+    failures = {check.code for check in result.checks if not check.passed}
+    assert failed_checks.issubset(failures)
 
 
 @pytest.mark.parametrize(

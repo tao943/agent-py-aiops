@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from operator import add
 from time import monotonic
@@ -21,7 +22,9 @@ from langgraph.graph import END, START, StateGraph
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.causal_intents import (
     allowed_causal_intents,
+    next_causal_refinement_index,
     repair_plan_causal_coverage,
+    supported_causal_coverage,
 )
 from super_ai.aiops.decision_validation import (
     can_replan_deterministic_gap,
@@ -30,6 +33,7 @@ from super_ai.aiops.decision_validation import (
     validate_grounded_candidate,
 )
 from super_ai.aiops.reasoning import (
+    CausalRole,
     DiagnosticPlanStep,
     EvidenceSufficiencyDecision,
     HypothesisState,
@@ -1088,6 +1092,13 @@ class AiopsDiagnosticService:
             str(item.get("id")) for item in public_hypotheses if item.get("id")
         }
         summary = str(state.get("current_evidence_summary") or "")
+        raw_plan_intent = plan_step.get("causalIntent")
+        plan_intent = cast(
+            CausalRole,
+            raw_plan_intent
+            if raw_plan_intent in {"trigger", "mechanism", "impact", "context"}
+            else "context",
+        )
         prompt = (
             "Return one JSON observation decision with purpose, supports, refutes, summary, "
             "and causalRole. causalRole must be one of trigger, mechanism, impact, or context "
@@ -1103,12 +1114,24 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 known_hypotheses=known_hypotheses,
             )
+            reported_role = decision.causal_role
+            decision = replace(
+                decision,
+                causal_role=plan_intent,
+                causal_role_origin=(
+                    "model" if reported_role == plan_intent else "plan_contract"
+                ),
+                reported_causal_role=reported_role,
+                causal_role_corrected=reported_role != plan_intent,
+            )
         except Exception:
             decision = ObservationDecision(
                 purpose=str(plan_step.get("purpose") or "Evaluate persisted observation."),
                 supports=(),
                 refutes=(),
                 summary="The observation could not be mapped to a validated hypothesis update.",
+                causal_role=plan_intent,
+                causal_role_origin="plan_contract",
             )
         decision_payload = _observation_decision_payload(decision, evidence_id=evidence_id)
         hypothesis_states = _update_hypothesis_states(
@@ -1192,27 +1215,65 @@ class AiopsDiagnosticService:
                 evidence_ids=evidence_ids,
             )
         payload = _evidence_sufficiency_payload(decision)
+        causal_coverage = supported_causal_coverage(
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            observation_decisions=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+        )
+        payload.update(
+            {
+                "causalTriggerCount": causal_coverage.trigger_count,
+                "causalMechanismCount": causal_coverage.mechanism_count,
+                "causalImpactCount": causal_coverage.impact_count,
+                "missingCausalRoles": list(causal_coverage.missing_roles),
+                "ambiguousTrigger": causal_coverage.ambiguous_trigger,
+            }
+        )
         attempt_count = int(state.get("executor_attempt_count") or 0)
         max_total_steps = int(state.get("max_total_steps") or 6)
         refinement_index: int | None = None
         refinement_reason = ""
         if decision.status == "sufficient":
-            if attempt_count < max_total_steps:
-                refinement_index = _supported_refinement_index(
+            supported_hypothesis_id = (
+                decision.supported_hypotheses[0]
+                if len(decision.supported_hypotheses) == 1
+                else None
+            )
+            if causal_coverage.complete:
+                next_route = "decision"
+                termination_reason = "evidence_sufficient"
+            elif attempt_count < max_total_steps:
+                refinement_index = next_causal_refinement_index(
                     plan=plan,
                     plan_index=plan_index,
-                    supported_hypotheses=decision.supported_hypotheses,
+                    missing_roles=causal_coverage.missing_roles,
+                    supported_hypothesis_id=supported_hypothesis_id,
                     executed_fingerprints=cast(
                         list[str], state.get("executed_step_fingerprints") or []
                     ),
+                    fingerprint=_step_fingerprint,
                 )
-            if refinement_index is not None:
-                next_route = "executor"
+                if refinement_index is not None:
+                    next_route = "executor"
+                    termination_reason = ""
+                    refinement_reason = "missing_causal_role_plan_step_remaining"
+                elif _can_replan(state):
+                    next_route = "replanner"
+                    termination_reason = ""
+                    refinement_reason = "missing_causal_role_requires_replan"
+                else:
+                    next_route = "decision"
+                    termination_reason = _budget_termination_reason(state)
+            elif _can_replan(state):
+                next_route = "replanner"
                 termination_reason = ""
-                refinement_reason = "supported_hypothesis_plan_step_remaining"
+                refinement_reason = "missing_causal_role_requires_replan"
             else:
                 next_route = "decision"
-                termination_reason = "evidence_sufficient"
+                termination_reason = _budget_termination_reason(state)
         elif plan_index < len(plan) and attempt_count < max_total_steps:
             next_route = "executor"
             termination_reason = ""
@@ -2425,6 +2486,9 @@ def _observation_decision_payload(
         "summary": decision.summary,
         "evidenceIds": [evidence_id],
         "causalRole": decision.causal_role,
+        "causalRoleOrigin": decision.causal_role_origin,
+        "reportedCausalRole": decision.reported_causal_role,
+        "causalRoleCorrected": decision.causal_role_corrected,
     }
 
 
