@@ -61,6 +61,45 @@ allowlisted error category、尝试次数、warning 和 deterministic check resu
 - **THEN** Decision 与 Validator MUST 使用 `json_mode` 构造 structured invoker
 - **AND** Workflow MUST 保留既有 schema 校验、一次格式纠正和安全错误分类
 
+### Requirement: Semantic validation uses an independently configured model
+
+后端 SHALL 允许 Decision Validator 使用与主 Agent 不同的 Chat Model，并 SHALL 复用同一
+Provider 的凭据、Base URL、timeout 与 retry 设置。未配置独立 Validator 的历史配置和测试
+Provider SHALL 回退主 Chat Model；只有 Decision Validator 节点可使用该独立模型。
+
+#### Scenario: Dedicated Validator is configured
+- **WHEN** `validatorModel=qwen3.8-max` 且其 capability 声明 `structuredOutputMethod=json_mode`
+- **THEN** Decision Validator MUST 使用 `qwen3.8-max` 和 `json_mode`
+- **AND** Planner、Executor、Evidence Evaluation、Sufficiency、Decision、Recovery 与 Report MUST 继续使用主 Agent 模型
+
+#### Scenario: Validator model profile is missing
+- **WHEN** `validatorModel` 指向没有 capability profile 的模型
+- **THEN** 配置加载 MUST fail closed
+- **AND** 系统 MUST NOT 静默切换到未知模型
+
+### Requirement: Validator parse diagnostics are secret-safe and auditable
+
+Workflow SHALL 将 structured parse 失败分类为允许列表中的 `invalid_json`、
+`structured_envelope_mismatch`、`missing_required_field`、`invalid_enum`、
+`wrong_container_type`、`extra_field`、`unknown_evidence_id` 或
+`invalid_json_or_schema`，并 SHALL 在 Step、Checkpoint 与 Run Artifact 中保存安全模型名、
+错误码、category、phase 和尝试次数。
+
+#### Scenario: First response needs a format correction
+- **WHEN** Validator 第一次响应无法通过 JSON 或 Schema 校验且第二次响应合法
+- **THEN** 最终 validation error category MUST 为空
+- **AND** 审计 MUST 保留第一次的安全 parse code
+
+#### Scenario: Parse failure is exhausted
+- **WHEN** 两次 Validator 响应均无法通过 JSON 或 Schema 校验
+- **THEN** Workflow MUST 保存 `retry_exhausted` 和 `structured_parse`
+- **AND** Workflow MUST NOT 保存 Prompt、原始响应、异常正文、字段值、凭据、Ground Truth、Oracle 或原始 CLS 日志
+
+#### Scenario: Validation audit contains malformed metadata
+- **WHEN** 持久化 validation payload 包含未知枚举值或不符合 `^[A-Za-z0-9._-]{1,120}$` 的模型名
+- **THEN** Run Artifact MUST 丢弃该值
+- **AND** Benchmark scoring MUST 保持不变
+
 ### Requirement: Persisted hypothesis state is authoritative for sufficiency
 
 Sufficiency Gate SHALL 从公开 Hypothesis 全集和持久化 Hypothesis State 确定

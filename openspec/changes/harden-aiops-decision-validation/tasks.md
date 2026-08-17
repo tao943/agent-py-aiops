@@ -28,3 +28,11 @@
 - [x] 5.2 存在 open competitor 时定向执行相关未运行 Plan Step 或有界 Replan
 - [x] 5.3 仅对表达检查失败且 Evidence 完整的 Candidate 做 Observation 规范化
 - [x] 5.4 运行两组专项 pytest、Ruff、Pyright 和 focused OpenSpec strict
+
+## 6. 独立 LLM Validator 与安全解析审计
+
+- [x] 6.1 为 `validatorModel` 增加独立 capability profile，并兼容缺省回退主模型
+- [x] 6.2 只将 Decision Validator 路由到 `qwen3.8-max`，其余 Agent 节点保持主模型
+- [x] 6.3 以 TDD 增加八类脱敏 structured parse 子分类和有界重试审计
+- [x] 6.4 将模型名与错误码安全投影到 Step、Checkpoint 和 Run Artifact，不改变评分
+- [x] 6.5 运行两组专项离线回归和一次合成 `qwen3.8-max` Live readiness

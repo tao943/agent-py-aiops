@@ -4,7 +4,10 @@ import math
 
 import pytest
 
-from super_ai.aiops.decision_validation import invoke_structured_root_cause_decision
+from super_ai.aiops.decision_validation import (
+    invoke_structured_root_cause_decision,
+    invoke_structured_root_cause_validation,
+)
 from super_ai.llm import (
     LlmConfigurationError,
     QwenOpenAIProvider,
@@ -48,6 +51,29 @@ async def test_live_structured_decision_readiness(
     )
 
     assert outcome.decision is not None, repr(outcome)
+    assert outcome.error_category is None
+
+
+@pytest.mark.asyncio
+async def test_live_dedicated_validator_readiness(
+    live_provider: QwenOpenAIProvider,
+) -> None:
+    outcome = await invoke_structured_root_cause_validation(
+        model=live_provider.create_validator_model(),
+        prompt=(
+            "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
+            "and summary. Validate these fictional public facts: a synthetic trigger caused "
+            "a synthetic impact, and both facts support the candidate. Return status valid, "
+            "evidenceIds [ev-synthetic-trigger, ev-synthetic-impact], empty unsupportedFields, "
+            "empty missingEvidence, and a short public summary."
+        ),
+        available_evidence_ids={"ev-synthetic-trigger", "ev-synthetic-impact"},
+        structured_output_method=live_provider.validator_structured_output_method,
+    )
+
+    assert live_provider.validator_model_name == "qwen3.8-max"
+    assert outcome.decision is not None, repr(outcome)
+    assert outcome.decision.status == "valid"
     assert outcome.error_category is None
 
 

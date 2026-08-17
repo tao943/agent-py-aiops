@@ -479,6 +479,24 @@ clean、Pyright `0 errors`、`harden-aiops-decision-validation --strict` valid�
 通过。本轮没有再次执行真实 LLM APY-013，因此不新增真实分数或达标声明；下一次真实验收仍需
 单独授权并保存为新的独立 Run。
 
+### 独立 qwen3.8-max Validator readiness（2026-08-18）
+
+主 Agent 继续使用 `qwen3.7-plus`；只有语义 Decision Validator 使用 `qwen3.8-max`。两者复用
+现有 DashScope API Key、Base URL、timeout 与 retry 配置，并分别使用各自 capability profile
+中的 `json_mode`。历史配置缺少 `validatorModel` 时兼容回退主模型；配置了模型但缺少 capability
+profile 时 fail closed。
+
+Validator Prompt 现在包含明确的 JSON 指令和只描述形状的安全示例。structured parse 失败可审计
+区分非法 JSON、envelope、缺字段、枚举、容器、额外字段、非当前任务 Evidence ID 和兼容回退；
+Step、Checkpoint 与 Run Artifact 仅保存允许列表模型名和错误分类，不保存 Prompt、原始响应、
+异常正文、字段值、凭据、Ground Truth、Oracle 或原始 CLS 日志。确定性 Validator、Benchmark
+权重/阈值、Policy Gate 与恢复权限均未改变。
+
+本轮没有运行全量 pytest。离线 Group A 115 项、Group B 88 项全部通过；随后只运行一次使用
+虚构公开事实和虚构 Evidence ID 的真实 Validator readiness，`qwen3.8-max` 在约 16 秒内通过
+Pydantic Schema 并返回 `valid`。该 readiness 未读取 APY、RAG、CLS 或 PostgreSQL 诊断证据，
+也没有运行 APY-013，因此没有产生新的 Benchmark 分数或达标声明。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
