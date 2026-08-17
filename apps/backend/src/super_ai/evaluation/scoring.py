@@ -7,6 +7,7 @@ from typing import Literal
 
 from super_ai.evaluation.artifacts import RunArtifact, tool_observation_role
 from super_ai.evaluation.domain import ScenarioOracle
+from super_ai.evaluation.semantic_scoring import score_root_cause_semantics
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +107,23 @@ def _score_diagnosis(
 
     component_correct = decision.component == oracle.primary_cause.component
     mechanism_correct = decision.mechanism == oracle.primary_cause.mechanism
-    trigger_correct = decision.trigger == oracle.primary_cause.trigger
+    semantic = (
+        score_root_cause_semantics(decision, oracle)
+        if oracle.root_cause_semantics is not None
+        else None
+    )
+    trigger_correct = (
+        semantic.trigger == 4
+        if semantic is not None
+        else decision.trigger == oracle.primary_cause.trigger
+    )
     cause_relationship_correct = not oracle.contributing_causes
-    causal_chain_correct = decision.causal_chain == oracle.causal_chain
+    causal_chain_correct = (
+        bool(semantic.milestones)
+        and all(points == 2 for _, points in semantic.milestones)
+        if semantic is not None
+        else decision.causal_chain == oracle.causal_chain
+    )
     refuted = {item.id for item in artifact.hypothesis_states if item.status == "refuted"}
     rule_outs_correct = set(oracle.required_rule_outs) <= refuted
     if not component_correct:

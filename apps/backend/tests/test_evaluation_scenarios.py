@@ -101,6 +101,29 @@ def test_expansion_scenarios_require_discriminating_evidence(
     validate_scenario_bundle(ScenarioBundle(public=public, oracle=oracle, root=root))
 
 
+def test_apy_013_loads_private_root_cause_semantics() -> None:
+    public = load_public_scenario(SCENARIOS / "APY-013")
+    oracle = load_scenario_oracle(SCENARIOS / "APY-013")
+
+    assert oracle.root_cause_semantics is not None
+    assert oracle.root_cause_semantics.trigger.all_of == (
+        "transaction",
+        "order_resource",
+        "inventory_resource",
+        "opposite_order",
+    )
+    assert tuple(
+        item.id for item in oracle.root_cause_semantics.causal_milestones
+    ) == (
+        "opposite_resource_acquisition",
+        "cyclic_lock_wait",
+        "postgres_deadlock_abort",
+    )
+    serialized_public = repr(asdict(public)).casefold()
+    assert "root_cause_semantics" not in serialized_public
+    assert "sqlstate 40p01" not in serialized_public
+
+
 @pytest.fixture
 def valid_scenario_dir(tmp_path: Path) -> Path:
     scenario_dir = tmp_path / "APY-003"

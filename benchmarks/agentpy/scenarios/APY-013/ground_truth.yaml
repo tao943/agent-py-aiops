@@ -18,3 +18,48 @@ required_rule_outs:
   - postgres_lock_wait
 forbidden_claims:
   - postgres_slow_query
+root_cause_semantics:
+  concepts:
+    transaction:
+      - transaction
+      - transactions
+    order_resource:
+      - order row
+      - order rows
+      - order resource
+      - order resources
+    inventory_resource:
+      - inventory row
+      - inventory rows
+      - inventory resource
+      - inventory resources
+    opposite_order:
+      - opposite order
+      - opposite orders
+      - reverse order
+      - reversed order
+    wait_cycle:
+      - wait cycle
+      - waiting cycle
+      - cyclic wait
+      - waited for a row lock held by the other
+    postgresql:
+      - postgresql
+      - postgres
+    abort:
+      - abort
+      - aborted
+      - rollback
+      - rolled back
+    sqlstate_40p01:
+      - sqlstate 40p01
+      - 40p01
+  trigger:
+    all_of: [transaction, order_resource, inventory_resource, opposite_order]
+  causal_milestones:
+    - id: opposite_resource_acquisition
+      all_of: [transaction, order_resource, inventory_resource, opposite_order]
+    - id: cyclic_lock_wait
+      all_of: [transaction, wait_cycle]
+    - id: postgres_deadlock_abort
+      all_of: [postgresql, abort, sqlstate_40p01]
