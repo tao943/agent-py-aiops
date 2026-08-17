@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Collection, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from typing import Literal, cast
+
+from super_ai.aiops.causal_intents import (
+    CausalIntent,
+    CausalIntentOrigin,
+    allowed_causal_intents,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +22,8 @@ class DiagnosticPlanStep:
     arguments: dict[str, object]
     purpose: str
     tests_hypotheses: tuple[str, ...]
+    causal_intent: CausalIntent
+    causal_intent_origin: CausalIntentOrigin = "model"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +34,7 @@ class HypothesisState:
     evidence_ids: tuple[str, ...]
 
 
-CausalRole = Literal["trigger", "mechanism", "impact", "context"]
+CausalRole = CausalIntent
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +137,7 @@ def parse_plan(
     *,
     available_tools: Set[str],
     known_hypotheses: Set[str],
+    causal_capabilities: Mapping[str, Collection[CausalIntent]] | None = None,
 ) -> tuple[DiagnosticPlanStep, ...]:
     """Parse a bounded plan that can use only discovered tools and public hypotheses."""
     payload = _json_mapping(text)
@@ -158,6 +167,21 @@ def parse_plan(
                 + "."
             )
         arguments = dict(_required_mapping(step, "arguments"))
+        causal_intent_value = _required_str(step, "causalIntent")
+        if causal_intent_value not in {"trigger", "mechanism", "impact", "context"}:
+            raise ValueError(
+                "Plan causalIntent must be trigger, mechanism, impact, or context."
+            )
+        causal_intent = cast(CausalIntent, causal_intent_value)
+        capabilities = (
+            frozenset(causal_capabilities.get(tool, ()))
+            if causal_capabilities is not None
+            else allowed_causal_intents(tool)
+        )
+        if causal_intent not in capabilities:
+            raise ValueError(
+                f"Plan causalIntent {causal_intent!r} is not allowed for tool {tool}."
+            )
         parsed.append(
             DiagnosticPlanStep(
                 id=step_id,
@@ -165,6 +189,7 @@ def parse_plan(
                 arguments=arguments,
                 purpose=_required_str(step, "purpose"),
                 tests_hypotheses=tested,
+                causal_intent=causal_intent,
             )
         )
     return tuple(parsed)

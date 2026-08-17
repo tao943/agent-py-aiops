@@ -626,9 +626,34 @@ def test_plan_rejects_unknown_tools_and_hypotheses() -> None:
     with pytest.raises(ValueError, match="unknown hypothesis"):
         parse_plan(
             '{"steps":[{"id":"x","tool":"InspectContainer","arguments":{},'
-            '"purpose":"inspect","testsHypotheses":["invented"]}]}',
+            '"purpose":"inspect","testsHypotheses":["invented"],'
+            '"causalIntent":"context"}]}',
             available_tools={"InspectContainer"},
             known_hypotheses={"process-down"},
+        )
+
+
+def test_plan_requires_causal_intent() -> None:
+    with pytest.raises(ValueError, match="causalIntent"):
+        parse_plan(
+            '{"steps":[{"id":"x","tool":"InspectPostgresWaitGraph",'
+            '"arguments":{},"purpose":"inspect",'
+            '"testsHypotheses":["deadlock"]}]}',
+            available_tools={"InspectPostgresWaitGraph"},
+            known_hypotheses={"deadlock"},
+            causal_capabilities={"InspectPostgresWaitGraph": {"mechanism"}},
+        )
+
+
+def test_plan_rejects_intent_outside_tool_capability() -> None:
+    with pytest.raises(ValueError, match="causalIntent"):
+        parse_plan(
+            '{"steps":[{"id":"x","tool":"InspectPostgresWaitGraph",'
+            '"arguments":{},"purpose":"inspect",'
+            '"testsHypotheses":["deadlock"],"causalIntent":"trigger"}]}',
+            available_tools={"InspectPostgresWaitGraph"},
+            known_hypotheses={"deadlock"},
+            causal_capabilities={"InspectPostgresWaitGraph": {"mechanism"}},
         )
 
 
