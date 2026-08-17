@@ -9,12 +9,15 @@ import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
+    _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
+    _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
     build_grounded_fallback_decision,
     normalize_tool_plan_steps,
 )
 from super_ai.aiops.reasoning import (
+    EvidenceSufficiencyDecision,
     RootCauseDecision,
     normalize_root_cause_decision,
     parse_evidence_sufficiency,
@@ -35,6 +38,112 @@ from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+def _model_sufficiency() -> EvidenceSufficiencyDecision:
+    return EvidenceSufficiencyDecision(
+        status="sufficient",
+        evidence_ids=("ev-cycle",),
+        supported_hypotheses=("postgres_deadlock",),
+        refuted_hypotheses=("postgres_lock_wait", "postgres_slow_query"),
+        unresolved_hypotheses=(),
+        missing_evidence=(),
+        recommended_tools=(),
+        summary="The model claims every competitor is closed.",
+    )
+
+
+def test_authoritative_sufficiency_projects_public_persisted_states() -> None:
+    public_hypotheses: list[JsonDict] = [
+        {"id": "postgres_deadlock"},
+        {"id": "postgres_lock_wait"},
+        {"id": "postgres_slow_query"},
+    ]
+    projected = _project_evidence_sufficiency(
+        model_decision=_model_sufficiency(),
+        public_hypotheses=public_hypotheses,
+        hypothesis_states=[
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_lock_wait", "status": "open"},
+            {"id": "postgres_slow_query", "status": "open"},
+        ],
+        evidence_ids=("ev-cycle",),
+    )
+
+    assert projected.status == "insufficient"
+    assert projected.supported_hypotheses == ("postgres_deadlock",)
+    assert projected.refuted_hypotheses == ()
+    assert projected.unresolved_hypotheses == (
+        "postgres_lock_wait",
+        "postgres_slow_query",
+    )
+
+    complete = _project_evidence_sufficiency(
+        model_decision=_model_sufficiency(),
+        public_hypotheses=public_hypotheses,
+        hypothesis_states=[
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_lock_wait", "status": "refuted"},
+            {"id": "postgres_slow_query", "status": "refuted"},
+        ],
+        evidence_ids=("ev-cycle",),
+    )
+    assert complete.status == "sufficient"
+
+
+@pytest.mark.parametrize(
+    "hypothesis_states",
+    [
+        [{"id": "postgres_deadlock", "status": "supported"}],
+        [
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_deadlock", "status": "refuted"},
+            {"id": "postgres_lock_wait", "status": "refuted"},
+        ],
+        [
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_lock_wait", "status": "refuted"},
+            {"id": "private_oracle", "status": "refuted"},
+        ],
+    ],
+)
+def test_authoritative_sufficiency_fails_closed_for_incomplete_or_invalid_state(
+    hypothesis_states: list[JsonDict],
+) -> None:
+    projected = _project_evidence_sufficiency(
+        model_decision=_model_sufficiency(),
+        public_hypotheses=[
+            {"id": "postgres_deadlock"},
+            {"id": "postgres_lock_wait"},
+        ],
+        hypothesis_states=hypothesis_states,
+        evidence_ids=("ev-cycle",),
+    )
+
+    assert projected.status == "insufficient"
+    assert "private_oracle" not in (
+        *projected.supported_hypotheses,
+        *projected.refuted_hypotheses,
+        *projected.unresolved_hypotheses,
+    )
+
+
+def test_sufficiency_model_failure_uses_authoritative_projection() -> None:
+    decision = _fallback_evidence_sufficiency(
+        public_hypotheses=[
+            {"id": "postgres_deadlock"},
+            {"id": "postgres_lock_wait"},
+        ],
+        hypothesis_states=[
+            {"id": "postgres_deadlock", "status": "supported"},
+            {"id": "postgres_lock_wait", "status": "refuted"},
+        ],
+        evidence_ids=("ev-cycle",),
+    )
+
+    assert decision.status == "sufficient"
+    assert decision.supported_hypotheses == ("postgres_deadlock",)
+    assert decision.refuted_hypotheses == ("postgres_lock_wait",)
 
 
 def _refinement_step(

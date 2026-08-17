@@ -1232,11 +1232,20 @@ class AiopsDiagnosticService:
             )
         except Exception:
             decision = _fallback_evidence_sufficiency(
+                public_hypotheses=public_hypotheses,
                 hypothesis_states=cast(
                     list[JsonDict], state.get("hypothesis_states") or []
                 ),
                 evidence_ids=evidence_ids,
             )
+        decision = _project_evidence_sufficiency(
+            model_decision=decision,
+            public_hypotheses=public_hypotheses,
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            evidence_ids=evidence_ids,
+        )
         payload = _evidence_sufficiency_payload(decision)
         causal_coverage = supported_causal_coverage(
             hypothesis_states=cast(
@@ -2411,33 +2420,75 @@ def _budget_termination_reason(state: AiopsDiagnosticState) -> str:
 
 def _fallback_evidence_sufficiency(
     *,
+    public_hypotheses: Sequence[JsonDict],
     hypothesis_states: Sequence[JsonDict],
     evidence_ids: Sequence[str],
 ) -> EvidenceSufficiencyDecision:
-    supported = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") == "supported"
-    )
-    refuted = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") == "refuted"
-    )
-    unresolved = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") not in {"supported", "refuted"}
-    )
-    return EvidenceSufficiencyDecision(
+    fallback = EvidenceSufficiencyDecision(
         status="insufficient",
         evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
-        supported_hypotheses=supported[:6],
-        refuted_hypotheses=refuted[:6],
-        unresolved_hypotheses=unresolved[:6],
+        supported_hypotheses=(),
+        refuted_hypotheses=(),
+        unresolved_hypotheses=(),
         missing_evidence=("Structured sufficiency assessment was unavailable.",),
         recommended_tools=(),
         summary="Evidence sufficiency could not be confirmed.",
+    )
+    return _project_evidence_sufficiency(
+        model_decision=fallback,
+        public_hypotheses=public_hypotheses,
+        hypothesis_states=hypothesis_states,
+        evidence_ids=evidence_ids,
+    )
+
+
+def _project_evidence_sufficiency(
+    *,
+    model_decision: EvidenceSufficiencyDecision,
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    evidence_ids: Sequence[str],
+) -> EvidenceSufficiencyDecision:
+    public_ids = _unique_strings(
+        [str(item.get("id") or "") for item in public_hypotheses]
+    )
+    public_set = set(public_ids)
+    state_by_id: dict[str, JsonDict] = {}
+    state_integrity_valid = True
+    for item in hypothesis_states:
+        hypothesis_id = str(item.get("id") or "")
+        if not hypothesis_id or hypothesis_id not in public_set:
+            state_integrity_valid = False
+            continue
+        if hypothesis_id in state_by_id:
+            state_integrity_valid = False
+            continue
+        state_by_id[hypothesis_id] = item
+
+    supported: list[str] = []
+    refuted: list[str] = []
+    unresolved: list[str] = []
+    for hypothesis_id in public_ids:
+        status = str(state_by_id.get(hypothesis_id, {}).get("status") or "open")
+        if status == "supported":
+            supported.append(hypothesis_id)
+        elif status == "refuted":
+            refuted.append(hypothesis_id)
+        else:
+            unresolved.append(hypothesis_id)
+
+    sufficient = (
+        state_integrity_valid and len(supported) == 1 and not unresolved
+    )
+    return EvidenceSufficiencyDecision(
+        status="sufficient" if sufficient else "insufficient",
+        evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
+        supported_hypotheses=tuple(supported[:6]),
+        refuted_hypotheses=tuple(refuted[:6]),
+        unresolved_hypotheses=tuple(unresolved[:6]),
+        missing_evidence=() if sufficient else model_decision.missing_evidence,
+        recommended_tools=() if sufficient else model_decision.recommended_tools,
+        summary=model_decision.summary,
     )
 
 
