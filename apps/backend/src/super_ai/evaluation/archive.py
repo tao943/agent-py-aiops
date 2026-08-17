@@ -15,6 +15,10 @@ from super_ai.project_config import ProjectConfigurationError, load_project_conf
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 
 
+class EvaluationArchiveError(RuntimeError):
+    """The durable local evaluation archive could not be written."""
+
+
 class EvaluationArchive:
     """Persist versioned run envelopes outside disposable Git worktrees."""
 
@@ -137,9 +141,9 @@ class EvaluationArchive:
         return EvaluationRunEnvelope.from_json(cast(Mapping[str, object], raw))
 
     def _atomic_write(self, path: Path, envelope: EvaluationRunEnvelope) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             with temporary.open("x", encoding="utf-8", newline="\n") as stream:
                 json.dump(
                     envelope.to_json(),
@@ -152,9 +156,14 @@ class EvaluationArchive:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+        except OSError as exc:
+            raise EvaluationArchiveError("Evaluation archive write failed.") from exc
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
 
 
 def _same_identity(running: EvaluationRunEnvelope, terminal: EvaluationRunEnvelope) -> bool:

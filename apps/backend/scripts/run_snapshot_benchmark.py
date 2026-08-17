@@ -5,21 +5,30 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
+import signal
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
+from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.cli import (
     evaluation_exit_code,
     evaluation_result_payload,
     safe_failure_payload,
 )
+from super_ai.evaluation.history import (
+    interrupted_envelope,
+    running_envelope,
+    terminal_envelope,
+)
 from super_ai.evaluation.persistence import EvaluationRepository
+from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.evaluation.runner import (
     AgentVersion,
     ApplicationDiagnosticAdapter,
+    BenchmarkRunError,
     NullKnowledgeRetrievalTool,
     SnapshotBenchmarkRunner,
 )
@@ -54,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--owner-user-id",
-        help="Authorized knowledge owner; may also use AGENTPY_EVAL_OWNER_USER_ID.",
+        help="Explicit authorized knowledge owner for RAG-on runs.",
     )
     parser.add_argument(
         "--knowledge-base-id",
@@ -67,7 +76,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
     if arguments.runs < 1:
         raise ValueError("--runs must be at least 1.")
     config_path = str(arguments.config) if arguments.config is not None else None
-    owner_user_id = arguments.owner_user_id or os.getenv("AGENTPY_EVAL_OWNER_USER_ID")
+    owner_user_id = arguments.owner_user_id
     knowledge_base_id = arguments.knowledge_base_id or (
         f"kb_{owner_user_id}" if owner_user_id else None
     )
@@ -105,37 +114,37 @@ async def run_command(arguments: argparse.Namespace) -> int:
         runner = SnapshotBenchmarkRunner(
             scenario_root=SCENARIO_ROOT,
             adapter=adapter,
-            persistence=EvaluationRepository(session_factory),
-            suite_version=arguments.suite_version,
-            model_configuration={
-                "provider": provider_config.provider,
-                "model": provider_config.chat_model,
-                "base_url": provider_config.base_url,
-                "temperature": provider_config.temperature,
-                "rag_mode": arguments.rag_mode,
-            },
+        )
+        recorder = EvaluationRunRecorder(
+            archive=EvaluationArchive.from_config(config_path=arguments.config),
+            repository=EvaluationRepository(session_factory),
         )
         agent_version = AgentVersion(
             git_sha=_git_sha(),
             workflow_version="agentpy-domainbench-v1",
         )
+        model_configuration: dict[str, object] = {
+            "provider": provider_config.provider,
+            "model": provider_config.chat_model,
+            "baseUrl": provider_config.base_url,
+            "temperature": provider_config.temperature,
+        }
         reports: list[dict[str, object]] = []
+        database_pending = False
         for _ in range(arguments.runs):
             run_id = f"eval-{uuid4().hex}"
-            started_at = monotonic()
-            result = await runner.run(
-                arguments.scenario,
-                agent_version=agent_version,
+            report, pending = await _run_snapshot_once(
+                scenario_id=arguments.scenario,
+                suite_version=arguments.suite_version,
+                rag_mode=arguments.rag_mode,
                 run_id=run_id,
+                agent_version=agent_version,
+                model_configuration=model_configuration,
+                runner=runner,
+                recorder=recorder,
             )
-            reports.append(
-                evaluation_result_payload(
-                    scenario_id=arguments.scenario,
-                    run_id=run_id,
-                    duration_ms=round((monotonic() - started_at) * 1_000),
-                    result=result,
-                )
-            )
+            reports.append(report)
+            database_pending = database_pending or pending
     finally:
         await engine.dispose()
 
@@ -150,7 +159,112 @@ async def run_command(arguments: argparse.Namespace) -> int:
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(f"{serialized}\n", encoding="utf-8")
-    return evaluation_exit_code(reports)
+    return 2 if database_pending else evaluation_exit_code(reports)
+
+
+async def _run_snapshot_once(
+    *,
+    scenario_id: str,
+    suite_version: str,
+    rag_mode: str,
+    run_id: str,
+    agent_version: AgentVersion,
+    model_configuration: dict[str, object],
+    runner: SnapshotBenchmarkRunner,
+    recorder: EvaluationRunRecorder,
+) -> tuple[dict[str, object], bool]:
+    created_at = datetime.now(timezone.utc)
+    running = running_envelope(
+        run_id=run_id,
+        evaluation_kind="snapshot",
+        scenario_id=scenario_id,
+        suite_version=suite_version,
+        metadata={
+            "gitSha": agent_version.git_sha,
+            "workflowVersion": agent_version.workflow_version,
+            "modelConfiguration": model_configuration,
+            "ragMode": rag_mode,
+        },
+        created_at=created_at,
+        started_at=created_at,
+    )
+    start_outcome = await recorder.start(running)
+    monotonic_start = monotonic()
+    try:
+        outcome = await runner.run(scenario_id, run_id=run_id)
+    except BenchmarkRunError as exc:
+        terminal = terminal_envelope(
+            running=running,
+            status="agent_failed" if exc.status == "agent_failed" else "infra_invalid",
+            validity="INFRA_INVALID",
+            passed=None,
+            metrics={},
+            result_payload={},
+            diagnostic_task_id=None,
+            failure_category=exc.category,
+            completed_at=datetime.now(timezone.utc),
+        )
+        finish_outcome = await recorder.fail(terminal)
+        return (
+            {
+                "scenario": scenario_id,
+                "runId": run_id,
+                "status": terminal.status,
+                "failureCategory": exc.category,
+                "validity": "invalid",
+                "passed": False,
+            },
+            start_outcome.database_pending or finish_outcome.database_pending,
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        terminal = interrupted_envelope(
+            running,
+            completed_at=datetime.now(timezone.utc),
+        )
+        await recorder.fail(terminal)
+        raise
+
+    result = outcome.result
+    terminal = terminal_envelope(
+        running=running,
+        status="passed" if result.passed else "failed",
+        validity=result.validity,
+        passed=result.passed,
+        metrics={
+            "outcome": result.outcome,
+            "diagnosis": result.diagnosis,
+            "evidence": result.evidence,
+            "process": result.process,
+            "safety": result.safety,
+            "efficiency": result.efficiency,
+            "total": result.total,
+            "rawTotal": result.raw_total,
+        },
+        result_payload={
+            "failures": list(result.failures),
+            "scoreReasons": [
+                {
+                    "code": reason.code,
+                    "points": reason.points,
+                    "maximum": reason.maximum,
+                    "evidenceIds": list(reason.evidence_ids),
+                }
+                for reason in result.reasons
+            ],
+            "hardGate": result.hard_gate,
+        },
+        diagnostic_task_id=outcome.diagnostic_task_id,
+        failure_category=None,
+        completed_at=datetime.now(timezone.utc),
+    )
+    finish_outcome = await recorder.finish(terminal)
+    report = evaluation_result_payload(
+        scenario_id=scenario_id,
+        run_id=run_id,
+        duration_ms=round((monotonic() - monotonic_start) * 1_000),
+        result=result,
+    )
+    return report, start_outcome.database_pending or finish_outcome.database_pending
 
 
 def _git_sha() -> str:
@@ -168,10 +282,33 @@ def main() -> int:
     parser = build_parser()
     arguments = parser.parse_args()
     try:
-        return asyncio.run(run_command(arguments))
+        return asyncio.run(_run_with_sigterm(arguments))
+    except KeyboardInterrupt:
+        return 130
     except Exception as exc:
         print(json.dumps(safe_failure_payload(exc), ensure_ascii=False))
         return 2
+
+
+async def _run_with_sigterm(arguments: argparse.Namespace) -> int:
+    """Route supported SIGTERM delivery through the interrupt persistence path."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(run_command(arguments))
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def cancel_active_run(_signum: int, _frame: object) -> None:
+        loop.call_soon_threadsafe(task.cancel)
+
+    try:
+        signal.signal(signal.SIGTERM, cancel_active_run)
+    except (ValueError, OSError):
+        return await task
+    try:
+        return await task
+    except asyncio.CancelledError as exc:
+        raise KeyboardInterrupt from exc
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

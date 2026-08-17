@@ -3,6 +3,12 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.recording import EvaluationRunRecorder
+from super_ai.evaluation.runner import AgentVersion, BenchmarkRunError
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_snapshot_benchmark.py"
 SPEC = importlib.util.spec_from_file_location("run_snapshot_benchmark", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -22,6 +28,11 @@ def test_snapshot_cli_has_explicit_rag_mode_defaulting_on() -> None:
     )
 
 
+def test_snapshot_output_is_optional_export_not_primary_storage() -> None:
+    arguments = MODULE.build_parser().parse_args(["--scenario", "APY-013"])
+    assert arguments.output is None
+
+
 def test_snapshot_cli_accepts_explicit_retrieval_scope() -> None:
     arguments = MODULE.build_parser().parse_args(
         [
@@ -36,3 +47,46 @@ def test_snapshot_cli_accepts_explicit_retrieval_scope() -> None:
 
     assert arguments.owner_user_id == "eval-owner"
     assert arguments.knowledge_base_id == "kb-eval-owner"
+
+
+class AvailableRepository:
+    async def start_envelope(self, envelope: object) -> None:
+        del envelope
+
+    async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
+        del envelope, artifact_checksum
+
+
+class RaisingRunner:
+    async def run(self, scenario_id: str, *, run_id: str) -> None:
+        del scenario_id, run_id
+        raise BenchmarkRunError("agent_failed", "adapter_error")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_still_finalizes_safe_archive(tmp_path: Path) -> None:
+    archive = EvaluationArchive(
+        tmp_path / "archive",
+        repository_root=tmp_path / "repository",
+    )
+    recorder = EvaluationRunRecorder(
+        archive=archive,
+        repository=AvailableRepository(),
+    )
+
+    report, pending = await MODULE._run_snapshot_once(
+        scenario_id="APY-013",
+        suite_version="v1",
+        rag_mode="off",
+        run_id="eval-cli-failure",
+        agent_version=AgentVersion(git_sha="abc", workflow_version="v1"),
+        model_configuration={"provider": "offline", "model": "scripted"},
+        runner=RaisingRunner(),
+        recorder=recorder,
+    )
+
+    saved = archive.load("eval-cli-failure")
+    assert pending is False
+    assert report["status"] == "agent_failed"
+    assert saved.status == "agent_failed"
+    assert saved.failure_category == "adapter_error"
