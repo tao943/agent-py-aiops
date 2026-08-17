@@ -121,7 +121,8 @@ git commit -m "feat: configure a dedicated validator model"
 
 - [ ] **Step 1: Write failing parse classification tests**
 
-Use raw `SequenceChatModel` responses and structured envelopes to cover:
+Use raw `SequenceChatModel` responses and realistic LangChain envelopes whose `parsing_error`
+contains `ValidationError` or `JSONDecodeError` to cover:
 
 ```python
 (
@@ -132,6 +133,7 @@ Use raw `SequenceChatModel` responses and structured envelopes to cover:
     "wrong_container_type",
     "extra_field",
     "unknown_evidence_id",
+    "invalid_json_or_schema",
 )
 ```
 
@@ -147,11 +149,11 @@ Expected: FAIL because all parse failures currently collapse to `invalid_json_or
 
 - [ ] **Step 3: Implement safe classification**
 
-Catch `json.JSONDecodeError` as `invalid_json`. Validate structured envelope keys before schema conversion and map malformed envelope/parsing error to `structured_envelope_mismatch`. Catch Pydantic `ValidationError`, project only `error["type"]` and the final allowlisted string in `error["loc"]`, then map `missing`, `literal_error`, list/tuple/set type errors, and `extra_forbidden`. Validate Evidence ownership after schema validation and raise `unknown_evidence_id` without retaining the ID. Other `TypeError`/`ValueError` maps to `invalid_json_or_schema`.
+Catch `json.JSONDecodeError` as `invalid_json`. Validate structured envelope keys before schema conversion. When envelope `parsing_error` is a Pydantic `ValidationError`, project its safe codes; when it is `JSONDecodeError`, map `invalid_json`; only unknown envelope error types or malformed envelope keys map to `structured_envelope_mismatch`. Catch Pydantic `ValidationError`, project only `error["type"]` and the final allowlisted string in `error["loc"]`, then map `missing`, `literal_error`, list/tuple/set type errors, and `extra_forbidden`. Validate Evidence ownership after schema validation and raise `unknown_evidence_id` without retaining the ID. Unknown Pydantic types and otherwise unclassified `TypeError`/`ValueError` map to `invalid_json_or_schema` without reading exception text.
 
 - [ ] **Step 4: Preserve errors across the bounded retry**
 
-Accumulate distinct codes from attempt one and two, stable in first-seen order and capped at six. A successful second attempt returns no error codes; two failures return the accumulated tuple. Do not change Provider exception classification.
+Accumulate distinct codes from attempt one and two, stable in first-seen order and capped at six. A successful second attempt keeps the first attempt's safe parse codes while returning `error_category=None`; two failures return all accumulated codes with `retry_exhausted`. Do not change Provider exception classification.
 
 - [ ] **Step 5: Run Task 2 tests and verify GREEN**
 
@@ -254,7 +256,7 @@ Expected: FAIL because RunArtifact lacks validation audit metadata.
 
 - [ ] **Step 3: Implement the safe projection**
 
-Read only the final `decision_validation` step. Allowlist origins, categories, phases, model strings matching the existing safe model-name character set, parse codes from Task 2, and integer attempts in `0..2`. Never copy unknown payload keys or response content.
+Read only the final `decision_validation` step. Allowlist origins, categories, phases, parse codes from Task 2, and integer attempts in `0..2`. Accept model names only when they match `^[A-Za-z0-9._-]{1,120}$`; add tests rejecting control characters, newline, whitespace, `/`, `\\`, and 121-character values. Never copy unknown payload keys or response content.
 
 - [ ] **Step 4: Run Task 4 tests and verify GREEN**
 

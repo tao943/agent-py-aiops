@@ -133,7 +133,8 @@ IDs，不包含 ground truth、正确标签、恢复动作或隐藏评分字段�
 Structured Parse 失败映射到以下允许列表：
 
 - `invalid_json`：原始非 structured 路径不是合法 JSON；
-- `structured_envelope_mismatch`：缺少 `parsed`、存在 `parsing_error` 或 envelope 形状错误；
+- `structured_envelope_mismatch`：envelope 缺少必要键、形状错误，或包含无法安全识别的
+  `parsing_error`；
 - `missing_required_field`：Pydantic `missing`；
 - `invalid_enum`：Pydantic `literal_error`；
 - `wrong_container_type`：列表字段收到非列表；
@@ -141,8 +142,15 @@ Structured Parse 失败映射到以下允许列表：
 - `unknown_evidence_id`：结构合法但引用非当前任务 Evidence ID；
 - `invalid_json_or_schema`：无法安全细分的兼容回退。
 
-分类函数只能使用异常类型、Pydantic error `type` 和允许列表 `loc`。不得读取或保存原始输入、
-`msg`、`ctx`、异常正文或模型响应。多错误去重后按稳定顺序保存，最多六项。
+LangChain `include_raw=True` 的 `parsing_error` 若为 Pydantic `ValidationError`，必须继续按
+`type/loc` 细分；若为 `JSONDecodeError`，映射为 `invalid_json`。只有未知异常类型才映射为
+`structured_envelope_mismatch`。分类函数只能使用异常类型、Pydantic error `type` 和允许列表
+`loc`，不得读取或保存原始输入、`msg`、`ctx`、异常正文或模型响应。多错误去重后按稳定顺序
+保存，最多六项。第一次失败、第二次纠正成功时仍保存第一次安全 parse code，同时最终
+`validationErrorCategory` 保持为空，以便统计依赖格式纠正的成功调用。
+
+`validationModel` 只接受正则 `^[A-Za-z0-9._-]{1,120}$`；控制字符、空白、斜杠、反斜杠和超长
+字符串不得进入 Artifact。
 
 Step、Checkpoint 和 Artifact 增加以下安全字段：
 
@@ -176,7 +184,9 @@ parse 子分类不与 Provider 调用错误混淆。
 2. Provider 创建 Validator 时模型名不同，但 API Key、Base URL、timeout/retry 相同且 API Key
    不进入 repr。
 3. Diagnostics 只在 Decision Validator 使用独立模型，其余节点保持主模型。
-4. 每个 parse 子分类都有直接失败测试；输出和 repr 不包含原始响应、字段值或异常正文。
+4. 每个 parse 子分类（包括兼容回退 `invalid_json_or_schema`）都有直接失败测试；真实
+   LangChain envelope 中的 Pydantic/JSON parsing error 可被继续细分；输出和 repr 不包含
+   原始响应、字段值或异常正文。
 5. `validationModel`、`validationErrorCodes` 在 Step/Checkpoint/Artifact 中一致，历史 Artifact
    缺失字段仍兼容。
 6. Validator Prompt 包含 JSON 指令和安全示例，且不包含 Ground Truth/Oracle。
