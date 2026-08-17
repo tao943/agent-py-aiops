@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 import openai
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
@@ -57,6 +57,24 @@ ValidationErrorPhase = Literal[
     "structured_parse",
 ]
 ValidationHttpStatusClass = Literal["4xx", "5xx"]
+StructuredParseErrorCode = Literal[
+    "invalid_json",
+    "structured_envelope_mismatch",
+    "missing_required_field",
+    "invalid_enum",
+    "wrong_container_type",
+    "extra_field",
+    "unknown_evidence_id",
+    "invalid_json_or_schema",
+]
+
+
+class _StructuredParseFailure(ValueError):
+    """Carry only allowlisted parse codes, never model data or error text."""
+
+    def __init__(self, *codes: StructuredParseErrorCode) -> None:
+        super().__init__()
+        self.codes = codes or ("invalid_json_or_schema",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +208,7 @@ async def invoke_structured_root_cause_validation(
         return _model_failure_outcome(failure, attempts=0)
     invoker: _AsyncInvoker = structured or model
     current_prompt = prompt
+    parse_codes: list[str] = []
     for attempt in (1, 2):
         try:
             response = await invoker.ainvoke(current_prompt)
@@ -202,7 +221,8 @@ async def invoke_structured_root_cause_validation(
                 structured=structured is not None,
                 available_evidence_ids=available_evidence_ids,
             )
-        except (TypeError, ValueError):
+        except _StructuredParseFailure as exc:
+            _append_parse_codes(parse_codes, exc.codes)
             if attempt == 1:
                 current_prompt = prompt + _CORRECTION_SUFFIX
                 continue
@@ -210,7 +230,20 @@ async def invoke_structured_root_cause_validation(
                 decision=None,
                 error_category="retry_exhausted",
                 attempts=attempt,
-                error_codes=("invalid_json_or_schema",),
+                error_codes=tuple(parse_codes),
+                error_phase="structured_parse",
+                retryable=False,
+            )
+        except (TypeError, ValueError):
+            _append_parse_codes(parse_codes, ("invalid_json_or_schema",))
+            if attempt == 1:
+                current_prompt = prompt + _CORRECTION_SUFFIX
+                continue
+            return StructuredValidationOutcome(
+                decision=None,
+                error_category="retry_exhausted",
+                attempts=attempt,
+                error_codes=tuple(parse_codes),
                 error_phase="structured_parse",
                 retryable=False,
             )
@@ -218,7 +251,7 @@ async def invoke_structured_root_cause_validation(
             decision=decision,
             error_category="model_rejected" if decision.status == "invalid" else None,
             attempts=attempt,
-            error_codes=(),
+            error_codes=tuple(parse_codes),
         )
     raise AssertionError("The bounded validation loop must return within two attempts.")
 
@@ -395,22 +428,84 @@ def _validation_decision_from_response(
 ) -> RootCauseValidationDecision:
     if structured:
         if not isinstance(response, Mapping):
-            raise ValueError("Structured validation response must be an envelope.")
+            raise _StructuredParseFailure("structured_envelope_mismatch")
         envelope = cast(Mapping[object, object], response)
-        if envelope.get("parsing_error") is not None:
-            raise ValueError("Structured validation envelope contains a parsing error.")
-        parsed = envelope.get("parsed")
+        if "parsed" not in envelope or "parsing_error" not in envelope:
+            raise _StructuredParseFailure("structured_envelope_mismatch")
+        parsing_error = envelope["parsing_error"]
+        if parsing_error is not None:
+            raise _StructuredParseFailure(*_parsing_error_codes(parsing_error))
+        parsed = envelope["parsed"]
         if isinstance(parsed, _RootCauseValidationSchema):
             schema = parsed
         else:
-            schema = _RootCauseValidationSchema.model_validate(parsed)
+            try:
+                schema = _RootCauseValidationSchema.model_validate(parsed)
+            except ValidationError as exc:
+                raise _StructuredParseFailure(*_pydantic_error_codes(exc)) from None
         text = json.dumps(schema.model_dump(by_alias=True), ensure_ascii=False)
     else:
-        text = _model_text(response)
-    return parse_root_cause_validation(
-        text,
-        available_evidence_ids=available_evidence_ids,
-    )
+        try:
+            parsed_json = json.loads(_model_text(response))
+        except json.JSONDecodeError:
+            raise _StructuredParseFailure("invalid_json") from None
+        try:
+            schema = _RootCauseValidationSchema.model_validate(parsed_json)
+        except ValidationError as exc:
+            raise _StructuredParseFailure(*_pydantic_error_codes(exc)) from None
+        text = json.dumps(schema.model_dump(by_alias=True), ensure_ascii=False)
+    if not set(schema.evidence_ids).issubset(available_evidence_ids):
+        raise _StructuredParseFailure("unknown_evidence_id")
+    try:
+        return parse_root_cause_validation(
+            text,
+            available_evidence_ids=available_evidence_ids,
+        )
+    except (TypeError, ValueError):
+        raise _StructuredParseFailure("invalid_json_or_schema") from None
+
+
+def _parsing_error_codes(error: object) -> tuple[StructuredParseErrorCode, ...]:
+    if isinstance(error, ValidationError):
+        return _pydantic_error_codes(error)
+    if isinstance(error, json.JSONDecodeError):
+        return ("invalid_json",)
+    return ("structured_envelope_mismatch",)
+
+
+def _pydantic_error_codes(
+    error: ValidationError,
+) -> tuple[StructuredParseErrorCode, ...]:
+    mapped: list[StructuredParseErrorCode] = []
+    for item in error.errors(include_url=False, include_context=False, include_input=False):
+        error_type = item.get("type")
+        code: StructuredParseErrorCode
+        if error_type == "missing":
+            code = "missing_required_field"
+        elif error_type == "literal_error":
+            code = "invalid_enum"
+        elif error_type in {"list_type", "tuple_type", "set_type", "frozen_set_type"}:
+            code = "wrong_container_type"
+        elif error_type == "extra_forbidden":
+            code = "extra_field"
+        else:
+            code = "invalid_json_or_schema"
+        if code not in mapped:
+            mapped.append(code)
+        if len(mapped) == 6:
+            break
+    return tuple(mapped) or ("invalid_json_or_schema",)
+
+
+def _append_parse_codes(
+    target: list[str],
+    codes: Sequence[StructuredParseErrorCode],
+) -> None:
+    for code in codes:
+        if code not in target:
+            target.append(code)
+        if len(target) == 6:
+            return
 
 
 def validate_grounded_candidate(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import Any
 
 import httpx
 import openai
 import pytest
+from pydantic import ValidationError
 
 from super_ai.aiops.decision_validation import (
     _RootCauseDecisionSchema,  # pyright: ignore[reportPrivateUsage]
@@ -659,6 +661,7 @@ async def test_structured_validator_reasks_once_after_parse_failure() -> None:
     assert outcome.decision is not None
     assert outcome.error_category is None
     assert outcome.attempts == 2
+    assert outcome.error_codes == ("invalid_json",)
     assert model.calls == 2
 
 
@@ -675,7 +678,7 @@ async def test_structured_validator_stops_after_one_format_retry() -> None:
     assert outcome.decision is None
     assert outcome.error_category == "retry_exhausted"
     assert outcome.attempts == 2
-    assert outcome.error_codes == ("invalid_json_or_schema",)
+    assert outcome.error_codes == ("invalid_json",)
 
 
 @pytest.mark.asyncio
@@ -742,7 +745,133 @@ async def test_structured_validator_rejects_unknown_envelope_evidence_after_retr
     assert outcome.decision is None
     assert outcome.error_category == "retry_exhausted"
     assert outcome.attempts == 2
+    assert outcome.error_codes == ("unknown_evidence_id",)
     assert model.structured.calls == 2
+
+
+def _schema_error(payload: object) -> ValidationError:
+    try:
+        _RootCauseValidationSchema.model_validate(payload)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("Test payload must fail schema validation.")
+
+
+def _structured_parse_case(code: str) -> object:
+    base = {
+        "status": "valid",
+        "evidenceIds": ["ev-1", "ev-2"],
+        "unsupportedFields": [],
+        "missingEvidence": [],
+        "summary": "sentinel-public-summary",
+    }
+    if code == "invalid_json":
+        return {
+            "raw": object(),
+            "parsed": None,
+            "parsing_error": json.JSONDecodeError(
+                "sentinel-json-error", "sentinel-raw-value", 0
+            ),
+        }
+    if code == "structured_envelope_mismatch":
+        return {"raw": object(), "parsing_error": None}
+    if code == "missing_required_field":
+        payload = {key: value for key, value in base.items() if key != "summary"}
+        return {
+            "raw": object(),
+            "parsed": None,
+            "parsing_error": _schema_error(payload),
+        }
+    if code == "invalid_enum":
+        return {
+            "raw": object(),
+            "parsed": None,
+            "parsing_error": _schema_error({**base, "status": "sentinel-invalid"}),
+        }
+    if code == "wrong_container_type":
+        return {
+            "raw": object(),
+            "parsed": None,
+            "parsing_error": _schema_error(
+                {**base, "evidenceIds": "sentinel-not-a-list"}
+            ),
+        }
+    if code == "extra_field":
+        return {
+            "raw": object(),
+            "parsed": None,
+            "parsing_error": _schema_error({**base, "sentinelExtra": True}),
+        }
+    if code == "unknown_evidence_id":
+        return {
+            "raw": object(),
+            "parsed": _validation_schema(evidence_ids=["ev-sentinel-foreign"]),
+            "parsing_error": None,
+        }
+    if code == "invalid_json_or_schema":
+        return {
+            "raw": object(),
+            "parsed": {
+                **base,
+                "status": "valid",
+                "unsupportedFields": ["trigger"],
+            },
+            "parsing_error": None,
+        }
+    raise AssertionError(f"Unknown test case: {code}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    (
+        "invalid_json",
+        "structured_envelope_mismatch",
+        "missing_required_field",
+        "invalid_enum",
+        "wrong_container_type",
+        "extra_field",
+        "unknown_evidence_id",
+        "invalid_json_or_schema",
+    ),
+)
+async def test_structured_validator_reports_safe_parse_error_code(code: str) -> None:
+    invalid = _structured_parse_case(code)
+    model = StructuredCapableChatModel([invalid, invalid])
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "retry_exhausted"
+    assert outcome.error_phase == "structured_parse"
+    assert outcome.error_codes == (code,)
+    assert "sentinel" not in repr(outcome)
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_keeps_first_parse_code_after_correction() -> None:
+    invalid = _structured_parse_case("missing_required_field")
+    valid = {
+        "raw": object(),
+        "parsed": _validation_schema(),
+        "parsing_error": None,
+    }
+    model = StructuredCapableChatModel([invalid, valid])
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="validate",
+        available_evidence_ids={"ev-1", "ev-2"},
+    )
+
+    assert outcome.decision is not None
+    assert outcome.error_category is None
+    assert outcome.attempts == 2
+    assert outcome.error_codes == ("missing_required_field",)
 
 
 def test_deterministic_evidence_gap_replans_only_with_unexecuted_discovered_tool() -> None:
