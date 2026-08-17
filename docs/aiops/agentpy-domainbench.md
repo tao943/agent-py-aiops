@@ -384,6 +384,41 @@ Executor 使用同一规范化和 JSON Schema 校验路径。模型仍负责选�
 在独立变更中区分知识检索与可形成 Observation 的诊断工具，不能通过修改本次答案或阈值
 处理。
 
+### APY-013 Validator 与评分修复验收（2026-08-17）
+
+本轮实现提交为 `1d486f9`、`9944433`、`e433098` 和 `3ed0218`：过程评分仅要求完成的
+诊断工具具有 Evidence Evaluation；Validator 模型失败使用允许列表错误码和阶段；Snapshot
+与 Live 共用有序语义评分；公开 Observation 增加 `trigger/mechanism/impact/context` 因果
+角色，grounded fallback 仅在存在唯一证据绑定 trigger 时生成 2～6 项有序因果链。
+
+离线验证仅运行受影响的十个专项测试文件，没有运行全量 pytest；拆分后的两组专项回归、
+Ruff、Pyright 和变更规格 `harden-aiops-decision-validation --strict` 均通过。全局 OpenSpec
+校验仍有 13 个未被本轮修改的历史规格质量警告，例如 `agent-tool-call-audits` 的 Purpose
+长度不足；这些警告不属于本轮代码变更。
+
+前置审计确认 30 个知识文档均为 `ready/indexed`，三个真实 LLM readiness 测试通过，
+Archive 无 checksum conflict。在 RAG on 条件下只执行一次真实 `APY-013`，run ID 为
+`eval-528fbe19193743b18cb90fb6f1eaf0c7`，耗时 306,822 ms。运行终态已同时写入
+PostgreSQL 与 Archive，审计为 27 个 artifact、27 个 checksum、0 pending、0 conflict。
+
+本次结果为 `validity=valid`、`passed=false`、总分 50，维度为
+`12 / 0 / 10 / 8 / 15 / 5`。`observations_evaluated=5/5`，证明
+`knowledge_retrieval` 不再占用诊断 Observation 配额。三个必要证据里程碑、安全边界和工具
+预算均通过，但没有产生 Root Cause Decision，因此失败项为
+`missing_root_cause_decision`。
+
+脱敏步骤审计显示三次 Evidence Evaluation 均完成，但真实模型将三条 Observation 全部
+标为 `mechanism`，没有唯一 `trigger`。LLM Decision 随后得到
+`decisionErrorCategory=invalid_model_output`；grounded fallback 按 fail-closed 合同拒绝从
+任意 mechanism 或公开 hypothesis description 猜测 trigger。Validator 因候选缺失记录
+`candidate_missing`，Recovery/Policy 保持 deferred 且 `executionPermitted=false`。因此本次
+未触发 Validator 模型调用，不能用它评价 Validator 供应商稳定性。
+
+下一轮应增强公开因果角色合同的确定性，而不是放宽评分或 fallback：让诊断计划为每个
+Evidence Evaluation 提供可审计的预期因果角色，并在 Observation 写入前校验角色与计划目的
+一致；角色冲突时进入受限修复或人工复核。该改造需保持 Ground Truth 隔离，不能把 evaluator
+rubric、正确根因或场景答案注入 Agent Prompt。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
