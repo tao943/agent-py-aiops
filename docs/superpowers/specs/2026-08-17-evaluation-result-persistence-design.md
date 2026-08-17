@@ -29,7 +29,7 @@
 ## 约束
 
 - PostgreSQL 是运行态查询和聚合的事实源；本地共享目录是可迁移、可恢复的不可变归档。
-- 归档目录必须位于 Git worktree 之外，并通过项目配置或环境变量显式指定。
+- 归档目录必须位于 Git worktree 之外，并通过本地项目 JSON 配置显式指定。
 - 不引入 MLflow、Langfuse、Phoenix、W&B 或新的外部服务。
 - 不保存 API key、密码、Token、完整 Prompt、原始模型响应、私有推理、`ground_truth.yaml` 内容或未脱敏日志。
 - 不改变现有 Benchmark 权重、阈值、Ground Truth、Agent Workflow 或恢复授权策略。
@@ -98,7 +98,7 @@ CLI 在调用 LLM、Milvus、CLS 或故障驱动器之前先建立 `running` 记
 1. 构造安全、版本化的 Run envelope；
 2. 使用同目录临时文件和原子重命名写入本地归档；
 3. 幂等写入 PostgreSQL；
-4. 数据库失败时更新本地 envelope 的 `persistenceWarnings`，等待后续 reconcile；
+4. 数据库失败时保留不可变 Artifact，由后续 reconcile 对账识别并补写数据库；
 5. 本地归档本身无法写入时以基础设施错误退出，不声称运行已可靠保存。
 
 该顺序不提供跨文件系统与 PostgreSQL 的分布式事务，但确保至少存在一份可重放的安全记录。`reconcile` 根据 `run_id` 和 checksum 将缺失记录补回 PostgreSQL。
@@ -117,7 +117,7 @@ CLI 在调用 LLM、Milvus、CLS 或故障驱动器之前先建立 `running` 记
 
 ### 本地共享归档
 
-归档根目录由 `evaluation.archiveDir` 配置，环境变量 `AGENTPY_EVAL_ARCHIVE_DIR` 可覆盖。配置值必须解析为 worktree 外的绝对路径。当前机器建议配置为：
+归档根目录只从本地 JSON 的 `evaluation.archiveDir` 读取，不使用环境变量。配置值必须解析为 worktree 外的绝对路径。可提交模板保留空值，当前机器的 `config/user.project.json` 建议配置为：
 
 ```text
 D:\桌面\后端\agent_py-evaluation-archive
