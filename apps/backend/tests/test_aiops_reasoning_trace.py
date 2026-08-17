@@ -1828,6 +1828,7 @@ class ContractReplanningLlmProvider:
 class PostgresContractAcceptanceChatModel:
     def __init__(self) -> None:
         self.sufficiency_count = 0
+        self.supporting_evidence_ids: list[str] = []
 
     async def ainvoke(self, input: object) -> str:
         prompt = str(input)
@@ -1895,6 +1896,11 @@ class PostgresContractAcceptanceChatModel:
             assert "causalRole" in prompt
             assert "trigger, mechanism, impact, or context" in prompt
             if "InspectPostgresWaitGraph" in prompt:
+                self.supporting_evidence_ids.extend(
+                    item
+                    for item in evidence_ids
+                    if item not in self.supporting_evidence_ids
+                )
                 return json.dumps(
                     {
                         "purpose": "Inspect the PostgreSQL wait graph.",
@@ -1915,6 +1921,11 @@ class PostgresContractAcceptanceChatModel:
                     }
                 )
             if "InspectTransactionResourceOrder" in prompt:
+                self.supporting_evidence_ids.extend(
+                    item
+                    for item in evidence_ids
+                    if item not in self.supporting_evidence_ids
+                )
                 return json.dumps(
                     {
                         "purpose": "Compare transaction resource order.",
@@ -1927,11 +1938,16 @@ class PostgresContractAcceptanceChatModel:
                         ),
                     }
                 )
+            self.supporting_evidence_ids.extend(
+                item
+                for item in evidence_ids
+                if item not in self.supporting_evidence_ids
+            )
             return json.dumps(
                 {
                     "purpose": "Inspect deadlock evidence.",
                     "supports": ["postgres_deadlock"],
-                    "refutes": ["postgres_slow_query"],
+                    "refutes": [],
                     "causalRole": "impact",
                     "summary": "PostgreSQL aborted one transaction with SQLSTATE 40P01.",
                 }
@@ -1942,7 +1958,7 @@ class PostgresContractAcceptanceChatModel:
             return json.dumps(
                 {
                     "status": "sufficient" if sufficient else "insufficient",
-                    "evidenceIds": evidence_ids,
+                    "evidenceIds": self.supporting_evidence_ids,
                     "supportedHypotheses": ["postgres_deadlock"],
                     "refutedHypotheses": (
                         ["postgres_lock_wait", "postgres_slow_query"]
@@ -1983,7 +1999,7 @@ class PostgresContractAcceptanceChatModel:
                         "Transactions acquire shared resources in opposite orders -> "
                         "a wait cycle forms -> PostgreSQL aborts one transaction."
                     ),
-                    "evidenceIds": evidence_ids,
+                    "evidenceIds": self.supporting_evidence_ids,
                     "confidence": 0.96,
                 }
             )
@@ -2658,7 +2674,7 @@ async def test_apy_013_unavailable_validator_keeps_normalized_grounded_candidate
 
 
 @pytest.mark.asyncio
-async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_a_decision(
+async def test_apy_013_sufficient_cycle_collects_four_relevant_exact_calls_and_a_decision(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-013")
@@ -2704,6 +2720,7 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
     assert [observation.tool_name for observation in snapshot.observations] == [
         "InspectPostgresErrors",
         "InspectPostgresWaitGraph",
+        "GetDatabaseMetrics",
         "InspectTransactionResourceOrder",
     ]
     assert all(
@@ -2714,9 +2731,9 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
     assert {item.evidence_id for item in snapshot.observations} == {
         "postgres-40p01-deadlock-record",
         "postgres-deadlock-cycle",
+        "postgres-capacity-distractor",
         "postgres-opposite-resource-order",
     }
-    assert all(item.tool_name != "GetDatabaseMetrics" for item in snapshot.observations)
     assert not any(
         step.phase == "executor" and "errorCategory" in step.payload
         for step in steps
@@ -2729,6 +2746,12 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
         step.phase == "sufficiency_gate"
         and step.payload.get("refinementReason")
         == "missing_causal_role_plan_step_remaining"
+        for step in steps
+    )
+    assert any(
+        step.phase == "sufficiency_gate"
+        and step.payload.get("refinementReason")
+        == "open_hypothesis_plan_step_remaining"
         for step in steps
     )
     decision = next(step for step in steps if step.phase == "decision")
@@ -2752,6 +2775,8 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
     assert validations[0].payload["status"] == "valid", validations[0].payload[
         "deterministicChecks"
     ]
+    recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
+    assert recovery_policy["executionPermitted"] is False
     assert completed.status == "succeeded"
 
 
