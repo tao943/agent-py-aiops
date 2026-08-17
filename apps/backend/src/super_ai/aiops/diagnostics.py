@@ -19,6 +19,10 @@ from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
+from super_ai.aiops.causal_intents import (
+    allowed_causal_intents,
+    repair_plan_causal_coverage,
+)
 from super_ai.aiops.decision_validation import (
     can_replan_deterministic_gap,
     deterministic_checks_payload,
@@ -129,12 +133,15 @@ def build_generic_live_plan(
     """Build a safe evidence-gathering fallback from public Live contracts."""
     available = set(available_tools)
     known = set(known_hypotheses)
-    definitions: tuple[tuple[str, str, JsonDict, tuple[str, ...]], ...] = (
+    definitions: tuple[
+        tuple[str, str, JsonDict, tuple[str, ...], str], ...
+    ] = (
         (
             "VerifyServiceHealth",
             "Check database reachability and service health.",
             {"target": "postgres_cluster", "check_connection_pool": True},
             ("postgres_connectivity_failure",),
+            "impact",
         ),
         (
             "InspectPostgresSessions",
@@ -144,12 +151,14 @@ def build_generic_live_plan(
                 "include_wait_events": True,
             },
             ("postgres_slow_query_without_lock", "postgres_lock_blocking"),
+            "mechanism",
         ),
         (
             "InspectPostgresLockGraph",
             "Inspect current blocking chains and deadlock signals.",
             {"detect_deadlocks": True, "analyze_blocking_chains": True},
             ("postgres_lock_blocking",),
+            "trigger",
         ),
     )
     return [
@@ -159,8 +168,12 @@ def build_generic_live_plan(
             "arguments": dict(arguments),
             "purpose": purpose,
             "testsHypotheses": [item for item in hypotheses if item in known],
+            "causalIntent": causal_intent,
+            "causalIntentOrigin": "generic",
         }
-        for index, (tool, purpose, arguments, hypotheses) in enumerate(definitions, start=1)
+        for index, (tool, purpose, arguments, hypotheses, causal_intent) in enumerate(
+            definitions, start=1
+        )
         if tool in available
     ]
 
@@ -748,6 +761,7 @@ class AiopsDiagnosticService:
             "plan": plan,
             "planOrigin": plan_origin,
             "retrievalError": retrieval_error,
+            **_plan_causal_coverage_payload(plan),
         }
         planner_step = await self._create_step(
             owner_user_id=owner_user_id,
@@ -1270,7 +1284,8 @@ class AiopsDiagnosticService:
         )
         prompt = (
             "Return JSON only for a gap-targeted diagnostic replan with a `steps` array. "
-            "Each step has id, tool, arguments, purpose, and testsHypotheses. Use only the "
+            "Each step has id, tool, arguments, purpose, testsHypotheses, and causalIntent. "
+            "causalIntent must be allowed by the selected tool contract. Use only the "
             "discovered contracts and public hypothesis IDs. Do not repeat an executed tool and "
             "arguments pair. "
             "Evidence gap: "
@@ -1289,6 +1304,10 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 available_tools=available_tools,
                 known_hypotheses=known_hypotheses,
+                causal_capabilities={
+                    definition.name: allowed_causal_intents(definition.name)
+                    for definition in tool_definitions
+                },
             )
             parsed_steps = [_diagnostic_plan_step_payload(step) for step in parsed]
         except Exception:
@@ -1299,9 +1318,26 @@ class AiopsDiagnosticService:
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
         )
+        parsed_coverage = repair_plan_causal_coverage(parsed_steps)
+        parsed_steps = list(parsed_coverage.steps)
         executed = set(state.get("executed_step_fingerprints") or [])
+        missing_roles = {
+            item
+            for item in cast(
+                list[object],
+                _json_dict(state.get("evidence_sufficiency")).get(
+                    "missingCausalRoles"
+                )
+                or [],
+            )
+            if isinstance(item, str)
+        }
         accepted: list[JsonDict] = []
+        causal_intent_rejected_count = 0
         for step in parsed_steps:
+            if missing_roles and step.get("causalIntent") not in missing_roles:
+                causal_intent_rejected_count += 1
+                continue
             fingerprint = _step_fingerprint(step)
             if fingerprint in executed or any(
                 _step_fingerprint(existing) == fingerprint for existing in accepted
@@ -1319,6 +1355,8 @@ class AiopsDiagnosticService:
             "remainingAttemptBudget": remaining_budget,
             "plan": accepted,
             "terminationReason": termination_reason,
+            "causalIntentRejectedStepCount": causal_intent_rejected_count,
+            **_plan_causal_coverage_payload(accepted),
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -2080,9 +2118,12 @@ class AiopsDiagnosticService:
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
         )
+        generic_plan = list(repair_plan_causal_coverage(generic_plan).steps)
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
-            "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
+            "has `id`, `tool`, `arguments`, `purpose`, `testsHypotheses`, and "
+            "`causalIntent`. causalIntent must be allowed by the selected tool contract. "
+            "Use at most six "
             "steps and only the tools and argument schemas in these discovered contracts. "
             "The initial plan must contain at most four steps: "
             f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
@@ -2097,6 +2138,10 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 available_tools=set(available_tools),
                 known_hypotheses=set(known_hypotheses),
+                causal_capabilities={
+                    definition.name: allowed_causal_intents(definition.name)
+                    for definition in tool_definitions
+                },
             )
             if len(parsed_plan) > 4:
                 raise ValueError("Initial diagnostic plan cannot contain more than four steps.")
@@ -2109,6 +2154,7 @@ class AiopsDiagnosticService:
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
         )
+        plan = list(repair_plan_causal_coverage(plan).steps)
         if not plan:
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"
@@ -2128,6 +2174,8 @@ class AiopsDiagnosticService:
             },
             "purpose": f"Gather real CLS evidence relevant to: {query}",
             "testsHypotheses": [],
+            "causalIntent": "context",
+            "causalIntentOrigin": "generic",
         }
 
     async def _create_step(
@@ -2217,6 +2265,8 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
         "arguments": step.arguments,
         "purpose": step.purpose,
         "testsHypotheses": list(step.tests_hypotheses),
+        "causalIntent": step.causal_intent,
+        "causalIntentOrigin": step.causal_intent_origin,
     }
 
 
@@ -2348,9 +2398,19 @@ def _tool_contracts_payload(
             "name": item.name,
             "description": item.description,
             "inputSchema": item.input_schema,
+            "allowedCausalIntents": sorted(allowed_causal_intents(item.name)),
         }
         for item in tool_definitions
     ]
+
+
+def _plan_causal_coverage_payload(plan: Sequence[JsonDict]) -> JsonDict:
+    coverage = repair_plan_causal_coverage(plan)
+    return {
+        "planCausalCoverageComplete": coverage.complete,
+        "missingCausalRoles": list(coverage.missing_roles),
+        "ambiguousTrigger": coverage.ambiguous_trigger,
+    }
 
 
 def _observation_decision_payload(

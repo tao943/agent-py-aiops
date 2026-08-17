@@ -10,6 +10,7 @@ import pytest
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
+    _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _supported_refinement_index,  # pyright: ignore[reportPrivateUsage]
     build_grounded_fallback_decision,
     normalize_tool_plan_steps,
@@ -633,6 +634,101 @@ def test_plan_rejects_unknown_tools_and_hypotheses() -> None:
         )
 
 
+def test_step_fingerprint_ignores_causal_intent_metadata() -> None:
+    base: dict[str, object] = {
+        "tool": "InspectPostgresWaitGraph",
+        "arguments": {"database": "agent_py", "windowMinutes": 15},
+    }
+
+    assert _step_fingerprint({**base, "causalIntent": "trigger"}) == (
+        _step_fingerprint({**base, "causalIntent": "mechanism"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_plan_causal_intents_are_minimally_repaired() -> None:
+    class StaticChatModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "errors",
+                            "tool": "InspectPostgresErrors",
+                            "arguments": {
+                                "service": "order-service",
+                                "windowMinutes": 15,
+                            },
+                            "purpose": "Inspect database errors.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                            "causalIntent": "mechanism",
+                        },
+                        {
+                            "id": "graph",
+                            "tool": "InspectPostgresWaitGraph",
+                            "arguments": {
+                                "database": "agent_py",
+                                "windowMinutes": 15,
+                            },
+                            "purpose": "Inspect the wait graph.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                            "causalIntent": "mechanism",
+                        },
+                        {
+                            "id": "order",
+                            "tool": "InspectTransactionResourceOrder",
+                            "arguments": {
+                                "service": "order-service",
+                                "windowMinutes": 15,
+                            },
+                            "purpose": "Inspect transaction resource order.",
+                            "testsHypotheses": ["postgres_deadlock"],
+                            "causalIntent": "mechanism",
+                        },
+                    ]
+                }
+            )
+
+    class StaticLlmProvider:
+        def create_chat_model(self) -> StaticChatModel:
+            return StaticChatModel()
+
+    snapshot = SnapshotMcpClient.from_yaml(
+        SCENARIOS / "APY-013" / "snapshot" / "tool_responses.yaml"
+    )
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, StaticLlmProvider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=snapshot,
+        cls_region="unused",
+        cls_topic_id="unused",
+        tool_argument_contracts=snapshot.tool_argument_contracts,
+    )
+
+    plan, origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Inspect a database incident.",
+        alert={},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=await snapshot.discover_tools(),
+        known_hypotheses=("postgres_deadlock",),
+    )
+
+    assert origin == "model"
+    assert [(step["tool"], step["causalIntent"]) for step in plan] == [
+        ("InspectPostgresErrors", "impact"),
+        ("InspectPostgresWaitGraph", "mechanism"),
+        ("InspectTransactionResourceOrder", "trigger"),
+    ]
+    assert [step["causalIntentOrigin"] for step in plan] == [
+        "coverage_repair",
+        "model",
+        "coverage_repair",
+    ]
+
+
 def test_plan_requires_causal_intent() -> None:
     with pytest.raises(ValueError, match="causalIntent"):
         parse_plan(
@@ -1145,6 +1241,7 @@ class ReasoningChatModel:
                                 "upstream_process_down",
                                 "upstream_port_mismatch",
                             ],
+                            "causalIntent": "mechanism",
                         },
                         {
                             "id": "inspect-nginx",
@@ -1155,6 +1252,7 @@ class ReasoningChatModel:
                                 "upstream_port_mismatch",
                                 "dns_resolution_failure",
                             ],
+                            "causalIntent": "context",
                         },
                     ]
                 }
@@ -1245,6 +1343,7 @@ class ReplanningChatModel:
                                 "upstream_process_down",
                                 "upstream_port_mismatch",
                             ],
+                            "causalIntent": "mechanism",
                         }
                     ]
                 }
@@ -1262,6 +1361,7 @@ class ReplanningChatModel:
                                 "upstream_port_mismatch",
                                 "dns_resolution_failure",
                             ],
+                            "causalIntent": "context",
                         }
                     ]
                 }
@@ -1398,6 +1498,7 @@ class ContractReplanningChatModel(ReplanningChatModel):
                                 "upstream_process_down",
                                 "upstream_port_mismatch",
                             ],
+                            "causalIntent": "mechanism",
                         }
                     ]
                 }
@@ -1415,6 +1516,7 @@ class ContractReplanningChatModel(ReplanningChatModel):
                                 "upstream_port_mismatch",
                                 "dns_resolution_failure",
                             ],
+                            "causalIntent": "context",
                         }
                     ]
                 }
@@ -1450,6 +1552,7 @@ class PostgresContractAcceptanceChatModel:
                             },
                             "purpose": "Inspect structured PostgreSQL errors.",
                             "testsHypotheses": ["postgres_deadlock"],
+                            "causalIntent": "impact",
                         },
                         {
                             "id": "wait-graph",
@@ -1463,6 +1566,7 @@ class PostgresContractAcceptanceChatModel:
                                 "postgres_deadlock",
                                 "postgres_lock_wait",
                             ],
+                            "causalIntent": "mechanism",
                         },
                         {
                             "id": "metrics",
@@ -1473,6 +1577,7 @@ class PostgresContractAcceptanceChatModel:
                             },
                             "purpose": "Rule out database capacity and slow-query pressure.",
                             "testsHypotheses": ["postgres_slow_query"],
+                            "causalIntent": "context",
                         },
                         {
                             "id": "resource-order",
@@ -1483,6 +1588,7 @@ class PostgresContractAcceptanceChatModel:
                             },
                             "purpose": "Compare transaction resource order.",
                             "testsHypotheses": ["postgres_deadlock"],
+                            "causalIntent": "trigger",
                         },
                     ]
                 }
@@ -1760,6 +1866,7 @@ class DuplicateStepChatModel(ReplanningChatModel):
                             "arguments": {"service": "checkout-service"},
                             "purpose": "Check the checkout process.",
                             "testsHypotheses": ["upstream_process_down"],
+                            "causalIntent": "mechanism",
                         },
                         {
                             "id": "inspect-container-duplicate",
@@ -1767,6 +1874,7 @@ class DuplicateStepChatModel(ReplanningChatModel):
                             "arguments": {"service": "checkout-service"},
                             "purpose": "Repeat the same process check.",
                             "testsHypotheses": ["upstream_process_down"],
+                            "causalIntent": "mechanism",
                         },
                     ]
                 }
@@ -1888,6 +1996,7 @@ class ProposalChatModel:
                             "arguments": {},
                             "purpose": "Confirm the public incident signal.",
                             "testsHypotheses": ["signal_failure"],
+                            "causalIntent": "context",
                         }
                     ]
                 }

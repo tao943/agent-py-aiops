@@ -172,6 +172,11 @@ def test_generic_fallback_uses_all_live_evidence_tools() -> None:
         "postgres_lock_blocking",
     ]
     assert plan[2]["testsHypotheses"] == ["postgres_lock_blocking"]
+    assert [step["causalIntent"] for step in plan] == [
+        "impact",
+        "mechanism",
+        "trigger",
+    ]
 
 
 def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:
@@ -227,6 +232,7 @@ async def test_model_search_plan_is_bound_before_contract_validation() -> None:
                             "arguments": {"Query": "*"},
                             "purpose": "Correlate current incident logs.",
                             "testsHypotheses": ["postgres_lock_blocking"],
+                            "causalIntent": "mechanism",
                         }
                     ]
                 }
