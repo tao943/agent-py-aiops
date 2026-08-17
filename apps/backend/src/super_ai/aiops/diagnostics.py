@@ -407,48 +407,80 @@ def _grounded_trigger(observations: Sequence[JsonDict]) -> str | None:
     return triggers[0] if len(triggers) == 1 else None
 
 
-def _repair_grounded_causal_chain(
+def _normalize_grounded_decision(
     decision: RootCauseDecision,
     *,
+    available_evidence_ids: set[str],
     public_hypotheses: Sequence[JsonDict],
     hypothesis_states: Sequence[JsonDict],
     observation_decisions: Sequence[JsonDict],
     decision_vocabulary: JsonDict,
 ) -> RootCauseDecision | None:
-    gaps = _deterministic_decision_gaps(
-        decision,
-        decision_vocabulary=decision_vocabulary,
-    )
-    if set(gaps) != {"causalChain"}:
-        return None
-    fallback = build_grounded_fallback_decision(
-        public_hypotheses=public_hypotheses,
+    validation = validate_grounded_candidate(
+        candidate=decision,
+        available_evidence_ids=available_evidence_ids,
         hypothesis_states=hypothesis_states,
         observation_decisions=observation_decisions,
         decision_vocabulary=decision_vocabulary,
     )
+    failed_codes = {
+        check.code for check in validation.checks if not check.passed
+    }
+    expression_codes = {"trigger_present", "grounded_causal_chain"}
     if (
-        fallback is None
-        or fallback.component != decision.component
-        or fallback.mechanism != decision.mechanism
-        or not set(fallback.evidence_ids).issubset(set(decision.evidence_ids))
-        or not 2 <= len(fallback.causal_chain) <= 6
+        not failed_codes
+        or not failed_codes.issubset(expression_codes)
+        or validation.supported_hypothesis_id is None
+        or validation.supported_hypothesis_id
+        not in {
+            str(item.get("id"))
+            for item in public_hypotheses
+            if item.get("id")
+        }
+        or len(set(decision.evidence_ids)) < 2
     ):
         return None
-    repaired = RootCauseDecision(
+
+    grounded_observations = _ordered_grounded_observations(
+        observation_decisions,
+        hypothesis_id=validation.supported_hypothesis_id,
+        evidence_ids=set(decision.evidence_ids),
+    )
+    if len(grounded_observations) < 2:
+        return None
+    cited_evidence = set(decision.evidence_ids)
+    normalized_evidence = {
+        item
+        for observation in grounded_observations
+        for item in cast(list[object], observation.get("evidenceIds") or [])
+        if isinstance(item, str)
+    }
+    if not normalized_evidence or not normalized_evidence.issubset(cited_evidence):
+        return None
+    trigger = _grounded_trigger(grounded_observations)
+    if trigger is None:
+        return None
+    normalized = RootCauseDecision(
         component=decision.component,
         mechanism=decision.mechanism,
-        trigger=fallback.trigger,
-        causal_chain=fallback.causal_chain,
+        trigger=trigger,
+        causal_chain=tuple(
+            cast(str, observation["summary"]).strip()
+            for observation in grounded_observations
+        ),
         evidence_ids=decision.evidence_ids,
         confidence=decision.confidence,
     )
-    if _deterministic_decision_gaps(
-        repaired,
+    normalized_validation = validate_grounded_candidate(
+        candidate=normalized,
+        available_evidence_ids=available_evidence_ids,
+        hypothesis_states=hypothesis_states,
+        observation_decisions=observation_decisions,
         decision_vocabulary=decision_vocabulary,
-    ):
+    )
+    if not normalized_validation.passed:
         return None
-    return repaired
+    return normalized
 
 
 class AiopsDiagnosticService:
@@ -1552,8 +1584,9 @@ class AiopsDiagnosticService:
                 ),
             )
             decision_origin = "llm"
-            repaired = _repair_grounded_causal_chain(
+            normalized = _normalize_grounded_decision(
                 decision,
+                available_evidence_ids=set(evidence_ids),
                 public_hypotheses=cast(
                     list[JsonDict], state.get("public_hypotheses") or []
                 ),
@@ -1565,9 +1598,9 @@ class AiopsDiagnosticService:
                 ),
                 decision_vocabulary=decision_vocabulary,
             )
-            if repaired is not None:
-                decision = repaired
-                decision_origin = "llm_grounded_causal_chain_repair"
+            if normalized is not None:
+                decision = normalized
+                decision_origin = "llm_grounded_normalization"
         if decision is None:
             decision = build_grounded_fallback_decision(
                 public_hypotheses=cast(

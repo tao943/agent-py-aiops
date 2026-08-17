@@ -11,8 +11,8 @@ from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _next_open_hypothesis_step_index,  # pyright: ignore[reportPrivateUsage]
+    _normalize_grounded_decision,  # pyright: ignore[reportPrivateUsage]
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
-    _repair_grounded_causal_chain,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
     build_grounded_fallback_decision,
     normalize_tool_plan_steps,
@@ -219,14 +219,15 @@ def _one_item_deadlock_decision(
     )
 
 
-def _repair_deadlock_chain(
+def _normalize_deadlock_decision(
     decision: RootCauseDecision,
     *,
     hypothesis_states: list[dict[str, object]] | None = None,
     observation_decisions: list[dict[str, object]] | None = None,
 ) -> RootCauseDecision | None:
-    return _repair_grounded_causal_chain(
+    return _normalize_grounded_decision(
         decision,
+        available_evidence_ids={"ev-error", "ev-cycle", "ev-order"},
         public_hypotheses=[
             {
                 "id": "postgres_deadlock",
@@ -282,10 +283,10 @@ def _repair_deadlock_chain(
     )
 
 
-def test_grounded_causal_chain_repair_replaces_only_chain() -> None:
+def test_grounded_normalization_replaces_only_expression_fields() -> None:
     original = _one_item_deadlock_decision()
 
-    repaired = _repair_deadlock_chain(original)
+    repaired = _normalize_deadlock_decision(original)
 
     assert repaired is not None
     assert repaired.causal_chain == (
@@ -300,14 +301,11 @@ def test_grounded_causal_chain_repair_replaces_only_chain() -> None:
     assert repaired.confidence == original.confidence
 
 
-def test_grounded_causal_chain_repair_fails_closed_for_unsafe_inputs() -> None:
-    assert _repair_deadlock_chain(
-        _one_item_deadlock_decision(causal_chain=("first", "second"))
-    ) is None
-    assert _repair_deadlock_chain(
+def test_grounded_normalization_fails_closed_for_unsafe_inputs() -> None:
+    assert _normalize_deadlock_decision(
         _one_item_deadlock_decision(component="postgres")
     ) is None
-    assert _repair_deadlock_chain(
+    assert _normalize_deadlock_decision(
         _one_item_deadlock_decision(),
         hypothesis_states=[
             {
@@ -324,7 +322,7 @@ def test_grounded_causal_chain_repair_fails_closed_for_unsafe_inputs() -> None:
             },
         ],
     ) is None
-    assert _repair_deadlock_chain(
+    assert _normalize_deadlock_decision(
         _one_item_deadlock_decision(),
         observation_decisions=[
             {
@@ -334,14 +332,31 @@ def test_grounded_causal_chain_repair_fails_closed_for_unsafe_inputs() -> None:
             }
         ],
     ) is None
-    assert _repair_deadlock_chain(
+    assert _normalize_deadlock_decision(
         _one_item_deadlock_decision(evidence_ids=("ev-error", "ev-cycle"))
     ) is None
-    assert _repair_deadlock_chain(
+    assert _normalize_deadlock_decision(
         _one_item_deadlock_decision(
             component="postgres",
             mechanism="deadlock",
         )
+    ) is None
+    assert _normalize_deadlock_decision(
+        _one_item_deadlock_decision(),
+        hypothesis_states=[
+            {
+                "id": "postgres_deadlock",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-error", "ev-cycle", "ev-order"],
+            },
+            {
+                "id": "postgres_lock_wait",
+                "status": "open",
+                "confidence": 0.5,
+                "evidenceIds": [],
+            },
+        ],
     ) is None
 
 
@@ -1192,7 +1207,7 @@ class OneStringDecisionLlmProvider:
 
 
 @pytest.mark.asyncio
-async def test_decision_node_repairs_grounded_causal_chain(
+async def test_decision_node_normalizes_grounded_expression(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-013")
@@ -1291,7 +1306,7 @@ async def test_decision_node_repairs_grounded_causal_chain(
         "PostgreSQL emitted SQLSTATE 40P01.",
     ]
     decision_step = steps[-1]
-    assert decision_step.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
+    assert decision_step.payload["decisionOrigin"] == "llm_grounded_normalization"
     assert decision_step.payload["decisionErrorCategory"] is None
     assert decision_step.payload["decisionAttempts"] == 1
     assert decision_step.payload["decisionErrorCodes"] == []
@@ -2582,7 +2597,7 @@ async def test_apy_013_missing_candidate_fails_closed_without_replanning(
 
 
 @pytest.mark.asyncio
-async def test_apy_013_unavailable_validator_rejects_ungrounded_candidate(
+async def test_apy_013_unavailable_validator_keeps_normalized_grounded_candidate(
     migrated_database_url: str,
 ) -> None:
     scenario = load_public_scenario(SCENARIOS / "APY-013")
@@ -2632,11 +2647,11 @@ async def test_apy_013_unavailable_validator_rejects_ungrounded_candidate(
 
     assert completed is not None
     validation = next(step for step in steps if step.phase == "decision_validation")
-    assert validation.payload["status"] == "invalid"
-    assert validation.payload["validationOrigin"] == "none"
-    assert validation.payload["validationErrorCategory"] == "deterministic_gap"
+    assert validation.payload["status"] == "valid"
+    assert validation.payload["validationOrigin"] == "deterministic_grounded_fallback"
+    assert validation.payload["validationErrorCategory"] == "model_call_failed"
     assert validation.payload["nextRoute"] == "recovery_planner"
-    assert completed.result_payload["rootCauseDecision"] is None
+    assert completed.result_payload["rootCauseDecision"] is not None
     assert not any(step.phase == "replanner" for step in steps)
     recovery_policy = cast(dict[str, object], completed.result_payload["recoveryPolicy"])
     assert recovery_policy["executionPermitted"] is False
@@ -2727,7 +2742,7 @@ async def test_apy_013_sufficient_cycle_collects_three_relevant_exact_calls_and_
         for step in steps
     )
     root_cause = cast(dict[str, object], decision.payload["rootCauseDecision"])
-    assert decision.payload["decisionOrigin"] == "llm_grounded_causal_chain_repair"
+    assert decision.payload["decisionOrigin"] == "llm_grounded_normalization"
     assert root_cause["causalChain"] == [
         "Concurrent transactions acquired order rows and inventory rows in opposite order.",
         "A two-session cycle exists without an ordinary blocker.",
