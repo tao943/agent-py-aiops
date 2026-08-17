@@ -21,3 +21,10 @@
 - [x] 4.1 运行目标 pytest、Ruff、strict Pyright 和普通离线全量测试
 - [x] 4.2 运行 OpenSpec strict/all 验证并更新 DomainBench 文档
 - [x] 4.3 只运行一次真实 APY-013；若失败则停止重试并用结构化审计诊断
+
+## 5. 确定性 Sufficiency 与 Decision 规范化
+
+- [x] 5.1 以公开 Hypothesis 全集校验持久化状态并派生唯一 Sufficiency 分类
+- [x] 5.2 存在 open competitor 时定向执行相关未运行 Plan Step 或有界 Replan
+- [x] 5.3 仅对表达检查失败且 Evidence 完整的 Candidate 做 Observation 规范化
+- [x] 5.4 运行两组专项 pytest、Ruff、Pyright 和 focused OpenSpec strict

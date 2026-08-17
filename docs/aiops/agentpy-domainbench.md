@@ -453,6 +453,32 @@ strict valid。Archive 当前为 28 个 artifact、28 个 checksum、0 conflict�
 上述两项修复完成后没有再次运行 `APY-013`，因此不能宣称真实 Benchmark 已达标；后续真实
 验收必须在新的明确授权下执行，并保留新 run，而不是覆盖或重标本次失败结果。
 
+### APY-013 确定性 Sufficiency 与 Decision 规范化（2026-08-17）
+
+本轮设计/计划提交为 `e7528e8`、`9884505` 和 `4ae907e`；实现与回归提交为
+`2e19a7e`、`0588d20`、`1cde2af` 和 `432ae32`。Sufficiency 的 supported、refuted 与
+unresolved 分类现在只由公开 Hypothesis 全集和持久化 Hypothesis State 派生；模型输出只保留
+缺失证据、推荐工具和公开摘要建议。缺失、重复或非公开状态会 fail closed，非公开 ID 不写入
+审计。存在 open competitor 时，Workflow 优先执行 `testsHypotheses` 与其相交的未运行 Plan
+Step，无匹配步骤才进入有界 Replan。
+
+Decision 在 LLM Validator 前新增全有或全无的公开证据规范化。只有原 Candidate 通过标签、
+Evidence 归属、唯一 supported、无 open competitor 等检查，且失败项仅为
+`trigger_present`/`grounded_causal_chain` 时，系统才使用 Candidate 已引用的 supporting
+Observation summary 重建 trigger 与因果链。规范化结果必须再次通过原十项确定性 Validator；
+Candidate 未引用链条所用 Observation Evidence、多 trigger、角色不完整或标签错误时不修补。
+Validator、评分阈值和恢复权限均未降低。
+
+离线 APY-013 application 回归现在按顺序执行四个诊断工具：PostgreSQL Error、Wait Graph、
+Database Metrics 和 Resource Order。Database Metrics 真实 refute `postgres_slow_query` 后，
+系统才关闭最后一个 competitor；随后生成 `decisionOrigin=llm_grounded_normalization`，确定性
+验证通过，恢复 Policy 仍为 `executionPermitted=false`。
+
+本轮只运行受限回归，没有运行全量 pytest：Group A 90 项、Group B 111 项全部通过；Ruff
+clean、Pyright `0 errors`、`harden-aiops-decision-validation --strict` valid、`git diff --check`
+通过。本轮没有再次执行真实 LLM APY-013，因此不新增真实分数或达标声明；下一次真实验收仍需
+单独授权并保存为新的独立 Run。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、

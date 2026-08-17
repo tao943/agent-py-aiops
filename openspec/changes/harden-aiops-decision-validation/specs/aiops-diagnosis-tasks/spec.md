@@ -60,3 +60,36 @@ allowlisted error category、尝试次数、warning 和 deterministic check resu
 - **WHEN** 当前模型 capability 声明 `structuredOutputMethod=json_mode`
 - **THEN** Decision 与 Validator MUST 使用 `json_mode` 构造 structured invoker
 - **AND** Workflow MUST 保留既有 schema 校验、一次格式纠正和安全错误分类
+
+### Requirement: Persisted hypothesis state is authoritative for sufficiency
+
+Sufficiency Gate SHALL 从公开 Hypothesis 全集和持久化 Hypothesis State 确定
+supported、refuted 与 unresolved 分类，且 SHALL NOT 允许模型输出覆盖该分类。
+
+#### Scenario: Model prematurely closes an open competitor
+- **WHEN** 模型报告 `sufficient`，但一个公开竞争假设在持久化状态中仍为 `open`
+- **THEN** Workflow MUST 保存 `status=insufficient` 和该 unresolved hypothesis
+- **AND** Workflow MUST 优先执行尚未运行且 `testsHypotheses` 覆盖该 competitor 的 Plan Step
+
+#### Scenario: Persisted state is incomplete or malformed
+- **WHEN** 公开 hypothesis 缺少状态，或状态包含重复/非公开 ID
+- **THEN** Workflow MUST fail closed 为 insufficient
+- **AND** Workflow MUST NOT 把非公开 ID 写入 Sufficiency 审计
+
+### Requirement: Grounded expression normalization preserves strict validation
+
+Workflow MAY 在 Validator 前把 LLM Candidate 的 trigger 和 causal chain 规范化为当前任务
+supporting Observation 的精确 summary，但 MUST 保留 component、mechanism、Evidence IDs 和
+confidence，并 MUST 在规范化前后运行同一确定性 Validator。
+
+#### Scenario: Only expression checks fail
+- **WHEN** Candidate 仅未通过 `trigger_present` 或 `grounded_causal_chain`
+- **AND** 唯一 supported hypothesis 没有 open competitor
+- **AND** Candidate 引用了规范化所使用的全部 supporting Observation Evidence
+- **THEN** Workflow MAY 生成 `llm_grounded_normalization`
+- **AND** 规范化结果 MUST 通过全部确定性 checks 才能进入 LLM Validator
+
+#### Scenario: Candidate does not cite a copied observation
+- **WHEN** 规范化链需要使用一个 Candidate 未引用 Evidence ID 的 supporting Observation
+- **THEN** Workflow MUST NOT 规范化 Candidate
+- **AND** 后续验证与恢复 MUST 保持 fail closed
