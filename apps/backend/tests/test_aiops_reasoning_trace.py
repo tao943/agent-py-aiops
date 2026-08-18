@@ -844,9 +844,11 @@ def test_plan_rejects_intent_outside_tool_capability() -> None:
 async def test_evidence_evaluator_retains_known_support_and_allowed_model_role(
     migrated_database_url: str,
 ) -> None:
+    prompts: list[str] = []
+
     class StaticChatModel:
         async def ainvoke(self, prompt: object) -> str:
-            del prompt
+            prompts.append(str(prompt))
             return json.dumps(
                 {
                     "purpose": "Inspect transaction resource order.",
@@ -933,6 +935,9 @@ async def test_evidence_evaluator_retains_known_support_and_allowed_model_role(
     assert observation["reportedCausalRole"] == "mechanism"
     assert observation["causalRoleCorrected"] is False
     assert steps[-1].payload["observationDecision"] == observation
+    assert "compatible with a hypothesis is not sufficient to support it" in prompts[0]
+    assert "decisively contradicts" in prompts[0]
+    assert "Evaluate every hypothesis named by testsHypotheses" in prompts[0]
 
 
 @pytest.mark.asyncio
