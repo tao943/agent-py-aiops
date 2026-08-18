@@ -68,7 +68,9 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise LiveBenchmarkError("recovery_denied", stage="recover")
+        error = LiveBenchmarkError("recovery_denied", stage="recover")
+        error.cleanup_succeeded = True
+        raise error
 
     payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
@@ -82,6 +84,7 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     assert payload["status"] == "failed"
     assert envelope.status == "failed"
     assert envelope.validity == "VALID_FAIL"
+    assert envelope.metrics["cleanupSucceeded"] is True
 
 
 @pytest.mark.asyncio
@@ -89,7 +92,9 @@ async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise LiveBenchmarkError("cls_index_timeout", stage="evidence")
+        error = LiveBenchmarkError("cls_index_timeout", stage="evidence")
+        error.cleanup_succeeded = True
+        raise error
 
     payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
@@ -102,6 +107,7 @@ async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
     assert exit_code == 2
     assert payload["status"] == "infra_invalid"
     assert envelope.metadata["evidenceSource"] == "cls"
+    assert envelope.metrics["cleanupSucceeded"] is True
 
 
 @pytest.mark.asyncio
@@ -109,7 +115,9 @@ async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise asyncio.CancelledError
+        error = asyncio.CancelledError()
+        error.cleanup_succeeded = True  # type: ignore[attr-defined]
+        raise error
 
     with pytest.raises(asyncio.CancelledError):
         await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
@@ -119,7 +127,55 @@ async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None
             execute=execute,
             recorder=recorder,
         )
-    assert archive.load("live-cancelled").status == "interrupted"
+    envelope = archive.load("live-cancelled")
+    assert envelope.status == "interrupted"
+    assert envelope.metrics["cleanupSucceeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_live_failure_saves_failed_cleanup_result(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = LiveBenchmarkError("diagnostic_failed", stage="diagnose")
+        error.cleanup_succeeded = False
+        raise error
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-cleanup-failed",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("live-cleanup-failed")
+    assert envelope.failure_category == "diagnostic_failed"
+    assert envelope.metrics["cleanupSucceeded"] is False
+
+
+@pytest.mark.asyncio
+async def test_live_runtime_error_saves_known_cleanup_result(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = RuntimeError("sensitive runtime detail")
+        error.cleanup_succeeded = False  # type: ignore[attr-defined]
+        raise error
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-runtime-cleanup-failed",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("live-runtime-cleanup-failed")
+    assert exit_code == 2
+    assert payload["status"] == "infra_invalid"
+    assert envelope.failure_category == "live_runtime_error"
+    assert envelope.metrics["cleanupSucceeded"] is False
 
 
 def test_cli_resolves_repository_live_scenario_root() -> None:
@@ -175,6 +231,51 @@ def test_cli_requires_explicit_scenario_and_run_id(command: str) -> None:
     assert args.command == command
     assert args.scenario == "APY-LIVE-PG-LOCK-001"
     assert args.run_id == "live-run-1"
+
+
+def test_live_run_cli_accepts_and_validates_campaign_id() -> None:
+    parser = build_parser()
+    base = [
+        "run",
+        "--scenario",
+        "APY-LIVE-PG-LOCK-001",
+        "--run-id",
+        "live-run-1",
+        "--owner-user-id",
+        "eval-user",
+        "--knowledge-base-id",
+        "kb-30-cards",
+        "--campaign-id",
+    ]
+
+    arguments = parser.parse_args([*base, "full-acceptance-20260818"])
+    assert arguments.campaign_id == "full-acceptance-20260818"
+    for invalid in ("", "../campaign", "x" * 81):
+        with pytest.raises(SystemExit):
+            parser.parse_args([*base, invalid])
+
+
+@pytest.mark.asyncio
+async def test_live_campaign_is_saved_only_as_metadata(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = LiveBenchmarkError("diagnostic_failed", stage="diagnose")
+        error.cleanup_succeeded = True
+        raise error
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-campaign",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+        campaign_id="full-acceptance-20260818",
+    )
+
+    envelope = archive.load("live-campaign")
+    assert envelope.metadata["acceptanceCampaignId"] == "full-acceptance-20260818"
+    assert "acceptanceCampaignId" not in envelope.result_payload
 
 
 def test_cli_rejects_missing_identity() -> None:

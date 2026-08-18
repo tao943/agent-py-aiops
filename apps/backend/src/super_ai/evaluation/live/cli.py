@@ -15,9 +15,11 @@ from typing import cast
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.history import (
     EvaluationStatus,
-    interrupted_envelope,
     running_envelope,
     terminal_envelope,
+)
+from super_ai.evaluation.history import (
+    validate_run_id as validate_evaluation_id,
 )
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
@@ -114,6 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--owner-user-id", required=True)
             command.add_argument("--knowledge-base-id", required=True)
             command.add_argument("--config")
+            command.add_argument(
+                "--campaign-id",
+                type=validate_evaluation_id,
+            )
             command.add_argument(
                 "--evidence-source",
                 choices=("local", "cls"),
@@ -221,6 +227,7 @@ async def _run_live_command(
             evidence_source=evidence_source,
             execute=execute,
             recorder=recorder,
+            campaign_id=cast(str | None, arguments.campaign_id),
         )
     finally:
         await engine.dispose()
@@ -235,26 +242,40 @@ async def _run_live_once(
     evidence_source: EvidenceSource,
     execute: Callable[[], Awaitable[LiveEvaluationResult]],
     recorder: EvaluationRunRecorder,
+    campaign_id: str | None = None,
 ) -> tuple[dict[str, object], int]:
     timestamp = datetime.now(timezone.utc)
+    metadata: dict[str, object] = {
+        "workflowVersion": "live-v1",
+        "evidenceSource": evidence_source,
+    }
+    if campaign_id is not None:
+        metadata["acceptanceCampaignId"] = campaign_id
     running = running_envelope(
         run_id=run_id,
         evaluation_kind="live",
         scenario_id=scenario_id,
         suite_version="v1",
-        metadata={
-            "workflowVersion": "live-v1",
-            "evidenceSource": evidence_source,
-        },
+        metadata=metadata,
         created_at=timestamp,
         started_at=timestamp,
     )
     start = await recorder.start(running)
     try:
         result = await execute()
-    except (KeyboardInterrupt, asyncio.CancelledError):
+    except (KeyboardInterrupt, asyncio.CancelledError) as exc:
         await recorder.fail(
-            interrupted_envelope(running, completed_at=datetime.now(timezone.utc))
+            terminal_envelope(
+                running=running,
+                status="interrupted",
+                validity=None,
+                passed=None,
+                metrics=_cleanup_metrics(exc),
+                result_payload={},
+                diagnostic_task_id=None,
+                failure_category=None,
+                completed_at=datetime.now(timezone.utc),
+            )
         )
         raise
     except LiveBenchmarkError as exc:
@@ -277,7 +298,7 @@ async def _run_live_once(
             status=cast(EvaluationStatus, status),
             validity=validity,
             passed=False if status == "failed" else None,
-            metrics={},
+            metrics=_cleanup_metrics(exc),
             result_payload=result_payload,
             diagnostic_task_id=None,
             failure_category=exc.category,
@@ -285,13 +306,13 @@ async def _run_live_once(
         )
         finish = await recorder.fail(terminal)
         return payload, 2 if start.database_pending or finish.database_pending else exit_code
-    except Exception:
+    except Exception as exc:
         terminal = terminal_envelope(
             running=running,
             status="infra_invalid",
             validity="INFRA_INVALID",
             passed=None,
-            metrics={},
+            metrics=_cleanup_metrics(exc),
             result_payload={"failures": ["live_runtime_error"]},
             diagnostic_task_id=None,
             failure_category="live_runtime_error",
@@ -346,6 +367,13 @@ async def _run_live_once(
         0 if result.passed else 1
     )
     return payload, exit_code
+
+
+def _cleanup_metrics(error: BaseException) -> dict[str, object]:
+    cleanup_succeeded = getattr(error, "cleanup_succeeded", None)
+    if isinstance(cleanup_succeeded, bool):
+        return {"cleanupSucceeded": cleanup_succeeded}
+    return {}
 
 
 class _LiveScoringEvaluator:

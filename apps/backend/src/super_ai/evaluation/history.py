@@ -55,6 +55,7 @@ _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "workflowVersion",
             "modelConfiguration",
             "ragMode",
+            "acceptanceCampaignId",
             "importSource",
         }
     ),
@@ -75,6 +76,7 @@ _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "workflowVersion",
             "modelConfiguration",
             "evidenceSource",
+            "acceptanceCampaignId",
             "importSource",
         }
     ),

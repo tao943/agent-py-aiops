@@ -22,6 +22,7 @@ from super_ai.evaluation.history import (
     interrupted_envelope,
     running_envelope,
     terminal_envelope,
+    validate_run_id,
 )
 from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.recording import EvaluationRunRecorder
@@ -68,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--knowledge-base-id",
         help="Authorized knowledge base; defaults to kb_<owner-user-id>.",
+    )
+    parser.add_argument(
+        "--campaign-id",
+        type=validate_run_id,
+        help="Optional safe acceptance campaign identifier.",
     )
     return parser
 
@@ -142,6 +148,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 model_configuration=model_configuration,
                 runner=runner,
                 recorder=recorder,
+                campaign_id=arguments.campaign_id,
             )
             reports.append(report)
             database_pending = database_pending or pending
@@ -172,19 +179,23 @@ async def _run_snapshot_once(
     model_configuration: dict[str, object],
     runner: SnapshotBenchmarkRunner,
     recorder: EvaluationRunRecorder,
+    campaign_id: str | None = None,
 ) -> tuple[dict[str, object], bool]:
     created_at = datetime.now(timezone.utc)
+    metadata: dict[str, object] = {
+        "gitSha": agent_version.git_sha,
+        "workflowVersion": agent_version.workflow_version,
+        "modelConfiguration": model_configuration,
+        "ragMode": rag_mode,
+    }
+    if campaign_id is not None:
+        metadata["acceptanceCampaignId"] = campaign_id
     running = running_envelope(
         run_id=run_id,
         evaluation_kind="snapshot",
         scenario_id=scenario_id,
         suite_version=suite_version,
-        metadata={
-            "gitSha": agent_version.git_sha,
-            "workflowVersion": agent_version.workflow_version,
-            "modelConfiguration": model_configuration,
-            "ragMode": rag_mode,
-        },
+        metadata=metadata,
         created_at=created_at,
         started_at=created_at,
     )

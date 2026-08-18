@@ -40,11 +40,13 @@ class LiveBenchmarkError(RuntimeError):
         *,
         stage: str | None = None,
         authorization_code: str | None = None,
+        cleanup_succeeded: bool | None = None,
     ) -> None:
         super().__init__("Docker Live benchmark failed at a classified boundary.")
         self.category = category
         self.stage = stage
         self.authorization_code = authorization_code
+        self.cleanup_succeeded = cleanup_succeeded
 
 
 class LiveScenarioDriver(Protocol):
@@ -226,15 +228,28 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             try:
                 cleanup = await self._driver.cleanup(identity)
                 if not cleanup.passed:
-                    raise LiveBenchmarkError("cleanup_failed", stage="cleanup")
+                    raise LiveBenchmarkError(
+                        "cleanup_failed",
+                        stage="cleanup",
+                        cleanup_succeeded=False,
+                    )
             except BaseException as cleanup_exc:
                 if isinstance(cleanup_exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                if isinstance(cleanup_exc, LiveBenchmarkError):
+                if active_error is not None:
+                    active_error.cleanup_succeeded = False  # pyright: ignore[reportAttributeAccessIssue]
+                elif isinstance(cleanup_exc, LiveBenchmarkError):
+                    cleanup_exc.cleanup_succeeded = False
                     raise cleanup_exc from active_error
-                raise LiveBenchmarkError("cleanup_failed", stage="cleanup") from (
-                    cleanup_exc if active_error is None else active_error
-                )
+                else:
+                    raise LiveBenchmarkError(
+                        "cleanup_failed",
+                        stage="cleanup",
+                        cleanup_succeeded=False,
+                    ) from cleanup_exc
+            else:
+                if active_error is not None:
+                    active_error.cleanup_succeeded = True  # pyright: ignore[reportAttributeAccessIssue]
 
     @staticmethod
     async def _classified(

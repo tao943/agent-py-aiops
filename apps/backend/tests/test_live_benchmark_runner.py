@@ -230,6 +230,7 @@ async def test_runner_classifies_a_diagnostic_boundary_without_raw_error() -> No
     assert captured.value.category == "diagnostic_failed"
     assert captured.value.stage == "diagnose"
     assert captured.value.authorization_code is None
+    assert captured.value.cleanup_succeeded is True
     assert "secret" not in str(captured.value)
     assert driver.events[-1] == "cleanup"
 
@@ -246,10 +247,11 @@ async def test_runner_re_raises_cancellation_after_cleanup() -> None:
         evaluator=RecordingEvaluator(driver.events),
     )
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as captured:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert driver.events[-1] == "cleanup"
+    assert captured.value.cleanup_succeeded is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -268,6 +270,7 @@ async def test_cleanup_failure_is_a_hard_failure() -> None:
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "cleanup_failed"
+    assert captured.value.cleanup_succeeded is False
 
 
 @pytest.mark.asyncio
@@ -287,6 +290,26 @@ async def test_failed_cleanup_result_is_a_hard_failure() -> None:
 
     assert captured.value.category == "cleanup_failed"
     assert captured.value.stage == "cleanup"
+    assert captured.value.cleanup_succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_original_failure_is_preserved_when_cleanup_also_fails() -> None:
+    driver = RecordingDriver(fail_at="cleanup")
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events, failed=True),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "diagnostic_failed"
+    assert captured.value.cleanup_succeeded is False
 
 
 @pytest.mark.asyncio

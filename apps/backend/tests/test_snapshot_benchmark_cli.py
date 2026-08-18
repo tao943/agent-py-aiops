@@ -33,6 +33,18 @@ def test_snapshot_output_is_optional_export_not_primary_storage() -> None:
     assert arguments.output is None
 
 
+def test_snapshot_cli_accepts_and_validates_campaign_id() -> None:
+    parser = MODULE.build_parser()
+
+    arguments = parser.parse_args(
+        ["--scenario", "APY-013", "--campaign-id", "full-acceptance-20260818"]
+    )
+    assert arguments.campaign_id == "full-acceptance-20260818"
+    for invalid in ("", "../campaign", "x" * 81):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--scenario", "APY-013", "--campaign-id", invalid])
+
+
 def test_snapshot_cli_accepts_explicit_retrieval_scope() -> None:
     arguments = MODULE.build_parser().parse_args(
         [
@@ -90,3 +102,31 @@ async def test_snapshot_failure_still_finalizes_safe_archive(tmp_path: Path) -> 
     assert report["status"] == "agent_failed"
     assert saved.status == "agent_failed"
     assert saved.failure_category == "adapter_error"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_campaign_is_saved_only_as_metadata(tmp_path: Path) -> None:
+    archive = EvaluationArchive(
+        tmp_path / "archive",
+        repository_root=tmp_path / "repository",
+    )
+    recorder = EvaluationRunRecorder(
+        archive=archive,
+        repository=AvailableRepository(),
+    )
+
+    await MODULE._run_snapshot_once(
+        scenario_id="APY-013",
+        suite_version="v1",
+        rag_mode="off",
+        run_id="eval-cli-campaign",
+        agent_version=AgentVersion(git_sha="abc", workflow_version="v1"),
+        model_configuration={"provider": "offline", "model": "scripted"},
+        runner=RaisingRunner(),
+        recorder=recorder,
+        campaign_id="full-acceptance-20260818",
+    )
+
+    saved = archive.load("eval-cli-campaign")
+    assert saved.metadata["acceptanceCampaignId"] == "full-acceptance-20260818"
+    assert "acceptanceCampaignId" not in saved.result_payload
