@@ -40,14 +40,12 @@ _CONTEXT_OR_MECHANISM = frozenset(
         "GetDatabaseMetrics",
         "GetGatewayMetrics",
         "GetRedisConnectionMetrics",
-        "GetServiceMetrics",
         "GetServiceTopology",
         "InspectContainer",
         "InspectDatabasePool",
         "InspectGatewayRequestTimeline",
         "InspectHostLimits",
         "InspectNginx",
-        "InspectPostgres",
         "InspectRedis",
         "InspectRedisClientPool",
         "InspectRedisServer",
@@ -58,6 +56,8 @@ _CONTEXT_OR_MECHANISM = frozenset(
         "QueryTrace",
     }
 )
+_CONTEXT_OR_MECHANISM_OR_IMPACT = frozenset({"GetServiceMetrics"})
+_TRIGGER_OR_CONTEXT_OR_MECHANISM = frozenset({"InspectPostgres"})
 _CONTEXT_OR_IMPACT = frozenset({"VerifyServiceHealth"})
 _LOG_EVIDENCE = frozenset({"SearchLog", "SearchLogs"})
 _NON_DIAGNOSTIC_PREFIXES = (
@@ -106,6 +106,10 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
         return frozenset({"mechanism", "impact"})
     if tool_name in _CONTEXT_OR_MECHANISM:
         return frozenset({"context", "mechanism"})
+    if tool_name in _CONTEXT_OR_MECHANISM_OR_IMPACT:
+        return frozenset({"context", "mechanism", "impact"})
+    if tool_name in _TRIGGER_OR_CONTEXT_OR_MECHANISM:
+        return frozenset({"trigger", "context", "mechanism"})
     if tool_name in _CONTEXT_OR_IMPACT:
         return frozenset({"context", "impact"})
     if tool_name in _LOG_EVIDENCE:
@@ -241,9 +245,20 @@ def next_causal_refinement_index(
         return None
     missing = set(missing_roles)
     executed = set(executed_fingerprints)
-    for index in range(max(plan_index, 0), len(plan)):
+    cursor = min(max(plan_index, 0), len(plan))
+    candidate_indexes = (*range(cursor, len(plan)), *range(0, cursor))
+    for index in candidate_indexes:
         step = plan[index]
         if step.get("causalIntent") not in missing:
+            continue
+        if supported_hypothesis_id not in _string_set(step.get("testsHypotheses")):
+            continue
+        if fingerprint(step) in executed:
+            continue
+        return index
+    for index in candidate_indexes:
+        step = plan[index]
+        if not (allowed_causal_intents(str(step.get("tool") or "")) & missing):
             continue
         if supported_hypothesis_id not in _string_set(step.get("testsHypotheses")):
             continue

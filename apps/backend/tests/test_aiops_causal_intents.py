@@ -41,6 +41,12 @@ def test_tool_capabilities_describe_public_observation_semantics() -> None:
     assert allowed_causal_intents("VerifyServiceHealth") == frozenset(
         {"context", "impact"}
     )
+    assert allowed_causal_intents("GetServiceMetrics") == frozenset(
+        {"context", "mechanism", "impact"}
+    )
+    assert allowed_causal_intents("InspectPostgres") == frozenset(
+        {"trigger", "context", "mechanism"}
+    )
     assert allowed_causal_intents("RestartTestService") == frozenset()
     assert allowed_causal_intents("InspectFutureSubsystem") == frozenset({"context"})
 
@@ -91,6 +97,25 @@ def test_plan_coverage_does_not_claim_completion_without_capable_tools() -> None
     assert result.complete is False
     assert result.missing_roles == ("trigger", "mechanism", "impact")
     assert result.ambiguous_trigger is False
+
+
+def test_plan_coverage_uses_metrics_for_impact_without_overwriting_other_roles() -> None:
+    result = repair_plan_causal_coverage(
+        (
+            _step("pool", "InspectDatabasePool", "context"),
+            _step("database", "InspectPostgres", "mechanism"),
+            _step("metrics", "GetServiceMetrics", "context"),
+            _step("changes", "GetDeploymentChanges", "trigger"),
+        )
+    )
+
+    assert result.complete is True
+    assert [item["causalIntent"] for item in result.steps] == [
+        "context",
+        "mechanism",
+        "impact",
+        "trigger",
+    ]
 
 
 def test_log_only_plan_cannot_be_repaired_into_a_trigger() -> None:
@@ -223,3 +248,19 @@ def test_causal_refinement_selects_unexecuted_missing_role() -> None:
         executed_fingerprints=(),
         fingerprint=lambda step: str(step["id"]),
     ) is None
+
+
+def test_causal_refinement_revisits_earlier_unexecuted_capable_step() -> None:
+    plan = (
+        _step("database", "InspectPostgres", "mechanism"),
+        _step("changes", "GetDeploymentChanges", "trigger"),
+    )
+
+    assert next_causal_refinement_index(
+        plan=plan,
+        plan_index=len(plan),
+        missing_roles=("trigger",),
+        supported_hypothesis_id="postgres_deadlock",
+        executed_fingerprints=("changes",),
+        fingerprint=lambda step: str(step["id"]),
+    ) == 0
