@@ -129,8 +129,8 @@ Expected: PostgreSQL、Redis、etcd、MinIO、Milvus、Nginx 以及三个隔离 
 Run from `apps/backend`:
 
 ```powershell
-uv run alembic upgrade head
-uv run alembic current
+uv run alembic -x project_config=$sharedProjectConfig upgrade head
+uv run alembic -x project_config=$sharedProjectConfig current
 ```
 
 Expected: current revision 等于唯一 head；命令退出 0。
