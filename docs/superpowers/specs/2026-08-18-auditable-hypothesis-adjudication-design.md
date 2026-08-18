@@ -238,14 +238,20 @@ PostgreSQL 任务租约已负责正常领取竞争。未来多实例争抢显著
 所有降级必须保存允许列表内的错误分类，不保存 Secret、原始 Prompt、模型私有推理、Ground Truth
 或未经脱敏的原始云日志。
 
-## 10. v1/v2 兼容
+## 10. 执行图与 Artifact 版本兼容
 
-v2 使用 `graph_version = aiops-diagnostic-v2`，执行键包含版本。
+执行恢复和 Benchmark Artifact 使用两套不同的版本标识：
 
-- 已完成 v1 测评不可变，汇总时标记原图版本；
-- 新运行全部使用 v2；
-- 中断的 v1 不能从 v2 中间节点恢复，应标记 `migration_required` 并创建 v2 新执行；
-- v1 证据可展示，但必须重新经过 v2 Fact Adapter 才能参与新决策；
+- 旧执行图没有显式版本，读取时视为 `graphVersion=aiops-diagnostic-v1`；
+- 新执行图使用 `graphVersion=aiops-diagnostic-v2`，执行键包含该版本；
+- 现有 Artifact `workflowVersion=evidence-driven-v2/v3` 保持原语义；
+- 新 disposition、条件式 Validator 和调用审计写入
+  `workflowVersion=evidence-driven-v4`。
+
+- 已完成的旧图/v2/v3 Artifact 不可变，继续按原合同汇总；
+- 新运行全部使用 `aiops-diagnostic-v2` 与 `evidence-driven-v4`；
+- 中断的旧图不能从新图中间节点恢复，应标记 `migration_required` 并创建新执行；
+- 旧图证据可展示，但必须重新经过新 Fact Adapter 才能参与新决策；
 - API 暂时保留旧 `hypothesisStates.status`，同时输出规范 `disposition`、`reasonCode`、
   `assessmentSource` 和证据 ID；
 - 新 Agent、Validator 和评分器只能读取 `disposition`，旧 `status` 仅用于客户端兼容；
@@ -264,7 +270,7 @@ v2 使用 `graph_version = aiops-diagnostic-v2`，执行键包含版本。
 - 覆盖 checkpoint 完成后崩溃、保存前崩溃、租约接管和 PostgreSQL 唯一冲突；
 - `uncertain` 副作用禁止重放，相同恢复意图并发提交最多生效一次；
 - SSE 重连、数据库短断、Worker/容器重启可以安全续跑；
-- v1 完成结果仍可读，v1 中断结果不能恢复进 v2；
+- 旧图及 v2/v3 Artifact 完成结果仍可读，旧图中断结果不能恢复进新图；
 - Ground Truth 隔离、路径穿越、嵌套 Oracle 字段和伪装场景 ID 继续被拒绝；
 - 新日志格式和证据冲突不能被静默误判。
 
