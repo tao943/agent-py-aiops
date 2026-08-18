@@ -1185,28 +1185,21 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 known_hypotheses=known_hypotheses,
             )
-            tested_hypotheses = {
-                item
-                for item in cast(
-                    list[object], plan_step.get("testsHypotheses") or []
-                )
-                if isinstance(item, str)
-            }
             reported_role = decision.causal_role
+            tool_name = str(plan_step.get("tool") or "")
+            accepted_role = (
+                reported_role
+                if reported_role in allowed_causal_intents(tool_name)
+                else plan_intent
+            )
             decision = replace(
                 decision,
-                supports=tuple(
-                    item for item in decision.supports if item in tested_hypotheses
-                ),
-                refutes=tuple(
-                    item for item in decision.refutes if item in tested_hypotheses
-                ),
-                causal_role=plan_intent,
+                causal_role=accepted_role,
                 causal_role_origin=(
-                    "model" if reported_role == plan_intent else "plan_contract"
+                    "model" if accepted_role == reported_role else "plan_contract"
                 ),
                 reported_causal_role=reported_role,
-                causal_role_corrected=reported_role != plan_intent,
+                causal_role_corrected=accepted_role != reported_role,
             )
         except Exception:
             decision = ObservationDecision(
@@ -1757,6 +1750,19 @@ class AiopsDiagnosticService:
                 available_tools=available_tools,
                 executed_tools=executed_tools,
             )
+        deterministic_failed_codes = (
+            {
+                check.code
+                for check in deterministic_result.checks
+                if not check.passed
+            }
+            if deterministic_result is not None
+            else set()
+        )
+        semantic_expression_codes = {"grounded_causal_chain", "trigger_present"}
+        semantic_review_allowed = deterministic_failed_codes.issubset(
+            semantic_expression_codes
+        )
         if candidate is not None and deterministic_result is not None and structural_gaps:
             validation = RootCauseValidationDecision(
                 status="invalid",
@@ -1774,6 +1780,7 @@ class AiopsDiagnosticService:
         elif (
             candidate is not None
             and deterministic_result is not None
+            and not semantic_review_allowed
             and deterministic_replan_allowed
         ):
             validation = RootCauseValidationDecision(
@@ -1787,6 +1794,7 @@ class AiopsDiagnosticService:
         elif (
             candidate is not None
             and deterministic_result is not None
+            and not semantic_review_allowed
             and not deterministic_result.passed
         ):
             validation = RootCauseValidationDecision(
@@ -1813,7 +1821,10 @@ class AiopsDiagnosticService:
                 "Return JSON only for one root-cause validation decision with status, evidenceIds, "
                 "unsupportedFields, missingEvidence, and summary. Judge only whether the "
                 "candidate component, mechanism, trigger, and causalChain are supported by the "
-                "public structured observations. Do not compare against hidden answers and do "
+                "public structured observations. Verify every candidate field and every "
+                "causalChain fact against the candidate-cited observation evidence IDs; semantic "
+                "paraphrases are acceptable, but an uncited or unsupported fact is invalid. Do "
+                "not compare against hidden answers and do "
                 "not include private chain-of-thought. Follow this JSON shape example: "
                 f"{response_example}. "
                 f"Candidate: {json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "

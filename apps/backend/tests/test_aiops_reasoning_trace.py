@@ -14,6 +14,7 @@ from super_ai.aiops.diagnostics import (
     _normalize_grounded_decision,  # pyright: ignore[reportPrivateUsage]
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
+    _supporting_decision_evidence_ids,  # pyright: ignore[reportPrivateUsage]
     _validator_chat_model,  # pyright: ignore[reportPrivateUsage]
     _validator_model_name,  # pyright: ignore[reportPrivateUsage]
     _validator_structured_output_method,  # pyright: ignore[reportPrivateUsage]
@@ -839,7 +840,7 @@ def test_plan_rejects_intent_outside_tool_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evidence_evaluator_normalizes_role_to_plan_contract(
+async def test_evidence_evaluator_retains_known_support_and_allowed_model_role(
     migrated_database_url: str,
 ) -> None:
     class StaticChatModel:
@@ -924,13 +925,110 @@ async def test_evidence_evaluator_normalizes_role_to_plan_contract(
     observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
     assert observation["summary"] == "Transactions acquired rows in opposite order."
     assert observation["supports"] == ["postgres_deadlock"]
-    assert observation["refutes"] == []
+    assert observation["refutes"] == ["postgres_slow_query"]
     assert observation["evidenceIds"] == ["ev-order"]
-    assert observation["causalRole"] == "trigger"
-    assert observation["causalRoleOrigin"] == "plan_contract"
+    assert observation["causalRole"] == "mechanism"
+    assert observation["causalRoleOrigin"] == "model"
     assert observation["reportedCausalRole"] == "mechanism"
-    assert observation["causalRoleCorrected"] is True
+    assert observation["causalRoleCorrected"] is False
     assert steps[-1].payload["observationDecision"] == observation
+
+
+@pytest.mark.asyncio
+async def test_evidence_evaluator_corrects_disallowed_model_role_to_plan_contract(
+    migrated_database_url: str,
+) -> None:
+    class StaticChatModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "purpose": "Inspect the PostgreSQL wait graph.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": [],
+                    "summary": "A two-session wait cycle exists.",
+                    "causalRole": "trigger",
+                }
+            )
+
+    class StaticLlmProvider:
+        def create_chat_model(self) -> StaticChatModel:
+            return StaticChatModel()
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="disallowed-causal-role-contract",
+            status="running",
+            query="Inspect a database incident.",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, StaticLlmProvider()),
+            retrieval_tool=cast(Any, object()),
+            mcp_client=cast(Any, object()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        update = await service._evidence_evaluator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "current_evidence_id": "ev-cycle",
+                    "current_evidence_summary": "bounded observation",
+                    "current_plan_step": {
+                        "id": "wait-graph",
+                        "tool": "InspectPostgresWaitGraph",
+                        "arguments": {},
+                        "purpose": "Inspect the PostgreSQL wait graph.",
+                        "testsHypotheses": ["postgres_deadlock"],
+                        "causalIntent": "mechanism",
+                    },
+                    "public_hypotheses": [{"id": "postgres_deadlock"}],
+                    "hypothesis_states": [
+                        {
+                            "id": "postgres_deadlock",
+                            "status": "open",
+                            "confidence": 0.5,
+                            "evidenceIds": [],
+                        }
+                    ],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
+    assert observation["causalRole"] == "mechanism"
+    assert observation["causalRoleOrigin"] == "plan_contract"
+    assert observation["reportedCausalRole"] == "trigger"
+    assert observation["causalRoleCorrected"] is True
+
+
+def test_supporting_decision_evidence_includes_incidental_known_support() -> None:
+    assert _supporting_decision_evidence_ids(
+        hypothesis_states=[{"id": "slow_database_work", "status": "supported"}],
+        observation_decisions=[
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["ev-postgres"],
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["ev-pool"],
+            },
+        ],
+        persisted_evidence_ids=["ev-postgres", "ev-pool", "ev-deployment"],
+    ) == ["ev-postgres", "ev-pool"]
 
 
 def test_observation_decision_requires_known_hypotheses() -> None:
@@ -2666,6 +2764,123 @@ async def test_apy_013_routes_only_validation_to_dedicated_validator(
     returned = cast(dict[str, object], result["decision_validation"])
     assert returned["validationModel"] == "qwen3.8-max"
     assert returned["validationErrorCodes"] == []
+
+
+def _semantic_expression_gap_state() -> dict[str, object]:
+    return {
+        "owner_user_id": "benchmark-user",
+        "task_id": "diagnostic-semantic-expression-gap",
+        "evidence_ids": ["evidence_a1", "evidence_b2", "evidence_c3"],
+        "root_cause_decision": {
+            "component": "postgresql",
+            "mechanism": "slow_transaction_pool_exhaustion",
+            "trigger": "A reporting transaction retained a lock for more than 428 seconds.",
+            "causalChain": [
+                "The long transaction held a database lock.",
+                "Blocked requests retained every pooled connection.",
+                "Pool acquisition attempts timed out.",
+            ],
+            "evidenceIds": ["evidence_a1", "evidence_b2", "evidence_c3"],
+            "confidence": 0.96,
+        },
+        "public_hypotheses": [{"id": "slow_database_work"}],
+        "hypothesis_states": [{"id": "slow_database_work", "status": "supported"}],
+        "observation_decisions": [
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_a1"],
+                "summary": "reporting-worker has held a transactionid lock for 428 seconds.",
+                "causalRole": "trigger",
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_b2"],
+                "summary": "The pool is 20/20 checked out while borrowers wait on a DB lock.",
+                "causalRole": "mechanism",
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_c3"],
+                "summary": "There were 37 pool acquire timeouts and a 21 percent error rate.",
+                "causalRole": "impact",
+            },
+        ],
+        "decision_vocabulary": {
+            "labelsByHypothesis": {
+                "slow_database_work": {
+                    "component": "postgresql",
+                    "mechanism": "slow_transaction_pool_exhaustion",
+                }
+            }
+        },
+        "evidence_sufficiency": {"recommendedTools": []},
+        "tool_definitions": (),
+        "evidence": [],
+        "replan_count": 0,
+        "max_replans": 0,
+        "plan_index": 0,
+        "plan": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_semantic_expression_gap_reaches_dedicated_validator() -> None:
+    provider = DedicatedValidatorLlmProvider()
+    repositories = RecordingMemoryRepositories()
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, repositories),
+        llm_provider=cast(LlmProvider, provider),
+        retrieval_tool=cast(Any, EmptyRetrieval()),
+        mcp_client=cast(Any, object()),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+
+    result = await service._decision_validator(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, _semantic_expression_gap_state())
+    )
+
+    assert provider.validator_model.wrapper_calls == 1
+    assert len(provider.validator_model.inputs) == 1
+    prompt = provider.validator_model.inputs[0]
+    assert "every candidate field" in prompt
+    assert "every causalChain fact" in prompt
+    validation = cast(dict[str, object], result["decision_validation"])
+    assert validation["status"] == "valid"
+    assert validation["validationOrigin"] == "llm_confirmed"
+    assert result["root_cause_decision"] is not None
+
+
+@pytest.mark.asyncio
+async def test_semantic_expression_gap_fails_closed_when_validator_is_unavailable() -> None:
+    class TimeoutValidatorModel(RecordingDedicatedValidatorModel):
+        async def ainvoke(self, input: object) -> object:
+            self.inputs.append(str(input))
+            raise TimeoutError("validator provider timeout")
+
+    provider = DedicatedValidatorLlmProvider()
+    provider.validator_model = TimeoutValidatorModel()
+    repositories = RecordingMemoryRepositories()
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, repositories),
+        llm_provider=cast(LlmProvider, provider),
+        retrieval_tool=cast(Any, EmptyRetrieval()),
+        mcp_client=cast(Any, object()),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+
+    result = await service._decision_validator(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, _semantic_expression_gap_state())
+    )
+
+    assert provider.validator_model.wrapper_calls == 1
+    validation = cast(dict[str, object], result["decision_validation"])
+    assert validation["status"] == "invalid"
+    assert validation["validationErrorCategory"] == "model_call_failed"
+    assert validation["validationWarning"] == "llm_validator_unavailable"
+    assert validation["validationOrigin"] == "none"
+    assert result["root_cause_decision"] is None
 
 
 @pytest.mark.asyncio
