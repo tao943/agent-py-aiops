@@ -15,6 +15,7 @@ from super_ai.aiops.diagnostics import (
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _supporting_decision_evidence_ids,  # pyright: ignore[reportPrivateUsage]
+    _update_hypothesis_states,  # pyright: ignore[reportPrivateUsage]
     _validator_chat_model,  # pyright: ignore[reportPrivateUsage]
     _validator_model_name,  # pyright: ignore[reportPrivateUsage]
     _validator_structured_output_method,  # pyright: ignore[reportPrivateUsage]
@@ -1046,6 +1047,84 @@ def test_observation_decision_cannot_support_and_refute_same_hypothesis() -> Non
             '"refutes":["process-down"],"summary":"x"}',
             known_hypotheses={"process-down"},
         )
+
+
+def test_strong_accumulated_support_survives_one_conflicting_observation() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["database_work"],'
+        '"summary":"One observation conflicts.","causalRole":"context"}',
+        known_hypotheses={"database_work"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "database_work",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-conflict",
+    )
+
+    assert states == [
+        {
+            "id": "database_work",
+            "status": "supported",
+            "confidence": 0.6,
+            "evidenceIds": ["ev-1", "ev-2", "ev-3", "ev-conflict"],
+        }
+    ]
+
+
+def test_weak_support_becomes_open_when_evidence_conflicts() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["database_work"],'
+        '"summary":"One observation conflicts.","causalRole":"context"}',
+        known_hypotheses={"database_work"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "database_work",
+                "status": "supported",
+                "confidence": 0.75,
+                "evidenceIds": ["ev-support"],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-conflict",
+    )
+
+    assert states[0]["status"] == "open"
+    assert states[0]["confidence"] == pytest.approx(0.35)
+
+
+def test_open_hypothesis_becomes_refuted_after_one_refuting_observation() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["traffic"],'
+        '"summary":"Traffic stayed flat.","causalRole":"context"}',
+        known_hypotheses={"traffic"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "traffic",
+                "status": "open",
+                "confidence": 0.5,
+                "evidenceIds": [],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-traffic",
+    )
+
+    assert states[0]["status"] == "refuted"
+    assert states[0]["confidence"] == pytest.approx(0.1)
 
 
 def test_root_cause_decision_requires_available_evidence_ids() -> None:

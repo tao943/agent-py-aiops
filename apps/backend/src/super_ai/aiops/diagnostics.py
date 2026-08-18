@@ -2773,12 +2773,17 @@ def _update_hypothesis_states(
             else 0.5
         )
         if hypothesis_id in decision.supports:
-            status = "supported"
             confidence = min(1.0, confidence + 0.25)
+            status = "supported" if confidence >= 0.6 else "open"
             existing_evidence_ids = _unique_strings(existing_evidence_ids + [evidence_id])
         elif hypothesis_id in decision.refutes:
-            status = "refuted"
             confidence = max(0.0, confidence - 0.4)
+            if confidence >= 0.6:
+                status = "supported"
+            elif confidence <= 0.25:
+                status = "refuted"
+            else:
+                status = "open"
             existing_evidence_ids = _unique_strings(existing_evidence_ids + [evidence_id])
         hypothesis = HypothesisState(
             id=hypothesis_id,
