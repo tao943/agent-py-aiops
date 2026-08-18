@@ -2773,8 +2773,9 @@ def _update_hypothesis_states(
             else 0.5
         )
         if hypothesis_id in decision.supports:
-            confidence = min(1.0, confidence + 0.25)
-            status = "supported" if confidence >= 0.6 else "open"
+            support_delta = 0.1 if decision.causal_role == "context" else 0.25
+            confidence = min(1.0, confidence + support_delta)
+            status = "supported" if confidence >= 0.65 else "open"
             existing_evidence_ids = _unique_strings(existing_evidence_ids + [evidence_id])
         elif hypothesis_id in decision.refutes:
             confidence = max(0.0, confidence - 0.4)

@@ -1127,6 +1127,42 @@ def test_open_hypothesis_becomes_refuted_after_one_refuting_observation() -> Non
     assert states[0]["confidence"] == pytest.approx(0.1)
 
 
+def test_context_support_cannot_outweigh_later_direct_refutation() -> None:
+    context = parse_observation_decision(
+        '{"purpose":"check","supports":["port_mismatch"],"refutes":[],'
+        '"summary":"The symptom is compatible.","causalRole":"context"}',
+        known_hypotheses={"port_mismatch"},
+    )
+    direct_refutation = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["port_mismatch"],'
+        '"summary":"The process is not listening.","causalRole":"mechanism"}',
+        known_hypotheses={"port_mismatch"},
+    )
+
+    after_context = _update_hypothesis_states(
+        [
+            {
+                "id": "port_mismatch",
+                "status": "open",
+                "confidence": 0.5,
+                "evidenceIds": [],
+            }
+        ],
+        decision=context,
+        evidence_id="ev-context",
+    )
+    after_direct = _update_hypothesis_states(
+        after_context,
+        decision=direct_refutation,
+        evidence_id="ev-direct",
+    )
+
+    assert after_context[0]["status"] == "open"
+    assert after_context[0]["confidence"] == pytest.approx(0.6)
+    assert after_direct[0]["status"] == "refuted"
+    assert after_direct[0]["confidence"] == pytest.approx(0.2)
+
+
 def test_root_cause_decision_requires_available_evidence_ids() -> None:
     with pytest.raises(ValueError, match="evidence"):
         parse_root_cause_decision(
@@ -1848,6 +1884,7 @@ class ReplanningChatModel:
                         "supports": ["upstream_process_down"],
                         "refutes": [],
                         "summary": "The checkout container is exited and has no listener.",
+                        "causalRole": "mechanism",
                     }
                 )
             return json.dumps(
@@ -1858,6 +1895,7 @@ class ReplanningChatModel:
                     "summary": (
                         "Nginx resolves checkout on port 8080 but the connection is refused."
                     ),
+                    "causalRole": "context",
                 }
             )
         if "evidence sufficiency decision" in prompt:
