@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
-from collections.abc import Mapping
+import signal
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import cast
+from uuid import uuid4
 
+from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.history import (
+    interrupted_envelope,
+    running_envelope,
+    terminal_envelope,
+)
+from super_ai.evaluation.persistence import EvaluationRepository
+from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.evaluation.retrieval import (
     RetrievalCitationAudit,
     RetrievalQueryResult,
@@ -17,6 +29,7 @@ from super_ai.evaluation.retrieval import (
     load_retrieval_queries,
 )
 from super_ai.llm import build_default_llm_provider, load_llm_provider_config
+from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.retrieval import (
     KnowledgeRetrievalCitationSource,
     KnowledgeRetrievalHit,
@@ -39,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--queries", type=Path, default=DEFAULT_QUERIES)
     parser.add_argument("--output", type=Path, help="Optional UTF-8 JSON report path.")
     parser.add_argument("--config", type=Path, help="Optional project configuration path.")
+    parser.add_argument("--run-id", help="Optional stable evaluation run ID.")
     return parser
 
 
@@ -216,37 +230,165 @@ def _top_two_margin(hits: list[KnowledgeRetrievalHit]) -> float | None:
 async def run_command(arguments: argparse.Namespace) -> int:
     config_path = str(arguments.config) if arguments.config is not None else None
     provider_config = load_llm_provider_config(config_path=config_path)
-    provider = build_default_llm_provider(config_path=config_path)
-    tool = KnowledgeRetrievalTool(
-        embedding_model=provider.create_embedding_model(),
-        vector_store=build_default_milvus_vector_store(config_path=config_path),
-        rerank_model=provider.create_rerank_model(),
+    model_configuration = {
+        "embeddingModel": provider_config.embedding_model,
+        "rerankModel": provider_config.rerank_model,
+    }
+    engine = create_memory_engine(config_path=config_path)
+    recorder = EvaluationRunRecorder(
+        archive=EvaluationArchive.from_config(config_path=arguments.config),
+        repository=EvaluationRepository(create_memory_session_factory(engine)),
     )
-    payload = await run_queries(
-        tool,
-        owner_user_id=arguments.owner_user_id,
-        knowledge_base_id=arguments.knowledge_base_id,
-        queries_path=arguments.queries,
-        model_configuration={
-            "embeddingModel": provider_config.embedding_model,
-            "rerankModel": provider_config.rerank_model,
-        },
-    )
+
+    async def execute() -> dict[str, object]:
+        provider = build_default_llm_provider(config_path=config_path)
+        tool = KnowledgeRetrievalTool(
+            embedding_model=provider.create_embedding_model(),
+            vector_store=build_default_milvus_vector_store(config_path=config_path),
+            rerank_model=provider.create_rerank_model(),
+        )
+        return await run_queries(
+            tool,
+            owner_user_id=arguments.owner_user_id,
+            knowledge_base_id=arguments.knowledge_base_id,
+            queries_path=arguments.queries,
+            model_configuration=model_configuration,
+        )
+
+    try:
+        payload, exit_code = await _run_retrieval_once(
+            run_id=arguments.run_id or f"eval-{uuid4().hex}",
+            queries_path=arguments.queries,
+            owner_user_id=arguments.owner_user_id,
+            knowledge_base_id=arguments.knowledge_base_id,
+            model_configuration=model_configuration,
+            execute=execute,
+            recorder=recorder,
+        )
+    finally:
+        await engine.dispose()
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     print(serialized)
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(f"{serialized}\n", encoding="utf-8")
-    return 0 if _passes(payload) else 1
+    return exit_code
+
+
+async def _run_retrieval_once(
+    *,
+    run_id: str,
+    queries_path: Path,
+    owner_user_id: str,
+    knowledge_base_id: str,
+    model_configuration: Mapping[str, str],
+    execute: Callable[[], Awaitable[dict[str, object]]],
+    recorder: EvaluationRunRecorder,
+) -> tuple[dict[str, object], int]:
+    timestamp = datetime.now(timezone.utc)
+    running = running_envelope(
+        run_id=run_id,
+        evaluation_kind="retrieval",
+        scenario_id=queries_path.stem,
+        suite_version="v1",
+        metadata={
+            "workflowVersion": "retrieval-v1",
+            "modelConfiguration": dict(model_configuration),
+            "datasetChecksum": hashlib.sha256(queries_path.read_bytes()).hexdigest(),
+            "ownerUserId": owner_user_id,
+            "knowledgeBaseId": knowledge_base_id,
+        },
+        created_at=timestamp,
+        started_at=timestamp,
+    )
+    start = await recorder.start(running)
+    try:
+        payload = await execute()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await recorder.fail(
+            interrupted_envelope(running, completed_at=datetime.now(timezone.utc))
+        )
+        raise
+    except Exception:
+        terminal = terminal_envelope(
+            running=running,
+            status="infra_invalid",
+            validity="INFRA_INVALID",
+            passed=None,
+            metrics={},
+            result_payload={},
+            diagnostic_task_id=None,
+            failure_category="retrieval_runtime_error",
+            completed_at=datetime.now(timezone.utc),
+        )
+        await recorder.fail(terminal)
+        return (
+            {"validity": "invalid", "passed": False, "error": "Retrieval benchmark failed."},
+            2,
+        )
+
+    metrics_value = payload.get("metrics")
+    if not isinstance(metrics_value, Mapping):
+        raise ValueError("Retrieval benchmark metrics are missing.")
+    metrics = dict(cast(Mapping[str, object], metrics_value))
+    passed = _passes(payload)
+    failures = _threshold_failures(metrics)
+    terminal = terminal_envelope(
+        running=running,
+        status="passed" if passed else "failed",
+        validity="VALID_PASS" if passed else "VALID_FAIL",
+        passed=passed,
+        metrics=metrics,
+        result_payload={"failures": failures},
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=datetime.now(timezone.utc),
+    )
+    finish = await recorder.finish(terminal)
+    return payload, 2 if start.database_pending or finish.database_pending else (0 if passed else 1)
+
+
+def _threshold_failures(metrics: Mapping[str, object]) -> list[str]:
+    checks = (
+        ("recallAt1", _number_at_least(metrics.get("recallAt1"), 0.80)),
+        ("recallAt3", _number_at_least(metrics.get("recallAt3"), 0.95)),
+        ("mrr", _number_at_least(metrics.get("mrr"), 0.85)),
+        ("forbiddenTopOneRate", _number_at_most(metrics.get("forbiddenTopOneRate"), 0.05)),
+        ("citationCompletenessRate", metrics.get("citationCompletenessRate") == 1.0),
+    )
+    return [f"{name}_below_threshold" for name, passed in checks if not passed]
 
 
 def main() -> int:
     arguments = build_parser().parse_args()
     try:
-        return asyncio.run(run_command(arguments))
+        return asyncio.run(_run_with_sigterm(arguments))
+    except KeyboardInterrupt:
+        return 130
     except Exception as exc:
-        print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False))
+        del exc
+        print(json.dumps({"error": "retrieval_benchmark_failed"}, ensure_ascii=False))
         return 2
+
+
+async def _run_with_sigterm(arguments: argparse.Namespace) -> int:
+    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(run_command(arguments))
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def cancel_active_run(_signum: int, _frame: object) -> None:
+        loop.call_soon_threadsafe(task.cancel)
+
+    try:
+        signal.signal(signal.SIGTERM, cancel_active_run)
+    except (ValueError, OSError):
+        return await task
+    try:
+        return await task
+    except asyncio.CancelledError as exc:
+        raise KeyboardInterrupt from exc
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

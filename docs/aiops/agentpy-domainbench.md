@@ -76,7 +76,7 @@ PostgreSQL repository 和本地项目配置。它会调用所配置的真实 Cha
 
 ### 证据驱动诊断工作流
 
-`evidence-driven-v2` 不再按固定步骤直接生成结论。每轮工具观测先形成结构化
+`evidence-driven-v3` 不再按固定步骤直接生成结论。每轮工具观测先形成结构化
 Evidence，再更新公开候选假设，判断当前证据是否足以区分根因；证据缺口明确且预算
 仍可用时才进入 gap-targeted replanner。
 
@@ -89,18 +89,28 @@ flowchart TD
     R --> X
     S -->|"sufficient or bounded stop"| D["Root Cause Decision"]
     D --> V{"Decision Validator"}
-    V -->|"invalid and budget remains"| R
-    V -->|"valid"| RP["Recovery Planner"]
+    V -->|"explicit evidence gap and budget remains"| R
+    V -->|"llm_confirmed"| RP["Recovery Planner"]
+    V -->|"deterministic_grounded_fallback"| MR["Manual Review Recovery"]
     V -->|"invalid and cannot replan"| RP
     RP --> G["Policy Gate"]
+    MR --> G
     G --> O["Report and public artifact"]
     O -.-> SC["External deterministic scorer"]
 ```
 
 初始计划最多 4 步；所有已持久化的 Executor 尝试合计最多 6 次，重复步骤、参数校验
-失败和工具失败同样消耗预算；最多允许 2 次 replan。Decision Validator 同时检查
-结构合法性与证据支持。v2 运行缺少 `decision_validation=valid` 时，Artifact 不导出
-候选根因，避免中断或无效结论进入评分。
+失败和工具失败同样消耗预算；最多允许 2 次 replan。Decision Validator 先执行公开、
+确定性的证据绑定检查，再调用结构化 LLM Validator。模型调用失败、格式错误、明确拒绝和
+候选缺失分别记录为 `model_call_failed`、`invalid_model_output` / `retry_exhausted`、
+`model_rejected` 和 `candidate_missing`，不得把基础设施故障伪装成证据缺口。
+
+v3 只有两种可进入 Artifact 的有效来源：`llm_confirmed`，或候选通过全部公开确定性检查后
+因 Validator 不可用形成的 `deterministic_grounded_fallback`。后者必须进入
+`manual_review`，Policy Gate 保持 `executionPermitted=false`；如果候选混入 Alert、RAG、
+其他任务或非 supporting Observation 的 Evidence ID，则禁止降级并 fail closed。历史
+`evidence-driven-v2` 仍按 `decision_validation.status=valid` 读取，旧运行不会因新增 origin
+字段而失去可评分性。
 
 Recovery Planner 只生成结构化建议。`proposal_only` 工具必须由本次请求显式加入
 白名单、符合发现到的 JSON Schema，并且要求人工审批；Policy Gate 的 `allowed` 只表示
@@ -339,6 +349,153 @@ oracle 或覆盖映射字段。RAG off 的知识引用数均为 0。`APY-013` �
 这暴露出一个有效性缺口：Snapshot CLI 当前不会把 RAG 子系统失败提升为 exit 2，后续
 应在比较门禁中修复。当前持久化结构也未记录 token usage，因此不能把模型用量写成 0；
 这里只记录模型名称与实际总耗时。
+
+### Snapshot Tool Calling 参数所有权
+
+Snapshot 中的资源标识、采样窗口和冻结查询范围由评测运行时拥有，不再要求模型精确复述。
+加载场景时，运行时会从公开的注册调用中派生固定字段和合法变体；Planner、Replanner 与
+Executor 使用同一规范化和 JSON Schema 校验路径。模型仍负责选择工具、诊断目的、候选假设
+和真正存在的多调用变体，例如上游目标或 retry-policy 视图。
+
+这不是答案注入：参数契约不包含 `evidence_id`、工具结果、根因、恢复动作或 ground truth。
+规范化后仍由 Snapshot MCP 做精确调用匹配，任意或近似参数不会获得证据。审计保存的是实际
+发送给 MCP 的有效参数，规范化后重复的调用不会消耗六步执行预算；绕过 Planner 的非法旧
+状态会在创建 MCP 审计前以有限 `invalid_arguments` 错误拒绝。
+
+真实模型验收必须按顺序执行：先运行 `APY-013`；只有它达到既有阈值，才依次抽验
+`APY-014`、`APY-015` 和 `APY-016`。不得为通过验收修改答案、评分权重或阈值。
+
+### APY-013 resilient validation 验收（2026-08-16）
+
+在 30 个 `ready/indexed` 知识文档和 RAG on 条件下只运行一次真实 `APY-013`，未自动
+重试。运行耗时 336,212 ms，总分 89，`validity=valid`、`passed=true` 且无 hard gate。
+三个必需证据里程碑、独立正证据、根因 component/mechanism 和安全边界均通过。
+
+本次 LLM Validator 调用不可用，但候选通过全部十项公开确定性检查，因此审计记录为
+`validationOrigin=deterministic_grounded_fallback`、
+`validationErrorCategory=model_call_failed`。Workflow 没有进入无关 Replan，Recovery 被
+强制为 `manual_review`，Policy Gate 记录 `manual_review_required` 且
+`executionPermitted=false`，验证了降级闭环不会授权自动恢复。
+
+剩余扣分为 `trigger_wrong` 和 `causal_chain_incomplete`，属于生成语义与评分标签的后续
+调优范围。`observations_evaluated` 也未得分：本次有四个 Executor / Evidence Evaluation，
+但 Artifact 同时把一次 `knowledge_retrieval` 审计计入五个 completed tool calls，现有规则
+要求 Observation 数量不少于全部 completed tool calls，因而产生口径偏差；该评分口径需
+在独立变更中区分知识检索与可形成 Observation 的诊断工具，不能通过修改本次答案或阈值
+处理。
+
+### APY-013 Validator 与评分修复验收（2026-08-17）
+
+本轮实现提交为 `1d486f9`、`9944433`、`e433098` 和 `3ed0218`：过程评分仅要求完成的
+诊断工具具有 Evidence Evaluation；Validator 模型失败使用允许列表错误码和阶段；Snapshot
+与 Live 共用有序语义评分；公开 Observation 增加 `trigger/mechanism/impact/context` 因果
+角色，grounded fallback 仅在存在唯一证据绑定 trigger 时生成 2～6 项有序因果链。
+
+离线验证仅运行受影响的十个专项测试文件，没有运行全量 pytest；拆分后的两组专项回归、
+Ruff、Pyright 和变更规格 `harden-aiops-decision-validation --strict` 均通过。全局 OpenSpec
+校验仍有 13 个未被本轮修改的历史规格质量警告，例如 `agent-tool-call-audits` 的 Purpose
+长度不足；这些警告不属于本轮代码变更。
+
+前置审计确认 30 个知识文档均为 `ready/indexed`，三个真实 LLM readiness 测试通过，
+Archive 无 checksum conflict。在 RAG on 条件下只执行一次真实 `APY-013`，run ID 为
+`eval-528fbe19193743b18cb90fb6f1eaf0c7`，耗时 306,822 ms。运行终态已同时写入
+PostgreSQL 与 Archive，审计为 27 个 artifact、27 个 checksum、0 pending、0 conflict。
+
+本次结果为 `validity=valid`、`passed=false`、总分 50，维度为
+`12 / 0 / 10 / 8 / 15 / 5`。`observations_evaluated=5/5`，证明
+`knowledge_retrieval` 不再占用诊断 Observation 配额。三个必要证据里程碑、安全边界和工具
+预算均通过，但没有产生 Root Cause Decision，因此失败项为
+`missing_root_cause_decision`。
+
+脱敏步骤审计显示三次 Evidence Evaluation 均完成，但真实模型将三条 Observation 全部
+标为 `mechanism`，没有唯一 `trigger`。LLM Decision 随后得到
+`decisionErrorCategory=invalid_model_output`；grounded fallback 按 fail-closed 合同拒绝从
+任意 mechanism 或公开 hypothesis description 猜测 trigger。Validator 因候选缺失记录
+`candidate_missing`，Recovery/Policy 保持 deferred 且 `executionPermitted=false`。因此本次
+未触发 Validator 模型调用，不能用它评价 Validator 供应商稳定性。
+
+下一轮应增强公开因果角色合同的确定性，而不是放宽评分或 fallback：让诊断计划为每个
+Evidence Evaluation 提供可审计的预期因果角色，并在 Observation 写入前校验角色与计划目的
+一致；角色冲突时进入受限修复或人工复核。该改造需保持 Ground Truth 隔离，不能把 evaluator
+rubric、正确根因或场景答案注入 Agent Prompt。
+
+### APY-013 causal intent routing 验收（2026-08-17）
+
+本轮设计与计划提交为 `10c72c0`、`b631cb7` 和 `ae44108`；实现提交为 `fa888e6`、
+`52be2d0`、`8bac75f`、`ae615a8`、`c947a5d`、`74e9338` 和 `1d5ac82`。Planner/
+Replanner 现在为每个诊断步骤保存 `causalIntent` 及来源，Evidence Evaluation 按 Plan 合同
+归一化 `trigger/mechanism/impact/context`，Sufficiency、Decision 和 Validator 只接受证据绑定
+且角色完整的唯一根因。Observation 的 `supports/refutes` 也被限制在当前步骤
+`testsHypotheses` 内，模型不能越权修改未测试 hypothesis。
+
+本阶段只运行一次真实 `APY-013`，run ID 为
+`eval-247b1751764e40c08fd9a7f0b4cde4f0`，耗时 322,545 ms。结果为
+`validity=valid`、`passed=false`、总分 50，维度为 `12 / 0 / 10 / 8 / 15 / 5`，失败项为
+`missing_root_cause_decision`。三个必要证据、`observations_evaluated=5/5`、Ground Truth 隔离、
+恢复安全和工具预算均通过；Recovery 为 `no_action`，Policy 为 `no_grounded_action`，
+`executionPermitted=false`。
+
+安全步骤审计确认 Planner 已形成完整角色覆盖：PostgreSQL Error 为 impact、Wait Graph 为
+mechanism、Resource Order 为 trigger、Metrics 为 context，前三条 Observation 也正确形成
+impact/mechanism/trigger。随后真实 Sufficiency 仍继续执行 Metrics；Metrics 模型输出越权
+refute 了当前步骤未测试的三个 hypothesis，导致唯一支持假设消失。Decision structured 调用同时
+记录 `model_call_failed/provider_4xx`，Validator 因候选缺失记录 `candidate_missing`。因此这次
+50 分反映两项独立问题：Observation hypothesis 越界更新，以及 structured-output 方法与当前
+DashScope 模型不兼容。
+
+修复后，模型 capability profile 显式声明 `structuredOutputMethod`；当前本地
+`qwen3.7-plus` 使用 LangChain `json_mode`，旧 profile 缺失字段时保持
+`function_calling` 兼容。一个只含合成公开事实的最小真实 structured Decision readiness 在
+24.1 秒内通过，没有读取真实日志、隐藏答案或 Ground Truth。离线 Group A 137 项、Group B
+148 项、provider/Decision/config 57 项均通过，Ruff clean、Pyright 0 errors，聚焦 OpenSpec
+strict valid。Archive 当前为 28 个 artifact、28 个 checksum、0 conflict、0 pending。
+
+上述两项修复完成后没有再次运行 `APY-013`，因此不能宣称真实 Benchmark 已达标；后续真实
+验收必须在新的明确授权下执行，并保留新 run，而不是覆盖或重标本次失败结果。
+
+### APY-013 确定性 Sufficiency 与 Decision 规范化（2026-08-17）
+
+本轮设计/计划提交为 `e7528e8`、`9884505` 和 `4ae907e`；实现与回归提交为
+`2e19a7e`、`0588d20`、`1cde2af` 和 `432ae32`。Sufficiency 的 supported、refuted 与
+unresolved 分类现在只由公开 Hypothesis 全集和持久化 Hypothesis State 派生；模型输出只保留
+缺失证据、推荐工具和公开摘要建议。缺失、重复或非公开状态会 fail closed，非公开 ID 不写入
+审计。存在 open competitor 时，Workflow 优先执行 `testsHypotheses` 与其相交的未运行 Plan
+Step，无匹配步骤才进入有界 Replan。
+
+Decision 在 LLM Validator 前新增全有或全无的公开证据规范化。只有原 Candidate 通过标签、
+Evidence 归属、唯一 supported、无 open competitor 等检查，且失败项仅为
+`trigger_present`/`grounded_causal_chain` 时，系统才使用 Candidate 已引用的 supporting
+Observation summary 重建 trigger 与因果链。规范化结果必须再次通过原十项确定性 Validator；
+Candidate 未引用链条所用 Observation Evidence、多 trigger、角色不完整或标签错误时不修补。
+Validator、评分阈值和恢复权限均未降低。
+
+离线 APY-013 application 回归现在按顺序执行四个诊断工具：PostgreSQL Error、Wait Graph、
+Database Metrics 和 Resource Order。Database Metrics 真实 refute `postgres_slow_query` 后，
+系统才关闭最后一个 competitor；随后生成 `decisionOrigin=llm_grounded_normalization`，确定性
+验证通过，恢复 Policy 仍为 `executionPermitted=false`。
+
+本轮只运行受限回归，没有运行全量 pytest：Group A 90 项、Group B 111 项全部通过；Ruff
+clean、Pyright `0 errors`、`harden-aiops-decision-validation --strict` valid、`git diff --check`
+通过。本轮没有再次执行真实 LLM APY-013，因此不新增真实分数或达标声明；下一次真实验收仍需
+单独授权并保存为新的独立 Run。
+
+### 独立 qwen3.8-max Validator readiness（2026-08-18）
+
+主 Agent 继续使用 `qwen3.7-plus`；只有语义 Decision Validator 使用 `qwen3.8-max`。两者复用
+现有 DashScope API Key、Base URL、timeout 与 retry 配置，并分别使用各自 capability profile
+中的 `json_mode`。历史配置缺少 `validatorModel` 时兼容回退主模型；配置了模型但缺少 capability
+profile 时 fail closed。
+
+Validator Prompt 现在包含明确的 JSON 指令和只描述形状的安全示例。structured parse 失败可审计
+区分非法 JSON、envelope、缺字段、枚举、容器、额外字段、非当前任务 Evidence ID 和兼容回退；
+Step、Checkpoint 与 Run Artifact 仅保存允许列表模型名和错误分类，不保存 Prompt、原始响应、
+异常正文、字段值、凭据、Ground Truth、Oracle 或原始 CLS 日志。确定性 Validator、Benchmark
+权重/阈值、Policy Gate 与恢复权限均未改变。
+
+本轮没有运行全量 pytest。离线 Group A 115 项、Group B 88 项全部通过；随后只运行一次使用
+虚构公开事实和虚构 Evidence ID 的真实 Validator readiness，`qwen3.8-max` 在约 16 秒内通过
+Pydantic Schema 并返回 `valid`。该 readiness 未读取 APY、RAG、CLS 或 PostgreSQL 诊断证据，
+也没有运行 APY-013，因此没有产生新的 Benchmark 分数或达标声明。
 
 ## 当前阶段边界
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import cast
 
 import pytest
 
+from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.retrieval import (
     KnowledgeRetrievalCitationSource,
     KnowledgeRetrievalHit,
@@ -220,3 +223,113 @@ async def test_missing_citation_counts_as_incomplete_instead_of_disappearing() -
     )
 
     assert payload["metrics"]["citationCompletenessRate"] == 0.0
+
+
+class AvailableEvaluationRepository:
+    async def start_envelope(self, envelope: object) -> None:
+        del envelope
+
+    async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
+        del envelope, artifact_checksum
+
+
+def retrieval_recorder(tmp_path: Path) -> tuple[EvaluationRunRecorder, EvaluationArchive]:
+    archive = EvaluationArchive(
+        tmp_path / "archive", repository_root=tmp_path / "repository"
+    )
+    return (
+        EvaluationRunRecorder(
+            archive=archive,
+            repository=AvailableEvaluationRepository(),
+        ),
+        archive,
+    )
+
+
+def retrieval_metrics(*, recall_at_1: float) -> dict[str, object]:
+    return {
+        "queryCount": 64,
+        "answerableQueryCount": 58,
+        "noAnswerProbeCount": 6,
+        "recallAt1": recall_at_1,
+        "recallAt3": 0.95,
+        "mrr": 0.85,
+        "forbiddenTopOneRate": 0.0,
+        "citationCompletenessRate": 1.0,
+        "vectorChannelCoverageRate": 1.0,
+        "bm25ChannelCoverageRate": 1.0,
+        "hybridChannelCoverageRate": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieval_threshold_failure_is_persisted(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.yaml"
+    queries.write_text("queries: []\n", encoding="utf-8")
+    recorder, archive = retrieval_recorder(tmp_path)
+
+    async def execute() -> dict[str, object]:
+        return {"metrics": retrieval_metrics(recall_at_1=0.79)}
+
+    _payload, exit_code = await MODULE._run_retrieval_once(
+        run_id="eval-retrieval-fail",
+        queries_path=queries,
+        owner_user_id="owner-a",
+        knowledge_base_id="kb-owner-a",
+        model_configuration={"embeddingModel": "embed", "rerankModel": "rerank"},
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("eval-retrieval-fail")
+    assert exit_code == 1
+    assert envelope.evaluation_kind == "retrieval"
+    assert envelope.status == "failed"
+    assert envelope.metrics["recallAt1"] == 0.79
+
+
+@pytest.mark.asyncio
+async def test_retrieval_tool_error_is_persisted_as_infra_invalid(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.yaml"
+    queries.write_bytes(b"queries: []\n")
+    recorder, archive = retrieval_recorder(tmp_path)
+
+    async def execute() -> dict[str, object]:
+        raise TimeoutError
+
+    _payload, exit_code = await MODULE._run_retrieval_once(
+        run_id="eval-retrieval-error",
+        queries_path=queries,
+        owner_user_id="owner-a",
+        knowledge_base_id="kb-owner-a",
+        model_configuration={},
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("eval-retrieval-error")
+    assert exit_code == 2
+    assert envelope.status == "infra_invalid"
+    assert envelope.failure_category == "retrieval_runtime_error"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_cancellation_is_persisted_as_interrupted(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.yaml"
+    queries.write_bytes(b"queries: []\n")
+    recorder, archive = retrieval_recorder(tmp_path)
+
+    async def execute() -> dict[str, object]:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await MODULE._run_retrieval_once(
+            run_id="eval-retrieval-cancelled",
+            queries_path=queries,
+            owner_user_id="owner-a",
+            knowledge_base_id="kb-owner-a",
+            model_configuration={},
+            execute=execute,
+            recorder=recorder,
+        )
+    assert archive.load("eval-retrieval-cancelled").status == "interrupted"

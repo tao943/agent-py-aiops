@@ -13,6 +13,7 @@ from super_ai.evaluation.cli import (
 )
 from super_ai.evaluation.domain import (
     EvidenceMilestone,
+    PublicDecisionLabel,
     PublicHypothesis,
     PublicScenario,
     RootCause,
@@ -52,6 +53,7 @@ __all__ = [
     "BenchmarkRunError",
     "DiagnosticRunAdapter",
     "RunArtifact",
+    "PublicDecisionLabel",
     "PublicHypothesis",
     "PublicScenario",
     "RetrievalCitationAudit",

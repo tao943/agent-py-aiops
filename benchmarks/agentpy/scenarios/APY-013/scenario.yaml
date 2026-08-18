@@ -11,8 +11,17 @@ alert:
 hypotheses:
   - id: postgres_deadlock
     description: Concurrent transactions formed a cyclic dependency.
+    decision_label:
+      component: order-service
+      mechanism: opposite_order_transaction_deadlock
   - id: postgres_lock_wait
     description: A long transaction is blocking otherwise valid work.
+    decision_label:
+      component: order-service
+      mechanism: long_transaction_lock_blocking
   - id: postgres_slow_query
     description: Expensive statements are exceeding the request deadline.
+    decision_label:
+      component: order-service
+      mechanism: slow_query_timeout
 snapshot_file: snapshot/tool_responses.yaml

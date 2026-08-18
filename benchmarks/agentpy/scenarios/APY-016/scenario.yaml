@@ -11,10 +11,22 @@ alert:
 hypotheses:
   - id: client_retry_storm
     description: Clients are retrying rate-limited requests without effective backoff.
+    decision_label:
+      component: checkout-client
+      mechanism: retry_after_ignored_without_backoff
   - id: expected_rate_limiting
     description: The limiter is rejecting a stable excess load as configured.
+    decision_label:
+      component: api-gateway
+      mechanism: expected_rate_limiting
   - id: malicious_traffic
     description: Untrusted callers are deliberately generating excess requests.
+    decision_label:
+      component: edge
+      mechanism: malicious_traffic
   - id: downstream_saturation
     description: A slow dependency is increasing concurrent work and retries.
+    decision_label:
+      component: downstream
+      mechanism: dependency_saturation
 snapshot_file: snapshot/tool_responses.yaml

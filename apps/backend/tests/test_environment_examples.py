@@ -80,6 +80,7 @@ def test_project_templates_merge_with_offline_provider_config(tmp_path: Path) ->
     assert "modelCapabilities" not in base_config["llm"]
     capabilities = user_config["llm"]["modelCapabilities"]
     assert capabilities["qwen3.7-max"]["contextWindowTokens"] == 1_000_000
+    assert capabilities["qwen3.7-max"]["structuredOutputMethod"] == "json_mode"
     assert llm["maxRetries"] == 2
 
 

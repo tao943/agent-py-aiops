@@ -11,8 +11,17 @@ alert:
 hypotheses:
   - id: redis_server_availability
     description: The Redis server is not accepting client connections.
+    decision_label:
+      component: redis
+      mechanism: service_process_stopped
   - id: redis_client_connection_lifecycle
     description: The application client pool cannot recover usable connections.
+    decision_label:
+      component: checkout-service
+      mechanism: stale_connections_retained_after_recovery
   - id: redis_network_path
     description: The network path between the application and Redis is failing.
+    decision_label:
+      component: network
+      mechanism: redis_network_path_failure
 snapshot_file: snapshot/tool_responses.yaml

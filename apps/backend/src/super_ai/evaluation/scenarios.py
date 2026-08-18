@@ -10,11 +10,15 @@ import yaml
 
 from super_ai.evaluation.domain import (
     EvidenceMilestone,
+    PublicDecisionLabel,
     PublicHypothesis,
     PublicScenario,
     RootCause,
+    RootCauseSemantics,
     ScenarioBundle,
     ScenarioOracle,
+    SemanticConcept,
+    SemanticRequirement,
 )
 
 _PUBLIC_FORBIDDEN_KEYS = frozenset(
@@ -24,6 +28,7 @@ _PUBLIC_FORBIDDEN_KEYS = frozenset(
         "primary_cause",
         "required_evidence",
         "required_rule_outs",
+        "root_cause_semantics",
         "answer",
     }
 )
@@ -38,11 +43,7 @@ def load_public_scenario(path: Path) -> PublicScenario:
         raise ValueError(f"Public scenario contains ground-truth keys: {names}.")
 
     hypotheses = tuple(
-        PublicHypothesis(
-            id=_required_str(_as_mapping(item, "hypothesis"), "id"),
-            description=_required_str(_as_mapping(item, "hypothesis"), "description"),
-        )
-        for item in _required_sequence(payload, "hypotheses")
+        _public_hypothesis(item) for item in _required_sequence(payload, "hypotheses")
     )
     hypothesis_ids = [item.id for item in hypotheses]
     if len(set(hypothesis_ids)) != len(hypothesis_ids):
@@ -64,6 +65,14 @@ def load_public_scenario(path: Path) -> PublicScenario:
 def load_scenario_oracle(path: Path) -> ScenarioOracle:
     """Load the evaluator-only oracle without reading public scenario data."""
     payload = _load_yaml_mapping(path / "ground_truth.yaml")
+    raw_semantics = payload.get("root_cause_semantics")
+    semantics = (
+        None
+        if raw_semantics is None
+        else load_root_cause_semantics(
+            _as_mapping(raw_semantics, "root_cause_semantics")
+        )
+    )
     return ScenarioOracle(
         primary_cause=_root_cause(_required_mapping(payload, "primary_cause")),
         contributing_causes=tuple(
@@ -81,7 +90,80 @@ def load_scenario_oracle(path: Path) -> ScenarioOracle:
         ),
         required_rule_outs=_string_tuple(payload, "required_rule_outs"),
         forbidden_claims=_string_tuple(payload, "forbidden_claims"),
+        root_cause_semantics=semantics,
     )
+
+
+def load_root_cause_semantics(
+    payload: Mapping[str, object],
+) -> RootCauseSemantics:
+    """Load one strict evaluator-only natural-language scoring rubric."""
+    raw_concepts = _required_mapping(payload, "concepts")
+    if not raw_concepts:
+        raise ValueError("root_cause_semantics concepts must not be empty.")
+    concepts: list[SemanticConcept] = []
+    for concept_id, raw_aliases in raw_concepts.items():
+        aliases = _non_empty_string_sequence(
+            raw_aliases, f"root_cause_semantics concept '{concept_id}' aliases"
+        )
+        normalized_aliases = [alias.casefold() for alias in aliases]
+        if len(normalized_aliases) != len(set(normalized_aliases)):
+            raise ValueError(
+                f"root_cause_semantics concept '{concept_id}' aliases must be unique."
+            )
+        concepts.append(SemanticConcept(concept_id, aliases))
+
+    known_concepts = {concept.id for concept in concepts}
+    trigger = _semantic_requirement(
+        _required_mapping(payload, "trigger"), "trigger", default_id="trigger"
+    )
+    raw_milestones = _required_sequence(payload, "causal_milestones")
+    if len(raw_milestones) != 3:
+        raise ValueError(
+            "root_cause_semantics causal_milestones must contain exactly three items."
+        )
+    milestones = tuple(
+        _semantic_requirement(
+            _as_mapping(item, "causal milestone"), "causal_milestones"
+        )
+        for item in raw_milestones
+    )
+    milestone_ids = [item.id for item in milestones]
+    if len(milestone_ids) != len(set(milestone_ids)):
+        raise ValueError("root_cause_semantics causal milestone IDs must be unique.")
+    for requirement in (trigger, *milestones):
+        unknown = set(requirement.all_of) - known_concepts
+        if unknown:
+            raise ValueError(
+                f"root_cause_semantics requirement '{requirement.id}' references "
+                "an unknown concept."
+            )
+    return RootCauseSemantics(tuple(concepts), trigger, milestones)
+
+
+def _semantic_requirement(
+    payload: Mapping[str, object],
+    label: str,
+    *,
+    default_id: str | None = None,
+) -> SemanticRequirement:
+    identifier = default_id or _required_str(payload, "id")
+    all_of = _non_empty_string_sequence(
+        payload.get("all_of"), f"root_cause_semantics {label} all_of"
+    )
+    if len(all_of) != len(set(all_of)):
+        raise ValueError(f"root_cause_semantics {label} all_of must be unique.")
+    return SemanticRequirement(identifier, all_of)
+
+
+def _non_empty_string_sequence(
+    value: object,
+    label: str,
+) -> tuple[str, ...]:
+    values = _as_sequence(value, label)
+    if not values or not all(isinstance(item, str) and item.strip() for item in values):
+        raise ValueError(f"{label} must contain non-empty strings.")
+    return tuple(cast(str, item).strip() for item in values)
 
 
 def validate_scenario_bundle(bundle: ScenarioBundle) -> None:
@@ -158,6 +240,19 @@ def _root_cause(payload: Mapping[str, object]) -> RootCause:
         component=_required_str(payload, "component"),
         mechanism=_required_str(payload, "mechanism"),
         trigger=_required_str(payload, "trigger"),
+    )
+
+
+def _public_hypothesis(value: object) -> PublicHypothesis:
+    payload = _as_mapping(value, "hypothesis")
+    decision_label = _required_mapping(payload, "decision_label")
+    return PublicHypothesis(
+        id=_required_str(payload, "id"),
+        description=_required_str(payload, "description"),
+        decision_label=PublicDecisionLabel(
+            component=_required_str(decision_label, "component"),
+            mechanism=_required_str(decision_label, "mechanism"),
+        ),
     )
 
 

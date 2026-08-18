@@ -75,6 +75,9 @@ def test_loads_offline_qwen_configuration(offline_config: LlmProviderConfig) -> 
     assert config.rerank_model == "qwen3-vl-rerank"
     assert config.rerank_url == "https://example.test/rerank"
     assert config.context_window_tokens == 1_000_000
+    assert config.structured_output_method == "json_mode"
+    assert config.validator_model == "qwen-test-chat"
+    assert config.validator_structured_output_method == "json_mode"
     assert config.temperature == 0.2
     assert config.timeout_seconds == 30.0
     assert config.max_retries == 2
@@ -162,6 +165,37 @@ def test_chat_model_requires_matching_capability_profile(tmp_path: Path) -> None
         load_llm_provider_config(config_path=config_path)
 
 
+def test_loads_dedicated_validator_model_capability(tmp_path: Path) -> None:
+    config = load_llm_provider_config(
+        config_path=_write_config(
+            tmp_path,
+            api_key="test-secret",
+            chat_model="qwen3.7-plus",
+            validator_model="qwen3.8-max",
+        )
+    )
+
+    assert config.chat_model == "qwen3.7-plus"
+    assert config.validator_model == "qwen3.8-max"
+    assert config.validator_structured_output_method == "json_mode"
+
+
+def test_validator_model_requires_matching_capability_profile(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        api_key="test-secret",
+        validator_model="qwen3.8-max",
+    )
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    del raw_config["llm"]["modelCapabilities"]["qwen3.8-max"]
+    config_path.write_text(json.dumps(raw_config), encoding="utf-8")
+
+    with pytest.raises(LlmConfigurationError, match="qwen3.8-max") as exc_info:
+        load_llm_provider_config(config_path=config_path)
+
+    assert "test-secret" not in str(exc_info.value)
+
+
 def test_provider_constructs_model_with_config(
     offline_config: LlmProviderConfig,
 ) -> None:
@@ -178,6 +212,42 @@ def test_provider_constructs_model_with_config(
 
     assert isinstance(model, FakeChatModel)
     assert captured["config"] is config
+
+
+def test_provider_constructs_dedicated_validator_with_shared_transport(
+    tmp_path: Path,
+) -> None:
+    config = load_llm_provider_config(
+        config_path=_write_config(
+            tmp_path,
+            api_key="shared-secret",
+            base_url="https://example.test/v1",
+            chat_model="qwen3.7-plus",
+            validator_model="qwen3.8-max",
+            timeout_seconds=45,
+            max_retries=4,
+        )
+    )
+    captured: list[LlmProviderConfig] = []
+
+    def fake_factory(factory_config: LlmProviderConfig) -> FakeChatModel:
+        captured.append(factory_config)
+        return FakeChatModel()
+
+    provider = QwenOpenAIProvider(config=config, model_factory=fake_factory)
+
+    provider.create_chat_model()
+    provider.create_validator_model()
+
+    main_config, validator_config = captured
+    assert main_config.chat_model == "qwen3.7-plus"
+    assert validator_config.chat_model == "qwen3.8-max"
+    assert validator_config.api_key == main_config.api_key
+    assert validator_config.base_url == main_config.base_url
+    assert validator_config.timeout_seconds == main_config.timeout_seconds
+    assert validator_config.max_retries == main_config.max_retries
+    assert provider.validator_model_name == "qwen3.8-max"
+    assert provider.validator_structured_output_method == "json_mode"
 
 
 def test_provider_constructs_embedding_model_with_config(
@@ -274,35 +344,49 @@ def _write_config(
     api_key: str,
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
     chat_model: str = "qwen3.7-max",
+    validator_model: str | None = None,
     embedding_model: str = "text-embedding-v4",
     embedding_dimensions: int = 1024,
     rerank_model: str = "qwen3-vl-rerank",
     rerank_url: str = "https://example.test/rerank",
     context_window_tokens: int = 1_000_000,
+    structured_output_method: str = "json_mode",
     temperature: float = 0.2,
     timeout_seconds: int = 30,
     max_retries: int = 2,
 ) -> Path:
+    capabilities = {
+        chat_model: {
+            "contextWindowTokens": context_window_tokens,
+            "structuredOutputMethod": structured_output_method,
+        }
+    }
+    if validator_model is not None:
+        capabilities[validator_model] = {
+            "contextWindowTokens": context_window_tokens,
+            "structuredOutputMethod": "json_mode",
+        }
+    llm_config: dict[str, object] = {
+        "provider": "qwen-openai",
+        "apiKey": api_key,
+        "baseUrl": base_url,
+        "chatModel": chat_model,
+        "embeddingModel": embedding_model,
+        "embeddingDimensions": embedding_dimensions,
+        "rerankModel": rerank_model,
+        "rerankUrl": rerank_url,
+        "modelCapabilities": capabilities,
+        "temperature": temperature,
+        "timeoutSeconds": timeout_seconds,
+        "maxRetries": max_retries,
+    }
+    if validator_model is not None:
+        llm_config["validatorModel"] = validator_model
     config_path = tmp_path / "project.json"
     config_path.write_text(
         json.dumps(
             {
-                "llm": {
-                    "provider": "qwen-openai",
-                    "apiKey": api_key,
-                    "baseUrl": base_url,
-                    "chatModel": chat_model,
-                    "embeddingModel": embedding_model,
-                    "embeddingDimensions": embedding_dimensions,
-                    "rerankModel": rerank_model,
-                    "rerankUrl": rerank_url,
-                    "modelCapabilities": {
-                        chat_model: {"contextWindowTokens": context_window_tokens}
-                    },
-                    "temperature": temperature,
-                    "timeoutSeconds": timeout_seconds,
-                    "maxRetries": max_retries,
-                }
+                "llm": llm_config
             }
         ),
         encoding="utf-8",

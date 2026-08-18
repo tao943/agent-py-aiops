@@ -2,7 +2,14 @@
 import { defineConfig } from "vitepress";
 
 const activeItems = [
+  { text: "add-agentpy-sre-benchmark", link: "/changes/active/add-agentpy-sre-benchmark/" },
+  { text: "add-blog-derived-retrieval-eval", link: "/changes/active/add-blog-derived-retrieval-eval/" },
+  { text: "add-docker-live-postgres-lock-eval", link: "/changes/active/add-docker-live-postgres-lock-eval/" },
+  { text: "add-knowledge-batch-import", link: "/changes/active/add-knowledge-batch-import/" },
+  { text: "expand-rag-retrieval-benchmark", link: "/changes/active/expand-rag-retrieval-benchmark/" },
+  { text: "harden-aiops-decision-validation", link: "/changes/active/harden-aiops-decision-validation/" },
   { text: "migrate-postgresql-add-redis-runtime", link: "/changes/active/migrate-postgresql-add-redis-runtime/" },
+  { text: "persist-evaluation-results", link: "/changes/active/persist-evaluation-results/" },
 ];
 
 const archivedItems = [

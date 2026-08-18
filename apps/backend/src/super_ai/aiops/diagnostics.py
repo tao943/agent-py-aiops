@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from operator import add
 from time import monotonic
@@ -19,7 +20,21 @@ from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.cases import DiagnosisCasePersistor
+from super_ai.aiops.causal_intents import (
+    allowed_causal_intents,
+    next_causal_refinement_index,
+    repair_plan_causal_coverage,
+    supported_causal_coverage,
+)
+from super_ai.aiops.decision_validation import (
+    can_replan_deterministic_gap,
+    deterministic_checks_payload,
+    invoke_structured_root_cause_decision,
+    invoke_structured_root_cause_validation,
+    validate_grounded_candidate,
+)
 from super_ai.aiops.reasoning import (
+    CausalRole,
     DiagnosticPlanStep,
     EvidenceSufficiencyDecision,
     HypothesisState,
@@ -33,12 +48,18 @@ from super_ai.aiops.reasoning import (
     parse_observation_decision,
     parse_plan,
     parse_recovery_plan,
-    parse_root_cause_decision,
-    parse_root_cause_validation,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
-from super_ai.llm import LlmProvider
+from super_ai.llm import ChatModel, LlmProvider
+from super_ai.llm.config import StructuredOutputMethod
 from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp.tool_arguments import (
+    ToolArgumentContract,
+    ToolArgumentContractError,
+    constrain_tool_definitions,
+    normalize_tool_arguments,
+    tool_step_fingerprint,
+)
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.mcp_connections import McpConnectionService
 from super_ai.memory.repositories import (
@@ -109,6 +130,44 @@ AIOPS_REPORT_REQUIRED_HEADINGS = (
 )
 
 
+def _provider_structured_output_method(
+    provider: LlmProvider,
+) -> StructuredOutputMethod:
+    value = getattr(provider, "structured_output_method", "function_calling")
+    if value not in {"function_calling", "json_mode", "json_schema"}:
+        raise ValueError("Unsupported structured-output method configured by provider.")
+    return cast(StructuredOutputMethod, value)
+
+
+def _validator_chat_model(provider: LlmProvider) -> ChatModel:
+    factory = getattr(provider, "create_validator_model", None)
+    if callable(factory):
+        return cast(ChatModel, factory())
+    return provider.create_chat_model()
+
+
+def _validator_model_name(provider: LlmProvider) -> str:
+    value = getattr(provider, "validator_model_name", None)
+    if callable(value):
+        value = value()
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,120}", value):
+        return value
+    return "legacy-main-model"
+
+
+def _validator_structured_output_method(
+    provider: LlmProvider,
+) -> StructuredOutputMethod:
+    value = getattr(provider, "validator_structured_output_method", None)
+    if callable(value):
+        value = value()
+    if value is None:
+        return _provider_structured_output_method(provider)
+    if value not in {"function_calling", "json_mode", "json_schema"}:
+        raise ValueError("Unsupported Validator structured-output method configured by provider.")
+    return cast(StructuredOutputMethod, value)
+
+
 def build_generic_live_plan(
     *,
     available_tools: Sequence[str],
@@ -117,12 +176,15 @@ def build_generic_live_plan(
     """Build a safe evidence-gathering fallback from public Live contracts."""
     available = set(available_tools)
     known = set(known_hypotheses)
-    definitions: tuple[tuple[str, str, JsonDict, tuple[str, ...]], ...] = (
+    definitions: tuple[
+        tuple[str, str, JsonDict, tuple[str, ...], str], ...
+    ] = (
         (
             "VerifyServiceHealth",
             "Check database reachability and service health.",
             {"target": "postgres_cluster", "check_connection_pool": True},
             ("postgres_connectivity_failure",),
+            "impact",
         ),
         (
             "InspectPostgresSessions",
@@ -132,12 +194,14 @@ def build_generic_live_plan(
                 "include_wait_events": True,
             },
             ("postgres_slow_query_without_lock", "postgres_lock_blocking"),
+            "mechanism",
         ),
         (
             "InspectPostgresLockGraph",
             "Inspect current blocking chains and deadlock signals.",
             {"detect_deadlocks": True, "analyze_blocking_chains": True},
             ("postgres_lock_blocking",),
+            "trigger",
         ),
     )
     return [
@@ -147,8 +211,12 @@ def build_generic_live_plan(
             "arguments": dict(arguments),
             "purpose": purpose,
             "testsHypotheses": [item for item in hypotheses if item in known],
+            "causalIntent": causal_intent,
+            "causalIntentOrigin": "generic",
         }
-        for index, (tool, purpose, arguments, hypotheses) in enumerate(definitions, start=1)
+        for index, (tool, purpose, arguments, hypotheses, causal_intent) in enumerate(
+            definitions, start=1
+        )
         if tool in available
     ]
 
@@ -192,6 +260,56 @@ def plan_matches_tool_contracts(
     return bool(plan)
 
 
+def normalize_tool_plan_steps(
+    plan: Sequence[JsonDict],
+    *,
+    trusted_tool_arguments: Mapping[str, Mapping[str, object]],
+    tool_argument_contracts: Mapping[str, ToolArgumentContract],
+    tool_definitions: Sequence[McpToolDefinition],
+) -> tuple[list[JsonDict], list[ToolArgumentContractError]]:
+    """Bind, validate, and deduplicate effective planned MCP calls."""
+    bound = bind_trusted_tool_arguments(plan, trusted_tool_arguments)
+    accepted: list[JsonDict] = []
+    errors: list[ToolArgumentContractError] = []
+    fingerprints: set[str] = set()
+    for source in bound:
+        step = dict(source)
+        tool_name = step.get("tool")
+        arguments = step.get("arguments")
+        if not isinstance(tool_name, str) or not isinstance(arguments, Mapping):
+            errors.append(
+                ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=str(tool_name or "unknown"),
+                )
+            )
+            continue
+        try:
+            effective_arguments = normalize_tool_arguments(
+                tool_name,
+                arguments,
+                tool_argument_contracts,
+            )
+        except ToolArgumentContractError as exc:
+            errors.append(exc)
+            continue
+        step["arguments"] = effective_arguments
+        if not plan_matches_tool_contracts([step], tool_definitions):
+            errors.append(
+                ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=tool_name,
+                )
+            )
+            continue
+        fingerprint = tool_step_fingerprint(tool_name, effective_arguments)
+        if fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        accepted.append(step)
+    return accepted, errors
+
+
 def build_grounded_fallback_decision(
     *,
     public_hypotheses: Sequence[JsonDict],
@@ -230,7 +348,6 @@ def build_grounded_fallback_decision(
     )
     if public_hypothesis is None:
         return None
-    description = public_hypothesis.get("description")
     labels = _json_dict(
         _json_dict(decision_vocabulary.get("labelsByHypothesis")).get(hypothesis_id)
     )
@@ -238,30 +355,161 @@ def build_grounded_fallback_decision(
     mechanism = labels.get("mechanism")
     if not all(
         isinstance(item, str) and item.strip()
-        for item in (description, component, mechanism)
+        for item in (component, mechanism)
     ):
         return None
 
     evidence_set = set(evidence_ids)
-    causal_chain = tuple(
-        summary.strip()
-        for observation in observation_decisions
-        if hypothesis_id in cast(list[object], observation.get("supports") or [])
-        and evidence_set.intersection(
-            item
-            for item in cast(list[object], observation.get("evidenceIds") or [])
-            if isinstance(item, str)
-        )
-        if isinstance((summary := observation.get("summary")), str) and summary.strip()
+    grounded_observations = _ordered_grounded_observations(
+        observation_decisions,
+        hypothesis_id=hypothesis_id,
+        evidence_ids=evidence_set,
     )
+    trigger = _grounded_trigger(grounded_observations)
+    causal_chain = tuple(
+        cast(str, observation["summary"]).strip()
+        for observation in grounded_observations
+    )
+    if trigger is None or not 2 <= len(causal_chain) <= _MAX_CAUSAL_CHAIN_ITEMS:
+        return None
     return RootCauseDecision(
         component=cast(str, component).strip(),
         mechanism=cast(str, mechanism).strip(),
-        trigger=cast(str, description).strip(),
+        trigger=trigger,
         causal_chain=causal_chain,
         evidence_ids=evidence_ids,
         confidence=confidence,
     )
+
+
+_MAX_CAUSAL_CHAIN_ITEMS = 6
+
+
+def _ordered_grounded_observations(
+    observations: Sequence[JsonDict],
+    *,
+    hypothesis_id: str,
+    evidence_ids: set[str],
+) -> tuple[JsonDict, ...]:
+    supported: list[JsonDict] = []
+    seen_summaries: set[str] = set()
+    for observation in observations:
+        if hypothesis_id not in cast(list[object], observation.get("supports") or []):
+            continue
+        linked_evidence = {
+            item
+            for item in cast(list[object], observation.get("evidenceIds") or [])
+            if isinstance(item, str)
+        }
+        summary = observation.get("summary")
+        if not evidence_ids.intersection(linked_evidence) or not isinstance(summary, str):
+            continue
+        normalized_summary = " ".join(summary.casefold().split())
+        if not normalized_summary or normalized_summary in seen_summaries:
+            continue
+        seen_summaries.add(normalized_summary)
+        supported.append(observation)
+
+    triggers = [item for item in supported if item.get("causalRole") == "trigger"]
+    mechanisms = [
+        item for item in supported if item.get("causalRole") == "mechanism"
+    ]
+    impacts = [item for item in supported if item.get("causalRole") == "impact"]
+    contexts = [item for item in supported if item.get("causalRole") == "context"]
+    terminal = impacts[-1:] if impacts else []
+    mechanism_limit = _MAX_CAUSAL_CHAIN_ITEMS - len(triggers) - len(terminal)
+    selected = [*triggers, *mechanisms[:mechanism_limit]]
+    context_limit = _MAX_CAUSAL_CHAIN_ITEMS - len(selected) - len(terminal)
+    selected.extend(contexts[:context_limit])
+    selected.extend(terminal)
+    return tuple(selected)
+
+
+def _grounded_trigger(observations: Sequence[JsonDict]) -> str | None:
+    triggers = [
+        cast(str, item["summary"]).strip()
+        for item in observations
+        if item.get("causalRole") == "trigger"
+        and isinstance(item.get("summary"), str)
+        and cast(str, item["summary"]).strip()
+    ]
+    return triggers[0] if len(triggers) == 1 else None
+
+
+def _normalize_grounded_decision(
+    decision: RootCauseDecision,
+    *,
+    available_evidence_ids: set[str],
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    decision_vocabulary: JsonDict,
+) -> RootCauseDecision | None:
+    validation = validate_grounded_candidate(
+        candidate=decision,
+        available_evidence_ids=available_evidence_ids,
+        hypothesis_states=hypothesis_states,
+        observation_decisions=observation_decisions,
+        decision_vocabulary=decision_vocabulary,
+    )
+    failed_codes = {
+        check.code for check in validation.checks if not check.passed
+    }
+    expression_codes = {"trigger_present", "grounded_causal_chain"}
+    if (
+        not failed_codes
+        or not failed_codes.issubset(expression_codes)
+        or validation.supported_hypothesis_id is None
+        or validation.supported_hypothesis_id
+        not in {
+            str(item.get("id"))
+            for item in public_hypotheses
+            if item.get("id")
+        }
+        or len(set(decision.evidence_ids)) < 2
+    ):
+        return None
+
+    grounded_observations = _ordered_grounded_observations(
+        observation_decisions,
+        hypothesis_id=validation.supported_hypothesis_id,
+        evidence_ids=set(decision.evidence_ids),
+    )
+    if len(grounded_observations) < 2:
+        return None
+    cited_evidence = set(decision.evidence_ids)
+    normalized_evidence = {
+        item
+        for observation in grounded_observations
+        for item in cast(list[object], observation.get("evidenceIds") or [])
+        if isinstance(item, str)
+    }
+    if not normalized_evidence or not normalized_evidence.issubset(cited_evidence):
+        return None
+    trigger = _grounded_trigger(grounded_observations)
+    if trigger is None:
+        return None
+    normalized = RootCauseDecision(
+        component=decision.component,
+        mechanism=decision.mechanism,
+        trigger=trigger,
+        causal_chain=tuple(
+            cast(str, observation["summary"]).strip()
+            for observation in grounded_observations
+        ),
+        evidence_ids=decision.evidence_ids,
+        confidence=decision.confidence,
+    )
+    normalized_validation = validate_grounded_candidate(
+        candidate=normalized,
+        available_evidence_ids=available_evidence_ids,
+        hypothesis_states=hypothesis_states,
+        observation_decisions=observation_decisions,
+        decision_vocabulary=decision_vocabulary,
+    )
+    if not normalized_validation.passed:
+        return None
+    return normalized
 
 
 class AiopsDiagnosticService:
@@ -278,6 +526,7 @@ class AiopsDiagnosticService:
         cls_region: str,
         cls_topic_id: str,
         trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None,
+        tool_argument_contracts: Mapping[str, ToolArgumentContract] | None = None,
         tool_policies: Mapping[str, Literal["proposal_only"]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
     ) -> None:
@@ -294,6 +543,9 @@ class AiopsDiagnosticService:
             name: dict(arguments)
             for name, arguments in (trusted_tool_arguments or {}).items()
         }
+        self._tool_argument_contracts = MappingProxyType(
+            dict(tool_argument_contracts or {})
+        )
         copied_tool_policies = dict(tool_policies or {})
         unsupported_policies = {
             str(policy) for policy in copied_tool_policies.values() if policy != "proposal_only"
@@ -539,7 +791,10 @@ class AiopsDiagnosticService:
 
         try:
             mcp_client = await self._mcp_client_for(owner_user_id)
-            discovered_tools = await mcp_client.discover_tools()
+            discovered_tools = constrain_tool_definitions(
+                await mcp_client.discover_tools(),
+                self._tool_argument_contracts,
+            )
         except McpClientError:
             discovered_tools = []
             events.append(
@@ -575,12 +830,13 @@ class AiopsDiagnosticService:
             )
         )
         planner_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v2",
+            "workflowVersion": "evidence-driven-v3",
             "noSopMatched": no_sop_matched,
             "sopHits": sop_hits,
             "plan": plan,
             "planOrigin": plan_origin,
             "retrievalError": retrieval_error,
+            **_plan_causal_coverage_payload(plan),
         }
         planner_step = await self._create_step(
             owner_user_id=owner_user_id,
@@ -650,13 +906,64 @@ class AiopsDiagnosticService:
         if plan_index >= len(plan):
             return {"current_evidence_id": "", "events": []}
 
-        step = plan[plan_index]
+        source_step = plan[plan_index]
+        normalized_steps, contract_errors = normalize_tool_plan_steps(
+            [source_step],
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tuple(state.get("tool_definitions") or ()),
+        )
+        if contract_errors or not normalized_steps:
+            error = (
+                contract_errors[0]
+                if contract_errors
+                else ToolArgumentContractError(
+                    code="schema_mismatch",
+                    tool_name=str(source_step.get("tool") or "unknown"),
+                )
+            )
+            tool_name = str(source_step.get("tool") or "unknown")
+            fingerprint = _step_fingerprint(source_step)
+            payload: JsonDict = {
+                "planStepId": str(source_step.get("id") or ""),
+                "tool": tool_name,
+                "errorCategory": "invalid_arguments",
+                "contractCode": error.code,
+            }
+            await self._create_step(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                phase="executor",
+                status="failed",
+                payload=payload,
+            )
+            await self._save_checkpoint(state, "executor", payload)
+            return {
+                "plan_index": plan_index + 1,
+                "executor_attempt_count": attempt_count + 1,
+                "executed_step_fingerprints": [fingerprint],
+                "current_evidence_id": "",
+                "current_plan_step": {
+                    "id": str(source_step.get("id") or ""),
+                    "tool": tool_name,
+                },
+                "events": [
+                    _task_status_event(
+                        task_id,
+                        "running",
+                        "Executor: rejected invalid diagnostic tool arguments.",
+                        55,
+                    )
+                ],
+            }
+
+        step = normalized_steps[0]
         tool_name = str(step.get("tool") or "")
         arguments = _json_dict(step.get("arguments"))
         fingerprint = _step_fingerprint(step)
         if fingerprint in set(state.get("executed_step_fingerprints") or []):
             payload: JsonDict = {
-                "planStep": step,
+                "planStepId": str(step.get("id") or ""),
                 "tool": tool_name,
                 "errorCategory": "duplicate_step",
             }
@@ -670,7 +977,7 @@ class AiopsDiagnosticService:
             await self._save_checkpoint(state, "executor", payload)
             return {
                 "plan_index": plan_index + 1,
-                "executor_attempt_count": attempt_count + 1,
+                "executor_attempt_count": attempt_count,
                 "executed_step_fingerprints": [fingerprint],
                 "current_evidence_id": "",
                 "current_plan_step": step,
@@ -856,9 +1163,18 @@ class AiopsDiagnosticService:
             str(item.get("id")) for item in public_hypotheses if item.get("id")
         }
         summary = str(state.get("current_evidence_summary") or "")
+        raw_plan_intent = plan_step.get("causalIntent")
+        plan_intent = cast(
+            CausalRole,
+            raw_plan_intent
+            if raw_plan_intent in {"trigger", "mechanism", "impact", "context"}
+            else "context",
+        )
         prompt = (
-            "Return one JSON observation decision with purpose, supports, refutes, and "
-            "summary. Use only known hypothesis IDs. Do not include hidden reasoning. "
+            "Return one JSON observation decision with purpose, supports, refutes, summary, "
+            "and causalRole. causalRole must be one of trigger, mechanism, impact, or context "
+            "and describes the public causal function of this observation, not private "
+            "reasoning. Use only known hypothesis IDs. Do not include hidden reasoning. "
             f"Known hypotheses: {json.dumps(public_hypotheses, ensure_ascii=False)}. "
             f"Plan step: {json.dumps(plan_step, ensure_ascii=False)}. "
             f"Persisted evidence ID: {evidence_id}. Observation: {summary}."
@@ -869,12 +1185,37 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 known_hypotheses=known_hypotheses,
             )
+            tested_hypotheses = {
+                item
+                for item in cast(
+                    list[object], plan_step.get("testsHypotheses") or []
+                )
+                if isinstance(item, str)
+            }
+            reported_role = decision.causal_role
+            decision = replace(
+                decision,
+                supports=tuple(
+                    item for item in decision.supports if item in tested_hypotheses
+                ),
+                refutes=tuple(
+                    item for item in decision.refutes if item in tested_hypotheses
+                ),
+                causal_role=plan_intent,
+                causal_role_origin=(
+                    "model" if reported_role == plan_intent else "plan_contract"
+                ),
+                reported_causal_role=reported_role,
+                causal_role_corrected=reported_role != plan_intent,
+            )
         except Exception:
             decision = ObservationDecision(
                 purpose=str(plan_step.get("purpose") or "Evaluate persisted observation."),
                 supports=(),
                 refutes=(),
                 summary="The observation could not be mapped to a validated hypothesis update.",
+                causal_role=plan_intent,
+                causal_role_origin="plan_contract",
             )
         decision_payload = _observation_decision_payload(decision, evidence_id=evidence_id)
         hypothesis_states = _update_hypothesis_states(
@@ -952,17 +1293,101 @@ class AiopsDiagnosticService:
             )
         except Exception:
             decision = _fallback_evidence_sufficiency(
+                public_hypotheses=public_hypotheses,
                 hypothesis_states=cast(
                     list[JsonDict], state.get("hypothesis_states") or []
                 ),
                 evidence_ids=evidence_ids,
             )
+        decision = _project_evidence_sufficiency(
+            model_decision=decision,
+            public_hypotheses=public_hypotheses,
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            evidence_ids=evidence_ids,
+        )
         payload = _evidence_sufficiency_payload(decision)
+        causal_coverage = supported_causal_coverage(
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            observation_decisions=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+        )
+        payload.update(
+            {
+                "causalTriggerCount": causal_coverage.trigger_count,
+                "causalMechanismCount": causal_coverage.mechanism_count,
+                "causalImpactCount": causal_coverage.impact_count,
+                "missingCausalRoles": list(causal_coverage.missing_roles),
+                "ambiguousTrigger": causal_coverage.ambiguous_trigger,
+            }
+        )
         attempt_count = int(state.get("executor_attempt_count") or 0)
         max_total_steps = int(state.get("max_total_steps") or 6)
-        if decision.status == "sufficient":
-            next_route: Literal["executor", "replanner", "decision"] = "decision"
-            termination_reason = "evidence_sufficient"
+        refinement_index: int | None = None
+        refinement_reason = ""
+        if decision.unresolved_hypotheses:
+            if attempt_count < max_total_steps:
+                refinement_index = _next_open_hypothesis_step_index(
+                    plan=plan,
+                    plan_index=plan_index,
+                    open_hypothesis_ids=decision.unresolved_hypotheses,
+                    executed_fingerprints=cast(
+                        list[str], state.get("executed_step_fingerprints") or []
+                    ),
+                )
+            if refinement_index is not None:
+                next_route = "executor"
+                termination_reason = ""
+                refinement_reason = "open_hypothesis_plan_step_remaining"
+            elif _can_replan(state):
+                next_route = "replanner"
+                termination_reason = ""
+                refinement_reason = "open_hypothesis_requires_replan"
+            else:
+                next_route = "decision"
+                termination_reason = _budget_termination_reason(state)
+        elif decision.status == "sufficient":
+            supported_hypothesis_id = (
+                decision.supported_hypotheses[0]
+                if len(decision.supported_hypotheses) == 1
+                else None
+            )
+            if causal_coverage.complete:
+                next_route = "decision"
+                termination_reason = "evidence_sufficient"
+            elif attempt_count < max_total_steps:
+                refinement_index = next_causal_refinement_index(
+                    plan=plan,
+                    plan_index=plan_index,
+                    missing_roles=causal_coverage.missing_roles,
+                    supported_hypothesis_id=supported_hypothesis_id,
+                    executed_fingerprints=cast(
+                        list[str], state.get("executed_step_fingerprints") or []
+                    ),
+                    fingerprint=_step_fingerprint,
+                )
+                if refinement_index is not None:
+                    next_route = "executor"
+                    termination_reason = ""
+                    refinement_reason = "missing_causal_role_plan_step_remaining"
+                elif _can_replan(state):
+                    next_route = "replanner"
+                    termination_reason = ""
+                    refinement_reason = "missing_causal_role_requires_replan"
+                else:
+                    next_route = "decision"
+                    termination_reason = _budget_termination_reason(state)
+            elif _can_replan(state):
+                next_route = "replanner"
+                termination_reason = ""
+                refinement_reason = "missing_causal_role_requires_replan"
+            else:
+                next_route = "decision"
+                termination_reason = _budget_termination_reason(state)
         elif plan_index < len(plan) and attempt_count < max_total_steps:
             next_route = "executor"
             termination_reason = ""
@@ -977,14 +1402,22 @@ class AiopsDiagnosticService:
             task_id=task_id,
             phase="sufficiency_gate",
             status="completed",
-            payload={**payload, "nextRoute": next_route},
+            payload={
+                **payload,
+                "nextRoute": next_route,
+                "refinementReason": refinement_reason,
+            },
         )
         await self._save_checkpoint(
             state,
             "sufficiency_gate",
-            {**payload, "nextRoute": next_route},
+            {
+                **payload,
+                "nextRoute": next_route,
+                "refinementReason": refinement_reason,
+            },
         )
-        return {
+        update: dict[str, object] = {
             "evidence_sufficiency": payload,
             "next_route": next_route,
             "termination_reason": termination_reason,
@@ -997,6 +1430,9 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        if refinement_index is not None:
+            update["plan_index"] = refinement_index
+        return update
 
     async def _replanner(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -1023,7 +1459,8 @@ class AiopsDiagnosticService:
         )
         prompt = (
             "Return JSON only for a gap-targeted diagnostic replan with a `steps` array. "
-            "Each step has id, tool, arguments, purpose, and testsHypotheses. Use only the "
+            "Each step has id, tool, arguments, purpose, testsHypotheses, and causalIntent. "
+            "causalIntent must be allowed by the selected tool contract. Use only the "
             "discovered contracts and public hypothesis IDs. Do not repeat an executed tool and "
             "arguments pair. "
             "Evidence gap: "
@@ -1042,22 +1479,44 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 available_tools=available_tools,
                 known_hypotheses=known_hypotheses,
+                causal_capabilities={
+                    definition.name: allowed_causal_intents(definition.name)
+                    for definition in tool_definitions
+                },
             )
             parsed_steps = [_diagnostic_plan_step_payload(step) for step in parsed]
         except Exception:
             parsed_steps = []
-        parsed_steps = bind_trusted_tool_arguments(
-            parsed_steps, self._trusted_tool_arguments
+        parsed_steps, _contract_errors = normalize_tool_plan_steps(
+            parsed_steps,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
         )
+        parsed_coverage = repair_plan_causal_coverage(parsed_steps)
+        parsed_steps = list(parsed_coverage.steps)
         executed = set(state.get("executed_step_fingerprints") or [])
+        missing_roles = {
+            item
+            for item in cast(
+                list[object],
+                _json_dict(state.get("evidence_sufficiency")).get(
+                    "missingCausalRoles"
+                )
+                or [],
+            )
+            if isinstance(item, str)
+        }
         accepted: list[JsonDict] = []
+        causal_intent_rejected_count = 0
         for step in parsed_steps:
+            if missing_roles and step.get("causalIntent") not in missing_roles:
+                causal_intent_rejected_count += 1
+                continue
             fingerprint = _step_fingerprint(step)
             if fingerprint in executed or any(
                 _step_fingerprint(existing) == fingerprint for existing in accepted
             ):
-                continue
-            if not plan_matches_tool_contracts([step], tool_definitions):
                 continue
             accepted.append(step)
             if len(accepted) >= remaining_budget:
@@ -1071,6 +1530,8 @@ class AiopsDiagnosticService:
             "remainingAttemptBudget": remaining_budget,
             "plan": accepted,
             "terminationReason": termination_reason,
+            "causalIntentRejectedStepCount": causal_intent_rejected_count,
+            **_plan_causal_coverage_payload(accepted),
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -1098,11 +1559,24 @@ class AiopsDiagnosticService:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        decision_evidence_ids = _supporting_decision_evidence_ids(
+            hypothesis_states=cast(
+                list[JsonDict], state.get("hypothesis_states") or []
+            ),
+            observation_decisions=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+            persisted_evidence_ids=evidence_ids,
+        )
         decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
         prompt = (
             "Return JSON only for one root-cause decision with component, mechanism, trigger, "
-            "causalChain, evidenceIds, and confidence. This is a structured root-cause "
-            "decision, not private chain-of-thought. Use only persisted evidence IDs. "
+            "causalChain, evidenceIds, and confidence. Trigger must state the direct "
+            "triggering condition, not repeat the alert symptom or the broad hypothesis "
+            "description. causalChain must contain 2 to 6 ordered atomic causal facts, and "
+            "every fact must map to a supporting structured observation. This is a "
+            "structured public decision, not private chain-of-thought. Use only persisted "
+            "evidence IDs. "
             f"Alert: {json.dumps(_json_dict(state.get('alert')), ensure_ascii=False)}. "
             "Public hypotheses: "
             f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
@@ -1113,33 +1587,49 @@ class AiopsDiagnosticService:
             "Use the canonical component and mechanism labels declared by this public "
             "decision vocabulary when it contains a matching alias: "
             f"{json.dumps(decision_vocabulary, ensure_ascii=False)}. "
-            f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
+            "Supporting observation evidence IDs: "
+            f"{json.dumps(decision_evidence_ids)}."
         )
         decision: RootCauseDecision | None = None
         decision_origin = "none"
-        decision_error_category: str | None = None
-        try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-        except Exception:
-            decision_error_category = "model_call_failed"
-        else:
-            try:
-                decision = parse_root_cause_decision(
-                    _model_text(response),
-                    available_evidence_ids=set(evidence_ids),
-                )
-                decision = normalize_root_cause_decision(
-                    decision,
-                    component_aliases=_string_mapping(
-                        decision_vocabulary.get("componentAliases")
-                    ),
-                    mechanism_aliases=_string_mapping(
-                        decision_vocabulary.get("mechanismAliases")
-                    ),
-                )
-                decision_origin = "llm"
-            except Exception:
-                decision_error_category = "invalid_model_output"
+        decision_outcome = await invoke_structured_root_cause_decision(
+            model=self._llm_provider.create_chat_model(),
+            prompt=prompt,
+            available_evidence_ids=set(decision_evidence_ids),
+            structured_output_method=_provider_structured_output_method(
+                self._llm_provider
+            ),
+        )
+        decision = decision_outcome.decision
+        decision_error_category = decision_outcome.error_category
+        if decision is not None:
+            decision = normalize_root_cause_decision(
+                decision,
+                component_aliases=_string_mapping(
+                    decision_vocabulary.get("componentAliases")
+                ),
+                mechanism_aliases=_string_mapping(
+                    decision_vocabulary.get("mechanismAliases")
+                ),
+            )
+            decision_origin = "llm"
+            normalized = _normalize_grounded_decision(
+                decision,
+                available_evidence_ids=set(evidence_ids),
+                public_hypotheses=cast(
+                    list[JsonDict], state.get("public_hypotheses") or []
+                ),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=decision_vocabulary,
+            )
+            if normalized is not None:
+                decision = normalized
+                decision_origin = "llm_grounded_normalization"
         if decision is None:
             decision = build_grounded_fallback_decision(
                 public_hypotheses=cast(
@@ -1164,6 +1654,12 @@ class AiopsDiagnosticService:
             "status": "grounded" if decision is not None else "insufficient_evidence",
             "decisionOrigin": decision_origin,
             "decisionErrorCategory": decision_error_category,
+            "decisionAttempts": decision_outcome.attempts,
+            "decisionErrorCodes": list(decision_outcome.error_codes),
+            "decisionErrorCode": decision_outcome.error_code,
+            "decisionErrorPhase": decision_outcome.error_phase,
+            "decisionRetryable": decision_outcome.retryable,
+            "decisionHttpStatusClass": decision_outcome.http_status_class,
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -1195,7 +1691,40 @@ class AiopsDiagnosticService:
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
         candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
-        deterministic_gaps = (
+        validation_origin = "none"
+        validation_error_category: str | None = None
+        validation_error_code: str | None = None
+        validation_error_codes: tuple[str, ...] = ()
+        validation_error_phase: str | None = None
+        validation_retryable: bool | None = None
+        validation_http_status_class: str | None = None
+        validation_attempts = 0
+        validation_warning: str | None = None
+        validation_model = _validator_model_name(self._llm_provider)
+        deterministic_result = None
+        deterministic_replan_allowed = False
+        validation = RootCauseValidationDecision(
+            status="invalid",
+            evidence_ids=(),
+            unsupported_fields=(),
+            missing_evidence=("No grounded root-cause decision was available.",),
+            summary="Decision validation failed closed because no candidate was available.",
+        )
+        if candidate is None:
+            validation_error_category = "candidate_missing"
+        else:
+            deterministic_result = validate_grounded_candidate(
+                candidate=candidate,
+                available_evidence_ids=set(evidence_ids),
+                hypothesis_states=cast(
+                    list[JsonDict], state.get("hypothesis_states") or []
+                ),
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+            )
+        structural_gaps = (
             _deterministic_decision_gaps(
                 candidate,
                 decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
@@ -1203,15 +1732,32 @@ class AiopsDiagnosticService:
             if candidate is not None
             else ()
         )
-        if candidate is None:
-            validation = RootCauseValidationDecision(
-                status="invalid",
-                evidence_ids=(),
-                unsupported_fields=(),
-                missing_evidence=("No grounded root-cause decision was available.",),
-                summary="Decision validation failed closed because no candidate was available.",
+        if deterministic_result is not None:
+            sufficiency = _json_dict(state.get("evidence_sufficiency"))
+            recommended_tools = _unique_strings(
+                [
+                    item
+                    for item in cast(
+                        list[object], sufficiency.get("recommendedTools") or []
+                    )
+                    if isinstance(item, str)
+                ]
             )
-        elif deterministic_gaps:
+            available_tools = {
+                definition.name for definition in state.get("tool_definitions") or ()
+            }
+            executed_tools = {
+                tool
+                for item in cast(list[JsonDict], state.get("evidence") or [])
+                if isinstance((tool := item.get("tool")), str)
+            }
+            deterministic_replan_allowed = can_replan_deterministic_gap(
+                deterministic_result,
+                recommended_tools=recommended_tools,
+                available_tools=available_tools,
+                executed_tools=executed_tools,
+            )
+        if candidate is not None and deterministic_result is not None and structural_gaps:
             validation = RootCauseValidationDecision(
                 status="invalid",
                 evidence_ids=candidate.evidence_ids,
@@ -1219,20 +1765,57 @@ class AiopsDiagnosticService:
                     tuple[
                         Literal["component", "mechanism", "trigger", "causalChain"], ...
                     ],
-                    deterministic_gaps,
+                    structural_gaps,
                 ),
-                missing_evidence=(
-                    "The candidate root-cause structure is not fully supported.",
-                ),
+                missing_evidence=(),
                 summary="Deterministic root-cause validation rejected the candidate.",
             )
-        else:
+            validation_error_category = "deterministic_gap"
+        elif (
+            candidate is not None
+            and deterministic_result is not None
+            and deterministic_replan_allowed
+        ):
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=candidate.evidence_ids,
+                unsupported_fields=(),
+                missing_evidence=deterministic_result.missing_evidence,
+                summary="The deterministic evidence contract identified a targeted gap.",
+            )
+            validation_error_category = "deterministic_gap"
+        elif (
+            candidate is not None
+            and deterministic_result is not None
+            and not deterministic_result.passed
+        ):
+            validation = RootCauseValidationDecision(
+                status="invalid",
+                evidence_ids=candidate.evidence_ids,
+                unsupported_fields=deterministic_result.unsupported_fields,
+                missing_evidence=deterministic_result.missing_evidence,
+                summary="The candidate failed the deterministic evidence contract.",
+            )
+            validation_error_category = "deterministic_gap"
+        elif candidate is not None and deterministic_result is not None:
+            response_example = json.dumps(
+                {
+                    "status": "valid",
+                    "evidenceIds": list(candidate.evidence_ids),
+                    "unsupportedFields": [],
+                    "missingEvidence": [],
+                    "summary": "Public evidence supports every candidate field.",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
             prompt = (
-                "Return one JSON root-cause validation decision with status, evidenceIds, "
+                "Return JSON only for one root-cause validation decision with status, evidenceIds, "
                 "unsupportedFields, missingEvidence, and summary. Judge only whether the "
                 "candidate component, mechanism, trigger, and causalChain are supported by the "
                 "public structured observations. Do not compare against hidden answers and do "
-                "not include private chain-of-thought. "
+                "not include private chain-of-thought. Follow this JSON shape example: "
+                f"{response_example}. "
                 f"Candidate: {json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
                 "Public hypotheses: "
                 f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
@@ -1242,25 +1825,64 @@ class AiopsDiagnosticService:
                 f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}. "
                 f"Persisted evidence IDs: {json.dumps(evidence_ids)}."
             )
-            try:
-                response = await self._llm_provider.create_chat_model().ainvoke(prompt)
-                validation = parse_root_cause_validation(
-                    _model_text(response),
-                    available_evidence_ids=set(evidence_ids),
+            outcome = await invoke_structured_root_cause_validation(
+                model=_validator_chat_model(self._llm_provider),
+                prompt=prompt,
+                available_evidence_ids=set(evidence_ids),
+                structured_output_method=_validator_structured_output_method(
+                    self._llm_provider
+                ),
+            )
+            validation_attempts = outcome.attempts
+            validation_error_category = outcome.error_category
+            validation_error_code = outcome.error_code
+            validation_error_codes = outcome.error_codes
+            validation_error_phase = outcome.error_phase
+            validation_retryable = outcome.retryable
+            validation_http_status_class = outcome.http_status_class
+            if outcome.decision is not None:
+                validation = outcome.decision
+                if validation.status == "valid":
+                    validation_origin = "llm_confirmed"
+            elif deterministic_result.passed:
+                validation = RootCauseValidationDecision(
+                    status="valid",
+                    evidence_ids=candidate.evidence_ids,
+                    unsupported_fields=(),
+                    missing_evidence=(),
+                    summary=(
+                        "The candidate passed every public deterministic evidence check; "
+                        "the LLM Validator was unavailable."
+                    ),
                 )
-            except Exception:
+                validation_origin = "deterministic_grounded_fallback"
+                validation_warning = "llm_validator_unavailable"
+            else:
                 validation = RootCauseValidationDecision(
                     status="invalid",
                     evidence_ids=candidate.evidence_ids,
-                    unsupported_fields=(),
-                    missing_evidence=("Structured root-cause validation was unavailable.",),
-                    summary="Decision validation failed closed.",
+                    unsupported_fields=deterministic_result.unsupported_fields,
+                    missing_evidence=deterministic_result.missing_evidence,
+                    summary=(
+                        "The LLM Validator was unavailable and the candidate did not pass "
+                        "the deterministic fallback contract."
+                    ),
                 )
+                validation_warning = "llm_validator_unavailable"
         payload = _root_cause_validation_payload(validation)
         can_replan = (
             candidate is not None
             and validation.status == "invalid"
-            and bool(validation.missing_evidence)
+            and (
+                (
+                    validation_error_category == "model_rejected"
+                    and bool(validation.missing_evidence or validation.unsupported_fields)
+                )
+                or (
+                    validation_error_category == "deterministic_gap"
+                    and deterministic_replan_allowed
+                )
+            )
             and _can_replan(state)
         )
         route = "replanner" if can_replan else "recovery_planner"
@@ -1274,15 +1896,69 @@ class AiopsDiagnosticService:
             task_id=task_id,
             phase="decision_validation",
             status="completed",
-            payload={**payload, "nextRoute": route},
+            payload={
+                **payload,
+                "validationOrigin": validation_origin,
+                "validationErrorCategory": validation_error_category,
+                "validationErrorCode": validation_error_code,
+                "validationErrorCodes": list(validation_error_codes),
+                "validationErrorPhase": validation_error_phase,
+                "validationRetryable": validation_retryable,
+                "validationHttpStatusClass": validation_http_status_class,
+                "validationAttempts": validation_attempts,
+                "validationModel": validation_model,
+                "validationWarning": validation_warning,
+                "deterministicChecks": (
+                    deterministic_checks_payload(deterministic_result)
+                    if deterministic_result is not None
+                    else []
+                ),
+                "nextRoute": route,
+            },
         )
         await self._save_checkpoint(
             state,
             "decision_validation",
-            {**payload, "nextRoute": route},
+            {
+                **payload,
+                "validationOrigin": validation_origin,
+                "validationErrorCategory": validation_error_category,
+                "validationErrorCode": validation_error_code,
+                "validationErrorCodes": list(validation_error_codes),
+                "validationErrorPhase": validation_error_phase,
+                "validationRetryable": validation_retryable,
+                "validationHttpStatusClass": validation_http_status_class,
+                "validationAttempts": validation_attempts,
+                "validationModel": validation_model,
+                "validationWarning": validation_warning,
+                "deterministicChecks": (
+                    deterministic_checks_payload(deterministic_result)
+                    if deterministic_result is not None
+                    else []
+                ),
+                "nextRoute": route,
+            },
         )
+        validation_payload: JsonDict = {
+            **payload,
+            "validationOrigin": validation_origin,
+            "validationErrorCategory": validation_error_category,
+            "validationErrorCode": validation_error_code,
+            "validationErrorCodes": list(validation_error_codes),
+            "validationErrorPhase": validation_error_phase,
+            "validationRetryable": validation_retryable,
+            "validationHttpStatusClass": validation_http_status_class,
+            "validationAttempts": validation_attempts,
+            "validationModel": validation_model,
+            "validationWarning": validation_warning,
+            "deterministicChecks": (
+                deterministic_checks_payload(deterministic_result)
+                if deterministic_result is not None
+                else []
+            ),
+        }
         return {
-            "decision_validation": payload,
+            "decision_validation": validation_payload,
             "root_cause_decision": root_cause_payload,
             "next_route": cast(Literal["replanner", "recovery_planner"], route),
             "termination_reason": termination_reason,
@@ -1312,6 +1988,14 @@ class AiopsDiagnosticService:
         proposal_tools = {definition.name for definition in proposal_definitions}
         if candidate is None:
             plan = _fallback_recovery_plan(None, proposal_tools=proposal_tools)
+        elif _json_dict(state.get("decision_validation")).get(
+            "validationOrigin"
+        ) == "deterministic_grounded_fallback":
+            plan = _fallback_recovery_plan(
+                candidate,
+                proposal_tools=proposal_tools,
+                force_manual_review=True,
+            )
         else:
             prompt = (
                 "Return one JSON structured recovery plan with mode, action, target, rationale, "
@@ -1518,7 +2202,7 @@ class AiopsDiagnosticService:
         ]
         report_content, report_generation = await self._generate_report_content(state)
         report_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v2",
+            "workflowVersion": "evidence-driven-v3",
             "noSopMatched": no_sop_matched,
             "plan": _json_list(state.get("plan")),
             "planOrigin": str(state.get("plan_origin") or "generic"),
@@ -1655,13 +2339,18 @@ class AiopsDiagnosticService:
         )
         if not generic_plan and "SearchLog" in available_tools:
             generic_plan = [self._generic_search_log_step(query)]
-        generic_plan = bind_trusted_tool_arguments(
+        generic_plan, _generic_contract_errors = normalize_tool_plan_steps(
             generic_plan,
-            self._trusted_tool_arguments,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
         )
+        generic_plan = list(repair_plan_causal_coverage(generic_plan).steps)
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
-            "has `id`, `tool`, `arguments`, `purpose`, and `testsHypotheses`. Use at most six "
+            "has `id`, `tool`, `arguments`, `purpose`, `testsHypotheses`, and "
+            "`causalIntent`. causalIntent must be allowed by the selected tool contract. "
+            "Use at most six "
             "steps and only the tools and argument schemas in these discovered contracts. "
             "The initial plan must contain at most four steps: "
             f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
@@ -1676,14 +2365,24 @@ class AiopsDiagnosticService:
                 _model_text(response),
                 available_tools=set(available_tools),
                 known_hypotheses=set(known_hypotheses),
+                causal_capabilities={
+                    definition.name: allowed_causal_intents(definition.name)
+                    for definition in tool_definitions
+                },
             )
             if len(parsed_plan) > 4:
                 raise ValueError("Initial diagnostic plan cannot contain more than four steps.")
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
-        plan = bind_trusted_tool_arguments(plan, self._trusted_tool_arguments)
-        if not plan or not plan_matches_tool_contracts(plan, tool_definitions):
+        plan, _contract_errors = normalize_tool_plan_steps(
+            plan,
+            trusted_tool_arguments=self._trusted_tool_arguments,
+            tool_argument_contracts=self._tool_argument_contracts,
+            tool_definitions=tool_definitions,
+        )
+        plan = list(repair_plan_causal_coverage(plan).steps)
+        if not plan:
             return generic_plan, "generic"
         return plan, "SOP-backed" if sop_hits else "model"
 
@@ -1702,6 +2401,8 @@ class AiopsDiagnosticService:
             },
             "purpose": f"Gather real CLS evidence relevant to: {query}",
             "testsHypotheses": [],
+            "causalIntent": "context",
+            "causalIntentOrigin": "generic",
         }
 
     async def _create_step(
@@ -1791,20 +2492,46 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
         "arguments": step.arguments,
         "purpose": step.purpose,
         "testsHypotheses": list(step.tests_hypotheses),
+        "causalIntent": step.causal_intent,
+        "causalIntentOrigin": step.causal_intent_origin,
     }
 
 
 def _step_fingerprint(step: Mapping[str, object]) -> str:
-    canonical = {
-        "tool": str(step.get("tool") or ""),
-        "arguments": _json_dict(step.get("arguments")),
-    }
-    return json.dumps(
-        canonical,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return tool_step_fingerprint(
+        str(step.get("tool") or ""),
+        _json_dict(step.get("arguments")),
     )
+
+
+def _next_open_hypothesis_step_index(
+    *,
+    plan: Sequence[JsonDict],
+    plan_index: int,
+    open_hypothesis_ids: Sequence[str],
+    executed_fingerprints: Sequence[str],
+) -> int | None:
+    open_ids = set(open_hypothesis_ids)
+    if not open_ids:
+        return None
+    executed = set(executed_fingerprints)
+    bounded_index = min(max(plan_index, 0), len(plan))
+    candidate_indices = [
+        *range(bounded_index, len(plan)),
+        *range(0, bounded_index),
+    ]
+    for index in candidate_indices:
+        step = plan[index]
+        if _step_fingerprint(step) in executed:
+            continue
+        tested = {
+            item
+            for item in cast(list[object], step.get("testsHypotheses") or [])
+            if isinstance(item, str)
+        }
+        if tested & open_ids:
+            return index
+    return None
 
 
 def _can_replan(state: AiopsDiagnosticState) -> bool:
@@ -1827,33 +2554,75 @@ def _budget_termination_reason(state: AiopsDiagnosticState) -> str:
 
 def _fallback_evidence_sufficiency(
     *,
+    public_hypotheses: Sequence[JsonDict],
     hypothesis_states: Sequence[JsonDict],
     evidence_ids: Sequence[str],
 ) -> EvidenceSufficiencyDecision:
-    supported = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") == "supported"
-    )
-    refuted = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") == "refuted"
-    )
-    unresolved = tuple(
-        str(item.get("id"))
-        for item in hypothesis_states
-        if item.get("id") and item.get("status") not in {"supported", "refuted"}
-    )
-    return EvidenceSufficiencyDecision(
+    fallback = EvidenceSufficiencyDecision(
         status="insufficient",
         evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
-        supported_hypotheses=supported[:6],
-        refuted_hypotheses=refuted[:6],
-        unresolved_hypotheses=unresolved[:6],
+        supported_hypotheses=(),
+        refuted_hypotheses=(),
+        unresolved_hypotheses=(),
         missing_evidence=("Structured sufficiency assessment was unavailable.",),
         recommended_tools=(),
         summary="Evidence sufficiency could not be confirmed.",
+    )
+    return _project_evidence_sufficiency(
+        model_decision=fallback,
+        public_hypotheses=public_hypotheses,
+        hypothesis_states=hypothesis_states,
+        evidence_ids=evidence_ids,
+    )
+
+
+def _project_evidence_sufficiency(
+    *,
+    model_decision: EvidenceSufficiencyDecision,
+    public_hypotheses: Sequence[JsonDict],
+    hypothesis_states: Sequence[JsonDict],
+    evidence_ids: Sequence[str],
+) -> EvidenceSufficiencyDecision:
+    public_ids = _unique_strings(
+        [str(item.get("id") or "") for item in public_hypotheses]
+    )
+    public_set = set(public_ids)
+    state_by_id: dict[str, JsonDict] = {}
+    state_integrity_valid = True
+    for item in hypothesis_states:
+        hypothesis_id = str(item.get("id") or "")
+        if not hypothesis_id or hypothesis_id not in public_set:
+            state_integrity_valid = False
+            continue
+        if hypothesis_id in state_by_id:
+            state_integrity_valid = False
+            continue
+        state_by_id[hypothesis_id] = item
+
+    supported: list[str] = []
+    refuted: list[str] = []
+    unresolved: list[str] = []
+    for hypothesis_id in public_ids:
+        status = str(state_by_id.get(hypothesis_id, {}).get("status") or "open")
+        if status == "supported":
+            supported.append(hypothesis_id)
+        elif status == "refuted":
+            refuted.append(hypothesis_id)
+        else:
+            unresolved.append(hypothesis_id)
+
+    sufficient = (
+        state_integrity_valid and len(supported) == 1 and not unresolved
+    )
+    return EvidenceSufficiencyDecision(
+        status="sufficient" if sufficient else "insufficient",
+        evidence_ids=tuple(_unique_strings(list(evidence_ids))[:6]),
+        supported_hypotheses=tuple(supported),
+        refuted_hypotheses=tuple(refuted),
+        unresolved_hypotheses=tuple(unresolved),
+        missing_evidence=() if sufficient else model_decision.missing_evidence,
+        recommended_tools=() if sufficient else model_decision.recommended_tools,
+        summary=model_decision.summary,
     )
 
 
@@ -1863,9 +2632,9 @@ def _evidence_sufficiency_payload(
     return {
         "status": decision.status,
         "evidenceIds": list(decision.evidence_ids),
-        "supportedHypotheses": list(decision.supported_hypotheses),
-        "refutedHypotheses": list(decision.refuted_hypotheses),
-        "unresolvedHypotheses": list(decision.unresolved_hypotheses),
+        "supportedHypotheses": list(decision.supported_hypotheses[:6]),
+        "refutedHypotheses": list(decision.refuted_hypotheses[:6]),
+        "unresolvedHypotheses": list(decision.unresolved_hypotheses[:6]),
         "missingEvidence": list(decision.missing_evidence),
         "recommendedTools": list(decision.recommended_tools),
         "summary": decision.summary,
@@ -1903,9 +2672,52 @@ def _tool_contracts_payload(
             "name": item.name,
             "description": item.description,
             "inputSchema": item.input_schema,
+            "allowedCausalIntents": sorted(allowed_causal_intents(item.name)),
         }
         for item in tool_definitions
     ]
+
+
+def _plan_causal_coverage_payload(plan: Sequence[JsonDict]) -> JsonDict:
+    coverage = repair_plan_causal_coverage(plan)
+    return {
+        "planCausalCoverageComplete": coverage.complete,
+        "missingCausalRoles": list(coverage.missing_roles),
+        "ambiguousTrigger": coverage.ambiguous_trigger,
+    }
+
+
+def _supporting_decision_evidence_ids(
+    *,
+    hypothesis_states: Sequence[JsonDict],
+    observation_decisions: Sequence[JsonDict],
+    persisted_evidence_ids: Sequence[str],
+) -> list[str]:
+    supported = [
+        str(item["id"])
+        for item in hypothesis_states
+        if item.get("status") == "supported" and item.get("id")
+    ]
+    if len(supported) != 1:
+        return []
+    supported_id = supported[0]
+    persisted = set(persisted_evidence_ids)
+    return _unique_strings(
+        [
+            evidence_id
+            for observation in observation_decisions
+            if supported_id
+            in {
+                item
+                for item in cast(list[object], observation.get("supports") or [])
+                if isinstance(item, str)
+            }
+            for evidence_id in cast(
+                list[object], observation.get("evidenceIds") or []
+            )
+            if isinstance(evidence_id, str) and evidence_id in persisted
+        ]
+    )
 
 
 def _observation_decision_payload(
@@ -1919,6 +2731,10 @@ def _observation_decision_payload(
         "refutes": list(decision.refutes),
         "summary": decision.summary,
         "evidenceIds": [evidence_id],
+        "causalRole": decision.causal_role,
+        "causalRoleOrigin": decision.causal_role_origin,
+        "reportedCausalRole": decision.reported_causal_role,
+        "causalRoleCorrected": decision.causal_role_corrected,
     }
 
 
@@ -2057,6 +2873,7 @@ def _fallback_recovery_plan(
     decision: RootCauseDecision | None,
     *,
     proposal_tools: set[str],
+    force_manual_review: bool = False,
 ) -> RecoveryPlan:
     if decision is None:
         return RecoveryPlan(
@@ -2074,7 +2891,11 @@ def _fallback_recovery_plan(
             human_approval_required=False,
         )
     return RecoveryPlan(
-        mode="manual_review" if proposal_tools else "external_policy_required",
+        mode=(
+            "manual_review"
+            if force_manual_review or proposal_tools
+            else "external_policy_required"
+        ),
         action="review_validated_diagnosis",
         target=decision.component,
         rationale="Recovery planning model output was unavailable or invalid.",

@@ -11,8 +11,17 @@ alert:
 hypotheses:
   - id: slow_database_work
     description: Database work holds pooled connections for an extended period.
+    decision_label:
+      component: postgresql
+      mechanism: slow_transaction_pool_exhaustion
   - id: application_connection_lifecycle
     description: The application does not return borrowed connections reliably.
+    decision_label:
+      component: checkout-service
+      mechanism: borrowed_connection_not_returned
   - id: traffic_capacity
     description: Legitimate concurrency exceeds the configured pool capacity.
+    decision_label:
+      component: checkout-service
+      mechanism: pool_capacity_exceeded_by_legitimate_concurrency
 snapshot_file: snapshot/tool_responses.yaml

@@ -1,11 +1,20 @@
 {
+  "evaluation": {
+    "archiveDir": ""
+  },
   "llm": {
     "apiKey": "",
     "chatModel": "qwen3.7-max",
+    "validatorModel": "qwen3.8-max",
     "embeddingModel": "text-embedding-v4",
     "modelCapabilities": {
       "qwen3.7-max": {
-        "contextWindowTokens": 1000000
+        "contextWindowTokens": 1000000,
+        "structuredOutputMethod": "json_mode"
+      },
+      "qwen3.8-max": {
+        "contextWindowTokens": 1000000,
+        "structuredOutputMethod": "json_mode"
       }
     }
   },

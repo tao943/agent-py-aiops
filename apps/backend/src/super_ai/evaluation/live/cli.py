@@ -6,11 +6,19 @@ import argparse
 import asyncio
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.history import (
+    EvaluationStatus,
+    interrupted_envelope,
+    running_envelope,
+    terminal_envelope,
+)
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     LiveClsLogUploader,
@@ -56,6 +64,8 @@ from super_ai.evaluation.live.runner import (
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
 from super_ai.evaluation.live.scoring import LiveEvaluationResult, score_live_run
+from super_ai.evaluation.persistence import EvaluationRepository
+from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.llm import build_default_llm_provider
 from super_ai.mcp_client import LocalMcpClient
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -160,19 +170,22 @@ async def _run_live_command(
 ) -> tuple[dict[str, object], int]:
     config_path = cast(str | None, arguments.config)
     evidence_source = cast(EvidenceSource, arguments.evidence_source)
-    evidence_preparer, cls_mcp_client = build_live_evidence_runtime(
-        evidence_source=evidence_source,
-        config_path=config_path,
-    )
-    components = build_live_scenario_registry().resolve(
-        cast(str, arguments.scenario)
-    )
     engine = create_memory_engine(config_path=config_path)
-    driver = components.driver
-    try:
-        repositories = create_sqlalchemy_memory_repositories(
-            create_memory_session_factory(engine)
+    session_factory = create_memory_session_factory(engine)
+    recorder = EvaluationRunRecorder(
+        archive=EvaluationArchive.from_config(config_path=config_path),
+        repository=EvaluationRepository(session_factory),
+    )
+
+    async def execute() -> LiveEvaluationResult:
+        evidence_preparer, cls_mcp_client = build_live_evidence_runtime(
+            evidence_source=evidence_source,
+            config_path=config_path,
         )
+        components = build_live_scenario_registry().resolve(
+            cast(str, arguments.scenario)
+        )
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
         llm_provider = build_default_llm_provider(config_path=config_path)
         retrieval_tool = KnowledgeRetrievalTool(
             embedding_model=llm_provider.create_embedding_model(),
@@ -190,38 +203,149 @@ async def _run_live_command(
         )
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
-            driver=driver,
+            driver=components.driver,
             evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
             recovery=components.recovery,
             evaluator=_LiveScoringEvaluator(evidence_source),
         )
-        try:
-            result = await runner.run(
-                cast(str, arguments.scenario),
-                run_id=cast(str, arguments.run_id),
-            )
-        except LiveBenchmarkError as exc:
-            payload, exit_code = _live_failure_payload(
-                scenario_id=cast(str, arguments.scenario),
-                run_id=cast(str, arguments.run_id),
-                evidence_source=evidence_source,
-                error=exc,
-            )
-            write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
-            return payload, exit_code
+        return await runner.run(
+            cast(str, arguments.scenario),
+            run_id=cast(str, arguments.run_id),
+        )
+
+    try:
+        payload, exit_code = await _run_live_once(
+            scenario_id=cast(str, arguments.scenario),
+            run_id=cast(str, arguments.run_id),
+            evidence_source=evidence_source,
+            execute=execute,
+            recorder=recorder,
+        )
     finally:
         await engine.dispose()
-    result_payload = _live_result_payload(result, evidence_source=evidence_source)
+    write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
+    return payload, exit_code
+
+
+async def _run_live_once(
+    *,
+    scenario_id: str,
+    run_id: str,
+    evidence_source: EvidenceSource,
+    execute: Callable[[], Awaitable[LiveEvaluationResult]],
+    recorder: EvaluationRunRecorder,
+) -> tuple[dict[str, object], int]:
+    timestamp = datetime.now(timezone.utc)
+    running = running_envelope(
+        run_id=run_id,
+        evaluation_kind="live",
+        scenario_id=scenario_id,
+        suite_version="v1",
+        metadata={
+            "workflowVersion": "live-v1",
+            "evidenceSource": evidence_source,
+        },
+        created_at=timestamp,
+        started_at=timestamp,
+    )
+    start = await recorder.start(running)
+    try:
+        result = await execute()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await recorder.fail(
+            interrupted_envelope(running, completed_at=datetime.now(timezone.utc))
+        )
+        raise
+    except LiveBenchmarkError as exc:
+        payload, exit_code = _live_failure_payload(
+            scenario_id=scenario_id,
+            run_id=run_id,
+            evidence_source=evidence_source,
+            error=exc,
+        )
+        status, validity, _ = classify_live_failure(
+            exc.category, evidence_source=evidence_source
+        )
+        result_payload: dict[str, object] = {"failures": [exc.category]}
+        if exc.stage is not None:
+            result_payload["failureStage"] = exc.stage
+        if exc.authorization_code is not None:
+            result_payload["authorizationCode"] = exc.authorization_code
+        terminal = terminal_envelope(
+            running=running,
+            status=cast(EvaluationStatus, status),
+            validity=validity,
+            passed=False if status == "failed" else None,
+            metrics={},
+            result_payload=result_payload,
+            diagnostic_task_id=None,
+            failure_category=exc.category,
+            completed_at=datetime.now(timezone.utc),
+        )
+        finish = await recorder.fail(terminal)
+        return payload, 2 if start.database_pending or finish.database_pending else exit_code
+    except Exception:
+        terminal = terminal_envelope(
+            running=running,
+            status="infra_invalid",
+            validity="INFRA_INVALID",
+            passed=None,
+            metrics={},
+            result_payload={"failures": ["live_runtime_error"]},
+            diagnostic_task_id=None,
+            failure_category="live_runtime_error",
+            completed_at=datetime.now(timezone.utc),
+        )
+        await recorder.fail(terminal)
+        return (
+            safe_output(
+                command="run",
+                scenario_id=scenario_id,
+                run_id=run_id,
+                status="infra_invalid",
+                result={
+                    "validity": "INFRA_INVALID",
+                    "failureCategory": "live_runtime_error",
+                    "evidenceSource": evidence_source,
+                },
+            ),
+            2,
+        )
+
+    live_result = _live_result_payload(result, evidence_source=evidence_source)
+    status = "passed" if result.passed else "failed"
+    terminal = terminal_envelope(
+        running=running,
+        status=cast(EvaluationStatus, status),
+        validity="VALID_PASS" if result.passed else "VALID_FAIL",
+        passed=result.passed,
+        metrics={
+            "total": result.total,
+            "rawTotal": result.raw_total,
+            "verificationPassed": result.recovery_verification == 15,
+            "cleanupSucceeded": True,
+        },
+        result_payload={
+            "failures": list(result.failures),
+            "hardGate": result.hard_gate,
+        },
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=datetime.now(timezone.utc),
+    )
+    finish = await recorder.finish(terminal)
     payload = safe_output(
         command="run",
-        scenario_id=cast(str, arguments.scenario),
-        run_id=cast(str, arguments.run_id),
-        status="passed" if result.passed else "failed",
-        result=result_payload,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        status=status,
+        result=live_result,
     )
-    write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
-    return payload, 0 if result.passed else 1
+    exit_code = 2 if start.database_pending or finish.database_pending else (
+        0 if result.passed else 1
+    )
+    return payload, exit_code
 
 
 class _LiveScoringEvaluator:

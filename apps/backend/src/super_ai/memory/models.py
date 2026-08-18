@@ -530,9 +530,15 @@ class EvaluationRunModel(Base):
     __table_args__ = (
         Index("ix_aiops_evaluation_runs_scenario_created_at", "scenario_id", "created_at"),
         Index("ix_aiops_evaluation_runs_status_created_at", "status", "created_at"),
+        Index("ix_aiops_evaluation_runs_kind_created_at", "evaluation_kind", "created_at"),
     )
 
     run_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    evaluation_kind: Mapped[str] = mapped_column(String(40), nullable=False, default="snapshot")
+    artifact_schema_version: Mapped[str] = mapped_column(String(20), nullable=False, default="v1")
+    artifact_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provenance: Mapped[str] = mapped_column(String(40), nullable=False, default="native")
+    run_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     scenario_id: Mapped[str] = mapped_column(String(80), nullable=False)
     mode: Mapped[str] = mapped_column(String(40), nullable=False)
     suite_version: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -565,13 +571,15 @@ class EvaluationResultModel(Base):
         index=True,
     )
     dimension_scores: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    total: Mapped[int] = mapped_column(Integer, nullable=False)
-    raw_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     validity: Mapped[str] = mapped_column(String(40), nullable=False)
-    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     failures: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     score_reasons: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     hard_gate: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

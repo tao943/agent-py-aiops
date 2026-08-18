@@ -290,3 +290,36 @@ uv run python scripts/run_retrieval_benchmark.py --owner-user-id <owner-id> --kn
 不属于普通 CI，也不调用 Agent Chat 模型。
 有答案查询使用 Document Recall@1、Document Recall@3、MRR、forbidden Top-1 和 citation
 完整率门禁。无答案探针只记录 Top-1 与 margin，不进入排名分母，也不影响退出码。
+
+## Evaluation history operations
+
+Snapshot、Retrieval 与 Live/CLS 正式测评现在都会先写入 worktree 外的本地 Artifact，再幂等
+同步 PostgreSQL。请只在被 Git 忽略的 `config/user.project.json` 配置本机绝对路径；提交模板
+保持空值，例如：
+
+```json
+{
+  "evaluation": {
+    "archiveDir": "D:\\agent-py-data\\evaluation-archive"
+  }
+}
+```
+
+本地 Artifact 是数据库临时不可用时的真实结果保底；`--output` 和旧 Live report 只是兼容
+导出。退出码统一为：`0` 通过、`1` 有效但未达标、`2` 基础设施无效或数据库待对账、`130`
+操作员中断。归档只保存字段允许列表内的指标与安全来源信息，不保存密钥、Ground Truth、
+Prompt、私有推理、原始模型响应或原始 CLS 日志。
+
+从 `apps/backend` 执行管理命令：
+
+```powershell
+uv run python scripts/manage_evaluation_history.py import-history --source D:\eval-source-a --source D:\eval-source-b --config ..\..\config\project.json
+uv run python scripts/manage_evaluation_history.py reconcile --config ..\..\config\project.json
+uv run python scripts/manage_evaluation_history.py summarize --config ..\..\config\project.json
+uv run python scripts/manage_evaluation_history.py audit --config ..\..\config\project.json
+```
+
+`import-history` 只扫描显式提供的文件或目录，按 run ID 与规范 checksum 区分 duplicate 和
+conflict。`reconcile` 补写 Archive-only、DB-only 与旧 NULL checksum；`summarize` 原子重建
+`index.jsonl` 和 `summary.md`；`audit` 重新执行 schema、路径和递归禁止字段校验。无法证明的
+旧评分、答案和模型输出不会推断或补造，只在汇总的“不可恢复边界”中说明。

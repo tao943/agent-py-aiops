@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
@@ -36,7 +38,88 @@ from super_ai.evaluation.live.redis_maxclients import (
     RedisMaxclientsScenarioDriver,
 )
 from super_ai.evaluation.live.runner import LiveBenchmarkError, LocalLiveEvidencePreparer
+from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.project_config import ProjectConfigurationError
+
+
+class AvailableEvaluationRepository:
+    async def start_envelope(self, envelope: object) -> None:
+        del envelope
+
+    async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
+        del envelope, artifact_checksum
+
+
+def live_recorder(tmp_path: Path) -> tuple[EvaluationRunRecorder, EvaluationArchive]:
+    archive = EvaluationArchive(
+        tmp_path / "archive", repository_root=tmp_path / "repository"
+    )
+    return (
+        EvaluationRunRecorder(
+            archive=archive,
+            repository=AvailableEvaluationRepository(),
+        ),
+        archive,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        raise LiveBenchmarkError("recovery_denied", stage="recover")
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-recovery-denied",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+    envelope = archive.load("live-recovery-denied")
+    assert exit_code == 1
+    assert payload["status"] == "failed"
+    assert envelope.status == "failed"
+    assert envelope.validity == "VALID_FAIL"
+
+
+@pytest.mark.asyncio
+async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        raise LiveBenchmarkError("cls_index_timeout", stage="evidence")
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-cls-timeout",
+        evidence_source="cls",
+        execute=execute,
+        recorder=recorder,
+    )
+    envelope = archive.load("live-cls-timeout")
+    assert exit_code == 2
+    assert payload["status"] == "infra_invalid"
+    assert envelope.metadata["evidenceSource"] == "cls"
+
+
+@pytest.mark.asyncio
+async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+            scenario_id="APY-LIVE-PG-LOCK-001",
+            run_id="live-cancelled",
+            evidence_source="local",
+            execute=execute,
+            recorder=recorder,
+        )
+    assert archive.load("live-cancelled").status == "interrupted"
 
 
 def test_cli_resolves_repository_live_scenario_root() -> None:

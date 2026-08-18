@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, cast
@@ -27,6 +28,7 @@ class ArtifactEvidence:
     claim_id: str
     grounded: bool
     source: str = ""
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,7 @@ class ArtifactToolCall:
     approved: bool = False
     verified: bool = False
     arguments: JsonDict = field(default_factory=_empty_json_dict)
+    audit_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +70,16 @@ class LiveRecoveryAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class ValidationAudit:
+    model: str | None
+    origin: str | None
+    error_category: str | None
+    error_codes: tuple[str, ...]
+    error_phase: str | None
+    attempts: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunArtifact:
     scenario_id: str
     mode: str
@@ -83,6 +96,7 @@ class RunArtifact:
     diagnostic_task_id: str | None = None
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
+    validation_audit: ValidationAudit | None = None
 
 
 def build_run_artifact(
@@ -109,6 +123,7 @@ def build_run_artifact(
             status=item.status,
             risk_tier=_risk_tier(item.tool_name),
             arguments=dict(item.arguments),
+            audit_id=item.id,
         )
         for item in tool_calls
     )
@@ -126,7 +141,101 @@ def build_run_artifact(
         duration_ms=duration_ms,
         safety_events=(),
         diagnostic_task_id=task.id,
+        validation_audit=_validation_audit_from_steps(ordered_steps),
     )
+
+
+_VALIDATION_ORIGINS = frozenset(
+    {"none", "llm_confirmed", "deterministic_grounded_fallback"}
+)
+_VALIDATION_ERROR_CATEGORIES = frozenset(
+    {
+        "candidate_missing",
+        "deterministic_gap",
+        "model_call_failed",
+        "invalid_model_output",
+        "model_rejected",
+        "retry_exhausted",
+    }
+)
+_VALIDATION_ERROR_PHASES = frozenset(
+    {"structured_invoker_setup", "model_invoke", "structured_parse"}
+)
+_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "timeout",
+        "connection",
+        "authentication",
+        "permission_denied",
+        "rate_limit",
+        "provider_4xx",
+        "provider_5xx",
+        "structured_output_unsupported",
+        "unknown",
+        "invalid_json",
+        "structured_envelope_mismatch",
+        "missing_required_field",
+        "invalid_enum",
+        "wrong_container_type",
+        "extra_field",
+        "unknown_evidence_id",
+        "invalid_json_or_schema",
+    }
+)
+_SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+
+
+def _validation_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> ValidationAudit | None:
+    validation = next(
+        (step for step in reversed(steps) if step.phase == "decision_validation"),
+        None,
+    )
+    if validation is None:
+        return None
+    payload = validation.payload
+    model_value = payload.get("validationModel")
+    model = (
+        model_value
+        if isinstance(model_value, str) and _SAFE_MODEL_NAME.fullmatch(model_value)
+        else None
+    )
+    origin = _allowlisted_text(payload.get("validationOrigin"), _VALIDATION_ORIGINS)
+    error_category = _allowlisted_text(
+        payload.get("validationErrorCategory"), _VALIDATION_ERROR_CATEGORIES
+    )
+    error_phase = _allowlisted_text(
+        payload.get("validationErrorPhase"), _VALIDATION_ERROR_PHASES
+    )
+    raw_codes = payload.get("validationErrorCodes")
+    codes: list[str] = []
+    if isinstance(raw_codes, list):
+        for item in cast(list[object], raw_codes):
+            if isinstance(item, str) and item in _VALIDATION_ERROR_CODES and item not in codes:
+                codes.append(item)
+            if len(codes) == 6:
+                break
+    attempts_value = payload.get("validationAttempts")
+    attempts = (
+        attempts_value
+        if isinstance(attempts_value, int)
+        and not isinstance(attempts_value, bool)
+        and 0 <= attempts_value <= 2
+        else 0
+    )
+    return ValidationAudit(
+        model=model,
+        origin=origin,
+        error_category=error_category,
+        error_codes=tuple(codes),
+        error_phase=error_phase,
+        attempts=attempts,
+    )
+
+
+def _allowlisted_text(value: object, allowed: frozenset[str]) -> str | None:
+    return value if isinstance(value, str) and value in allowed else None
 
 
 def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
@@ -141,6 +250,7 @@ def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
         claim_id=claim_id,
         grounded=record.step_id is not None and bool(record.source),
         source=record.source,
+        tool_call_id=record.tool_call_id,
     )
 
 
@@ -151,18 +261,23 @@ def _decision_from_steps(steps: Sequence[DiagnosticStepRecord]) -> RootCauseDeci
     )
     if decision_index is None:
         return None
-    evidence_driven_v2 = any(
-        step.phase == "planner"
-        and step.payload.get("workflowVersion") == "evidence-driven-v2"
+    workflow_versions = [
+        step.payload.get("workflowVersion")
         for step in steps
-    )
-    if evidence_driven_v2:
+        if step.phase == "planner"
+    ]
+    workflow_version = workflow_versions[-1] if workflow_versions else None
+    if workflow_version in {"evidence-driven-v2", "evidence-driven-v3"}:
         validations = [
             step
             for step in steps[decision_index + 1 :]
             if step.phase == "decision_validation"
         ]
         if not validations or validations[-1].payload.get("status") != "valid":
+            return None
+        if workflow_version == "evidence-driven-v3" and validations[-1].payload.get(
+            "validationOrigin"
+        ) not in {"llm_confirmed", "deterministic_grounded_fallback"}:
             return None
 
     payload = steps[decision_index].payload.get("rootCauseDecision")
@@ -244,6 +359,14 @@ def _observation_decisions_from_steps(
         supports = item.get("supports")
         refutes = item.get("refutes")
         summary = item.get("summary")
+        causal_role = item.get("causalRole", "context")
+        causal_role_origin = item.get("causalRoleOrigin")
+        reported_causal_role = item.get("reportedCausalRole")
+        causal_role_corrected = item.get("causalRoleCorrected", False)
+        raw_evidence_ids = item.get("evidenceIds")
+        evidence_ids = (
+            [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
+        )
         support_items = _string_list(supports)
         refute_items = _string_list(refutes)
         if (
@@ -251,6 +374,12 @@ def _observation_decisions_from_steps(
             and support_items is not None
             and refute_items is not None
             and isinstance(summary, str)
+            and evidence_ids is not None
+            and causal_role in {"trigger", "mechanism", "impact", "context"}
+            and causal_role_origin in {None, "model", "plan_contract"}
+            and reported_causal_role
+            in {None, "trigger", "mechanism", "impact", "context"}
+            and isinstance(causal_role_corrected, bool)
         ):
             decisions.append(
                 ObservationDecision(
@@ -258,6 +387,21 @@ def _observation_decisions_from_steps(
                     supports=tuple(support_items),
                     refutes=tuple(refute_items),
                     summary=summary,
+                    evidence_ids=tuple(evidence_ids),
+                    causal_role=cast(
+                        Literal["trigger", "mechanism", "impact", "context"],
+                        causal_role,
+                    ),
+                    causal_role_origin=cast(
+                        Literal["model", "plan_contract"] | None,
+                        causal_role_origin,
+                    ),
+                    reported_causal_role=cast(
+                        Literal["trigger", "mechanism", "impact", "context"]
+                        | None,
+                        reported_causal_role,
+                    ),
+                    causal_role_corrected=causal_role_corrected,
                 )
             )
     return tuple(decisions)
@@ -283,35 +427,84 @@ def _string_list(value: object) -> list[str] | None:
     return [cast(str, item) for item in items]
 
 
-def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
-    if tool_name in {
+ToolObservationRole = Literal[
+    "diagnostic_observation",
+    "knowledge_context",
+    "recovery_or_verification",
+    "unknown",
+]
+
+_L1_RECOVERY_TOOLS = frozenset(
+    {
         "RestartTestService",
         "ResumeTestConsumer",
         "DeleteRebuildableTestCacheKey",
         "RestoreTestRedisService",
         "RemoveInjectedNetworkFault",
         "RestoreInjectedServiceState",
-    }:
-        return "L1"
-    if tool_name.startswith("Propose"):
-        return "L2"
-    if tool_name in {
-        "knowledge_retrieval",
-        "SearchKnowledge",
-        "GetActiveAlerts",
+    }
+)
+_KNOWLEDGE_CONTEXT_TOOLS = frozenset(
+    {"knowledge_retrieval", "SearchKnowledge", "GetActiveAlerts"}
+)
+_RECOVERY_OR_VERIFICATION_TOOLS = _L1_RECOVERY_TOOLS | {"VerifyServiceHealth"}
+_DIAGNOSTIC_OBSERVATION_TOOLS = frozenset(
+    {
         "SearchLogs",
         "SearchLog",
         "QueryMetrics",
         "QueryTrace",
+        "GetDatabaseMetrics",
         "InspectContainer",
+        "GetGatewayMetrics",
+        "GetRedisConnectionMetrics",
+        "GetServiceMetrics",
+        "InspectClientRetryPolicy",
+        "InspectDatabasePool",
+        "InspectGatewayErrors",
+        "InspectGatewayRequestTimeline",
+        "InspectHostLimits",
+        "InspectHttpAttempts",
         "InspectNginx",
         "InspectPostgres",
+        "InspectPostgresErrors",
+        "InspectPostgresWaitGraph",
         "InspectPostgresSessions",
         "InspectPostgresLockGraph",
+        "InspectRateLimitTimeline",
         "InspectRedis",
+        "InspectRedisClientPool",
+        "InspectRedisServer",
+        "InspectTrafficAndDependencyHealth",
+        "InspectTransactionResourceOrder",
+        "ListRedisClients",
+        "ProbeUpstreamHealth",
         "GetServiceTopology",
         "GetDeploymentChanges",
-        "VerifyServiceHealth",
-    }:
+    }
+)
+
+
+def tool_observation_role(tool: ArtifactToolCall) -> ToolObservationRole:
+    """Classify whether a completed tool call requires Evidence Evaluation."""
+    if tool.name in _KNOWLEDGE_CONTEXT_TOOLS:
+        return "knowledge_context"
+    if tool.name in _RECOVERY_OR_VERIFICATION_TOOLS or tool.name.startswith("Propose"):
+        return "recovery_or_verification"
+    if tool.name in _DIAGNOSTIC_OBSERVATION_TOOLS:
+        return "diagnostic_observation"
+    return "unknown"
+
+
+def _risk_tier(tool_name: str) -> Literal["L0", "L1", "L2", "L3"]:
+    if tool_name in _L1_RECOVERY_TOOLS:
+        return "L1"
+    if tool_name.startswith("Propose"):
+        return "L2"
+    if tool_name in (
+        _KNOWLEDGE_CONTEXT_TOOLS
+        | _DIAGNOSTIC_OBSERVATION_TOOLS
+        | _RECOVERY_OR_VERIFICATION_TOOLS
+    ):
         return "L0"
     return "L3"

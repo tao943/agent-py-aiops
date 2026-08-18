@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.evaluation.artifacts import RunArtifact, tool_observation_role
 from super_ai.evaluation.domain import ScenarioOracle
+from super_ai.evaluation.semantic_scoring import score_root_cause_semantics
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +107,23 @@ def _score_diagnosis(
 
     component_correct = decision.component == oracle.primary_cause.component
     mechanism_correct = decision.mechanism == oracle.primary_cause.mechanism
-    trigger_correct = decision.trigger == oracle.primary_cause.trigger
+    semantic = (
+        score_root_cause_semantics(decision, oracle)
+        if oracle.root_cause_semantics is not None
+        else None
+    )
+    trigger_correct = (
+        semantic.trigger == 4
+        if semantic is not None
+        else decision.trigger == oracle.primary_cause.trigger
+    )
     cause_relationship_correct = not oracle.contributing_causes
-    causal_chain_correct = decision.causal_chain == oracle.causal_chain
+    causal_chain_correct = (
+        bool(semantic.milestones)
+        and all(points == 2 for _, points in semantic.milestones)
+        if semantic is not None
+        else decision.causal_chain == oracle.causal_chain
+    )
     refuted = {item.id for item in artifact.hypothesis_states if item.status == "refuted"}
     rule_outs_correct = set(oracle.required_rule_outs) <= refuted
     if not component_correct:
@@ -200,15 +215,47 @@ def _score_process(
     rule_outs_correct: bool,
     reasons: list[ScoreReason],
 ) -> int:
-    completed_tool_calls = sum(item.status == "completed" for item in artifact.tool_calls)
+    completed = tuple(item for item in artifact.tool_calls if item.status == "completed")
+    diagnostic = tuple(
+        item
+        for item in completed
+        if tool_observation_role(item) == "diagnostic_observation"
+    )
+    unknown_l0 = any(
+        item.risk_tier == "L0" and tool_observation_role(item) == "unknown"
+        for item in completed
+    )
+    evidence_to_tool = {
+        item.record_id: item.tool_call_id
+        for item in artifact.evidence
+        if item.tool_call_id is not None
+    }
+    covered_tool_calls = {
+        tool_call_id
+        for observation in artifact.observation_decisions
+        for evidence_id in observation.evidence_ids
+        if (tool_call_id := evidence_to_tool.get(evidence_id)) is not None
+    }
+    diagnostic_ids = {
+        item.audit_id for item in diagnostic if item.audit_id is not None
+    }
+    all_diagnostics_linked = bool(diagnostic) and all(
+        item.audit_id is not None for item in diagnostic
+    )
+    linked_complete = all_diagnostics_linked and diagnostic_ids <= covered_tool_calls
+    legacy_complete = (
+        bool(diagnostic)
+        and all(item.audit_id is None for item in diagnostic)
+        and len(artifact.observation_decisions) >= len(diagnostic)
+    )
+    observations_complete = (linked_complete or legacy_complete) and not unknown_l0
     return (
         _award(reasons, "bounded_plan", 3, 0 < artifact.plan_step_count <= 6)
         + _award(
             reasons,
             "observations_evaluated",
             5,
-            completed_tool_calls > 0
-            and len(artifact.observation_decisions) >= completed_tool_calls,
+            observations_complete,
         )
         + _award(reasons, "competing_hypothesis_ruled_out", 4, rule_outs_correct)
         + _award(reasons, "structured_decision", 3, artifact.decision is not None)

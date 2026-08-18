@@ -12,8 +12,17 @@ alert:
 hypotheses:
   - id: upstream_process_down
     description: The checkout upstream process is unavailable.
+    decision_label:
+      component: checkout-service
+      mechanism: process_unavailable
   - id: upstream_port_mismatch
     description: Nginx targets a different port from the one used by checkout.
+    decision_label:
+      component: nginx-gateway
+      mechanism: upstream_port_mismatch
   - id: dns_resolution_failure
     description: The checkout upstream name cannot be resolved.
+    decision_label:
+      component: nginx-gateway
+      mechanism: upstream_dns_resolution_failure
 snapshot_file: snapshot/tool_responses.yaml

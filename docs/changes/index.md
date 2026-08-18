@@ -6,7 +6,14 @@ title: OpenSpec 变更
 
 ## 进行中
 
+- [add-agentpy-sre-benchmark](/changes/active/add-agentpy-sre-benchmark/)
+- [add-blog-derived-retrieval-eval](/changes/active/add-blog-derived-retrieval-eval/)
+- [add-docker-live-postgres-lock-eval](/changes/active/add-docker-live-postgres-lock-eval/)
+- [add-knowledge-batch-import](/changes/active/add-knowledge-batch-import/)
+- [expand-rag-retrieval-benchmark](/changes/active/expand-rag-retrieval-benchmark/)
+- [harden-aiops-decision-validation](/changes/active/harden-aiops-decision-validation/)
 - [migrate-postgresql-add-redis-runtime](/changes/active/migrate-postgresql-add-redis-runtime/)
+- [persist-evaluation-results](/changes/active/persist-evaluation-results/)
 
 ## 已归档
 

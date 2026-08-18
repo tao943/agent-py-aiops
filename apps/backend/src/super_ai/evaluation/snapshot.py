@@ -7,10 +7,14 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 import yaml
+from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 
+from super_ai.mcp.tool_arguments import ToolArgumentContract
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 
@@ -39,9 +43,14 @@ class SnapshotMcpClient:
         *,
         definitions: Sequence[McpToolDefinition],
         calls: Mapping[tuple[str, str], _SnapshotCall],
+        registered_arguments: Mapping[str, Sequence[Mapping[str, object]]],
     ) -> None:
         self._definitions = tuple(copy.deepcopy(definitions))
         self._calls = dict(copy.deepcopy(calls))
+        self._registered_arguments = {
+            name: tuple(copy.deepcopy(dict(arguments)) for arguments in calls_for_tool)
+            for name, calls_for_tool in registered_arguments.items()
+        }
         self._observations: list[SnapshotToolObservation] = []
 
     @classmethod
@@ -50,6 +59,7 @@ class SnapshotMcpClient:
         payload = _load_yaml_mapping(path)
         definitions: list[McpToolDefinition] = []
         calls: dict[tuple[str, str], _SnapshotCall] = {}
+        registered_arguments: dict[str, list[dict[str, object]]] = {}
         names: set[str] = set()
         for raw_tool in _required_sequence(payload, "tools"):
             tool = _as_mapping(raw_tool, "snapshot tool")
@@ -60,6 +70,14 @@ class SnapshotMcpClient:
             if _normalize_tool_name(name) == "readgroundtruth":
                 continue
             input_schema = dict(_required_mapping(tool, "input_schema"))
+            try:
+                validator_class = validator_for(input_schema)
+                validator_class.check_schema(input_schema)
+                validator = validator_class(input_schema)
+            except SchemaError as exc:
+                raise ValueError(
+                    f"Snapshot tool {name} declares an invalid input schema."
+                ) from exc
             definitions.append(
                 McpToolDefinition(
                     name=name,
@@ -68,9 +86,19 @@ class SnapshotMcpClient:
                     server_name="snapshot",
                 )
             )
-            for raw_call in _required_sequence(tool, "calls"):
+            raw_calls = _required_sequence(tool, "calls")
+            if not raw_calls:
+                raise ValueError(f"Snapshot tool {name} must register at least one call.")
+            registered_arguments[name] = []
+            for raw_call in raw_calls:
                 call = _as_mapping(raw_call, f"{name} call")
                 arguments = dict(_required_mapping(call, "arguments"))
+                try:
+                    validator.validate(cast(Any, arguments))
+                except ValidationError as exc:
+                    raise ValueError(
+                        f"Snapshot call for tool {name} violates its input schema."
+                    ) from exc
                 key = (name, _canonical_arguments(arguments))
                 if key in calls:
                     raise ValueError(f"Duplicate snapshot call for tool {name}.")
@@ -78,9 +106,27 @@ class SnapshotMcpClient:
                     evidence_id=_required_str(call, "evidence_id"),
                     result=dict(_required_mapping(call, "result")),
                 )
+                registered_arguments[name].append(copy.deepcopy(arguments))
         if not definitions:
             raise ValueError("Snapshot must define at least one tool.")
-        return cls(definitions=definitions, calls=calls)
+        return cls(
+            definitions=definitions,
+            calls=calls,
+            registered_arguments=registered_arguments,
+        )
+
+    @property
+    def tool_argument_contracts(self) -> Mapping[str, ToolArgumentContract]:
+        """Return answer-free exact call contracts as defensive immutable values."""
+        return MappingProxyType(
+            {
+                name: ToolArgumentContract(
+                    tool_name=name,
+                    registered_calls=tuple(copy.deepcopy(calls_for_tool)),
+                )
+                for name, calls_for_tool in self._registered_arguments.items()
+            }
+        )
 
     @property
     def observations(self) -> tuple[SnapshotToolObservation, ...]:

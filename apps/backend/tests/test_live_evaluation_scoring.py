@@ -344,8 +344,9 @@ def test_live_score_accepts_grounded_baseline_root_cause_paraphrase() -> None:
             "row_lock_blocking",
             "A transaction is holding a row lock required by order status updates.",
             (
-                "The observation reveals a session waiting on a Lock event.",
-                "The lock graph confirmed a blocker to waiter edge causing the timeouts.",
+                "A transaction holds the order row lock.",
+                "The lock graph confirms the order status update waits on that row lock.",
+                "The blocked request results in the business probe timing out.",
             ),
             ("ev-session", "ev-graph"),
             1.0,
@@ -414,6 +415,20 @@ def test_live_score_reports_incomplete_trigger_and_causal_chain() -> None:
     assert "primary_trigger_unsupported" in result.failures
     assert "causal_chain_incomplete" in result.failures
     assert "primary_root_cause_wrong" in result.failures
+
+
+def test_live_score_accepts_reordered_causal_milestones() -> None:
+    decision = passing_artifact().decision
+    assert decision is not None
+    artifact = replace(
+        passing_artifact(),
+        decision=replace(decision, causal_chain=tuple(reversed(decision.causal_chain))),
+    )
+
+    result = score(artifact)
+
+    assert result.root_cause == 20
+    assert "causal_chain_incomplete" not in result.failures
 
 
 @pytest.mark.parametrize(
