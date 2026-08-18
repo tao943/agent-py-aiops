@@ -37,6 +37,10 @@ Secret、Logset 和 Topic，不打印或复制其值：
 - `evaluation.archiveDir = D:\\桌面\\后端\\agent_py-evaluation-archive`；
 - 保留当前 Embedding 和 Rerank 模型，避免在本轮改变已索引知识向量的模型口径。
 
+隔离 worktree 不复制私有配置；所有正式命令显式读取主仓库的 `config/project.json`，由
+配置加载器合并同目录的 ignored `user.project.json`。目标 worktree 必须保持这两个本机文件
+不存在且未 staged，避免产生凭据副本。
+
 任何日志、CLI 汇总、设计文档和提交均不得包含 API Key、云凭据、Prompt、模型原始响应、
 Ground Truth、Oracle、私有推理或原始 CLS 日志。
 
@@ -77,7 +81,9 @@ Ground Truth、Oracle、私有推理或原始 CLS 日志。
 
 1. PostgreSQL、Redis、Milvus、etcd、MinIO 和 Nginx 健康；
 2. 目标 owner/knowledge base 在 PostgreSQL 中有 30 个 `ready/indexed` 文档；
-3. Milvus 中存在与上述 owner、tenant、knowledge base 和 document 对齐的 Chunk；
+3. 使用项目内只读 audit 核对 PostgreSQL 的 30 个 document ID 与 Milvus scoped Chunk 的
+   owner、tenant、knowledge base、document 集合完全对齐，每个文档至少一个 Chunk，且无
+   orphan/unscoped Chunk；
 4. Chat、Validator、Embedding 和 Rerank 分别通过最小真实 readiness；
 5. CLS MCP ready，上传与检索使用配置的 Region、Logset 和 Topic；
 6. Live driver cleanup 预检无上次运行残留。
@@ -107,7 +113,10 @@ Ground Truth、Oracle、私有推理或原始 CLS 日志。
 4. `APY-LIVE-NGINX-TIMEOUT-001`。
 
 每个场景先执行不调用 Agent 的 cleanup、baseline、inject、fault confirmation 和 cleanup
-预检；通过后才执行一次 `evidence-source=cls` 的完整 Agent run。每次运行必须绑定唯一
+预检。预检先从 Archive 和安全 Live report 枚举已知旧 Run ID，逐个执行 scoped cleanup，
+再只读确认 PostgreSQL Live session/fixture、Redis benchmark client 和 Nginx 配置均无全局
+残留；不得用新 Run ID 的空 cleanup 代替残留审计。通过后才执行一次
+`evidence-source=cls` 的完整 Agent run。每次运行必须绑定唯一
 `run_id`、`scenario_id`、`incident_id` 和 CLS 时间窗。失败后立即停止，保留现场安全审计并
 执行 scoped、幂等 cleanup；完成局部修复和离线回归后再创建新 Run。
 
@@ -127,6 +136,14 @@ Archive 是数据库临时不可用时的保底真源；PostgreSQL 同步失败�
 `database_pending`，基础设施恢复后使用现有 `reconcile` 补写。每个阶段结束后执行 Archive
 schema/checksum audit、PostgreSQL 对账和安全汇总。旧 Run 不覆盖、不重标、不删除。
 
+所有 14 个正式 Run 使用同一个安全 `acceptanceCampaignId`，该字段与 Git SHA 一起写入
+Archive/PostgreSQL metadata。最终验收按 campaign 精确选择 Run，不使用易受后续普通重跑影响
+的“全局 latest”口径。
+
+Live runner 必须把内部 `finally` cleanup 结果写入同一 Run 的 `cleanupSucceeded` 指标；有效
+失败、基础设施失败和中断也必须保存该指标。独立 cleanup CLI 只作补救，不得覆盖原终态；
+若补救发生，则以同 campaign 的安全 cleanup audit 关联原 Run。
+
 最终汇总只包含允许列表字段：Run ID、场景、Git commit、模型名、状态、有效性、分数、维度、
 失败分类、Validator 来源/错误分类、工具审计、恢复模式、验证和 cleanup 状态。
 
@@ -143,8 +160,10 @@ schema/checksum audit、PostgreSQL 对账和安全汇总。旧 Run 不覆盖、�
 
 ## 8. 验收标准
 
-- 10/10 Snapshot 的最新正式 Run 为 `validity=valid`、`passed=true`、无 hard gate；
-- 4/4 Live 的最新正式 Run 为 `validity=valid`、`passed=true`、无 hard gate；
+- 同一 `acceptanceCampaignId` 下 10/10 Snapshot 的目标 Run 为 `validity=valid`、
+  `passed=true`、无 hard gate；
+- 同一 `acceptanceCampaignId` 下 4/4 Live 的目标 Run 为 `validity=valid`、`passed=true`、
+  无 hard gate；
 - 每个 Live 的 fault confirmation、独立证据、恢复策略、恢复验证和 cleanup 均通过；
 - Archive 与 PostgreSQL 对账为 0 conflict、0 pending；
 - 目标 pytest、Ruff、Pyright 和相关 OpenSpec strict 校验通过；

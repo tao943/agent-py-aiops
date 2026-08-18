@@ -31,12 +31,7 @@
 - Consumes: 当前本机 API Key、CLS 凭据、Embedding/Rerank 配置。
 - Produces: `qwen3.7-max` 主模型、`qwen3.8-max` Validator、外部 Archive 路径。
 
-- [ ] **Step 1: 使用 `using-git-worktrees` 创建或确认 `feat/full-benchmark-acceptance` 隔离 worktree**
-
-主仓库回到 `main`，feature branch 保留设计和本计划；worktree 必须位于仓库
-`.worktrees/full-benchmark-acceptance`，不得复用已删除或有残留的旧 worktree。
-
-- [ ] **Step 2: 更新被忽略的本机配置且不触碰密钥字段**
+- [ ] **Step 1: 在主仓库更新被忽略的本机配置且不触碰密钥字段**
 
 将 `config/user.project.json` 的安全非密钥字段设为：
 
@@ -64,6 +59,19 @@
 
 保留现有 `apiKey`、Embedding、Rerank、CLS Secret、Region、Logset、Topic 与轮询配置。
 
+- [ ] **Step 2: 使用 `using-git-worktrees` 创建 `feat/full-benchmark-acceptance` 隔离 worktree**
+
+确认 feature branch 无未提交修改后，在主仓库执行 `git switch main`，再把该已有分支添加到
+`.worktrees/full-benchmark-acceptance`。不得复用已删除或有残留的旧 worktree。隔离 worktree
+不复制私有配置；所有正式命令显式使用以下主仓库配置：
+
+```powershell
+$sharedProjectConfig = 'D:\桌面\后端\agent_py-release-2026-07-25\agent_py-release-2026-07-25\config\project.json'
+```
+
+验证 worktree 内 `config/project.json`、`config/user.project.json` 均不存在或仍被 Git ignore，
+`git status --short` 不得出现任何本机配置。
+
 - [ ] **Step 3: 运行配置合同测试**
 
 Run from `apps/backend`:
@@ -78,7 +86,8 @@ Expected: 全部通过；输出不包含 API Key 或 CLS Secret。
 
 - [ ] **Step 4: 安全读取配置结果**
 
-只输出 `chatModel`、`validatorModel`、Archive 是否配置和各凭据是否非空的布尔值。
+通过 `$sharedProjectConfig` 加载配置，只输出 `chatModel`、`validatorModel`、Archive 是否配置
+和各凭据是否非空的布尔值。
 
 Expected: 主模型 `qwen3.7-max`、Validator `qwen3.8-max`、Archive/LLM/CLS readiness 布尔值为真。
 
@@ -87,6 +96,9 @@ Expected: 主模型 `qwen3.7-max`、Validator `qwen3.8-max`、Archive/LLM/CLS re
 ### Task 2: 通过持久化、数据库和 RAG readiness
 
 **Files:**
+- Create: `apps/backend/src/super_ai/evaluation/knowledge_scope_audit.py`
+- Create: `apps/backend/scripts/audit_knowledge_index_scope.py`
+- Create: `apps/backend/tests/test_knowledge_scope_audit.py`
 - Reference: `apps/backend/src/super_ai/evaluation/archive.py`
 - Reference: `apps/backend/src/super_ai/evaluation/recording.py`
 - Reference: `apps/backend/src/super_ai/evaluation/persistence.py`
@@ -135,9 +147,9 @@ Expected: 全部通过。
 - [ ] **Step 4: 审计现有 Archive 并对账 PostgreSQL**
 
 ```powershell
-uv run python scripts/manage_evaluation_history.py audit --config ../../config/project.json
-uv run python scripts/manage_evaluation_history.py reconcile --config ../../config/project.json
-uv run python scripts/manage_evaluation_history.py summarize --config ../../config/project.json
+uv run python scripts/manage_evaluation_history.py audit --config $sharedProjectConfig
+uv run python scripts/manage_evaluation_history.py reconcile --config $sharedProjectConfig
+uv run python scripts/manage_evaluation_history.py summarize --config $sharedProjectConfig
 ```
 
 Expected: audit 退出 0；reconcile `conflicts=0`、`database_pending=0`；summary `conflicts=0`。
@@ -155,19 +167,167 @@ $benchmarkOwnerId, $benchmarkKnowledgeBaseId = $scopeRows[0].Split('|', 2)
 
 Expected: 恰好一组 owner/KB；值只保留在当前进程变量，不写入提交文档或日志汇总。
 
-- [ ] **Step 6: 验证 30 文档和 Milvus scoped Chunk**
+- [ ] **Step 6: 用 TDD 增加 PostgreSQL–Milvus scope audit**
+
+在 `test_knowledge_scope_audit.py` 先覆盖：30 个 ready/indexed 文档且每个文档有 scoped Chunk
+时通过；缺文档、缺 Chunk、orphan document ID、错误 owner/tenant/KB 或重复 active filename 时
+分别失败。实现：
+
+```python
+@dataclass(frozen=True, slots=True)
+class KnowledgeScopeAudit:
+    document_count: int
+    chunk_count: int
+    missing_document_ids: tuple[str, ...]
+    orphan_document_ids: tuple[str, ...]
+    document_scope_mismatch_count: int
+    chunk_scope_mismatch_count: int
+    duplicate_filename_count: int
+    passed: bool
+
+def audit_knowledge_scope(
+    *,
+    documents: Sequence[KnowledgeDocumentRecord],
+    chunks: Sequence[StoredVectorChunk],
+    owner_user_id: str,
+    knowledge_base_id: str,
+) -> KnowledgeScopeAudit:
+    ready_indexed = tuple(
+        item
+        for item in documents
+        if item.status == "ready" and item.index_status == "indexed"
+    )
+    document_scope_mismatch_count = sum(
+        1
+        for item in ready_indexed
+        if item.owner_user_id != owner_user_id
+        or item.knowledge_base_id != knowledge_base_id
+    )
+    active = tuple(
+        item
+        for item in ready_indexed
+        if item.owner_user_id == owner_user_id
+        and item.knowledge_base_id == knowledge_base_id
+    )
+    expected_ids = {item.id for item in active}
+    actual_ids = {item.document_id for item in chunks}
+    chunk_scope_mismatch_count = sum(
+        1
+        for item in chunks
+        if item.owner_user_id != owner_user_id
+        or item.tenant_id != owner_user_id
+        or item.knowledge_base_id != knowledge_base_id
+    )
+    filenames = [item.filename for item in active]
+    duplicate_filename_count = len(filenames) - len(set(filenames))
+    missing = tuple(sorted(expected_ids - actual_ids))
+    orphan = tuple(sorted(actual_ids - expected_ids))
+    return KnowledgeScopeAudit(
+        document_count=len(active),
+        chunk_count=len(chunks),
+        missing_document_ids=missing,
+        orphan_document_ids=orphan,
+        document_scope_mismatch_count=document_scope_mismatch_count,
+        chunk_scope_mismatch_count=chunk_scope_mismatch_count,
+        duplicate_filename_count=duplicate_filename_count,
+        passed=(
+            len(active) == 30
+            and not missing
+            and not orphan
+            and document_scope_mismatch_count == 0
+            and chunk_scope_mismatch_count == 0
+            and duplicate_filename_count == 0
+        ),
+    )
+```
+
+CLI 使用 `KnowledgeDocumentRepository.list_documents()` 和
+`MilvusVectorStore.list_chunks(tenant_id=owner_user_id, knowledge_base_ids=(knowledge_base_id,))`，
+只输出计数、布尔值和缺失/orphan ID，不输出 Chunk 正文。目标测试 RED 后实现最小代码，再运行：
+
+```powershell
+uv run pytest tests/test_knowledge_scope_audit.py tests/test_milvus_vector_store.py -q -p no:cacheprovider
+uv run ruff check src/super_ai/evaluation/knowledge_scope_audit.py scripts/audit_knowledge_index_scope.py tests/test_knowledge_scope_audit.py
+uv run pyright
+```
+
+- [ ] **Step 7: 验证 30 文档和 Milvus scoped Chunk**
+
+```powershell
+uv run python scripts/audit_knowledge_index_scope.py --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --config $sharedProjectConfig
+```
+
+Expected: document count 30、missing/orphan/scope mismatch 均为 0、exit 0。
+
+- [ ] **Step 8: 运行 64-query Retrieval 正式基线**
 
 复用现有 Retrieval runner 对 64-query 数据集执行一次正式基线；它会验证 owner、tenant、KB、document 和 citation scope：
 
 ```powershell
-uv run python scripts/run_retrieval_benchmark.py --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --queries ../../benchmarks/agentpy/retrieval/queries.yaml --config ../../config/project.json --output var/benchmarks/full-acceptance-retrieval.json
+uv run python scripts/run_retrieval_benchmark.py --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --queries ../../benchmarks/agentpy/retrieval/queries.yaml --config $sharedProjectConfig --output var/benchmarks/full-acceptance-retrieval.json
 ```
 
 Expected: exit 0，Recall/Citation 门禁通过，结果保存到 Archive、PostgreSQL 和 ignored output。
 
 ---
 
-### Task 3: 通过真实模型与 CLS readiness
+### Task 3: 增加正式 campaign 与 Live cleanup 持久化合同
+
+**Files:**
+- Modify: `apps/backend/src/super_ai/evaluation/history.py`
+- Modify: `apps/backend/scripts/run_snapshot_benchmark.py`
+- Modify: `apps/backend/src/super_ai/evaluation/live/cli.py`
+- Modify: `apps/backend/src/super_ai/evaluation/live/runner.py`
+- Test: `apps/backend/tests/test_snapshot_benchmark_cli.py`
+- Test: `apps/backend/tests/test_live_benchmark_cli.py`
+
+**Interfaces:**
+- Produces: Snapshot/Live `--campaign-id`；metadata `acceptanceCampaignId`；所有 Live 终态的 `cleanupSucceeded`。
+
+- [ ] **Step 1: 写 campaign metadata RED 测试**
+
+断言 Snapshot 和 Live parser 接受 `--campaign-id full-acceptance-20260818`，运行 Envelope metadata
+包含 `acceptanceCampaignId`；空值、路径字符和超长值被 `validate_run_id` 拒绝；历史未提供参数
+的调用保持兼容。
+
+- [ ] **Step 2: 实现 campaign ID**
+
+在 Snapshot/Live parser 增加可选 `--campaign-id`，通过现有 `validate_run_id` 校验后写入
+metadata；`history.py` 的 Snapshot/Live metadata allowlist 增加
+`acceptanceCampaignId`。不把 campaign 写进 Agent input、Prompt 或 Oracle。
+
+- [ ] **Step 3: 写 Live 失败与中断 cleanup RED 测试**
+
+覆盖：有效失败后 cleanup 成功、CLS infra failure 后 cleanup 成功、cleanup 自身失败、
+`asyncio.CancelledError` 后 cleanup 成功。断言 Archive/PostgreSQL terminal Envelope 的
+`metrics.cleanupSucceeded` 分别为 true/false，原 failure category 和取消语义保持不变。
+
+- [ ] **Step 4: 实现 cleanup 结果传递**
+
+`LiveBenchmarkError` 增加 `cleanup_succeeded: bool | None`。`LiveBenchmarkRunner.run()` 的
+`finally` 在 re-raise 前把 scoped cleanup 结果附加到安全异常；取消异常只附加布尔审计属性并
+继续按 `CancelledError` 传播。`_run_live_once()` 在 passed、failed、infra_invalid、interrupted
+终态都把已知的 `cleanupSucceeded` 写入允许列表 metrics；未知时省略，不伪造 true。
+
+- [ ] **Step 5: 运行专项回归**
+
+```powershell
+uv run pytest tests/test_snapshot_benchmark_cli.py tests/test_live_benchmark_cli.py tests/test_evaluation_history.py -q -p no:cacheprovider
+uv run ruff check src/super_ai/evaluation/history.py src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py scripts/run_snapshot_benchmark.py tests/test_snapshot_benchmark_cli.py tests/test_live_benchmark_cli.py
+uv run pyright
+```
+
+- [ ] **Step 6: 固定本轮 campaign**
+
+```powershell
+$acceptanceCampaignId = 'full-acceptance-20260818'
+```
+
+后续每个正式 Snapshot/Live Run 都必须传入该值；最终只按该 metadata 精确汇总。
+
+---
+
+### Task 4: 通过真实模型与 CLS readiness
 
 **Files:**
 - Reference: `apps/backend/tests/test_live_llm.py`
@@ -204,7 +364,7 @@ Expected: MCP ready；不输出 Secret 或原始日志。
 
 ---
 
-### Task 4: 顺序完成 10 个 Snapshot 正式验收
+### Task 5: 顺序完成 10 个 Snapshot 正式验收
 
 **Files:**
 - Reference: `apps/backend/scripts/run_snapshot_benchmark.py`
@@ -217,7 +377,7 @@ Expected: MCP ready；不输出 Secret 或原始日志。
 
 **Interfaces:**
 - Consumes: Gate 0–1 readiness、`$benchmarkOwnerId`、`$benchmarkKnowledgeBaseId`。
-- Produces: 10 个最新正式 Snapshot Run 均 passed。
+- Produces: campaign 下 10 个目标 Snapshot Run 均 passed。
 
 - [ ] **Step 1: 固定场景顺序和运行命令**
 
@@ -230,7 +390,7 @@ APY-002 APY-003 APY-006 APY-007 APY-011 APY-012 APY-013 APY-014 APY-015 APY-016
 每个场景单独执行：
 
 ```powershell
-uv run python scripts/run_snapshot_benchmark.py --scenario $scenarioId --suite-version v1 --runs 1 --adapter application --rag-mode on --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --config ../../config/project.json --output ("var/benchmarks/full-acceptance-{0}.json" -f $scenarioId)
+uv run python scripts/run_snapshot_benchmark.py --scenario $scenarioId --suite-version v1 --runs 1 --adapter application --rag-mode on --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --config $sharedProjectConfig --campaign-id $acceptanceCampaignId --output ("var/benchmarks/full-acceptance-{0}.json" -f $scenarioId)
 ```
 
 Expected: exit 0，唯一新 Run 为 `validity=valid`、`passed=true`、无 hard gate，Archive 与 PostgreSQL 均存在。
@@ -253,11 +413,11 @@ Expected: 两侧 Run ID/status/checksum 一致；不读取 result payload 中的
 
 - [ ] **Step 4: Snapshot 阶段汇总**
 
-运行 `audit`、`reconcile`、`summarize`，确认 10 个场景最新正式 Run 全部通过且 0 conflict/0 pending。
+运行 `audit`、`reconcile`、`summarize`，确认 campaign 下 10 个场景目标 Run 全部通过且 0 conflict/0 pending。
 
 ---
 
-### Task 5: 顺序完成 4 个 Live Docker + LLM + CLS 正式验收
+### Task 6: 顺序完成 4 个 Live Docker + LLM + CLS 正式验收
 
 **Files:**
 - Reference: `apps/backend/src/super_ai/evaluation/live/cli.py`
@@ -272,7 +432,7 @@ Expected: 两侧 Run ID/status/checksum 一致；不读取 result payload 中的
 
 **Interfaces:**
 - Consumes: Snapshot Gate 通过、CLS ready、Docker healthy、授权 owner/KB。
-- Produces: 4 个最新正式 Live Run 均 passed，cleanup 均通过。
+- Produces: campaign 下 4 个目标 Live Run 均 passed，cleanup 均通过。
 
 - [ ] **Step 1: 固定 Live 顺序**
 
@@ -283,20 +443,34 @@ APY-LIVE-REDIS-MAXCLIENTS-001
 APY-LIVE-NGINX-TIMEOUT-001
 ```
 
-- [ ] **Step 2: 每个场景运行前清理旧残留**
+- [ ] **Step 2: 按已知旧 Run 做 scoped cleanup，再执行全局只读残留审计**
 
 ```powershell
-$preflightRunId = ('preflight-{0}-{1}' -f $scenarioId.ToLowerInvariant().Replace('_','-'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-uv run python -m super_ai.evaluation.live.cli cleanup --scenario $scenarioId --run-id $preflightRunId
+$archiveRoot = 'D:\桌面\后端\agent_py-evaluation-archive\live'
+$knownLiveRuns = Get-ChildItem -Recurse -File -LiteralPath $archiveRoot -Filter '*.json' | ForEach-Object {
+  $item = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+  [pscustomobject]@{ Scenario = $item.scenarioId; RunId = $item.runId }
+} | Sort-Object Scenario,RunId -Unique
+foreach ($known in $knownLiveRuns) {
+  uv run python -m super_ai.evaluation.live.cli cleanup --scenario $known.Scenario --run-id $known.RunId
+}
+
+$postgresResidue = docker exec agent-py-postgres-1 psql -U agent_py -d agent_py_live_eval -X -At -v ON_ERROR_STOP=1 -c "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname='agent_py_live_eval' AND application_name LIKE 'agentpy-live:%') || '|' || (SELECT count(*) FROM pg_tables WHERE schemaname='live_eval');"
+$liveRedisContainer = docker compose -f ../../infra/compose.yaml --profile live-eval ps -q live-eval-redis
+$redisClientList = docker exec $liveRedisContainer redis-cli --raw CLIENT LIST
+$redisResidue = @($redisClientList | Where-Object { $_ -match 'name=agentpy-live:' }).Count
+git diff --exit-code -- ../../infra/live-eval/nginx.conf
+if ($postgresResidue.Trim() -ne '0|0' -or $redisResidue -ne 0) { throw "Live residue audit failed closed." }
 ```
 
-Expected: cleanup passed；无 blocker、fixture、benchmark Redis client 或 Nginx 配置变化残留。
+Expected: 所有已知 cleanup 通过；PostgreSQL 输出 `0|0`、Redis count 为 0、Nginx 配置无变化。
+任何无法映射到已知 Run 的 orphan 只报告并阻塞正式运行，不扩大删除范围。
 
 - [ ] **Step 3: 只执行一次完整 CLS Live Run**
 
 ```powershell
 $liveRunId = ('accept-{0}-{1}' -f $scenarioId.ToLowerInvariant().Replace('_','-'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-uv run python -m super_ai.evaluation.live.cli run --scenario $scenarioId --run-id $liveRunId --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --config ../../config/project.json --evidence-source cls
+uv run python -m super_ai.evaluation.live.cli run --scenario $scenarioId --run-id $liveRunId --owner-user-id $benchmarkOwnerId --knowledge-base-id $benchmarkKnowledgeBaseId --config $sharedProjectConfig --campaign-id $acceptanceCampaignId --evidence-source cls
 ```
 
 Expected: exit 0，`validity=valid`、`passed=true`、无 hard gate；fault confirmation、required evidence、differential diagnosis、root cause、citation/tool audit、recovery 和 verification 达标。
@@ -308,7 +482,8 @@ uv run python -m super_ai.evaluation.live.cli verify --scenario $scenarioId --ru
 uv run python -m super_ai.evaluation.live.cli cleanup --scenario $scenarioId --run-id $liveRunId
 ```
 
-Expected: verify 与 cleanup 均退出 0。即使 Step 3 失败或中断，也必须执行 cleanup。
+Expected: 原正式 Run Envelope 已记录 `cleanupSucceeded=true`；verify 与补充 cleanup 均退出 0。
+即使 Step 3 失败或中断也执行补充 scoped cleanup，但不得覆盖原终态。
 
 - [ ] **Step 5: 首个 Live 失败立即停止并进入 TDD 修复回路**
 
@@ -318,11 +493,11 @@ Expected: verify 与 cleanup 均退出 0。即使 Step 3 失败或中断，也�
 
 - [ ] **Step 6: Live 阶段汇总**
 
-确认四个场景最新正式 Run 全部通过，四次 cleanup 成功，Archive/PostgreSQL 0 conflict/0 pending。
+确认 campaign 下四个场景目标 Run 全部通过，四次内部 cleanup 成功，Archive/PostgreSQL 0 conflict/0 pending。
 
 ---
 
-### Task 6: 最终回归、文档和分支交付
+### Task 7: 最终回归、文档和分支交付
 
 **Files:**
 - Modify: `docs/aiops/agentpy-domainbench.md`
@@ -341,12 +516,13 @@ Expected: verify 与 cleanup 均退出 0。即使 Step 3 失败或中断，也�
 - [ ] **Step 2: 最终对账**
 
 ```powershell
-uv run python scripts/manage_evaluation_history.py audit --config ../../config/project.json
-uv run python scripts/manage_evaluation_history.py reconcile --config ../../config/project.json
-uv run python scripts/manage_evaluation_history.py summarize --config ../../config/project.json
+uv run python scripts/manage_evaluation_history.py audit --config $sharedProjectConfig
+uv run python scripts/manage_evaluation_history.py reconcile --config $sharedProjectConfig
+uv run python scripts/manage_evaluation_history.py summarize --config $sharedProjectConfig
 ```
 
-Expected: 0 conflict、0 database pending；14 个目标场景最新正式 Run 通过。
+Expected: 0 conflict、0 database pending；按 `acceptanceCampaignId=full-acceptance-20260818`
+精确查询出的 14 个目标场景 Run 全部通过。
 
 - [ ] **Step 3: 运行风险相称的最终回归**
 
