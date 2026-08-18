@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import pytest
 
@@ -20,7 +21,9 @@ pytestmark = pytest.mark.live_llm
 @pytest.fixture(scope="module")
 def live_provider() -> QwenOpenAIProvider:
     try:
-        config = load_llm_provider_config()
+        config = load_llm_provider_config(
+            config_path=os.environ.get("AGENTPY_PROJECT_CONFIG")
+        )
     except LlmConfigurationError as exc:
         pytest.skip(f"Live LLM configuration is unavailable: {exc}")
     return QwenOpenAIProvider(config)
