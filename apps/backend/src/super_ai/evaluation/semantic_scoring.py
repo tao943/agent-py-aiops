@@ -40,8 +40,10 @@ class RootCauseSemanticScore:
 def score_root_cause_semantics(
     decision: RootCauseDecision | None,
     oracle: ScenarioOracle,
+    *,
+    ordered_milestones: bool = True,
 ) -> RootCauseSemanticScore:
-    """Score canonical identity and ordered private semantic requirements."""
+    """Score canonical identity and private semantic requirements."""
     semantics = oracle.root_cause_semantics
     if semantics is None:
         raise ValueError("Root-cause semantic rubric is required.")
@@ -69,19 +71,36 @@ def score_root_cause_semantics(
     trigger = (
         4 if _requirement_matches(decision.trigger, semantics.trigger, semantics) else 0
     )
-    milestones = _ordered_milestone_scores(
+    milestones = _milestone_scores(
         decision.causal_chain,
         semantics.causal_milestones,
         semantics,
+        ordered=ordered_milestones,
     )
     return RootCauseSemanticScore(component, mechanism, trigger, milestones)
 
 
-def _ordered_milestone_scores(
+def _milestone_scores(
     steps: tuple[str, ...],
     requirements: tuple[SemanticRequirement, ...],
     semantics: RootCauseSemantics,
+    *,
+    ordered: bool,
 ) -> tuple[tuple[str, int], ...]:
+    if not ordered:
+        return tuple(
+            (
+                requirement.id,
+                2
+                if any(
+                    _requirement_matches(step, requirement, semantics)
+                    for step in steps
+                )
+                else 0,
+            )
+            for requirement in requirements
+        )
+
     next_index = 0
     scores: list[tuple[str, int]] = []
     for requirement in requirements:

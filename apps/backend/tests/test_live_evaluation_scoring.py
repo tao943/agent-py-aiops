@@ -417,7 +417,7 @@ def test_live_score_reports_incomplete_trigger_and_causal_chain() -> None:
     assert "primary_root_cause_wrong" in result.failures
 
 
-def test_live_score_rejects_reordered_causal_milestones() -> None:
+def test_live_score_accepts_reordered_causal_milestones() -> None:
     decision = passing_artifact().decision
     assert decision is not None
     artifact = replace(
@@ -427,8 +427,8 @@ def test_live_score_rejects_reordered_causal_milestones() -> None:
 
     result = score(artifact)
 
-    assert result.root_cause < 20
-    assert "causal_chain_incomplete" in result.failures
+    assert result.root_cause == 20
+    assert "causal_chain_incomplete" not in result.failures
 
 
 @pytest.mark.parametrize(

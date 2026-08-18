@@ -4,11 +4,11 @@
   },
   "llm": {
     "apiKey": "",
-    "chatModel": "qwen3.7-plus",
+    "chatModel": "qwen3.7-max",
     "validatorModel": "qwen3.8-max",
     "embeddingModel": "text-embedding-v4",
     "modelCapabilities": {
-      "qwen3.7-plus": {
+      "qwen3.7-max": {
         "contextWindowTokens": 1000000,
         "structuredOutputMethod": "json_mode"
       },
