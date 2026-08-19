@@ -132,6 +132,7 @@ class AiopsDiagnosticState(TypedDict, total=False):
     diagnostic_facts: list[JsonDict]
     current_tool_output: object
     adjudication_count: int
+    adjudicated_fact_count: int
     used_llm_adjudication: bool
     model_call_count: int
     model_call_audits: Annotated[list[JsonDict], add]
@@ -1184,6 +1185,7 @@ class AiopsDiagnosticService:
             ),
             "diagnostic_facts": [],
             "adjudication_count": 0,
+            "adjudicated_fact_count": 0,
             "used_llm_adjudication": False,
             "model_call_count": 0,
             "model_call_audits": [],
@@ -2278,7 +2280,14 @@ class AiopsDiagnosticService:
             next_route = "decision"
         elif soft_expired:
             next_route = "decision"
-        elif decision.unresolved_hypotheses and int(state.get("adjudication_count") or 0) == 0:
+        elif decision.unresolved_hypotheses and _can_adjudicate_new_evidence(
+            state,
+            fact_count=len(
+                _diagnostic_facts_from_payload(
+                    cast(list[JsonDict], state.get("diagnostic_facts") or [])
+                )
+            ),
+        ):
             next_route = "hypothesis_adjudicator"
         elif int(state.get("replan_count") or 0) < int(state.get("max_replans") or 1):
             next_route = "replanner"
@@ -2453,8 +2462,10 @@ class AiopsDiagnosticService:
         observation_payloads = accepted_observations
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
+            "adjudicationRound": int(state.get("adjudication_count") or 0) + 1,
             "adjudicationAttempt": adjudication_attempts,
             "adjudicationAttempts": adjudication_attempts,
+            "adjudicatedFactCount": len(facts),
             "adjudicationErrorCategory": adjudication_error_category,
             "acceptedAssessmentCount": accepted_count,
             "hypothesisAssessments": assessment_payloads,
@@ -2477,7 +2488,8 @@ class AiopsDiagnosticService:
                 for item in accepted
             ],
             "observation_decisions": observation_payloads,
-            "adjudication_count": 1,
+            "adjudication_count": int(state.get("adjudication_count") or 0) + 1,
+            "adjudicated_fact_count": len(facts),
             "used_llm_adjudication": accepted_count > 0,
             "model_call_count": model_runtime.budget.used,
             "model_call_audits": model_runtime.audits,
@@ -4557,6 +4569,26 @@ def _new_hypothesis_assessment(hypothesis_id: str) -> HypothesisAssessment:
         reason_code="awaiting_public_evidence",
         assessment_source="deterministic",
     )
+
+
+def _can_adjudicate_new_evidence(
+    state: Mapping[str, object],
+    *,
+    fact_count: int,
+) -> bool:
+    raw_adjudication_count = state.get("adjudication_count")
+    adjudication_count = (
+        raw_adjudication_count
+        if isinstance(raw_adjudication_count, int)
+        and not isinstance(raw_adjudication_count, bool)
+        else 0
+    )
+    if adjudication_count == 0:
+        return True
+    if adjudication_count >= 2:
+        return False
+    prior_fact_count = state.get("adjudicated_fact_count")
+    return isinstance(prior_fact_count, int) and fact_count > prior_fact_count
 
 
 def _step_targets_replan_gap(

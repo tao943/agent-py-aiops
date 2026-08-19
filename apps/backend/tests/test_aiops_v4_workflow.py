@@ -138,6 +138,29 @@ def test_v4_decision_gap_does_not_reject_mechanism_refinement() -> None:
     )
 
 
+def test_v4_readjudicates_only_after_new_public_facts() -> None:
+    can_adjudicate = getattr(
+        diagnostics_module,
+        "_can_adjudicate_new_evidence",
+        None,
+    )
+    assert callable(can_adjudicate)
+
+    assert can_adjudicate({"adjudication_count": 0}, fact_count=4)
+    assert not can_adjudicate(
+        {"adjudication_count": 1, "adjudicated_fact_count": 4},
+        fact_count=4,
+    )
+    assert can_adjudicate(
+        {"adjudication_count": 1, "adjudicated_fact_count": 4},
+        fact_count=5,
+    )
+    assert not can_adjudicate(
+        {"adjudication_count": 2, "adjudicated_fact_count": 4},
+        fact_count=5,
+    )
+
+
 @pytest.mark.asyncio
 async def test_v4_model_runtime_resumes_count_and_records_only_safe_audit_fields() -> None:
     class CountingModel:
