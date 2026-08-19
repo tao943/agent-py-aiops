@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from operator import add
 from time import monotonic
@@ -45,6 +46,13 @@ from super_ai.aiops.decision_validation import (
     validate_grounded_candidate,
 )
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
+from super_ai.aiops.model_budget import (
+    ROLE_TIMEOUT_SECONDS,
+    ExecutionDeadlines,
+    ModelCallBudget,
+    ModelCallBudgetExceeded,
+    ModelRole,
+)
 from super_ai.aiops.reasoning import (
     CausalRole,
     DiagnosticPlanStep,
@@ -60,7 +68,13 @@ from super_ai.aiops.reasoning import (
     parse_observation_decision,
     parse_plan,
     parse_recovery_plan,
+    parse_root_cause_validation,
     project_hypothesis_assessment,
+)
+from super_ai.aiops.validator_routing import (
+    RiskTier,
+    ValidatorRiskContext,
+    requires_llm_validation,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import ChatModel, LlmProvider
@@ -114,6 +128,12 @@ class AiopsDiagnosticState(TypedDict, total=False):
     current_tool_output: object
     adjudication_count: int
     used_llm_adjudication: bool
+    model_call_count: int
+    model_call_audits: Annotated[list[JsonDict], add]
+    started_at: str
+    soft_deadline_at: str
+    hard_deadline_at: str
+    validator_routing: JsonDict
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
     decision_validation: JsonDict
@@ -128,8 +148,11 @@ class AiopsDiagnosticState(TypedDict, total=False):
         "replanner",
         "hypothesis_adjudicator",
         "decision",
+        "manual_review",
         "report",
         "recovery_planner",
+        "llm_validator",
+        "policy_gate",
     ]
     replan_count: int
     max_replans: int
@@ -145,6 +168,13 @@ class AiopsDiagnosticState(TypedDict, total=False):
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _ModelRuntime:
+    budget: ModelCallBudget
+    deadlines: ExecutionDeadlines
+    audits: list[JsonDict]
 
 AIOPS_REPORT_TITLE = "告警分析报告"
 AIOPS_REPORT_REQUIRED_HEADINGS = (
@@ -621,6 +651,7 @@ class AiopsDiagnosticService:
             if requested_workflow_version == "evidence-driven-v4"
             else "evidence-driven-v3"
         )
+        deadlines = ExecutionDeadlines.start(_now())
         graph = self._build_graph(workflow_version=workflow_version)
         public_hypotheses = _json_list(task.input_payload.get("hypotheses"))
         initial_state: AiopsDiagnosticState = {
@@ -642,11 +673,16 @@ class AiopsDiagnosticService:
             "diagnostic_facts": [],
             "adjudication_count": 0,
             "used_llm_adjudication": False,
+            "model_call_count": 0,
+            "model_call_audits": [],
+            "started_at": deadlines.started_at.isoformat(),
+            "soft_deadline_at": deadlines.soft_deadline_at.isoformat(),
+            "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
             "observation_decisions": [],
             "accessible_knowledge_base_ids": tuple(accessible_knowledge_base_ids),
             "plan_index": 0,
             "replan_count": 0,
-            "max_replans": 2,
+            "max_replans": 1 if workflow_version == "evidence-driven-v4" else 2,
             "max_total_steps": 6,
             "executor_attempt_count": 0,
             "executed_step_fingerprints": [],
@@ -700,6 +736,87 @@ class AiopsDiagnosticService:
             raise McpClientError("MCP client is unavailable.")
         return self._mcp_client
 
+    def _model_runtime(self, state: AiopsDiagnosticState) -> _ModelRuntime:
+        return _ModelRuntime(
+            budget=ModelCallBudget(used=int(state.get("model_call_count") or 0)),
+            deadlines=_execution_deadlines_from_state(state),
+            audits=[],
+        )
+
+    async def _invoke_v4_model(
+        self,
+        runtime: _ModelRuntime,
+        *,
+        role: ModelRole,
+        prompt: str,
+    ) -> object | None:
+        started_at = monotonic()
+        if runtime.deadlines.hard_expired():
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=runtime.budget.used,
+                    duration_ms=0,
+                    safe_error_code="hard_deadline_exceeded",
+                )
+            )
+            return None
+        if role in {"replanner", "adjudicator"} and runtime.deadlines.soft_expired():
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=runtime.budget.used,
+                    duration_ms=0,
+                    safe_error_code="soft_deadline_exceeded",
+                )
+            )
+            return None
+        try:
+            attempt = runtime.budget.reserve(role)
+        except ModelCallBudgetExceeded:
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=runtime.budget.used,
+                    duration_ms=0,
+                    safe_error_code="model_call_budget_exhausted",
+                )
+            )
+            return None
+        remaining = max(
+            0.001,
+            (runtime.deadlines.hard_deadline_at - _now()).total_seconds(),
+        )
+        try:
+            model = (
+                _validator_chat_model(self._llm_provider)
+                if role == "validator"
+                else self._llm_provider.create_chat_model()
+            )
+            response = await asyncio.wait_for(
+                model.ainvoke(prompt),
+                timeout=min(float(ROLE_TIMEOUT_SECONDS[role]), remaining),
+            )
+        except Exception as exc:
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=int(round(elapsed_ms(started_at))),
+                    safe_error_code=_safe_model_call_error_code(exc),
+                )
+            )
+            return None
+        runtime.audits.append(
+            _model_call_audit_payload(
+                role=role,
+                attempt=attempt,
+                duration_ms=int(round(elapsed_ms(started_at))),
+                safe_error_code=None,
+            )
+        )
+        return response
+
     def _build_graph(self, *, workflow_version: str = "evidence-driven-v3") -> Any:
         if workflow_version == "evidence-driven-v4":
             return self._build_v4_graph()
@@ -749,7 +866,10 @@ class AiopsDiagnosticService:
         graph.add_node("replanner", self._replanner)
         graph.add_node("decision", self._decision_v4)
         graph.add_node("deterministic_validator", self._deterministic_validator_v4)
+        graph.add_node("manual_review", self._manual_review_v4)
         graph.add_node("recovery_planner", self._recovery_planner)
+        graph.add_node("validator_router", self._validator_router_v4)
+        graph.add_node("llm_validator", self._llm_validator_v4)
         graph.add_node("policy_gate", self._policy_gate)
         graph.add_node("report", self._report)
         graph.add_edge(START, "planner")
@@ -773,8 +893,23 @@ class AiopsDiagnosticService:
             {"executor": "executor", "decision": "decision"},
         )
         graph.add_edge("decision", "deterministic_validator")
-        graph.add_edge("deterministic_validator", "recovery_planner")
-        graph.add_edge("recovery_planner", "policy_gate")
+        graph.add_conditional_edges(
+            "deterministic_validator",
+            self._route_after_deterministic_validation_v4,
+            {
+                "replanner": "replanner",
+                "manual_review": "manual_review",
+                "recovery_planner": "recovery_planner",
+            },
+        )
+        graph.add_edge("manual_review", "policy_gate")
+        graph.add_edge("recovery_planner", "validator_router")
+        graph.add_conditional_edges(
+            "validator_router",
+            self._route_after_validator_router_v4,
+            {"llm_validator": "llm_validator", "policy_gate": "policy_gate"},
+        )
+        graph.add_edge("llm_validator", "policy_gate")
         graph.add_edge("policy_gate", "report")
         graph.add_edge("report", END)
         return graph.compile()
@@ -888,6 +1023,11 @@ class AiopsDiagnosticService:
                 )
             )
 
+        model_runtime = (
+            self._model_runtime(state)
+            if state.get("workflow_version") == "evidence-driven-v4"
+            else None
+        )
         plan, plan_origin = await self._create_plan(
             query=query,
             alert=_json_dict(state.get("alert")),
@@ -901,6 +1041,7 @@ class AiopsDiagnosticService:
                 for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
                 if item.get("id")
             ],
+            model_runtime=model_runtime,
         )
         events.append(
             _task_status_event(
@@ -921,6 +1062,9 @@ class AiopsDiagnosticService:
             "retrievalError": retrieval_error,
             **_plan_causal_coverage_payload(plan),
         }
+        if model_runtime is not None:
+            planner_payload["modelCallCount"] = model_runtime.budget.used
+            planner_payload["modelCallAudits"] = model_runtime.audits
         planner_step = await self._create_step(
             owner_user_id=owner_user_id,
             task_id=task_id,
@@ -960,7 +1104,7 @@ class AiopsDiagnosticService:
             "planner",
             planner_payload,
         )
-        return {
+        update: dict[str, object] = {
             "sop_hits": sop_hits,
             "no_sop_matched": no_sop_matched,
             "plan": plan,
@@ -972,6 +1116,10 @@ class AiopsDiagnosticService:
             "evidence_ids": persisted_evidence_ids,
             "events": events,
         }
+        if model_runtime is not None:
+            update["model_call_count"] = model_runtime.budget.used
+            update["model_call_audits"] = model_runtime.audits
+        return update
 
     async def _executor(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -980,6 +1128,16 @@ class AiopsDiagnosticService:
         plan_index = int(state.get("plan_index") or 0)
         attempt_count = int(state.get("executor_attempt_count") or 0)
         max_total_steps = int(state.get("max_total_steps") or 6)
+        if (
+            state.get("workflow_version") == "evidence-driven-v4"
+            and _execution_deadlines_from_state(state).hard_expired()
+        ):
+            return {
+                "plan_index": len(plan),
+                "current_evidence_id": "",
+                "termination_reason": "hard_deadline_exceeded",
+                "events": [],
+            }
         if attempt_count >= max_total_steps:
             return {
                 "current_evidence_id": "",
@@ -1218,7 +1376,7 @@ class AiopsDiagnosticService:
         )
         evidence["evidenceId"] = evidence_record.id
         await self._save_checkpoint(state, "executor", {"evidence": evidence})
-        return {
+        update: dict[str, object] = {
             "plan_index": plan_index + 1,
             "executor_attempt_count": attempt_count + 1,
             "executed_step_fingerprints": [fingerprint],
@@ -1230,6 +1388,7 @@ class AiopsDiagnosticService:
             "current_plan_step": step,
             "events": events,
         }
+        return update
 
     async def _fact_adapter(self, state: AiopsDiagnosticState) -> dict[str, object]:
         """Convert one bounded public tool result into facts and four-state assessments."""
@@ -1353,9 +1512,12 @@ class AiopsDiagnosticService:
         plan_index = int(state.get("plan_index") or 0)
         attempts = int(state.get("executor_attempt_count") or 0)
         maximum = int(state.get("max_total_steps") or 6)
+        soft_expired = _execution_deadlines_from_state(state).soft_expired()
         if plan_index < len(plan) and attempts < maximum:
             next_route = "executor"
         elif decision.status == "sufficient":
+            next_route = "decision"
+        elif soft_expired:
             next_route = "decision"
         elif decision.unresolved_hypotheses and int(state.get("adjudication_count") or 0) == 0:
             next_route = "hypothesis_adjudicator"
@@ -1416,8 +1578,15 @@ class AiopsDiagnosticService:
         )
         accepted = list(assessments)
         accepted_count = 0
+        model_runtime = self._model_runtime(state)
         try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            response = await self._invoke_v4_model(
+                model_runtime,
+                role="adjudicator",
+                prompt=prompt,
+            )
+            if response is None:
+                raise RuntimeError("Adjudicator model call was unavailable.")
             accepted, accepted_count = _apply_llm_adjudication_payload(
                 assessments=assessments,
                 text=_model_text(response),
@@ -1432,6 +1601,8 @@ class AiopsDiagnosticService:
             "adjudicationAttempt": 1,
             "acceptedAssessmentCount": accepted_count,
             "hypothesisAssessments": assessment_payloads,
+            "modelCallCount": model_runtime.budget.used,
+            "modelCallAudits": model_runtime.audits,
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -1448,7 +1619,9 @@ class AiopsDiagnosticService:
                 for item in accepted
             ],
             "adjudication_count": 1,
-            "used_llm_adjudication": True,
+            "used_llm_adjudication": accepted_count > 0,
+            "model_call_count": model_runtime.budget.used,
+            "model_call_audits": model_runtime.audits,
             "events": [
                 _task_status_event(
                     task_id,
@@ -1784,8 +1957,23 @@ class AiopsDiagnosticService:
             f"Remaining executor attempt budget: {remaining_budget}."
         )
         parsed_steps: list[JsonDict] = []
+        model_runtime = (
+            self._model_runtime(state)
+            if state.get("workflow_version") == "evidence-driven-v4"
+            else None
+        )
         try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            response = (
+                await self._invoke_v4_model(
+                    model_runtime,
+                    role="replanner",
+                    prompt=prompt,
+                )
+                if model_runtime is not None
+                else await self._llm_provider.create_chat_model().ainvoke(prompt)
+            )
+            if response is None:
+                raise RuntimeError("Replanner model call was unavailable.")
             parsed = parse_plan(
                 _model_text(response),
                 available_tools=available_tools,
@@ -1844,6 +2032,9 @@ class AiopsDiagnosticService:
             "causalIntentRejectedStepCount": causal_intent_rejected_count,
             **_plan_causal_coverage_payload(accepted),
         }
+        if model_runtime is not None:
+            payload["modelCallCount"] = model_runtime.budget.used
+            payload["modelCallAudits"] = model_runtime.audits
         await self._create_step(
             owner_user_id=owner_user_id,
             task_id=task_id,
@@ -1852,7 +2043,7 @@ class AiopsDiagnosticService:
             payload=payload,
         )
         await self._save_checkpoint(state, "replanner", payload)
-        return {
+        update: dict[str, object] = {
             "plan": [*current_plan, *accepted],
             "replan_count": replan_count,
             "termination_reason": termination_reason,
@@ -1865,6 +2056,10 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        if model_runtime is not None:
+            update["model_call_count"] = model_runtime.budget.used
+            update["model_call_audits"] = model_runtime.audits
+        return update
 
     async def _decision_v4(self, state: AiopsDiagnosticState) -> dict[str, object]:
         """Assemble the v4 decision without another model call."""
@@ -1908,7 +2103,7 @@ class AiopsDiagnosticService:
             payload=payload,
         )
         await self._save_checkpoint(state, "decision", payload)
-        return {
+        update: dict[str, object] = {
             "root_cause_decision": decision_payload,
             "hypothesis_states": projected_states,
             "events": [
@@ -1922,6 +2117,7 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        return update
 
     async def _deterministic_validator_v4(
         self, state: AiopsDiagnosticState
@@ -1950,6 +2146,20 @@ class AiopsDiagnosticService:
             else None
         )
         valid = deterministic_result is not None and deterministic_result.passed
+        deadline_soft_expired = _execution_deadlines_from_state(state).soft_expired()
+        replan_eligible = (
+            not valid
+            and int(state.get("replan_count") or 0)
+            < int(state.get("max_replans") or 1)
+            and not deadline_soft_expired
+        )
+        next_route = (
+            "recovery_planner"
+            if valid
+            else "replanner"
+            if replan_eligible
+            else "manual_review"
+        )
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
             "status": "valid" if valid else "invalid",
@@ -1977,7 +2187,8 @@ class AiopsDiagnosticService:
                 if valid
                 else "Deterministic public-evidence validation failed closed."
             ),
-            "nextRoute": "recovery_planner",
+            "targetedReplanEligible": replan_eligible,
+            "nextRoute": next_route,
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -1989,7 +2200,7 @@ class AiopsDiagnosticService:
         await self._save_checkpoint(state, "deterministic_validator", payload)
         return {
             "decision_validation": payload,
-            "next_route": "recovery_planner",
+            "next_route": next_route,
             "events": [
                 _task_status_event(
                     task_id,
@@ -1999,6 +2210,204 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+
+    async def _manual_review_v4(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+        proposal_tools = {
+            definition.name
+            for definition in (state.get("tool_definitions") or ())
+            if self._tool_policies.get(definition.name) == "proposal_only"
+        }
+        plan = _fallback_recovery_plan(
+            candidate,
+            proposal_tools=proposal_tools,
+            force_manual_review=True,
+        )
+        payload = _recovery_plan_payload(plan)
+        payload["origin"] = "deterministic_fail_closed"
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="recovery_planning",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "manual_review", payload)
+        return {
+            "recovery_plan": payload,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Recovery Planner: deterministic validation failed closed to manual review.",
+                    89,
+                )
+            ],
+        }
+
+    async def _validator_router_v4(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        validation = _json_dict(state.get("decision_validation"))
+        recovery = _json_dict(state.get("recovery_plan"))
+        vocabulary = _json_dict(state.get("decision_vocabulary"))
+        components = tuple(
+            item
+            for item in cast(list[object], vocabulary.get("causalComponents") or [])
+            if isinstance(item, str)
+        )
+        if not components:
+            candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+            components = (candidate.component,) if candidate is not None else ()
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        routing = requires_llm_validation(
+            ValidatorRiskContext(
+                deterministic_valid=validation.get("status") == "valid",
+                used_llm_adjudication=bool(state.get("used_llm_adjudication")),
+                execution_requested=recovery.get("mode")
+                in {"proposal_only", "external_policy_required"},
+                max_risk_tier=_risk_tier(recovery.get("risk")),
+                compound_root_cause=vocabulary.get("compoundRootCause") is True,
+                causal_components=components,
+                has_high_quality_conflict=any(
+                    item.has_high_quality_conflict for item in assessments
+                ),
+            )
+        )
+        payload: JsonDict = {
+            "validationRequired": routing.required,
+            "validationSkipped": not routing.required,
+            "validationReasonCodes": list(routing.reason_codes),
+            "validationSkipReason": routing.skip_reason,
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="validator_router",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "validator_router", payload)
+        return {
+            "validator_routing": payload,
+            "next_route": "llm_validator" if routing.required else "policy_gate",
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Validator Router: semantic validation required."
+                    if routing.required
+                    else "Validator Router: deterministic validation was sufficient.",
+                    89,
+                )
+            ],
+        }
+
+    async def _llm_validator_v4(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+        evidence_ids = set(
+            _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        )
+        model_runtime = self._model_runtime(state)
+        initial_model_count = model_runtime.budget.used
+        validation: RootCauseValidationDecision | None = None
+        if candidate is not None:
+            prompt = (
+                "Return JSON only with status, evidenceIds, unsupportedFields, "
+                "missingEvidence, and summary. Semantically validate only the public candidate "
+                "against public structured observations and cited Evidence IDs. Do not include "
+                "private reasoning. Candidate: "
+                f"{json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
+                "Observations: "
+                f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}."
+            )
+            try:
+                response = await self._invoke_v4_model(
+                    model_runtime,
+                    role="validator",
+                    prompt=prompt,
+                )
+                if response is None:
+                    raise RuntimeError("Validator model call was unavailable.")
+                validation = parse_root_cause_validation(
+                    _model_text(response),
+                    available_evidence_ids=evidence_ids,
+                )
+            except Exception:
+                validation = None
+        semantic_valid = validation is not None and validation.status == "valid"
+        payload: JsonDict = {
+            **_json_dict(state.get("decision_validation")),
+            "validationOrigin": "llm_semantic" if validation is not None else "llm_failed",
+            "semanticValidationStatus": (
+                validation.status if validation is not None else "failed"
+            ),
+            "semanticValidationAttempts": model_runtime.budget.used
+            - initial_model_count,
+            "validationRequired": True,
+            "validationSkipped": False,
+            "validationReasonCodes": list(
+                cast(
+                    list[object],
+                    _json_dict(state.get("validator_routing")).get(
+                        "validationReasonCodes"
+                    )
+                    or [],
+                )
+            ),
+            "modelCallCount": model_runtime.budget.used,
+            "modelCallAudits": model_runtime.audits,
+        }
+        update: dict[str, object] = {
+            "decision_validation": payload,
+            "model_call_count": model_runtime.budget.used,
+            "model_call_audits": model_runtime.audits,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "LLM Validator: semantic validation passed."
+                    if semantic_valid
+                    else "LLM Validator: failed closed to manual review.",
+                    89,
+                )
+            ],
+        }
+        if not semantic_valid:
+            proposal_tools = {
+                definition.name
+                for definition in (state.get("tool_definitions") or ())
+                if self._tool_policies.get(definition.name) == "proposal_only"
+            }
+            fallback = _fallback_recovery_plan(
+                candidate,
+                proposal_tools=proposal_tools,
+                force_manual_review=True,
+            )
+            recovery_payload = _recovery_plan_payload(fallback)
+            recovery_payload["origin"] = "semantic_validator_fail_closed"
+            update["recovery_plan"] = recovery_payload
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="llm_validator",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "llm_validator", payload)
+        return update
 
     async def _decision(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -2449,6 +2858,11 @@ class AiopsDiagnosticService:
             if self._tool_policies.get(definition.name) == "proposal_only"
         )
         proposal_tools = {definition.name for definition in proposal_definitions}
+        model_runtime = (
+            self._model_runtime(state)
+            if state.get("workflow_version") == "evidence-driven-v4"
+            else None
+        )
         if candidate is None:
             plan = _fallback_recovery_plan(None, proposal_tools=proposal_tools)
         elif _json_dict(state.get("decision_validation")).get(
@@ -2473,7 +2887,17 @@ class AiopsDiagnosticService:
                 f"{json.dumps(_tool_contracts_payload(proposal_definitions), ensure_ascii=False)}."
             )
             try:
-                response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+                response = (
+                    await self._invoke_v4_model(
+                        model_runtime,
+                        role="recovery_planner",
+                        prompt=prompt,
+                    )
+                    if model_runtime is not None
+                    else await self._llm_provider.create_chat_model().ainvoke(prompt)
+                )
+                if response is None:
+                    raise RuntimeError("Recovery Planner model call was unavailable.")
                 plan = parse_recovery_plan(
                     _model_text(response),
                     available_evidence_ids=set(evidence_ids),
@@ -2482,6 +2906,9 @@ class AiopsDiagnosticService:
             except Exception:
                 plan = _fallback_recovery_plan(candidate, proposal_tools=proposal_tools)
         payload = _recovery_plan_payload(plan)
+        if model_runtime is not None:
+            payload["modelCallCount"] = model_runtime.budget.used
+            payload["modelCallAudits"] = model_runtime.audits
         await self._create_step(
             owner_user_id=owner_user_id,
             task_id=task_id,
@@ -2490,7 +2917,7 @@ class AiopsDiagnosticService:
             payload=payload,
         )
         await self._save_checkpoint(state, "recovery_planning", payload)
-        return {
+        update: dict[str, object] = {
             "recovery_plan": payload,
             "events": [
                 _task_status_event(
@@ -2501,6 +2928,10 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        if model_runtime is not None:
+            update["model_call_count"] = model_runtime.budget.used
+            update["model_call_audits"] = model_runtime.audits
+        return update
 
     async def _policy_gate(
         self,
@@ -2663,9 +3094,19 @@ class AiopsDiagnosticService:
         events = [
             _task_status_event(task_id, "running", "Report: compiling evidence-backed report.", 90)
         ]
-        report_content, report_generation = await self._generate_report_content(state)
+        model_runtime = (
+            self._model_runtime(state)
+            if state.get("workflow_version") == "evidence-driven-v4"
+            else None
+        )
+        report_content, report_generation = await self._generate_report_content(
+            state,
+            model_runtime=model_runtime,
+        )
         report_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v3",
+            "workflowVersion": str(
+                state.get("workflow_version") or "evidence-driven-v3"
+            ),
             "noSopMatched": no_sop_matched,
             "plan": _json_list(state.get("plan")),
             "planOrigin": str(state.get("plan_origin") or "generic"),
@@ -2679,6 +3120,12 @@ class AiopsDiagnosticService:
             "recoveryPolicy": state.get("recovery_policy"),
             "evidenceSufficiency": state.get("evidence_sufficiency"),
             "terminationReason": str(state.get("termination_reason") or ""),
+            "modelCallCount": (
+                model_runtime.budget.used
+                if model_runtime is not None
+                else int(state.get("model_call_count") or 0)
+            ),
+            "validatorRouting": state.get("validator_routing"),
         }
         await self._create_step(
             owner_user_id=owner_user_id,
@@ -2754,9 +3201,18 @@ class AiopsDiagnosticService:
                 ),
             ]
         )
-        return {"report_id": report.id, "events": events}
+        update: dict[str, object] = {"report_id": report.id, "events": events}
+        if model_runtime is not None:
+            update["model_call_count"] = model_runtime.budget.used
+            update["model_call_audits"] = model_runtime.audits
+        return update
 
-    async def _generate_report_content(self, state: AiopsDiagnosticState) -> tuple[str, str]:
+    async def _generate_report_content(
+        self,
+        state: AiopsDiagnosticState,
+        *,
+        model_runtime: _ModelRuntime | None = None,
+    ) -> tuple[str, str]:
         fallback = _fallback_report_content(
             alert=_json_dict(state.get("alert")),
             no_sop_matched=bool(state.get("no_sop_matched")),
@@ -2766,7 +3222,17 @@ class AiopsDiagnosticService:
         )
         prompt = _report_prompt(state)
         try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            response = (
+                await self._invoke_v4_model(
+                    model_runtime,
+                    role="report",
+                    prompt=prompt,
+                )
+                if model_runtime is not None
+                else await self._llm_provider.create_chat_model().ainvoke(prompt)
+            )
+            if response is None:
+                return fallback, "fallback"
         except Exception:
             return fallback, "fallback"
         report = _clean_markdown_report(_model_text(response))
@@ -2785,6 +3251,14 @@ class AiopsDiagnosticService:
     def _route_after_decision_validation(self, state: AiopsDiagnosticState) -> str:
         return str(state.get("next_route") or "recovery_planner")
 
+    def _route_after_deterministic_validation_v4(
+        self, state: AiopsDiagnosticState
+    ) -> str:
+        return str(state.get("next_route") or "manual_review")
+
+    def _route_after_validator_router_v4(self, state: AiopsDiagnosticState) -> str:
+        return str(state.get("next_route") or "policy_gate")
+
     async def _create_plan(
         self,
         *,
@@ -2794,6 +3268,7 @@ class AiopsDiagnosticService:
         no_sop_matched: bool,
         tool_definitions: Sequence[McpToolDefinition],
         known_hypotheses: Sequence[str],
+        model_runtime: _ModelRuntime | None = None,
     ) -> tuple[list[JsonDict], str]:
         available_tools = [definition.name for definition in tool_definitions]
         generic_plan = build_generic_live_plan(
@@ -2828,7 +3303,17 @@ class AiopsDiagnosticService:
             f"No SOP matched: {str(no_sop_matched).lower()}."
         )
         try:
-            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            response = (
+                await self._invoke_v4_model(
+                    model_runtime,
+                    role="planner",
+                    prompt=prompt,
+                )
+                if model_runtime is not None
+                else await self._llm_provider.create_chat_model().ainvoke(prompt)
+            )
+            if response is None:
+                raise RuntimeError("Planner model call was unavailable.")
             parsed_plan = parse_plan(
                 _model_text(response),
                 available_tools=set(available_tools),
@@ -2941,6 +3426,22 @@ class AiopsDiagnosticService:
         payload: JsonDict,
     ) -> None:
         task_id = str(state["task_id"])
+        payload_model_count = payload.get("modelCallCount")
+        model_call_count = (
+            payload_model_count
+            if isinstance(payload_model_count, int)
+            and not isinstance(payload_model_count, bool)
+            else int(state.get("model_call_count") or 0)
+        )
+        runtime_payload: JsonDict = {
+            "modelCallCount": model_call_count,
+            "modelCallAudits": _json_list(payload.get("modelCallAudits")),
+            "startedAt": str(state.get("started_at") or ""),
+            "softDeadlineAt": str(state.get("soft_deadline_at") or ""),
+            "hardDeadlineAt": str(state.get("hard_deadline_at") or ""),
+            "replanCount": int(state.get("replan_count") or 0),
+            "maxReplans": int(state.get("max_replans") or 0),
+        }
         await self._repositories.diagnostics.save_checkpoint(
             owner_user_id=str(state["owner_user_id"]),
             checkpoint_record_id=f"checkpoint_{uuid4().hex}",
@@ -2948,7 +3449,7 @@ class AiopsDiagnosticService:
             thread_id=f"aiops:{task_id}",
             checkpoint_ns=node,
             checkpoint_id=f"{node}_{uuid4().hex}",
-            checkpoint_payload=payload,
+            checkpoint_payload={**payload, "executionRuntime": runtime_payload},
             metadata={"node": node},
         )
 
@@ -3137,6 +3638,61 @@ def _new_hypothesis_assessment(hypothesis_id: str) -> HypothesisAssessment:
         reason_code="awaiting_public_evidence",
         assessment_source="deterministic",
     )
+
+
+def _model_call_audit_payload(
+    *,
+    role: ModelRole,
+    attempt: int,
+    duration_ms: int,
+    safe_error_code: str | None,
+) -> JsonDict:
+    return {
+        "role": role,
+        "attempt": attempt,
+        "durationMs": duration_ms,
+        "cacheHit": False,
+        "safeErrorCode": safe_error_code,
+    }
+
+
+def _safe_model_call_error_code(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "connection"
+    return "model_call_failed"
+
+
+def _execution_deadlines_from_state(state: AiopsDiagnosticState) -> ExecutionDeadlines:
+    started_at = state.get("started_at")
+    soft_deadline_at = state.get("soft_deadline_at")
+    hard_deadline_at = state.get("hard_deadline_at")
+    if all(
+        isinstance(value, str)
+        for value in (started_at, soft_deadline_at, hard_deadline_at)
+    ):
+        try:
+            return ExecutionDeadlines.from_iso(
+                started_at=cast(str, started_at),
+                soft_deadline_at=cast(str, soft_deadline_at),
+                hard_deadline_at=cast(str, hard_deadline_at),
+            )
+        except ValueError:
+            pass
+    return ExecutionDeadlines.start(_now())
+
+
+def _risk_tier(value: object) -> RiskTier:
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"l3", "critical", "very high"}:
+            return "L3"
+        if normalized in {"l2", "high"}:
+            return "L2"
+        if normalized in {"l1", "medium", "moderate"}:
+            return "L1"
+    return "L0"
 
 
 def _initial_hypothesis_assessments(

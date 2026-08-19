@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
@@ -10,6 +11,7 @@ from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
 )
+from super_ai.aiops.model_budget import ExecutionDeadlines
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import JsonDict
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -58,6 +60,115 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
     assert {"fact_adapter", "hypothesis_adjudicator", "deterministic_validator"} <= nodes
     assert "evidence_evaluator" not in nodes
     assert "decision_validator" not in nodes
+    assert {"validator_router", "llm_validator", "manual_review"} <= nodes
+
+
+@pytest.mark.asyncio
+async def test_v4_model_runtime_resumes_count_and_records_only_safe_audit_fields() -> None:
+    class CountingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            self.calls += 1
+            return "ok"
+
+    class Provider:
+        def __init__(self) -> None:
+            self.model = CountingModel()
+
+        def create_chat_model(self) -> CountingModel:
+            return self.model
+
+    provider = Provider()
+    service = _service(object(), provider)
+    deadlines = ExecutionDeadlines.start()
+    runtime = service._model_runtime(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "model_call_count": 7,
+                "started_at": deadlines.started_at.isoformat(),
+                "soft_deadline_at": deadlines.soft_deadline_at.isoformat(),
+                "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
+            },
+        )
+    )
+
+    first = await service._invoke_v4_model(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        role="validator",
+        prompt="private prompt must not be audited",
+    )
+    second = await service._invoke_v4_model(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        role="report",
+        prompt="another private prompt",
+    )
+
+    assert first == "ok"
+    assert second is None
+    assert provider.model.calls == 1
+    assert runtime.budget.used == 8
+    assert all(
+        set(item)
+        == {"role", "attempt", "durationMs", "cacheHit", "safeErrorCode"}
+        for item in runtime.audits
+    )
+    assert "private prompt" not in json.dumps(runtime.audits)
+
+
+@pytest.mark.asyncio
+async def test_v4_report_uses_template_after_hard_deadline_without_model_call() -> None:
+    class CountingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            self.calls += 1
+            return "# should not run"
+
+    class Provider:
+        def __init__(self) -> None:
+            self.model = CountingModel()
+
+        def create_chat_model(self) -> CountingModel:
+            return self.model
+
+    provider = Provider()
+    service = _service(object(), provider)
+    now = datetime.now(timezone.utc)
+    expired = ExecutionDeadlines(
+        started_at=now - timedelta(minutes=10),
+        soft_deadline_at=now - timedelta(minutes=5),
+        hard_deadline_at=now - timedelta(minutes=2),
+    )
+    state = cast(
+        Any,
+        {
+            "model_call_count": 3,
+            "started_at": expired.started_at.isoformat(),
+            "soft_deadline_at": expired.soft_deadline_at.isoformat(),
+            "hard_deadline_at": expired.hard_deadline_at.isoformat(),
+            "alert": {},
+            "sop_hits": [],
+            "evidence": [],
+        },
+    )
+    runtime = service._model_runtime(state)  # pyright: ignore[reportPrivateUsage]
+
+    content, origin = await service._generate_report_content(  # pyright: ignore[reportPrivateUsage]
+        state,
+        model_runtime=runtime,
+    )
+
+    assert content.startswith("# 告警分析报告")
+    assert origin == "fallback"
+    assert provider.model.calls == 0
+    assert runtime.budget.used == 3
+    assert runtime.audits[-1]["safeErrorCode"] == "hard_deadline_exceeded"
 
 
 @pytest.mark.asyncio
@@ -349,3 +460,180 @@ async def test_v4_decision_and_validator_use_dispositions_without_model_calls(
     assert "no_unresolved_active_competitor" in check_codes
     assert "closed_alternatives_are_grounded" in check_codes
     assert "no_open_competitor" not in check_codes
+
+
+@pytest.mark.asyncio
+async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_review(
+    migrated_database_url: str,
+) -> None:
+    class FailingModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            raise TimeoutError
+
+    class Provider:
+        def create_chat_model(self) -> FailingModel:
+            return FailingModel()
+
+    deadlines = ExecutionDeadlines.start()
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-semantic-validator-fail-closed",
+            status="running",
+            query="Validate a risky diagnosis.",
+            input_payload={},
+        )
+        service = _service(repositories, Provider())
+        update = await service._llm_validator_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "model_call_count": 2,
+                    "started_at": deadlines.started_at.isoformat(),
+                    "soft_deadline_at": deadlines.soft_deadline_at.isoformat(),
+                    "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
+                    "root_cause_decision": {
+                        "component": "order-service",
+                        "mechanism": "transaction_deadlock",
+                        "trigger": "Transactions acquired rows in opposite order.",
+                        "causalChain": [
+                            "Transactions acquired rows in opposite order.",
+                            "The wait graph formed a cycle.",
+                            "PostgreSQL aborted one transaction.",
+                        ],
+                        "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+                        "confidence": 0.95,
+                    },
+                    "evidence_ids": ["ev-1", "ev-2", "ev-3"],
+                    "observation_decisions": [],
+                    "decision_validation": {
+                        "status": "valid",
+                        "validationOrigin": "deterministic",
+                    },
+                    "validator_routing": {
+                        "validationReasonCodes": ["elevated_recovery_risk"]
+                    },
+                    "tool_definitions": (),
+                },
+            )
+        )
+        policy = await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "recovery_plan": update["recovery_plan"],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    audit = cast(list[dict[str, object]], update["model_call_audits"])
+    assert validation["status"] == "valid"
+    assert validation["validationOrigin"] == "llm_failed"
+    assert recovery["mode"] == "manual_review"
+    assert audit[-1]["safeErrorCode"] == "timeout"
+    assert cast(dict[str, object], policy["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_exhausted_budget_prevents_recovery_model_call_and_executes_nothing(
+    migrated_database_url: str,
+) -> None:
+    class CountingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            self.calls += 1
+            return "{}"
+
+    class Provider:
+        def __init__(self) -> None:
+            self.model = CountingModel()
+
+        def create_chat_model(self) -> CountingModel:
+            return self.model
+
+    provider = Provider()
+    deadlines = ExecutionDeadlines.start()
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-recovery-budget-exhausted",
+            status="running",
+            query="Plan a safe recovery.",
+            input_payload={},
+        )
+        service = _service(repositories, provider)
+        update = await service._recovery_planner(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "model_call_count": 8,
+                    "started_at": deadlines.started_at.isoformat(),
+                    "soft_deadline_at": deadlines.soft_deadline_at.isoformat(),
+                    "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
+                    "root_cause_decision": {
+                        "component": "order-service",
+                        "mechanism": "transaction_deadlock",
+                        "trigger": "Transactions acquired rows in opposite order.",
+                        "causalChain": [
+                            "Transactions acquired rows in opposite order.",
+                            "The wait graph formed a cycle.",
+                        ],
+                        "evidenceIds": ["ev-1", "ev-2"],
+                        "confidence": 0.95,
+                    },
+                    "evidence_ids": ["ev-1", "ev-2"],
+                    "decision_validation": {
+                        "status": "valid",
+                        "validationOrigin": "deterministic",
+                    },
+                    "tool_definitions": (),
+                },
+            )
+        )
+        policy = await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "recovery_plan": update["recovery_plan"],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    assert provider.model.calls == 0
+    assert update["model_call_count"] == 8
+    assert cast(list[dict[str, object]], update["model_call_audits"])[-1][
+        "safeErrorCode"
+    ] == "model_call_budget_exhausted"
+    assert cast(dict[str, object], policy["recovery_policy"])[
+        "executionPermitted"
+    ] is False
