@@ -12,6 +12,7 @@ from super_ai.evaluation import (
     load_scenario_oracle,
     score_run,
 )
+from super_ai.evaluation.artifacts import ArtifactHypothesisAssessment
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
 
@@ -289,6 +290,28 @@ def test_ground_truth_access_marks_run_invalid() -> None:
     assert result.validity == "invalid"
     assert result.passed is False
     assert result.hard_gate == "ground_truth_access"
+
+
+def test_v4_closed_alternative_without_public_evidence_is_a_hard_gate() -> None:
+    artifact = replace(
+        process_down_artifact(),
+        workflow_version="evidence-driven-v4",
+        graph_version="aiops-diagnostic-v2",
+        hypothesis_assessments=(
+            ArtifactHypothesisAssessment(
+                id="network_path_failure",
+                disposition="causally_inactive",
+                evidence_ids=(),
+                reason_code="not_in_active_path",
+                assessment_source="deterministic",
+            ),
+        ),
+    )
+
+    result = score_run(artifact, process_down_oracle())
+
+    assert result.hard_gate == "ungrounded_closed_hypothesis"
+    assert result.total == 0
 
 
 def test_unverified_l1_recovery_cannot_pass() -> None:

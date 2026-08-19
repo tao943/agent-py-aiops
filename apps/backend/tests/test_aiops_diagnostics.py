@@ -515,12 +515,51 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
             headers=_auth_headers(owner["accessToken"]),
         )
         phases = (
+            "planner",
+            "validator_router",
             "sufficiency_gate",
             "decision_validation",
             "recovery_planning",
             "policy_gate",
         )
         for sequence, phase in enumerate(phases, start=1):
+            payload: dict[str, object] = {"phase": phase}
+            if phase == "planner":
+                payload.update(
+                    {
+                        "workflowVersion": "evidence-driven-v4",
+                        "modelCallCount": 2,
+                        "modelCallAudits": [
+                            {
+                                "role": "planner",
+                                "attempt": 1,
+                                "durationMs": 120,
+                                "cacheHit": False,
+                                "safeErrorCode": None,
+                                "prompt": "sentinel-private-prompt",
+                            }
+                        ],
+                        "hypothesisAssessments": [
+                            {
+                                "id": "cause-a",
+                                "disposition": "causally_inactive",
+                                "evidenceIds": ["evidence-owner"],
+                                "reasonCode": "not_in_active_path",
+                                "assessmentSource": "deterministic",
+                            }
+                        ],
+                        "rawResponse": "sentinel-private-response",
+                    }
+                )
+            elif phase == "validator_router":
+                payload.update(
+                    {
+                        "validationRequired": False,
+                        "validationSkipped": True,
+                        "validationReasonCodes": [],
+                        "validationSkipReason": "deterministic_evidence_sufficient",
+                    }
+                )
             await repositories.diagnostics.create_step(
                 owner_user_id=owner_user_id,
                 step_id=f"step-owner-{sequence}",
@@ -528,7 +567,7 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
                 sequence=sequence,
                 phase=phase,
                 status="completed",
-                payload={"phase": phase},
+                payload=payload,
             )
             await repositories.diagnostics.save_checkpoint(
                 owner_user_id=owner_user_id,
@@ -537,7 +576,10 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
                 thread_id=f"aiops:{diagnostic_id}",
                 checkpoint_ns=phase,
                 checkpoint_id=f"checkpoint-id-{sequence}",
-                checkpoint_payload={"phase": phase},
+                checkpoint_payload={
+                    "phase": phase,
+                    "executionBlob": "sentinel-private-checkpoint",
+                },
                 metadata={"node": phase},
             )
         await repositories.diagnostics.create_evidence(
@@ -588,6 +630,36 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
     assert [
         item["checkpointNamespace"] for item in owner_chain.json()["data"]["checkpoints"]
     ] == list(phases)
+    execution = owner_chain.json()["data"]["execution"]
+    assert execution == {
+        "graphVersion": "aiops-diagnostic-v2",
+        "workflowVersion": "evidence-driven-v4",
+        "modelCallCount": 2,
+        "modelCalls": [
+            {
+                "role": "planner",
+                "attempt": 1,
+                "durationMs": 120,
+                "cacheHit": False,
+                "safeErrorCode": None,
+            }
+        ],
+        "validator": {
+            "required": False,
+            "skipped": True,
+            "reasonCodes": [],
+            "skipReason": "deterministic_evidence_sufficient",
+        },
+        "resumeCount": 0,
+    }
+    assert all("payload" not in item for item in owner_chain.json()["data"]["checkpoints"])
+    assert "sentinel-private" not in owner_chain.text
+    planner_payload = owner_chain.json()["data"]["steps"][0]["payload"]
+    assert planner_payload["hypothesisAssessments"][0]["status"] == "refuted"
+    assert (
+        planner_payload["hypothesisAssessments"][0]["disposition"]
+        == "causally_inactive"
+    )
     assert denied_chain.status_code == 403
     assert denied_chain.json()["error"]["code"] == "AUTH_FORBIDDEN"
     other_user_id = other["user"]["id"]
@@ -611,7 +683,11 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
 async def test_diagnosis_case_api_lists_only_owner_cases_and_denies_direct_access(
     migrated_database_url: str,
 ) -> None:
-    app = create_app(database_url=migrated_database_url)
+    app = create_app(
+        database_url=migrated_database_url,
+        vector_store=cast(Any, FakeVectorStore([])),
+        rate_limit_service=AllowAllRateLimits(),
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         owner = await _register(client, "case-owner@example.com")

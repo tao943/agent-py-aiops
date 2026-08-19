@@ -8,7 +8,11 @@ import pytest
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
-from super_ai.evaluation.artifacts import LiveEvidenceAudit, LiveRecoveryAudit
+from super_ai.evaluation.artifacts import (
+    ArtifactHypothesisAssessment,
+    LiveEvidenceAudit,
+    LiveRecoveryAudit,
+)
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveFaultObservation,
@@ -490,3 +494,39 @@ def test_unverified_recovery_is_a_hard_gate() -> None:
     )
 
     assert result.hard_gate == "recovery_unverified"
+
+
+def test_live_v4_accepts_causally_inactive_rule_out_with_evidence() -> None:
+    artifact = replace(
+        passing_artifact(),
+        workflow_version="evidence-driven-v4",
+        graph_version="aiops-diagnostic-v2",
+        hypothesis_assessments=(
+            ArtifactHypothesisAssessment(
+                id="postgres_lock_blocking",
+                disposition="supported",
+                evidence_ids=("ev-graph",),
+                reason_code="lock_graph_confirmed",
+                assessment_source="deterministic",
+            ),
+            ArtifactHypothesisAssessment(
+                id="postgres_slow_query_without_lock",
+                disposition="causally_inactive",
+                evidence_ids=("ev-session",),
+                reason_code="latency_is_downstream",
+                assessment_source="deterministic",
+            ),
+            ArtifactHypothesisAssessment(
+                id="postgres_connectivity_failure",
+                disposition="refuted",
+                evidence_ids=("ev-session",),
+                reason_code="database_reachable",
+                assessment_source="deterministic",
+            ),
+        ),
+    )
+
+    result = score(artifact)
+
+    assert result.differential_diagnosis == 15
+    assert result.hard_gate is None

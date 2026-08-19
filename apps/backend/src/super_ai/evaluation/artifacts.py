@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
+from super_ai.aiops.adjudication import AssessmentSource, Disposition
 from super_ai.memory.repositories import (
     AgentToolCallAuditRecord,
     DiagnosticEvidenceRecord,
@@ -80,6 +81,32 @@ class ValidationAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactHypothesisAssessment:
+    id: str
+    disposition: Disposition
+    evidence_ids: tuple[str, ...]
+    reason_code: str | None
+    assessment_source: AssessmentSource | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallAudit:
+    role: str
+    attempt: int
+    duration_ms: int
+    cache_hit: bool
+    safe_error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorRoutingAudit:
+    required: bool
+    skipped: bool
+    reason_codes: tuple[str, ...]
+    skip_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunArtifact:
     scenario_id: str
     mode: str
@@ -97,6 +124,15 @@ class RunArtifact:
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
     validation_audit: ValidationAudit | None = None
+    workflow_version: str | None = None
+    graph_version: str | None = None
+    hypothesis_assessments: tuple[ArtifactHypothesisAssessment, ...] = ()
+    artifact_valid: bool = True
+    artifact_errors: tuple[str, ...] = ()
+    model_call_count: int = 0
+    model_call_audits: tuple[ModelCallAudit, ...] = ()
+    validator_routing: ValidatorRoutingAudit | None = None
+    resume_count: int = 0
 
 
 def build_run_artifact(
@@ -110,8 +146,15 @@ def build_run_artifact(
     scenario_id = _required_task_text(task.input_payload, "benchmarkScenarioId")
     mode = _required_task_text(task.input_payload, "benchmarkMode")
     ordered_steps = sorted(steps, key=lambda item: item.sequence)
+    workflow_version = _workflow_version(ordered_steps)
     decision = _decision_from_steps(ordered_steps)
     hypothesis_states = _hypothesis_states_from_steps(ordered_steps)
+    hypothesis_assessments, artifact_errors = _hypothesis_assessments_from_steps(
+        ordered_steps,
+        workflow_version=workflow_version,
+        legacy_states=hypothesis_states,
+    )
+    model_call_count, model_call_audits = _model_call_observability(ordered_steps)
     observation_decisions = _observation_decisions_from_steps(ordered_steps)
     plan_step_count = _plan_step_count(ordered_steps)
     duration_ms = 0
@@ -142,6 +185,194 @@ def build_run_artifact(
         safety_events=(),
         diagnostic_task_id=task.id,
         validation_audit=_validation_audit_from_steps(ordered_steps),
+        workflow_version=workflow_version,
+        graph_version=(
+            "aiops-diagnostic-v2"
+            if workflow_version == "evidence-driven-v4"
+            else None
+        ),
+        hypothesis_assessments=hypothesis_assessments,
+        artifact_valid=not artifact_errors,
+        artifact_errors=artifact_errors,
+        model_call_count=model_call_count,
+        model_call_audits=model_call_audits,
+        validator_routing=_validator_routing_from_steps(ordered_steps),
+        resume_count=sum(1 for step in ordered_steps if step.phase == "execution_resume"),
+    )
+
+
+def _workflow_version(steps: Sequence[DiagnosticStepRecord]) -> str | None:
+    versions = [
+        value
+        for step in steps
+        if isinstance((value := step.payload.get("workflowVersion")), str)
+    ]
+    return versions[-1] if versions else None
+
+
+def _hypothesis_assessments_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+    *,
+    workflow_version: str | None,
+    legacy_states: Sequence[HypothesisState],
+) -> tuple[tuple[ArtifactHypothesisAssessment, ...], tuple[str, ...]]:
+    if workflow_version != "evidence-driven-v4":
+        legacy_dispositions = {
+            "open": "unresolved",
+            "supported": "supported",
+            "refuted": "refuted",
+        }
+        return (
+            tuple(
+                ArtifactHypothesisAssessment(
+                    id=item.id,
+                    disposition=cast(Disposition, legacy_dispositions[item.status]),
+                    evidence_ids=item.evidence_ids,
+                    reason_code=None,
+                    assessment_source=None,
+                )
+                for item in legacy_states
+            ),
+            (),
+        )
+
+    raw_assessments: object | None = None
+    for step in reversed(steps):
+        candidate = step.payload.get("hypothesisAssessments")
+        if candidate is not None:
+            raw_assessments = candidate
+            break
+    if not isinstance(raw_assessments, list):
+        return (), ("missing_hypothesis_assessments",)
+
+    assessments: list[ArtifactHypothesisAssessment] = []
+    errors: list[str] = []
+    allowed_dispositions = {
+        "supported",
+        "refuted",
+        "causally_inactive",
+        "unresolved",
+    }
+    allowed_sources = {"deterministic", "llm_adjudicated"}
+    for raw in cast(list[object], raw_assessments):
+        if not isinstance(raw, Mapping):
+            errors.append("invalid_hypothesis_assessment")
+            continue
+        item = cast(Mapping[str, object], raw)
+        identifier = item.get("id") or item.get("hypothesisId")
+        disposition = item.get("disposition")
+        evidence_ids = _string_list(item.get("evidenceIds"))
+        reason_code = item.get("reasonCode")
+        source = item.get("assessmentSource")
+        if disposition not in allowed_dispositions:
+            errors.append("invalid_hypothesis_disposition")
+            continue
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or evidence_ids is None
+            or not isinstance(reason_code, str)
+            or not reason_code
+            or source not in allowed_sources
+        ):
+            errors.append("invalid_hypothesis_assessment")
+            continue
+        assessments.append(
+            ArtifactHypothesisAssessment(
+                id=identifier,
+                disposition=cast(Disposition, disposition),
+                evidence_ids=tuple(evidence_ids),
+                reason_code=reason_code,
+                assessment_source=cast(AssessmentSource, source),
+            )
+        )
+    return tuple(assessments), tuple(dict.fromkeys(errors))
+
+
+_MODEL_CALL_ROLES = frozenset(
+    {"planner", "adjudicator", "replanner", "validator", "report"}
+)
+
+
+def _model_call_observability(
+    steps: Sequence[DiagnosticStepRecord],
+) -> tuple[int, tuple[ModelCallAudit, ...]]:
+    count = 0
+    audits: list[ModelCallAudit] = []
+    seen: set[tuple[object, ...]] = set()
+    for step in steps:
+        count_value = step.payload.get("modelCallCount")
+        if (
+            isinstance(count_value, int)
+            and not isinstance(count_value, bool)
+            and 0 <= count_value <= 8
+        ):
+            count = max(count, count_value)
+        raw_audits = step.payload.get("modelCallAudits")
+        if not isinstance(raw_audits, list):
+            continue
+        for raw in cast(list[object], raw_audits):
+            if not isinstance(raw, Mapping):
+                continue
+            item = cast(Mapping[str, object], raw)
+            role = item.get("role")
+            attempt = item.get("attempt")
+            duration_ms = item.get("durationMs")
+            cache_hit = item.get("cacheHit")
+            error_code = item.get("safeErrorCode")
+            if (
+                role not in _MODEL_CALL_ROLES
+                or not isinstance(attempt, int)
+                or isinstance(attempt, bool)
+                or not 1 <= attempt <= 8
+                or not isinstance(duration_ms, int)
+                or isinstance(duration_ms, bool)
+                or duration_ms < 0
+                or not isinstance(cache_hit, bool)
+                or (error_code is not None and not isinstance(error_code, str))
+            ):
+                continue
+            identity = (role, attempt, duration_ms, cache_hit, error_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            audits.append(
+                ModelCallAudit(
+                    role=cast(str, role),
+                    attempt=attempt,
+                    duration_ms=duration_ms,
+                    cache_hit=cache_hit,
+                    safe_error_code=error_code,
+                )
+            )
+    return count, tuple(audits)
+
+
+def _validator_routing_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> ValidatorRoutingAudit | None:
+    routing = next(
+        (step for step in reversed(steps) if step.phase == "validator_router"),
+        None,
+    )
+    if routing is None:
+        return None
+    raw_codes = routing.payload.get("validationReasonCodes")
+    reason_codes = (
+        tuple(
+            item
+            for item in cast(list[object], raw_codes)
+            if isinstance(item, str)
+        )[:6]
+        if isinstance(raw_codes, list)
+        else ()
+    )
+    skip_reason = routing.payload.get("validationSkipReason")
+    return ValidatorRoutingAudit(
+        required=routing.payload.get("validationRequired") is True,
+        skipped=routing.payload.get("validationSkipped") is True,
+        reason_codes=reason_codes,
+        skip_reason=skip_reason if isinstance(skip_reason, str) else None,
     )
 
 

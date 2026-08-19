@@ -320,6 +320,182 @@ def test_artifact_counts_all_six_persisted_executor_attempts() -> None:
     assert artifact.plan_step_count == 6
 
 
+def test_v4_artifact_reads_auditable_hypothesis_dispositions() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [
+                        {
+                            "id": "postgres_lock_blocking",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "lock_graph_confirmed",
+                            "assessmentSource": "deterministic",
+                        },
+                        {
+                            "id": "postgres_slow_query_without_lock",
+                            "disposition": "causally_inactive",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "latency_is_downstream_of_lock",
+                            "assessmentSource": "deterministic",
+                        },
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.workflow_version == "evidence-driven-v4"
+    assert artifact.graph_version == "aiops-diagnostic-v2"
+    assert artifact.artifact_valid is True
+    assert [item.disposition for item in artifact.hypothesis_assessments] == [
+        "supported",
+        "causally_inactive",
+    ]
+
+
+def test_v4_artifact_rejects_unknown_disposition_without_legacy_fallback() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "hypothesisAssessments": [
+                        {
+                            "id": "postgres_lock_blocking",
+                            "disposition": "probably_supported",
+                            "status": "supported",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "unknown",
+                            "assessmentSource": "deterministic",
+                        }
+                    ]
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.artifact_valid is False
+    assert artifact.hypothesis_assessments == ()
+    assert "invalid_hypothesis_disposition" in artifact.artifact_errors
+
+
+def test_v3_artifact_projects_legacy_status_without_changing_it() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v3", "plan": []}),
+            _step(
+                2,
+                "evidence_evaluation",
+                {
+                    "hypothesisStates": [
+                        {
+                            "id": "legacy-open",
+                            "status": "open",
+                            "confidence": 0.3,
+                            "evidenceIds": [],
+                        },
+                        {
+                            "id": "legacy-refuted",
+                            "status": "refuted",
+                            "confidence": 0.1,
+                            "evidenceIds": ["ev-1"],
+                        },
+                    ]
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert [item.disposition for item in artifact.hypothesis_assessments] == [
+        "unresolved",
+        "refuted",
+    ]
+    assert [item.status for item in artifact.hypothesis_states] == ["open", "refuted"]
+
+
+def test_v4_artifact_projects_only_safe_model_and_validator_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "planner",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "modelCallCount": 2,
+                    "modelCallAudits": [
+                        {
+                            "role": "planner",
+                            "attempt": 1,
+                            "durationMs": 120,
+                            "cacheHit": False,
+                            "safeErrorCode": None,
+                            "prompt": "sentinel-private-prompt",
+                        }
+                    ],
+                },
+            ),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "hypothesisAssessments": [
+                        {
+                            "id": "cause-a",
+                            "disposition": "unresolved",
+                            "evidenceIds": [],
+                            "reasonCode": "awaiting_evidence",
+                            "assessmentSource": "deterministic",
+                        }
+                    ]
+                },
+            ),
+            _step(
+                3,
+                "validator_router",
+                {
+                    "validationRequired": False,
+                    "validationSkipped": True,
+                    "validationReasonCodes": [],
+                    "validationSkipReason": "deterministic_evidence_sufficient",
+                },
+            ),
+            _step(4, "execution_resume", {"resumeReason": "worker_restart"}),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.model_call_count == 2
+    assert artifact.model_call_audits[0].role == "planner"
+    assert "sentinel" not in repr(artifact.model_call_audits)
+    assert artifact.validator_routing is not None
+    assert artifact.validator_routing.skipped is True
+    assert artifact.validator_routing.skip_reason == "deterministic_evidence_sufficient"
+    assert artifact.resume_count == 1
+
+
 def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
     task = DiagnosticTaskRecord(
         id="task-1",

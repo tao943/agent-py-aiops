@@ -2,8 +2,11 @@
 
 from super_ai.evaluation.artifacts import (
     ArtifactEvidence,
+    ArtifactHypothesisAssessment,
     ArtifactToolCall,
+    ModelCallAudit,
     RunArtifact,
+    ValidatorRoutingAudit,
     build_run_artifact,
 )
 from super_ai.evaluation.cli import (
@@ -47,12 +50,15 @@ from super_ai.evaluation.snapshot import SnapshotMcpClient, SnapshotToolObservat
 __all__ = [
     "EvidenceMilestone",
     "ArtifactEvidence",
+    "ArtifactHypothesisAssessment",
     "ArtifactToolCall",
+    "ModelCallAudit",
     "AgentVersion",
     "ApplicationDiagnosticAdapter",
     "BenchmarkRunError",
     "DiagnosticRunAdapter",
     "RunArtifact",
+    "ValidatorRoutingAudit",
     "PublicDecisionLabel",
     "PublicHypothesis",
     "PublicScenario",

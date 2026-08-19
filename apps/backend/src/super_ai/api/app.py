@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -110,6 +110,7 @@ from super_ai.memory.repositories import (
     DiagnosticTaskRecord,
     DocumentIndexTaskRecord,
     GraphCheckpointRecord,
+    JsonDict,
     KnowledgeDocumentRecord,
     McpConnectionRecord,
     MemoryRepositories,
@@ -1733,6 +1734,7 @@ def create_app(
                 "reportEvidenceLinks": [
                     _report_evidence_link_payload(link) for link in report_links
                 ],
+                "execution": _aiops_execution_observability(steps),
                 "checkpoints": [
                     _graph_checkpoint_payload(checkpoint) for checkpoint in checkpoints
                 ],
@@ -2697,7 +2699,7 @@ def _diagnostic_step_payload(record: DiagnosticStepRecord) -> dict[str, object]:
         "sequence": record.sequence,
         "phase": record.phase,
         "status": record.status,
-        "payload": record.payload,
+        "payload": _safe_aiops_public_payload(record.payload),
         "createdAt": record.created_at.isoformat(),
     }
 
@@ -2756,9 +2758,163 @@ def _graph_checkpoint_payload(record: GraphCheckpointRecord) -> dict[str, object
         "threadId": record.thread_id,
         "checkpointNamespace": record.checkpoint_ns,
         "checkpointId": record.checkpoint_id,
-        "payload": record.checkpoint_payload,
-        "metadata": record.metadata,
+        "metadata": _safe_aiops_public_payload(record.metadata),
         "createdAt": record.created_at.isoformat(),
+    }
+
+
+_AIOPS_PRIVATE_PAYLOAD_KEYS = frozenset(
+    {
+        "prompt",
+        "messages",
+        "rawResponse",
+        "modelResponse",
+        "executionBlob",
+        "checkpointPayload",
+    }
+)
+_AIOPS_WORKFLOW_VERSIONS = frozenset(
+    {"evidence-driven-v2", "evidence-driven-v3", "evidence-driven-v4"}
+)
+_AIOPS_MODEL_ROLES = frozenset(
+    {"planner", "adjudicator", "replanner", "validator", "report"}
+)
+
+
+def _safe_aiops_public_payload(value: object) -> object:
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        payload = {
+            str(key): _safe_aiops_public_payload(item)
+            for key, item in source.items()
+            if isinstance(key, str) and key not in _AIOPS_PRIVATE_PAYLOAD_KEYS
+        }
+        disposition = source.get("disposition")
+        status = source.get("status")
+        if "status" not in payload and disposition in {
+            "supported",
+            "refuted",
+            "causally_inactive",
+            "unresolved",
+        }:
+            payload["status"] = {
+                "supported": "supported",
+                "refuted": "refuted",
+                "causally_inactive": "refuted",
+                "unresolved": "open",
+            }[cast(str, disposition)]
+        if "disposition" not in payload and status in {
+            "open",
+            "supported",
+            "refuted",
+        }:
+            payload["disposition"] = {
+                "open": "unresolved",
+                "supported": "supported",
+                "refuted": "refuted",
+            }[cast(str, status)]
+        return payload
+    if isinstance(value, list):
+        return [_safe_aiops_public_payload(item) for item in cast(list[object], value)]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return None
+
+
+def _aiops_execution_observability(
+    steps: Sequence[DiagnosticStepRecord],
+) -> dict[str, object]:
+    workflow_version: str | None = None
+    model_call_count = 0
+    model_calls: list[dict[str, object]] = []
+    seen_model_calls: set[tuple[object, ...]] = set()
+    validator: dict[str, object] = {
+        "required": False,
+        "skipped": False,
+        "reasonCodes": [],
+        "skipReason": None,
+    }
+    resume_count = 0
+    for step in sorted(steps, key=lambda item: item.sequence):
+        payload = step.payload
+        workflow = payload.get("workflowVersion")
+        if isinstance(workflow, str) and workflow in _AIOPS_WORKFLOW_VERSIONS:
+            workflow_version = workflow
+        count = payload.get("modelCallCount")
+        if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 8:
+            model_call_count = max(model_call_count, count)
+        raw_audits = payload.get("modelCallAudits")
+        if isinstance(raw_audits, list):
+            for raw in cast(list[object], raw_audits):
+                audit = _safe_model_call_audit(raw)
+                if audit is None:
+                    continue
+                identity = tuple(audit.values())
+                if identity not in seen_model_calls:
+                    seen_model_calls.add(identity)
+                    model_calls.append(audit)
+        if step.phase == "validator_router":
+            validator = _safe_validator_observability(payload)
+        if step.phase == "execution_resume":
+            resume_count += 1
+    return {
+        "graphVersion": (
+            "aiops-diagnostic-v2"
+            if workflow_version == "evidence-driven-v4"
+            else None
+        ),
+        "workflowVersion": workflow_version,
+        "modelCallCount": model_call_count,
+        "modelCalls": model_calls,
+        "validator": validator,
+        "resumeCount": resume_count,
+    }
+
+
+def _safe_model_call_audit(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    item = cast(Mapping[str, object], raw)
+    role = item.get("role")
+    attempt = item.get("attempt")
+    duration_ms = item.get("durationMs")
+    cache_hit = item.get("cacheHit")
+    error_code = item.get("safeErrorCode")
+    if (
+        role not in _AIOPS_MODEL_ROLES
+        or not isinstance(attempt, int)
+        or isinstance(attempt, bool)
+        or attempt < 1
+        or attempt > 8
+        or not isinstance(duration_ms, int)
+        or isinstance(duration_ms, bool)
+        or duration_ms < 0
+        or not isinstance(cache_hit, bool)
+        or (error_code is not None and not isinstance(error_code, str))
+    ):
+        return None
+    return {
+        "role": role,
+        "attempt": attempt,
+        "durationMs": duration_ms,
+        "cacheHit": cache_hit,
+        "safeErrorCode": error_code,
+    }
+
+
+def _safe_validator_observability(payload: JsonDict) -> dict[str, object]:
+    raw_codes = payload.get("validationReasonCodes")
+    reason_codes = (
+        [item for item in cast(list[object], raw_codes) if isinstance(item, str)][:6]
+        if isinstance(raw_codes, list)
+        else []
+    )
+    skip_reason = payload.get("validationSkipReason")
+    return {
+        "required": payload.get("validationRequired") is True,
+        "skipped": payload.get("validationSkipped") is True,
+        "reasonCodes": reason_codes,
+        "skipReason": skip_reason if isinstance(skip_reason, str) else None,
     }
 
 
