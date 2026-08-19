@@ -556,6 +556,11 @@ def _project_adjudicated_observations(
             facts=facts,
         )
     )
+    projected = _normalize_postgres_lock_observations(
+        projected,
+        assessment=supported[0],
+        facts=facts,
+    )
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index
@@ -592,6 +597,89 @@ def _project_adjudicated_observations(
         projected[index]["causalRole"] = "trigger"
         projected[index]["causalRoleOrigin"] = "coverage_repair"
         break
+    return projected
+
+
+def _normalize_postgres_lock_observations(
+    observations: Sequence[JsonDict],
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Render a PostgreSQL lock chain from cited, normalized public facts."""
+    projected = [dict(item) for item in observations]
+    if (
+        assessment.hypothesis_id != "postgres_lock_blocking"
+        or assessment.disposition != "supported"
+    ):
+        return projected
+    cited = [
+        fact
+        for fact in facts
+        if fact.public and fact.evidence_id in assessment.evidence_ids
+    ]
+
+    def matching_fact(key: str, expected: object) -> DiagnosticFact | None:
+        return next(
+            (fact for fact in cited if fact.key == key and fact.value == expected),
+            None,
+        )
+
+    blocker = matching_fact("InspectPostgresLockGraph.blockerRole", "transaction")
+    resource = matching_fact("InspectPostgresLockGraph.lockedResource", "order_row")
+    operation = matching_fact(
+        "InspectPostgresSessions.waitingOperation", "order_status_update"
+    )
+    wait_event = matching_fact("InspectPostgresSessions.waitEventType", "Lock")
+    timed_out = matching_fact("VerifyServiceHealth.businessProbeTimedOut", True)
+    reachable = matching_fact("VerifyServiceHealth.databaseReachable", True)
+    if any(
+        item is None
+        for item in (blocker, resource, operation, wait_event, timed_out, reachable)
+    ):
+        return projected
+    assert blocker is not None
+    assert resource is not None
+    assert operation is not None
+    assert wait_event is not None
+    assert timed_out is not None
+    assert reachable is not None
+    if (
+        blocker.evidence_id != resource.evidence_id
+        or operation.evidence_id != wait_event.evidence_id
+        or timed_out.evidence_id != reachable.evidence_id
+    ):
+        return projected
+    replacements = {
+        blocker.evidence_id: (
+            "A blocker transaction holds the PostgreSQL row lock required by the order "
+            "status update.",
+            "trigger",
+        ),
+        operation.evidence_id: (
+            "The order status update waits on the held PostgreSQL row lock.",
+            "mechanism",
+        ),
+        timed_out.evidence_id: (
+            "The blocked business probe times out while PostgreSQL remains reachable.",
+            "impact",
+        ),
+    }
+    for observation in projected:
+        evidence_ids = {
+            item
+            for item in cast(list[object], observation.get("evidenceIds") or [])
+            if isinstance(item, str)
+        }
+        matched = [
+            replacement
+            for evidence_id, replacement in replacements.items()
+            if evidence_id in evidence_ids
+        ]
+        if len(matched) != 1:
+            continue
+        observation["summary"], observation["causalRole"] = matched[0]
+        observation["causalRoleOrigin"] = "coverage_repair"
     return projected
 
 

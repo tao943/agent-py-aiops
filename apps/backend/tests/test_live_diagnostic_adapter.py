@@ -600,8 +600,11 @@ async def test_live_collector_exposes_only_read_only_safe_evidence() -> None:
     safe_lock_graph = cast(dict[str, Any], lock_graph)
     serialized = json.dumps((sessions, lock_graph))
     assert safe_sessions["waitEventType"] == "Lock"
+    assert safe_sessions["waitingOperation"] == "order_status_update"
     assert safe_sessions["benchmarkEvidenceId"] == "postgres-wait-event-lock"
     assert safe_lock_graph["blockerEdgeConfirmed"] is True
+    assert safe_lock_graph["blockerRole"] == "transaction"
+    assert safe_lock_graph["lockedResource"] == "order_row"
     assert safe_lock_graph["benchmarkEvidenceId"] == "postgres-blocking-pid-edge"
     assert "password" not in serialized.lower()
     assert "dsn" not in serialized.lower()
@@ -647,6 +650,7 @@ async def test_health_evidence_separates_reachability_from_business_probe() -> N
     assert health["databaseReachable"] is True
     assert health["connectivityStatus"] == "healthy"
     assert health["businessProbeSucceeded"] is False
+    assert health["businessProbeTimedOut"] is True
     assert "probeSucceeded" not in health
 
 

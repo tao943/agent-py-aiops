@@ -202,6 +202,7 @@ class LivePostgresEvidenceMcpClient:
         if name == "InspectPostgresSessions":
             return {
                 "waitingSession": "waiter",
+                "waitingOperation": "order_status_update",
                 "waitEventType": (
                     "Lock"
                     if self._observation.check_passed("waiter_has_lock_event")
@@ -212,6 +213,8 @@ class LivePostgresEvidenceMcpClient:
         if name == "InspectPostgresLockGraph":
             return {
                 "edge": "blocker->waiter",
+                "blockerRole": "transaction",
+                "lockedResource": "order_row",
                 "blockerEdgeConfirmed": self._observation.check_passed(
                     "blocker_edge_confirmed"
                 ),
@@ -222,6 +225,7 @@ class LivePostgresEvidenceMcpClient:
                 "databaseReachable": True,
                 "connectivityStatus": "healthy",
                 "businessProbeSucceeded": not self._observation.confirmed,
+                "businessProbeTimedOut": self._observation.confirmed,
                 "businessProbeStatus": (
                     "degraded" if self._observation.confirmed else "healthy"
                 ),

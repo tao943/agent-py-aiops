@@ -161,6 +161,105 @@ def test_v4_readjudicates_only_after_new_public_facts() -> None:
     )
 
 
+def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
+    normalize = getattr(
+        diagnostics_module,
+        "_normalize_postgres_lock_observations",
+        None,
+    )
+    assert callable(normalize)
+    assessment = HypothesisAssessment(
+        hypothesis_id="postgres_lock_blocking",
+        disposition="supported",
+        evidence_ids=("ev-graph", "ev-health", "ev-session"),
+        reason_code="evidence_supported",
+        assessment_source="llm_adjudicated",
+    )
+    observations = [
+        {
+            "summary": "raw graph",
+            "supports": ["postgres_lock_blocking"],
+            "refutes": [],
+            "evidenceIds": ["ev-graph"],
+            "causalRole": "trigger",
+        },
+        {
+            "summary": "raw session",
+            "supports": ["postgres_lock_blocking"],
+            "refutes": [],
+            "evidenceIds": ["ev-session"],
+            "causalRole": "mechanism",
+        },
+        {
+            "summary": "raw health",
+            "supports": ["postgres_lock_blocking"],
+            "refutes": [],
+            "evidenceIds": ["ev-health"],
+            "causalRole": "impact",
+        },
+    ]
+    facts = (
+        DiagnosticFact(
+            "InspectPostgresLockGraph.blockerRole",
+            "transaction",
+            "ev-graph",
+            "InspectPostgresLockGraph",
+            "direct",
+        ),
+        DiagnosticFact(
+            "InspectPostgresLockGraph.lockedResource",
+            "order_row",
+            "ev-graph",
+            "InspectPostgresLockGraph",
+            "direct",
+        ),
+        DiagnosticFact(
+            "InspectPostgresSessions.waitingOperation",
+            "order_status_update",
+            "ev-session",
+            "InspectPostgresSessions",
+            "direct",
+        ),
+        DiagnosticFact(
+            "InspectPostgresSessions.waitEventType",
+            "Lock",
+            "ev-session",
+            "InspectPostgresSessions",
+            "direct",
+        ),
+        DiagnosticFact(
+            "VerifyServiceHealth.businessProbeTimedOut",
+            True,
+            "ev-health",
+            "VerifyServiceHealth",
+            "direct",
+        ),
+        DiagnosticFact(
+            "VerifyServiceHealth.databaseReachable",
+            True,
+            "ev-health",
+            "VerifyServiceHealth",
+            "direct",
+        ),
+    )
+
+    normalized = cast(
+        list[dict[str, object]],
+        normalize(observations, assessment=assessment, facts=facts),
+    )
+
+    assert [item["summary"] for item in normalized] == [
+        "A blocker transaction holds the PostgreSQL row lock required by the order status update.",
+        "The order status update waits on the held PostgreSQL row lock.",
+        "The blocked business probe times out while PostgreSQL remains reachable.",
+    ]
+    assert [item["causalRole"] for item in normalized] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_v4_model_runtime_resumes_count_and_records_only_safe_audit_fields() -> None:
     class CountingModel:
