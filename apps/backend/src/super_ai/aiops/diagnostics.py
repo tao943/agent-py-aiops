@@ -1041,17 +1041,20 @@ def _derive_redis_maxclients_observations(
     """Derive Redis capacity trigger and rejection impact from cited counters."""
     if assessment.hypothesis_id != "redis_maxclients":
         return []
+    public_facts = [fact for fact in facts if fact.public]
     cited = [
         fact
-        for fact in facts
-        if fact.public and fact.evidence_id in assessment.evidence_ids
+        for fact in public_facts
+        if fact.evidence_id in assessment.evidence_ids
     ]
 
-    def positive_integer(*keys: str) -> DiagnosticFact | None:
+    def positive_integer(
+        source: Sequence[DiagnosticFact], *keys: str
+    ) -> DiagnosticFact | None:
         return next(
             (
                 fact
-                for fact in cited
+                for fact in source
                 if fact.key in keys
                 and isinstance(fact.value, int)
                 and not isinstance(fact.value, bool)
@@ -1061,14 +1064,17 @@ def _derive_redis_maxclients_observations(
         )
 
     connected = positive_integer(
+        cited,
         "InspectRedisServerInfo.connectedClients",
         "InspectRedisServer.connectedClients",
     )
     maximum = positive_integer(
+        cited,
         "InspectRedisServerInfo.maxclients",
         "InspectRedisServer.maxclients",
     )
     rejected = positive_integer(
+        cited,
         "InspectRedisServerInfo.rejectedConnectionsDelta",
         "GetRedisConnectionMetrics.rejectedConnectionsDelta",
     )
@@ -1085,28 +1091,74 @@ def _derive_redis_maxclients_observations(
         "causalRoleOrigin": "coverage_repair",
         "assessmentSource": "llm_adjudicated",
     }
-    return [
+    scoped_clients = positive_integer(
+        public_facts,
+        "ListBenchmarkRedisClients.currentRunClientCount",
+    )
+    established_healthy = next(
+        (
+            fact
+            for fact in public_facts
+            if fact.key == "VerifyRedisPing.establishedConnectionHealthy"
+            and fact.value is True
+        ),
+        None,
+    )
+    trigger_summary = (
+        "Current-run benchmark clients filled Redis connection capacity, and connected "
+        f"clients reached the configured maxclients limit of {maximum.value}."
+        if scoped_clients is not None
+        else (
+            "Redis connected clients reached the configured maxclients limit of "
+            f"{maximum.value}."
+        )
+    )
+    observations: list[JsonDict] = [
         {
             **common,
             "purpose": "Establish whether Redis reached its client capacity.",
-            "summary": (
-                f"Redis connected clients reached the configured maxclients limit of "
-                f"{maximum.value}."
+            "summary": trigger_summary,
+            "evidenceIds": _unique_strings(
+                [
+                    connected.evidence_id,
+                    *(
+                        [scoped_clients.evidence_id]
+                        if scoped_clients is not None
+                        else []
+                    ),
+                ]
             ),
-            "evidenceIds": [connected.evidence_id],
             "causalRole": "trigger",
         },
+    ]
+    if established_healthy is not None:
+        observations.append(
+            {
+                **common,
+                "purpose": "Establish whether existing Redis connections remained healthy.",
+                "summary": (
+                    f"At the maxclients capacity of {maximum.value}, ping succeeds on the "
+                    "established Redis control connection."
+                ),
+                "evidenceIds": _unique_strings(
+                    [maximum.evidence_id, established_healthy.evidence_id]
+                ),
+                "causalRole": "context",
+            }
+        )
+    observations.append(
         {
             **common,
             "purpose": "Establish the impact on new Redis connections.",
             "summary": (
-                f"Redis rejected {rejected.value} new connections after client capacity "
-                "was reached."
+                f"Redis recorded rejected connections (count: {rejected.value}) because "
+                "client capacity was saturated, causing new connections to fail."
             ),
             "evidenceIds": [rejected.evidence_id],
             "causalRole": "impact",
-        },
-    ]
+        }
+    )
+    return observations
 
 
 def _derive_upstream_deadline_observations(

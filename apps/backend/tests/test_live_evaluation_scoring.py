@@ -21,6 +21,7 @@ from super_ai.evaluation.live.domain import (
 )
 from super_ai.evaluation.live.scenarios import load_live_oracle
 from super_ai.evaluation.live.scoring import required_citation_sources, score_live_run
+from super_ai.evaluation.live.semantic_scoring import score_root_cause_semantics
 
 SCENARIO = (
     Path(__file__).resolve().parents[3]
@@ -139,6 +140,35 @@ OBSERVATION = LiveFaultObservation(
     (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
 )
 NGINX_SCENARIO = SCENARIO.parent / "APY-LIVE-NGINX-TIMEOUT-001"
+REDIS_SCENARIO = SCENARIO.parent / "APY-LIVE-REDIS-MAXCLIENTS-001"
+
+
+def test_redis_public_fact_projection_satisfies_semantic_contract() -> None:
+    trigger = (
+        "Current-run benchmark clients filled Redis connection capacity, and connected "
+        "clients reached the configured maxclients limit of 16."
+    )
+    decision = RootCauseDecision(
+        "live-eval-redis",
+        "benchmark_clients_exhausted_maxclients",
+        trigger,
+        (
+            trigger,
+            "At the maxclients capacity of 16, ping succeeds on the established Redis "
+            "control connection.",
+            "Redis recorded rejected connections (count: 1) because client capacity was "
+            "saturated, causing new connections to fail.",
+        ),
+        ("ev-info", "ev-clients", "ev-ping"),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(REDIS_SCENARIO),
+    )
+
+    assert score.total == 20
 RECOVERY = LiveRecoveryRecord(
     "terminate_postgres_backend",
     "synthetic_blocker",

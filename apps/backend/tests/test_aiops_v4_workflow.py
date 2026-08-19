@@ -1023,6 +1023,20 @@ def test_v4_adjudicator_derives_redis_chain_from_live_server_info() -> None:
                 source_tool="InspectRedisServerInfo",
                 quality="context",
             ),
+            DiagnosticFact(
+                key="ListBenchmarkRedisClients.currentRunClientCount",
+                value=15,
+                evidence_id="ev-clients",
+                source_tool="ListBenchmarkRedisClients",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="VerifyRedisPing.establishedConnectionHealthy",
+                value=True,
+                evidence_id="ev-ping",
+                source_tool="VerifyRedisPing",
+                quality="context",
+            ),
         ],
     )
 
@@ -1031,8 +1045,18 @@ def test_v4_adjudicator_derives_redis_chain_from_live_server_info() -> None:
         for item in projected
         if item.get("causalRoleOrigin") == "coverage_repair"
     ]
-    assert [item["causalRole"] for item in derived] == ["trigger", "impact"]
-    assert [item["evidenceIds"] for item in derived] == [["ev-info"], ["ev-info"]]
+    assert [item["causalRole"] for item in derived] == [
+        "trigger",
+        "context",
+        "impact",
+    ]
+    assert derived[0]["evidenceIds"] == ["ev-info", "ev-clients"]
+    assert "current-run benchmark clients" in str(derived[0]["summary"]).lower()
+    assert "maxclients limit" in str(derived[0]["summary"]).lower()
+    assert derived[1]["evidenceIds"] == ["ev-info", "ev-ping"]
+    assert "ping succeeds" in str(derived[1]["summary"]).lower()
+    assert derived[2]["evidenceIds"] == ["ev-info"]
+    assert "causing new connections to fail" in str(derived[2]["summary"]).lower()
     assert all(item["supports"] == ["redis_maxclients"] for item in derived)
 
 
