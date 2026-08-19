@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from super_ai.aiops.execution import ExecutionCoordinator
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.history import (
     EvaluationStatus,
@@ -71,6 +72,7 @@ from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.llm import build_default_llm_provider
 from super_ai.mcp_client import LocalMcpClient
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
+from super_ai.memory.repositories import AiopsRuntimeRepositoryProvider
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.project_config import (
     load_project_config,
@@ -101,6 +103,21 @@ _SAFE_RESULT_FIELDS = frozenset(
         "authorizationCode",
     }
 )
+
+
+def build_live_recovery_coordinator(
+    *,
+    runtime_provider: AiopsRuntimeRepositoryProvider,
+    owner_user_id: str,
+    diagnostic_task_id: str,
+    run_id: str,
+) -> ExecutionCoordinator:
+    repository = runtime_provider.execution_repository(
+        owner_user_id=owner_user_id,
+        task_id=diagnostic_task_id,
+        graph_version="live-eval-v1",
+    )
+    return ExecutionCoordinator(repository, worker_id=f"live-recovery:{run_id}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -207,6 +224,18 @@ async def _run_live_command(
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )
+        runtime_provider = repositories.aiops_runtime
+        if runtime_provider is None:
+            raise RuntimeError("AIOps runtime repository is required for Live recovery.")
+
+        def recovery_coordinator_factory(task_id: str) -> ExecutionCoordinator:
+            return build_live_recovery_coordinator(
+                runtime_provider=runtime_provider,
+                owner_user_id=cast(str, arguments.owner_user_id),
+                diagnostic_task_id=task_id,
+                run_id=cast(str, arguments.run_id),
+            )
+
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
             driver=components.driver,
@@ -214,6 +243,7 @@ async def _run_live_command(
             diagnostic=diagnostic,
             recovery=components.recovery,
             evaluator=_LiveScoringEvaluator(evidence_source),
+            recovery_coordinator_factory=recovery_coordinator_factory,
         )
         return await runner.run(
             cast(str, arguments.scenario),

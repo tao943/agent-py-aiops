@@ -174,6 +174,10 @@ class AiopsDiagnosticState(TypedDict, total=False):
 logger = logging.getLogger(__name__)
 
 
+class TransientDiagnosticInfrastructureError(RuntimeError):
+    """Signal a retryable transport/storage failure to the durable job runtime."""
+
+
 @dataclass(slots=True)
 class _ModelRuntime:
     budget: ModelCallBudget
@@ -742,6 +746,17 @@ class AiopsDiagnosticService:
                         if isinstance(event, dict):
                             yield cast(dict[str, object], event)
         except Exception as exc:
+            if _is_transient_infrastructure_error(exc):
+                emit_event(
+                    logger,
+                    "agent.aiops.retryable_failure",
+                    diagnosticTaskId=task.id,
+                    errorCategory=exc.__class__.__name__,
+                    durationMs=elapsed_ms(started_at),
+                )
+                raise TransientDiagnosticInfrastructureError(
+                    "retryable_diagnostic_infrastructure_failure"
+                ) from exc
             await self._repositories.diagnostics.update_task(
                 owner_user_id=task.owner_user_id,
                 task_id=task.id,
@@ -964,7 +979,9 @@ class AiopsDiagnosticService:
         owner_user_id = str(state["owner_user_id"])
         query = str(state["query"])
         events = [_task_status_event(task_id, "running", "Planner: retrieving SOP evidence.", 15)]
-        retrieval_audit_id = f"tool_{uuid4().hex}"
+        retrieval_audit_id = _stable_public_id(
+            "tool", task_id, "knowledge_retrieval", query
+        )
         events.append(
             _tool_event(
                 retrieval_audit_id,
@@ -1171,7 +1188,9 @@ class AiopsDiagnosticService:
                 citation_payload = _citation_payload(citation)
                 evidence_record = await self._repositories.diagnostics.create_evidence(
                     owner_user_id=owner_user_id,
-                    evidence_id=f"evidence_{uuid4().hex}",
+                    evidence_id=_stable_public_id(
+                        "evidence", task_id, "knowledge_reference", citation.id
+                    ),
                     task_id=task_id,
                     step_id=planner_step.id,
                     kind="knowledge_reference",
@@ -1183,7 +1202,9 @@ class AiopsDiagnosticService:
         elif retrieval_error is not None:
             evidence_record = await self._repositories.diagnostics.create_evidence(
                 owner_user_id=owner_user_id,
-                evidence_id=f"evidence_{uuid4().hex}",
+                evidence_id=_stable_public_id(
+                    "evidence", task_id, "knowledge_retrieval_error"
+                ),
                 task_id=task_id,
                 step_id=planner_step.id,
                 kind="knowledge_reference",
@@ -1324,7 +1345,10 @@ class AiopsDiagnosticService:
                     )
                 ],
             }
-        audit_id = f"tool_{uuid4().hex}"
+        plan_step_id = str(step.get("id") or f"step_{plan_index + 1}")
+        audit_id = _stable_public_id(
+            "tool", task_id, plan_step_id, tool_name, fingerprint
+        )
         events = [
             _task_status_event(
                 task_id,
@@ -1428,7 +1452,9 @@ class AiopsDiagnosticService:
             )
             evidence_record = await self._repositories.diagnostics.create_evidence(
                 owner_user_id=owner_user_id,
-                evidence_id=f"evidence_{uuid4().hex}",
+                evidence_id=_stable_public_id(
+                    "evidence", task_id, plan_step_id, tool_name, fingerprint
+                ),
                 task_id=task_id,
                 step_id=executor_step.id,
                 tool_call_id=audit_id,
@@ -1495,7 +1521,9 @@ class AiopsDiagnosticService:
         )
         evidence_record = await self._repositories.diagnostics.create_evidence(
             owner_user_id=owner_user_id,
-            evidence_id=f"evidence_{uuid4().hex}",
+            evidence_id=_stable_public_id(
+                "evidence", task_id, plan_step_id, tool_name, fingerprint
+            ),
             task_id=task_id,
             step_id=executor_step.id,
             tool_call_id=audit_id,
@@ -3166,7 +3194,14 @@ class AiopsDiagnosticService:
 
         owner_user_id = str(state["owner_user_id"])
         task_id = str(state["task_id"])
-        audit_id = f"tool_{uuid4().hex}"
+        recovery_intent_id = _stable_public_id(
+            "recovery_intent",
+            task_id,
+            plan.action,
+            plan.target,
+            json.dumps(plan.arguments, sort_keys=True, separators=(",", ":")),
+        )
+        audit_id = _stable_public_id("tool", recovery_intent_id, tool_name)
         try:
             await self._create_audit(
                 owner_user_id=owner_user_id,
@@ -3266,7 +3301,7 @@ class AiopsDiagnosticService:
         )
         report = await self._repositories.diagnostics.add_report(
             owner_user_id=owner_user_id,
-            report_id=f"report_{uuid4().hex}",
+            report_id=_stable_public_id("report", task_id, "diagnostic"),
             task_id=task_id,
             title=AIOPS_REPORT_TITLE,
             content=report_content,
@@ -3275,7 +3310,9 @@ class AiopsDiagnosticService:
         for evidence_id in evidence_ids:
             await self._repositories.diagnostics.link_report_evidence(
                 owner_user_id=owner_user_id,
-                link_id=f"report_evidence_{uuid4().hex}",
+                link_id=_stable_public_id(
+                    "report_evidence", task_id, report.id, evidence_id
+                ),
                 task_id=task_id,
                 report_id=report.id,
                 evidence_id=evidence_id,
@@ -3503,7 +3540,17 @@ class AiopsDiagnosticService:
         )
         return await self._repositories.diagnostics.create_step(
             owner_user_id=owner_user_id,
-            step_id=f"diagnostic_step_{uuid4().hex}",
+            step_id=_stable_public_id(
+                "diagnostic_step",
+                task_id,
+                phase,
+                json.dumps(
+                    _safe_value(payload),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            ),
             task_id=task_id,
             sequence=len(existing_steps) + 1,
             phase=phase,
@@ -3809,6 +3856,22 @@ def _safe_model_call_error_code(exc: Exception) -> str:
     if isinstance(exc, (ConnectionError, OSError)):
         return "connection"
     return "model_call_failed"
+
+
+def _is_transient_infrastructure_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    name = exc.__class__.__name__.casefold()
+    return any(
+        token in name
+        for token in (
+            "connection",
+            "timeout",
+            "cannotconnect",
+            "operationalerror",
+            "interfaceerror",
+        )
+    )
 
 
 def _execution_deadlines_from_state(state: AiopsDiagnosticState) -> ExecutionDeadlines:

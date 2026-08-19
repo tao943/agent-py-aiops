@@ -13,6 +13,7 @@ from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
     build_live_evidence_runtime,
+    build_live_recovery_coordinator,
     build_live_scenario_registry,
     build_parser,
     classify_live_failure,
@@ -48,6 +49,45 @@ class AvailableEvaluationRepository:
 
     async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
         del envelope, artifact_checksum
+
+
+class RecordingAiopsRuntimeProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.repository = object()
+
+    def execution_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> object:
+        self.calls.append(
+            {
+                "owner_user_id": owner_user_id,
+                "task_id": task_id,
+                "graph_version": graph_version,
+            }
+        )
+        return self.repository
+
+
+def test_live_recovery_coordinator_uses_diagnostic_task_scope() -> None:
+    provider = RecordingAiopsRuntimeProvider()
+
+    coordinator = build_live_recovery_coordinator(
+        runtime_provider=provider,  # type: ignore[arg-type]
+        owner_user_id="eval-user",
+        diagnostic_task_id="diagnostic-task-1",
+        run_id="live-run-1",
+    )
+
+    assert provider.calls == [
+        {
+            "owner_user_id": "eval-user",
+            "task_id": "diagnostic-task-1",
+            "graph_version": "live-eval-v1",
+        }
+    ]
+    assert coordinator._repository is provider.repository  # pyright: ignore[reportPrivateUsage]
+    assert coordinator._worker_id == "live-recovery:live-run-1"  # pyright: ignore[reportPrivateUsage]
 
 
 def live_recorder(tmp_path: Path) -> tuple[EvaluationRunRecorder, EvaluationArchive]:

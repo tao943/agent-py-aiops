@@ -599,25 +599,37 @@ class SQLAlchemyToolCallAuditRepository:
         started_at: datetime | None = None,
     ) -> AgentToolCallAuditRecord:
         timestamp = started_at or utc_now()
-        row = AgentToolCallAuditModel(
-            id=audit_id,
-            owner_user_id=owner_user_id,
-            chat_session_id=None,
-            diagnostic_task_id=diagnostic_task_id,
-            tool_name=tool_name,
-            status="started",
-            arguments=arguments or {},
-            result_summary=None,
-            error_message=None,
-            started_at=timestamp,
-            completed_at=None,
-            duration_ms=None,
-            created_at=timestamp,
-        )
+        values = {
+            "id": audit_id,
+            "owner_user_id": owner_user_id,
+            "chat_session_id": None,
+            "diagnostic_task_id": diagnostic_task_id,
+            "tool_name": tool_name,
+            "status": "started",
+            "arguments": arguments or {},
+            "result_summary": None,
+            "error_message": None,
+            "started_at": timestamp,
+            "completed_at": None,
+            "duration_ms": None,
+            "created_at": timestamp,
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, diagnostic_task_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(AgentToolCallAuditModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(AgentToolCallAuditModel, audit_id)
+        if (
+            row is None
+            or row.owner_user_id != owner_user_id
+            or row.diagnostic_task_id != diagnostic_task_id
+        ):
+            raise TenantScopeError("Tool audit identity is outside diagnostic task scope.")
         return _agent_tool_call_audit_record(row)
 
     async def finalize(
@@ -1222,19 +1234,27 @@ class SQLAlchemyDiagnosticMemoryRepository:
         payload: JsonDict | None = None,
         created_at: datetime | None = None,
     ) -> DiagnosticReportRecord:
-        row = DiagnosticReportModel(
-            id=report_id,
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            title=title,
-            content=content,
-            payload=payload or {},
-            created_at=created_at or utc_now(),
-        )
+        values = {
+            "id": report_id,
+            "owner_user_id": owner_user_id,
+            "task_id": task_id,
+            "title": title,
+            "content": content,
+            "payload": payload or {},
+            "created_at": created_at or utc_now(),
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, task_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(DiagnosticReportModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(DiagnosticReportModel, report_id)
+        if row is None or row.owner_user_id != owner_user_id or row.task_id != task_id:
+            raise TenantScopeError("Diagnostic report identity is outside task scope.")
         return _diagnostic_report_record(row)
 
     async def list_reports(
@@ -1363,20 +1383,28 @@ class SQLAlchemyDiagnosticMemoryRepository:
         payload: JsonDict | None = None,
         created_at: datetime | None = None,
     ) -> DiagnosticStepRecord:
-        row = DiagnosticStepModel(
-            id=step_id,
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            sequence=sequence,
-            phase=phase,
-            status=status,
-            payload=payload or {},
-            created_at=created_at or utc_now(),
-        )
+        values = {
+            "id": step_id,
+            "owner_user_id": owner_user_id,
+            "task_id": task_id,
+            "sequence": sequence,
+            "phase": phase,
+            "status": status,
+            "payload": payload or {},
+            "created_at": created_at or utc_now(),
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, task_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(DiagnosticStepModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(DiagnosticStepModel, step_id)
+        if row is None or row.owner_user_id != owner_user_id or row.task_id != task_id:
+            raise TenantScopeError("Diagnostic step identity is outside task scope.")
         return _diagnostic_step_record(row)
 
     async def list_steps(
@@ -1487,20 +1515,28 @@ class SQLAlchemyDiagnosticMemoryRepository:
         evidence_id: str,
         created_at: datetime | None = None,
     ) -> ReportEvidenceLinkRecord:
-        row = ReportEvidenceLinkModel(
-            id=link_id,
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            report_id=report_id,
-            evidence_id=evidence_id,
-            created_at=created_at or utc_now(),
-        )
+        values = {
+            "id": link_id,
+            "owner_user_id": owner_user_id,
+            "task_id": task_id,
+            "report_id": report_id,
+            "evidence_id": evidence_id,
+            "created_at": created_at or utc_now(),
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, task_id)
             await _require_diagnostic_report(session, owner_user_id, task_id, report_id)
             await _require_diagnostic_evidence(session, owner_user_id, task_id, evidence_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(ReportEvidenceLinkModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(ReportEvidenceLinkModel, link_id)
+        if row is None or row.owner_user_id != owner_user_id or row.task_id != task_id:
+            raise TenantScopeError("Report evidence link identity is outside task scope.")
         return _report_evidence_link_record(row)
 
     async def list_report_evidence_links(

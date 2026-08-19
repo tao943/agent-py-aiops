@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar, cast
 
+from super_ai.aiops.execution import (
+    ExecutionCoordinator,
+    ExecutionIdentity,
+    UnsafeExecutionReplay,
+)
 from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
+    LiveCheck,
     LiveCleanupResult,
     LiveEvidenceContext,
     LiveFaultObservation,
@@ -18,6 +24,7 @@ from super_ai.evaluation.live.domain import (
     LiveRunIdentity,
     LiveScenario,
     LiveVerification,
+    RecoveryExpectation,
 )
 from super_ai.evaluation.live.scenarios import (
     load_live_oracle,
@@ -130,6 +137,9 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
         diagnostic: LiveDiagnosticAdapter,
         recovery: LiveRecoveryService,
         evaluator: LiveEvaluator[EvaluationT],
+        recovery_coordinator: ExecutionCoordinator | None = None,
+        recovery_coordinator_factory: Callable[[str], ExecutionCoordinator]
+        | None = None,
     ) -> None:
         self._scenario_root = scenario_root.resolve()
         self._driver = driver
@@ -137,6 +147,8 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
         self._diagnostic = diagnostic
         self._recovery = recovery
         self._evaluator = evaluator
+        self._recovery_coordinator = recovery_coordinator
+        self._recovery_coordinator_factory = recovery_coordinator_factory
 
     async def run(self, scenario_id: str, *, run_id: str) -> EvaluationT:
         identity = validate_run_id(run_id)
@@ -177,15 +189,56 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 "diagnostic_failed",
                 "diagnose",
             )
-            recovery = await self._classified(
-                self._recovery.recover(
+            async def recover_once() -> dict[str, object]:
+                record = await self._recovery.recover(
                     identity=identity,
                     diagnostic_artifact=diagnostic_artifact,
                     observation=observation,
-                ),
-                "recovery_failed",
-                "recover",
-            )
+                )
+                return _recovery_payload(record)
+
+            try:
+                recovery_coordinator = self._recovery_coordinator
+                if (
+                    recovery_coordinator is None
+                    and self._recovery_coordinator_factory is not None
+                    and isinstance(diagnostic_artifact, RunArtifact)
+                    and diagnostic_artifact.diagnostic_task_id is not None
+                ):
+                    recovery_coordinator = self._recovery_coordinator_factory(
+                        diagnostic_artifact.diagnostic_task_id
+                    )
+                if recovery_coordinator is None:
+                    recovery = _recovery_from_payload(await recover_once())
+                else:
+                    coordinated = await recovery_coordinator.run_once(
+                        ExecutionIdentity(
+                            task_id=identity.run_id,
+                            graph_version="live-eval-v1",
+                            node_name="recovery",
+                            logical_iteration=0,
+                            input_payload={
+                                "runId": identity.run_id,
+                                "scenarioId": scenario.id,
+                                "safeFacts": dict(observation.safe_facts),
+                            },
+                            execution_kind="recovery",
+                            side_effecting=True,
+                        ),
+                        recover_once,
+                        outcome_known_on_error=False,
+                    )
+                    recovery = _recovery_from_payload(coordinated.output)
+            except UnsafeExecutionReplay as exc:
+                raise LiveBenchmarkError(
+                    "recovery_denied",
+                    stage="recover",
+                    authorization_code="uncertain_previous_attempt",
+                ) from exc
+            except LiveBenchmarkError:
+                raise
+            except Exception as exc:
+                raise LiveBenchmarkError("recovery_failed", stage="recover") from exc
             oracle = load_live_oracle(scenario_dir)
             if (
                 oracle.recovery_expectation is None
@@ -278,4 +331,52 @@ def _recovery_contract_satisfied(record: LiveRecoveryRecord) -> bool:
         not record.executed
         and bool(record.proposal_checks)
         and all(check.passed for check in record.proposal_checks)
+    )
+
+
+def _recovery_payload(record: LiveRecoveryRecord) -> dict[str, object]:
+    return {
+        "action": record.action,
+        "targetRef": record.target_ref,
+        "expectation": record.expectation,
+        "authorized": record.authorized,
+        "executed": record.executed,
+        "authorizationCode": record.authorization_code,
+        "proposalChecks": [
+            {"name": item.name, "passed": item.passed, "source": item.source}
+            for item in record.proposal_checks
+        ],
+    }
+
+
+def _recovery_from_payload(payload: dict[str, object]) -> LiveRecoveryRecord:
+    expectation = payload.get("expectation")
+    if expectation not in {"executed_recovery", "proposal_only"}:
+        raise ValueError("Recovery payload expectation is invalid.")
+    raw_checks = payload.get("proposalChecks")
+    check_items = cast(list[object], raw_checks) if isinstance(raw_checks, list) else []
+    checks: list[LiveCheck] = []
+    for raw in check_items:
+        if not isinstance(raw, Mapping):
+            continue
+        item = cast(Mapping[str, object], raw)
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        source = item.get("source")
+        checks.append(
+            LiveCheck(
+                name=name,
+                passed=item.get("passed") is True,
+                source=source if isinstance(source, str) else "driver",
+            )
+        )
+    return LiveRecoveryRecord(
+        action=str(payload.get("action") or ""),
+        target_ref=str(payload.get("targetRef") or ""),
+        expectation=cast(RecoveryExpectation, expectation),
+        authorized=payload.get("authorized") is True,
+        executed=payload.get("executed") is True,
+        authorization_code=str(payload.get("authorizationCode") or ""),
+        proposal_checks=tuple(checks),
     )

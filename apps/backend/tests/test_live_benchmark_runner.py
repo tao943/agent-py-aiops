@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from super_ai.aiops.execution import UnsafeExecutionReplay
+from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveCleanupResult,
@@ -97,6 +99,33 @@ class RecordingDiagnostic:
         if self.failed:
             raise RuntimeError("secret-diagnostic-failure")
         return {"decision": "row_lock_blocking"}
+
+
+class ArtifactDiagnostic(RecordingDiagnostic):
+    async def diagnose(self, **values: object) -> RunArtifact:
+        del values
+        self.events.append("diagnose")
+        return RunArtifact(
+            scenario_id="APY-LIVE-PG-LOCK-001",
+            mode="live",
+            completed=True,
+            report_produced=True,
+            decision=None,
+            evidence=(),
+            hypothesis_states=(),
+            observation_decisions=(),
+            tool_calls=(),
+            plan_step_count=1,
+            duration_ms=1,
+            safety_events=(),
+            diagnostic_task_id="diagnostic-live-1",
+        )
+
+
+class UncertainRecoveryCoordinator:
+    async def run_once(self, *args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise UnsafeExecutionReplay("uncertain_side_effect_requires_manual_review")
 
 
 class RecordingEvidencePreparer:
@@ -339,6 +368,39 @@ async def test_runner_rejects_recovery_record_that_disagrees_with_oracle() -> No
     assert captured.value.category == "recovery_denied"
     assert captured.value.stage == "recover"
     assert captured.value.authorization_code == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_recovery_is_denied_without_replaying_side_effect() -> None:
+    driver = RecordingDriver()
+    coordinator = UncertainRecoveryCoordinator()
+    recovery = RecordingRecovery(driver.events)
+    coordinator_task_ids: list[str] = []
+
+    def coordinator_factory(task_id: str) -> object:
+        coordinator_task_ids.append(task_id)
+        return coordinator
+
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=ArtifactDiagnostic(driver.events),
+        recovery=recovery,
+        evaluator=RecordingEvaluator(driver.events),
+        recovery_coordinator_factory=coordinator_factory,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "recovery_denied"
+    assert captured.value.stage == "recover"
+    assert captured.value.authorization_code == "uncertain_previous_attempt"
+    assert captured.value.cleanup_succeeded is True
+    assert coordinator_task_ids == ["diagnostic-live-1"]
+    assert "recover" not in driver.events
+    assert driver.events[-1] == "cleanup"
 
 
 @pytest.mark.asyncio

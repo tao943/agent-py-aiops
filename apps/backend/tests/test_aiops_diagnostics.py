@@ -18,6 +18,7 @@ from super_ai.mcp_client import LocalMcpClient, McpClientError, McpToolDefinitio
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import DiagnosticTaskRecord, TenantScopeError
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
+from super_ai.redis_runtime.rate_limit import RateLimitDecision
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import StoredVectorChunk, VectorSearchResult
 
@@ -463,6 +464,17 @@ class UnavailableRedisClient:
         raise RedisError("Redis is unavailable")
 
 
+class AllowAllRateLimits:
+    async def acquire(self, *, owner_id: str, action: str) -> RateLimitDecision:
+        del owner_id, action
+        return RateLimitDecision(
+            allowed=True,
+            remaining=1,
+            retry_after_seconds=0,
+            mode="local_fallback",
+        )
+
+
 @pytest.mark.asyncio
 async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_unavailable(
     migrated_database_url: str,
@@ -472,6 +484,8 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
         database_url=migrated_database_url,
         aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
         redis_client=cast(Redis, UnavailableRedisClient()),
+        vector_store=cast(Any, FakeVectorStore([])),
+        rate_limit_service=AllowAllRateLimits(),
     )
     transport = httpx.ASGITransport(
         app=app
@@ -485,12 +499,21 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
             json={"query": "Inspect CPU", "alert": {"severity": "high"}},
         )
         diagnostic_id = create_response.json()["data"]["id"]
+        repositories = app.state.memory_repositories
+        owner_user_id = owner["user"]["id"]
+        background_jobs = repositories.background_jobs
+        assert background_jobs is not None
+        diagnostic_job = await background_jobs.find_for_resource(
+            owner_user_id=owner_user_id,
+            resource_type="aiops_diagnostic",
+            resource_id=diagnostic_id,
+        )
+        assert diagnostic_job is not None
+        assert diagnostic_job.max_attempts == 3
         stream = await client.post(
             f"/aiops/diagnostics/{diagnostic_id}:stream",
             headers=_auth_headers(owner["accessToken"]),
         )
-        repositories = app.state.memory_repositories
-        owner_user_id = owner["user"]["id"]
         phases = (
             "sufficiency_gate",
             "decision_validation",

@@ -1596,7 +1596,7 @@ def create_app(
             resource_type="aiops_diagnostic",
             resource_id=task.id,
             payload={"diagnosticId": task.id},
-            max_attempts=1,
+            max_attempts=3,
             timeout_seconds=1800,
         )
         await _background_job_runtime(request).start()
