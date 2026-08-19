@@ -270,6 +270,121 @@ async def test_v4_adjudicator_batches_all_unresolved_hypotheses_in_one_call(
 
 
 @pytest.mark.asyncio
+async def test_v4_adjudicator_projects_citations_back_to_observations(
+    migrated_database_url: str,
+) -> None:
+    class AdjudicationModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "hypothesisId": "slow_database_work",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-pool", "ev-postgres"],
+                            "reasonCode": "database_work_exhausts_pool",
+                        },
+                        {
+                            "hypothesisId": "traffic_capacity",
+                            "disposition": "refuted",
+                            "evidenceIds": ["ev-pool"],
+                            "reasonCode": "pool_pressure_not_traffic_driven",
+                        },
+                    ]
+                }
+            )
+
+    class Provider:
+        def create_chat_model(self) -> AdjudicationModel:
+            return AdjudicationModel()
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-adjudicated-observations",
+            status="running",
+            query="Inspect database pool pressure.",
+            input_payload={},
+        )
+        update = await _service(
+            repositories, Provider()
+        )._hypothesis_adjudicator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {"id": "slow_database_work", "description": "Work is slow."},
+                        {"id": "traffic_capacity", "description": "Traffic is high."},
+                    ],
+                    "hypothesis_assessments": _initial_hypothesis_assessments(
+                        [
+                            {"id": "slow_database_work"},
+                            {"id": "traffic_capacity"},
+                        ]
+                    ),
+                    "diagnostic_facts": [
+                        {
+                            "key": "InspectDatabasePool.waiting",
+                            "value": 12,
+                            "evidenceId": "ev-pool",
+                            "sourceTool": "InspectDatabasePool",
+                            "quality": "direct",
+                            "public": True,
+                        },
+                        {
+                            "key": "InspectPostgres.longTransactions",
+                            "value": 3,
+                            "evidenceId": "ev-postgres",
+                            "sourceTool": "InspectPostgres",
+                            "quality": "direct",
+                            "public": True,
+                        },
+                    ],
+                    "observation_decisions": [
+                        {
+                            "purpose": "Inspect pool pressure.",
+                            "supports": [],
+                            "refutes": [],
+                            "summary": "The pool has waiting requests.",
+                            "evidenceIds": ["ev-pool"],
+                            "causalRole": "context",
+                            "causalRoleOrigin": "plan_contract",
+                            "assessmentSource": "deterministic",
+                        },
+                        {
+                            "purpose": "Inspect database work.",
+                            "supports": [],
+                            "refutes": [],
+                            "summary": "Long transactions retain connections.",
+                            "evidenceIds": ["ev-postgres"],
+                            "causalRole": "mechanism",
+                            "causalRoleOrigin": "plan_contract",
+                            "assessmentSource": "deterministic",
+                        },
+                    ],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    observations = cast(list[dict[str, object]], update["observation_decisions"])
+    assert observations[0]["supports"] == ["slow_database_work"]
+    assert observations[0]["refutes"] == ["traffic_capacity"]
+    assert observations[1]["supports"] == ["slow_database_work"]
+    assert observations[1]["causalRole"] == "trigger"
+    assert observations[1]["causalRoleOrigin"] == "coverage_repair"
+    assert all(item["assessmentSource"] == "llm_adjudicated" for item in observations)
+
+
+@pytest.mark.asyncio
 async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
     migrated_database_url: str,
 ) -> None:

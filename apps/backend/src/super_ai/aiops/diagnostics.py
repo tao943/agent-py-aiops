@@ -476,6 +476,106 @@ def _supporting_observation_evidence_ids(
     )
 
 
+def _project_adjudicated_observations(
+    *,
+    observations: Sequence[JsonDict],
+    assessments: Sequence[HypothesisAssessment],
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Project accepted public citations back onto their source observations."""
+    supported = [item for item in assessments if item.disposition == "supported"]
+    closed = [
+        item
+        for item in assessments
+        if item.disposition in {"refuted", "causally_inactive"}
+    ]
+    projected: list[JsonDict] = []
+    for source in observations:
+        item = dict(source)
+        evidence_ids = set(
+            _unique_strings(
+                [
+                    value
+                    for value in cast(list[object], item.get("evidenceIds") or [])
+                    if isinstance(value, str)
+                ]
+            )
+        )
+        supports = _unique_strings(
+            [
+                *[
+                    value
+                    for value in cast(list[object], item.get("supports") or [])
+                    if isinstance(value, str)
+                ],
+                *[
+                    assessment.hypothesis_id
+                    for assessment in supported
+                    if evidence_ids.intersection(assessment.evidence_ids)
+                ],
+            ]
+        )
+        refutes = _unique_strings(
+            [
+                *[
+                    value
+                    for value in cast(list[object], item.get("refutes") or [])
+                    if isinstance(value, str)
+                ],
+                *[
+                    assessment.hypothesis_id
+                    for assessment in closed
+                    if evidence_ids.intersection(assessment.evidence_ids)
+                ],
+            ]
+        )
+        item["supports"] = supports
+        item["refutes"] = refutes
+        if supports or refutes:
+            item["assessmentSource"] = "llm_adjudicated"
+        projected.append(item)
+
+    if len(supported) != 1:
+        return projected
+    supported_id = supported[0].hypothesis_id
+    supporting_indexes = [
+        index
+        for index, item in enumerate(projected)
+        if supported_id in cast(list[object], item.get("supports") or [])
+    ]
+    if any(
+        projected[index].get("causalRole") == "trigger"
+        for index in supporting_indexes
+    ):
+        return projected
+    source_tools_by_evidence: dict[str, set[str]] = {}
+    for fact in facts:
+        source_tools_by_evidence.setdefault(fact.evidence_id, set()).add(
+            fact.source_tool
+        )
+    for index in supporting_indexes:
+        evidence_ids = [
+            value
+            for value in cast(
+                list[object], projected[index].get("evidenceIds") or []
+            )
+            if isinstance(value, str)
+        ]
+        source_tools = {
+            tool
+            for evidence_id in evidence_ids
+            for tool in source_tools_by_evidence.get(evidence_id, set())
+        }
+        if not any(
+            "trigger" in allowed_causal_intents(tool) for tool in source_tools
+        ):
+            continue
+        projected[index]["causalRole"] = "trigger"
+        projected[index]["causalRoleOrigin"] = "coverage_repair"
+        break
+    return projected
+
+
 _MAX_CAUSAL_CHAIN_ITEMS = 6
 
 
@@ -1874,11 +1974,19 @@ class AiopsDiagnosticService:
         except Exception:
             accepted = list(assessments)
         assessment_payloads = [_hypothesis_assessment_payload(item) for item in accepted]
+        observation_payloads = _project_adjudicated_observations(
+            observations=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+            assessments=accepted,
+            facts=facts,
+        )
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
             "adjudicationAttempt": 1,
             "acceptedAssessmentCount": accepted_count,
             "hypothesisAssessments": assessment_payloads,
+            "observationDecisions": observation_payloads,
             "modelCallCount": model_runtime.budget.used,
             "modelCallAudits": model_runtime.audits,
         }
@@ -1896,6 +2004,7 @@ class AiopsDiagnosticService:
                 _hypothesis_state_payload(project_hypothesis_assessment(item))
                 for item in accepted
             ],
+            "observation_decisions": observation_payloads,
             "adjudication_count": 1,
             "used_llm_adjudication": accepted_count > 0,
             "model_call_count": model_runtime.budget.used,
@@ -1909,6 +2018,7 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+
 
     async def _evidence_evaluator(
         self,

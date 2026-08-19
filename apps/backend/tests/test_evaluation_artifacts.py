@@ -402,6 +402,56 @@ def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
     )
 
 
+def test_v4_artifact_prefers_adjudicator_observation_projection() -> None:
+    base_observation = {
+        "purpose": "Inspect database work.",
+        "supports": [],
+        "refutes": [],
+        "summary": "Long transactions retain connections.",
+        "evidenceIds": ["ev-postgres"],
+        "causalRole": "mechanism",
+        "causalRoleOrigin": "plan_contract",
+    }
+    adjudicated_observation = {
+        **base_observation,
+        "supports": ["slow_database_work"],
+        "causalRole": "trigger",
+        "causalRoleOrigin": "coverage_repair",
+    }
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [base_observation],
+                },
+            ),
+            _step(
+                3,
+                "hypothesis_adjudicator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [adjudicated_observation],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert artifact.observation_decisions[0].supports == ("slow_database_work",)
+    assert artifact.observation_decisions[0].causal_role == "trigger"
+    assert artifact.observation_decisions[0].causal_role_origin == "coverage_repair"
+
+
 def test_v4_artifact_rejects_unknown_disposition_without_legacy_fallback() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

@@ -581,13 +581,27 @@ def _observation_decisions_from_steps(
     steps: Sequence[DiagnosticStepRecord],
 ) -> tuple[ObservationDecision, ...]:
     decisions: list[ObservationDecision] = []
+    adjudicator_projection = next(
+        (
+            step
+            for step in reversed(steps)
+            if step.phase == "hypothesis_adjudicator"
+            and isinstance(step.payload.get("observationDecisions"), list)
+        ),
+        None,
+    )
     for step in steps:
         raw_items: list[Mapping[str, object]] = []
         legacy = step.payload.get("observationDecision")
         if step.phase == "evidence_evaluation" and isinstance(legacy, Mapping):
             raw_items.append(cast(Mapping[str, object], legacy))
         v4_items = step.payload.get("observationDecisions")
-        if step.phase == "fact_adapter" and isinstance(v4_items, list):
+        use_v4_items = (
+            step is adjudicator_projection
+            if adjudicator_projection is not None
+            else step.phase == "fact_adapter"
+        )
+        if use_v4_items and isinstance(v4_items, list):
             raw_items.extend(
                 cast(Mapping[str, object], item)
                 for item in cast(list[object], v4_items)
@@ -618,7 +632,13 @@ def _observation_decisions_from_steps(
                 and evidence_ids is not None
                 and causal_role in {"trigger", "mechanism", "impact", "context"}
                 and causal_role_origin
-                in {None, "model", "plan_contract", "trusted_evidence_rule"}
+                in {
+                    None,
+                    "model",
+                    "plan_contract",
+                    "trusted_evidence_rule",
+                    "coverage_repair",
+                }
                 and reported_causal_role
                 in {None, "trigger", "mechanism", "impact", "context"}
                 and isinstance(causal_role_corrected, bool)
@@ -636,7 +656,10 @@ def _observation_decisions_from_steps(
                         ),
                         causal_role_origin=cast(
                             Literal[
-                                "model", "plan_contract", "trusted_evidence_rule"
+                                "model",
+                                "plan_contract",
+                                "trusted_evidence_rule",
+                                "coverage_repair",
                             ]
                             | None,
                             causal_role_origin,
