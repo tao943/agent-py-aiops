@@ -549,6 +549,12 @@ def _project_adjudicated_observations(
             facts=facts,
         )
     )
+    projected.extend(
+        _derive_redis_maxclients_observations(
+            assessment=supported[0],
+            facts=facts,
+        )
+    )
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index
@@ -768,6 +774,88 @@ def _derive_redis_pool_recovery_observations(
             "causalRoleOrigin": "coverage_repair",
             "assessmentSource": "llm_adjudicated",
         }
+    ]
+
+
+def _derive_redis_maxclients_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Derive Redis capacity trigger and rejection impact from cited counters."""
+    if assessment.hypothesis_id != "redis_maxclients":
+        return []
+    cited = [
+        fact
+        for fact in facts
+        if fact.public and fact.evidence_id in assessment.evidence_ids
+    ]
+
+    def positive_integer(key: str) -> DiagnosticFact | None:
+        return next(
+            (
+                fact
+                for fact in cited
+                if fact.key == key
+                and isinstance(fact.value, int)
+                and not isinstance(fact.value, bool)
+                and fact.value > 0
+            ),
+            None,
+        )
+
+    connected = positive_integer("InspectRedisServer.connectedClients")
+    maximum = positive_integer("InspectRedisServer.maxclients")
+    rejected = positive_integer("GetRedisConnectionMetrics.rejectedConnectionsDelta")
+    successful = positive_integer(
+        "GetRedisConnectionMetrics.successfulExistingOperations"
+    )
+    network_refused = next(
+        (
+            fact
+            for fact in cited
+            if fact.key
+            == "GetRedisConnectionMetrics.connectionRefusedAtNetworkLayer"
+            and fact.value == 0
+        ),
+        None,
+    )
+    if (
+        connected is None
+        or maximum is None
+        or connected.value != maximum.value
+        or rejected is None
+        or successful is None
+        or network_refused is None
+    ):
+        return []
+    common: JsonDict = {
+        "supports": [assessment.hypothesis_id],
+        "refutes": [],
+        "causalRoleOrigin": "coverage_repair",
+        "assessmentSource": "llm_adjudicated",
+    }
+    return [
+        {
+            **common,
+            "purpose": "Establish whether Redis reached its client capacity.",
+            "summary": (
+                f"Redis connected clients reached the configured maxclients limit of "
+                f"{maximum.value}."
+            ),
+            "evidenceIds": [connected.evidence_id],
+            "causalRole": "trigger",
+        },
+        {
+            **common,
+            "purpose": "Establish the impact on new Redis connections.",
+            "summary": (
+                f"Redis rejected {rejected.value} new connections while existing operations "
+                "continued and the network layer reported no refusals."
+            ),
+            "evidenceIds": [rejected.evidence_id],
+            "causalRole": "impact",
+        },
     ]
 
 

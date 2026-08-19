@@ -587,6 +587,89 @@ def test_v4_adjudicator_derives_redis_pool_recovery_trigger() -> None:
     assert triggers[0]["evidenceIds"] == ["ev-pool"]
 
 
+def test_v4_adjudicator_derives_redis_maxclients_trigger_and_impact() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect Redis server capacity.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Connected clients equal maxclients.",
+                "evidenceIds": ["ev-capacity"],
+                "causalRole": "context",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            },
+            {
+                "purpose": "Inspect Redis rejection counters.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Rejected connections increased.",
+                "evidenceIds": ["ev-rejections"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            },
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="redis_maxclients",
+                disposition="supported",
+                evidence_ids=("ev-capacity", "ev-rejections"),
+                reason_code="redis_reached_client_limit",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectRedisServer.connectedClients",
+                value=16,
+                evidence_id="ev-capacity",
+                source_tool="InspectRedisServer",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectRedisServer.maxclients",
+                value=16,
+                evidence_id="ev-capacity",
+                source_tool="InspectRedisServer",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="GetRedisConnectionMetrics.rejectedConnectionsDelta",
+                value=83,
+                evidence_id="ev-rejections",
+                source_tool="GetRedisConnectionMetrics",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="GetRedisConnectionMetrics.successfulExistingOperations",
+                value=4201,
+                evidence_id="ev-rejections",
+                source_tool="GetRedisConnectionMetrics",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="GetRedisConnectionMetrics.connectionRefusedAtNetworkLayer",
+                value=0,
+                evidence_id="ev-rejections",
+                source_tool="GetRedisConnectionMetrics",
+                quality="context",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "coverage_repair"
+    ]
+    assert [item["causalRole"] for item in derived] == ["trigger", "impact"]
+    assert derived[0]["evidenceIds"] == ["ev-capacity"]
+    assert derived[1]["evidenceIds"] == ["ev-rejections"]
+    assert all(item["supports"] == ["redis_maxclients"] for item in derived)
+
+
 @pytest.mark.asyncio
 async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     migrated_database_url: str,
