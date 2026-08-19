@@ -497,6 +497,26 @@ Step、Checkpoint 与 Run Artifact 仅保存允许列表模型名和错误分类
 Pydantic Schema 并返回 `valid`。该 readiness 未读取 APY、RAG、CLS 或 PostgreSQL 诊断证据，
 也没有运行 APY-013，因此没有产生新的 Benchmark 分数或达标声明。
 
+### Nginx LLM + CLS 正式验收（2026-08-20）
+
+`APY-LIVE-NGINX-TIMEOUT-001` 的正式 Run ID 为
+`accept-apy-live-nginx-timeout-001-1787183288`。本次使用 30 卡 active/indexed 知识库、真实
+CLS 证据源和 `evidence-driven-v4` Workflow，结果为 `VALID_PASS`、总分 100、raw total 100，
+没有 hard gate 或失败项；Diagnostic Task 为 `succeeded`，Evaluation Run 为 `passed`，
+Artifact checksum 已持久化。总耗时 143,924 ms。
+
+本次 Agent 完成 `knowledge_retrieval`、三个 Nginx 只读工具、`SearchLog` 和无副作用
+`ProposeNginxTimeoutMitigation`，六条工具审计均为 `completed`。可信公开事实模式形成唯一
+upstream response timeout 根因和完整 trigger/mechanism/impact；未调用 Adjudicator、Replanner
+或 LLM Validator。模型角色只有 Planner、Recovery Planner 和同步 Report，共三次调用；Report
+由 LLM 生成。Validator Router 记录 `validationRequired=false` 和 `no_semantic_risk`。
+
+Recovery 保持 `proposal_only`，Policy Gate 仅记录供人工审阅的提案：
+`proposalRecorded=true`、`executionPermitted=false`，没有修改或 reload Nginx。独立 Verify 与
+Cleanup 均通过，Nginx 配置 diff 为 0。历史审计为 85 个 Artifact、85 个 checksum、0 conflict、
+0 database pending。本轮关键修复提交为 `39dc6e9` 和 `0716c84`；只运行目标回归，没有运行
+全量 pytest。
+
 ## 当前阶段边界
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
