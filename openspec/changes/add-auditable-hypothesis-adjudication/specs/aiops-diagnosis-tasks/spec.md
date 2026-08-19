@@ -46,6 +46,37 @@ or high-quality conflict review.
 - **THEN** Workflow MUST create a deterministic manual-review plan
 - **AND** Workflow MUST NOT spend an LLM Recovery Planner or Validator call
 
+### Requirement: Compound trusted patterns remain answer-isolated
+
+Workflow SHALL close multiple hypotheses deterministically only when a code-owned compound pattern matches
+current-task public Evidence. The pattern MUST NOT read scenario identity, run identity, Oracle, Ground Truth,
+score rules, or fixture values.
+
+#### Scenario: Nginx timeout facts close differentiated alternatives
+- **WHEN** one request has HTTP 504, upstream connect success, read deadline elapsed, independently healthy upstream and gateway probes, and an incident-scoped upstream-timeout event
+- **THEN** Workflow SHALL support upstream response timeout
+- **AND** every closed competitor MUST cite the direct current-task Evidence that closes it
+
+#### Scenario: One required fact is absent or belongs to another task
+- **WHEN** any required fact is absent, contradicted, or its Evidence ID is not owned by the current task
+- **THEN** Workflow MUST leave the affected hypothesis unresolved or conflicting
+- **AND** it MUST NOT infer the benchmark answer from scenario identity
+
+### Requirement: Replanner model calls require a provably useful search space
+
+Before calling the Replanner model, Workflow SHALL determine from discovered tool schemas, trusted argument
+contracts, execution-owned bindings, and causal capabilities whether at least one unexecuted contract-valid step
+can still address the current evidence gap. If no such step can exist under bounded trusted arguments, Workflow
+MUST persist `no_useful_step` without spending a Replanner model call.
+
+#### Scenario: Bounded diagnostic calls are exhausted
+- **WHEN** every gap-relevant tool has only empty, constant, or execution-owned arguments and every canonical call has already completed
+- **THEN** Workflow MUST skip the Replanner model and record an allowlisted skip reason
+
+#### Scenario: A free legal parameter space remains
+- **WHEN** a gap-relevant tool accepts a legal parameter that code cannot prove exhausted
+- **THEN** Workflow MAY call the bounded Replanner model once
+
 ### Requirement: Model and time budgets survive restart
 
 Workflow SHALL limit all model requests, including retries and format corrections, to eight calls. It SHALL persist

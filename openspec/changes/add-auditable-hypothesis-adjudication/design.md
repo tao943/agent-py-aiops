@@ -20,6 +20,11 @@ supported 且没有 unresolved 活跃竞争项时，系统才能形成单根因�
 Planner 只能选择项目代码内的模板和有界参数，不能自行定义 fact 与 disposition 的因果映射。
 未命中模板的观察进入一次批量 LLM Adjudicator；其输出仍须经相同的 Evidence 门禁。
 
+代码拥有的复合受信模式可以组合多个只读工具的公开 Fact，但只能接受当前任务已经持久化的
+Evidence ID。Nginx timeout 模式必须同时看到 HTTP 504、上游连接成功、读取 deadline 到期、独立
+upstream/gateway 健康探针和 incident-scoped CLS timeout 事件；缺失、冲突或跨任务 Evidence 均保持
+unresolved。该模式不读取 Scenario/Run ID、Oracle、Ground Truth、评分规则或 fixture 数值。
+
 ### Validator 由代码路由
 
 Deterministic Validator 始终运行。仅当使用过 LLM Adjudicator、请求执行恢复、存在 L2/L3 动作、
@@ -36,6 +41,14 @@ Step、工具审计和报告链接使用稳定 ID 冲突安全写入。恢复动
 
 模型调用总数、角色审计、Replanner 次数、首次启动时间和软硬 deadline 都属于 checkpoint 状态。
 Worker 重启使用原值恢复，不能重新获得调用或时间预算。
+
+### Replanner 仅在仍有可证明的搜索空间时调用模型
+
+Replanner 先用现有工具 schema、参数合同、execution-owned 参数和 causal capability 计算可执行的
+deterministic gap step。仅当代码不能证明所有可覆盖 gap 的有界调用都已执行时，才允许调用一次
+Replanner 模型；空参数、const 或 execution-owned 固定参数工具均已耗尽时直接持久化
+`no_useful_step`。RAG 的向量/BM25 并发和 owner/version 隔离 Redis cache 保持现状；Adjudicator 仍是
+一次批量调用，主链与同步 Report 不并行。
 
 ## Risks / Trade-offs
 
