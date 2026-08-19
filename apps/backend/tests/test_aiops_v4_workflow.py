@@ -961,6 +961,153 @@ async def test_fact_adapter_records_cross_evidence_differential_support(
 
 
 @pytest.mark.asyncio
+async def test_fact_adapter_deterministically_closes_redis_availability_chain(
+    migrated_database_url: str,
+) -> None:
+    hypotheses: list[JsonDict] = [
+        {"id": "redis_server_availability", "description": "Redis is unavailable."},
+        {
+            "id": "redis_client_connection_lifecycle",
+            "description": "The client retains unusable connections.",
+        },
+        {"id": "redis_network_path", "description": "The network path failed."},
+    ]
+    plan: list[JsonDict] = [
+        {
+            "id": "redis",
+            "tool": "InspectRedis",
+            "arguments": {},
+            "purpose": "Inspect Redis availability.",
+            "testsHypotheses": ["redis_server_availability"],
+            "causalIntent": "context",
+            "evidenceRules": [],
+        },
+        {
+            "id": "pool",
+            "tool": "InspectRedisClientPool",
+            "arguments": {},
+            "purpose": "Inspect the client pool.",
+            "testsHypotheses": [
+                "redis_client_connection_lifecycle",
+                "redis_network_path",
+            ],
+            "causalIntent": "mechanism",
+            "evidenceRules": [],
+        },
+        {
+            "id": "metrics",
+            "tool": "GetServiceMetrics",
+            "arguments": {},
+            "purpose": "Inspect Redis dependency impact.",
+            "testsHypotheses": [
+                "redis_server_availability",
+                "redis_network_path",
+            ],
+            "causalIntent": "impact",
+            "evidenceRules": [],
+        },
+        {
+            "id": "changes",
+            "tool": "GetDeploymentChanges",
+            "arguments": {},
+            "purpose": "Inspect unrelated deployment changes.",
+            "testsHypotheses": ["redis_client_connection_lifecycle"],
+            "causalIntent": "trigger",
+            "evidenceRules": [],
+        },
+    ]
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-deterministic-redis-availability",
+            status="running",
+            query="Resolve Redis request failures.",
+            input_payload={},
+        )
+        service = _service(repositories)
+        state: dict[str, object] = {
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "public_hypotheses": hypotheses,
+            "hypothesis_assessments": _initial_hypothesis_assessments(hypotheses),
+            "diagnostic_facts": [],
+            "plan": plan,
+        }
+        outputs = [
+            (
+                "ev-redis",
+                "Redis is stopped and not listening.",
+                {"processStatus": "stopped", "listening": False},
+            ),
+            (
+                "ev-pool",
+                "No stale connections; the endpoint refuses connections.",
+                {
+                    "waitingRequests": 0,
+                    "staleConnections": 0,
+                    "lastError": "connection refused",
+                },
+            ),
+            (
+                "ev-impact",
+                "Redis dependency errors increased.",
+                {"redisErrorRatePercent": 74},
+            ),
+            (
+                "ev-change",
+                "Only an unrelated UI release was found.",
+                {"changes": [{"component": "storefront-ui"}]},
+            ),
+        ]
+        observations: list[dict[str, object]] = []
+        for step, (evidence_id, summary, output) in zip(plan, outputs, strict=True):
+            update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        **state,
+                        "current_plan_step": step,
+                        "current_evidence_id": evidence_id,
+                        "current_evidence_summary": summary,
+                        "current_tool_output": output,
+                    },
+                )
+            )
+            state["hypothesis_assessments"] = update["hypothesis_assessments"]
+            state["diagnostic_facts"] = update["diagnostic_facts"]
+            observations.extend(
+                cast(list[dict[str, object]], update["observation_decisions"])
+            )
+    finally:
+        await engine.dispose()
+
+    assessments = {
+        item["hypothesisId"]: item
+        for item in cast(
+            list[dict[str, object]], state["hypothesis_assessments"]
+        )
+    }
+    assert assessments["redis_server_availability"]["disposition"] == "supported"
+    assert assessments["redis_client_connection_lifecycle"]["disposition"] == "refuted"
+    assert assessments["redis_network_path"]["disposition"] == "refuted"
+    supported = [
+        item
+        for item in observations
+        if "redis_server_availability" in cast(list[object], item["supports"])
+    ]
+    assert [item["causalRole"] for item in supported] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    assert observations[-1]["supports"] == []
+
+
+@pytest.mark.asyncio
 async def test_v4_sufficiency_requires_a_buildable_causal_decision(
     migrated_database_url: str,
 ) -> None:

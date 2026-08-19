@@ -23,6 +23,10 @@ _DIRECT_FACT_KEYS = frozenset(
         "InspectNginx.upstreamPort",
         "InspectNginx.resolvedAddresses",
         "InspectNginx.responseStatus",
+        "InspectRedis.processStatus",
+        "InspectRedis.listening",
+        "InspectRedisClientPool.lastError",
+        "InspectRedisClientPool.staleConnections",
     }
 )
 

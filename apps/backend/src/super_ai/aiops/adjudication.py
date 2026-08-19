@@ -144,6 +144,47 @@ _TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
         causal_role="context",
         parameters=(("addressesFact", "InspectNginx.resolvedAddresses"),),
     ),
+    "redis_process_stopped": _TrustedRuleTemplate(
+        step_tool="InspectRedis",
+        hypothesis_id="redis_server_availability",
+        predicate=EvidencePredicate(
+            left_fact="InspectRedis.processStatus",
+            operator="in",
+            expected=("dead", "exited", "stopped"),
+        ),
+        when_true="supported",
+        reason_code="redis_server_process_stopped",
+        causal_role="trigger",
+        parameters=(("statusFact", "InspectRedis.processStatus"),),
+    ),
+    "redis_no_stale_connections": _TrustedRuleTemplate(
+        step_tool="InspectRedisClientPool",
+        hypothesis_id="redis_client_connection_lifecycle",
+        predicate=EvidencePredicate(
+            left_fact="InspectRedisClientPool.staleConnections",
+            operator="eq",
+            expected=0,
+        ),
+        when_true="refuted",
+        reason_code="redis_client_pool_has_no_stale_connections",
+        causal_role="mechanism",
+        parameters=(
+            ("staleConnectionsFact", "InspectRedisClientPool.staleConnections"),
+        ),
+    ),
+    "redis_connection_refused_reaches_endpoint": _TrustedRuleTemplate(
+        step_tool="InspectRedisClientPool",
+        hypothesis_id="redis_network_path",
+        predicate=EvidencePredicate(
+            left_fact="InspectRedisClientPool.lastError",
+            operator="contains",
+            expected="connection refused",
+        ),
+        when_true="refuted",
+        reason_code="redis_endpoint_refused_reachable_connection",
+        causal_role="mechanism",
+        parameters=(("lastErrorFact", "InspectRedisClientPool.lastError"),),
+    ),
 }
 
 

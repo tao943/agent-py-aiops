@@ -1848,6 +1848,7 @@ class AiopsDiagnosticService:
             unresolved_assessments = [
                 item for item in reduced if item.disposition == "unresolved"
             ]
+            converged_causal_link = False
             if (
                 not supports
                 and refutes
@@ -1855,6 +1856,23 @@ class AiopsDiagnosticService:
                 and not unresolved_assessments
             ):
                 supports.append(supported_assessments[0].hypothesis_id)
+            if (
+                not supports
+                and not refutes
+                and len(supported_assessments) == 1
+                and not unresolved_assessments
+                and current_step.get("causalIntent") in {"mechanism", "impact"}
+                and supported_assessments[0].hypothesis_id
+                in {
+                    value
+                    for value in cast(
+                        list[object], current_step.get("testsHypotheses") or []
+                    )
+                    if isinstance(value, str)
+                }
+            ):
+                supports.append(supported_assessments[0].hypothesis_id)
+                converged_causal_link = True
             linked_ids = _unique_strings(
                 [
                     linked_id
@@ -1863,6 +1881,13 @@ class AiopsDiagnosticService:
                     for linked_id in item.evidence_ids
                 ]
             ) or [evidence_id]
+            if converged_causal_link:
+                linked_ids = _unique_strings(
+                    [
+                        *linked_ids,
+                        *supported_assessments[0].evidence_ids,
+                    ]
+                )
             rule_causal_roles = {
                 role
                 for item in reduced
@@ -4504,6 +4529,7 @@ def _trusted_rules_from_plan(
     plan: Sequence[JsonDict],
 ) -> tuple[HypothesisEvidenceRule, ...]:
     rules: dict[tuple[str, str], HypothesisEvidenceRule] = {}
+    catalog = trusted_evidence_rule_catalog()
     for step in plan:
         tool = step.get("tool")
         if not isinstance(tool, str):
@@ -4520,6 +4546,31 @@ def _trusted_rules_from_plan(
                 or not isinstance(hypothesis_id, str)
                 or not isinstance(parameters, Mapping)
                 or not all(isinstance(key, str) for key in parameters)
+            ):
+                continue
+            rule = instantiate_trusted_evidence_rule(
+                template_id=template_id,
+                hypothesis_id=hypothesis_id,
+                parameters=cast(Mapping[str, object], parameters),
+                step_tool=tool,
+            )
+            if rule is not None:
+                rules[(rule.template_id, rule.hypothesis_id)] = rule
+        tested_hypotheses = {
+            value
+            for value in cast(list[object], step.get("testsHypotheses") or [])
+            if isinstance(value, str)
+        }
+        for catalog_item in catalog:
+            template_id = catalog_item.get("templateId")
+            hypothesis_id = catalog_item.get("hypothesisId")
+            parameters = catalog_item.get("parameters")
+            if (
+                catalog_item.get("tool") != tool
+                or not isinstance(template_id, str)
+                or not isinstance(hypothesis_id, str)
+                or hypothesis_id not in tested_hypotheses
+                or not isinstance(parameters, Mapping)
             ):
                 continue
             rule = instantiate_trusted_evidence_rule(
