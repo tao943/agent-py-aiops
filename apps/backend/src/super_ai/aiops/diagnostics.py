@@ -561,12 +561,29 @@ def _project_adjudicated_observations(
         assessment=supported[0],
         facts=facts,
     )
-    projected.extend(
-        _derive_postgres_deadlock_observations(
-            assessment=supported[0],
-            facts=facts,
-        )
+    deadlock_observations = _derive_postgres_deadlock_observations(
+        assessment=supported[0],
+        facts=facts,
     )
+    if deadlock_observations:
+        trigger_evidence_ids = set(
+            cast(list[str], deadlock_observations[0]["evidenceIds"])
+        )
+        for observation in projected:
+            observation_evidence_ids = {
+                item
+                for item in cast(list[object], observation.get("evidenceIds") or [])
+                if isinstance(item, str)
+            }
+            if (
+                observation.get("causalRole") == "trigger"
+                and supported[0].hypothesis_id
+                in cast(list[object], observation.get("supports") or [])
+                and trigger_evidence_ids.intersection(observation_evidence_ids)
+            ):
+                observation["causalRole"] = "context"
+                observation["causalRoleOrigin"] = "fact_projection_context"
+        projected.extend(deadlock_observations)
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index

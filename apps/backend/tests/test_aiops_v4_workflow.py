@@ -292,7 +292,7 @@ def test_v4_derives_postgres_deadlock_chain_from_public_audit_facts() -> None:
             "supports": ["postgres_deadlock"],
             "refutes": [],
             "evidenceIds": ["ev-audit"],
-            "causalRole": "context",
+            "causalRole": "trigger",
         },
         {
             "summary": "raw result",
@@ -361,6 +361,7 @@ def test_v4_derives_postgres_deadlock_chain_from_public_audit_facts() -> None:
     )
     derived = projected[-3:]
 
+    assert sum(item.get("causalRole") == "trigger" for item in projected) == 1
     assert [item["causalRole"] for item in derived] == [
         "trigger",
         "mechanism",
