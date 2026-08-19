@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -320,11 +320,27 @@ class SQLAlchemyLangGraphCheckpointRepository(LangGraphCheckpointRepository):
         }
         async with self._session_factory() as session:
             await self._require_task(session)
+            statement = postgresql_insert(AiopsLangGraphCheckpointModel).values(
+                **values
+            )
             await session.execute(
-                postgresql_insert(AiopsLangGraphCheckpointModel)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=["thread_id", "checkpoint_ns", "checkpoint_id"]
+                statement.on_conflict_do_update(
+                    index_elements=["thread_id", "checkpoint_ns", "checkpoint_id"],
+                    set_={
+                        "parent_checkpoint_id": statement.excluded.parent_checkpoint_id,
+                        "checkpoint_type": statement.excluded.checkpoint_type,
+                        "checkpoint_blob": statement.excluded.checkpoint_blob,
+                        "metadata_type": statement.excluded.metadata_type,
+                        "metadata_blob": statement.excluded.metadata_blob,
+                        "created_at": statement.excluded.created_at,
+                    },
+                    where=and_(
+                        AiopsLangGraphCheckpointModel.owner_user_id
+                        == self._owner_user_id,
+                        AiopsLangGraphCheckpointModel.task_id == self._task_id,
+                        AiopsLangGraphCheckpointModel.graph_version
+                        == self._graph_version,
+                    ),
                 )
             )
             await session.commit()

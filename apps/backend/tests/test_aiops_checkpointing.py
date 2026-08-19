@@ -64,9 +64,18 @@ async def test_postgres_saver_round_trips_parent_and_idempotent_writes(
             cast(Any, {"source": "input", "step": 0, "parents": {}}),
             {},
         )
+        updated_first = first.copy()
+        updated_first["channel_values"] = {"model_call_count": 4}
+        updated_first_config = await saver.aput(
+            base_config,
+            updated_first,
+            cast(Any, {"source": "loop", "step": 1, "parents": {}}),
+            {},
+        )
+        updated_first_stored = await saver.aget_tuple(updated_first_config)
         second = empty_checkpoint()
         second["channel_values"] = {
-            "model_call_count": 4,
+            "model_call_count": 5,
             "soft_deadline_at": "persisted",
         }
         second_config = await saver.aput(
@@ -94,7 +103,11 @@ async def test_postgres_saver_round_trips_parent_and_idempotent_writes(
 
     assert stored is not None
     assert repeated_first_config == first_config
-    assert stored.checkpoint["channel_values"]["model_call_count"] == 4
+    assert updated_first_config == first_config
+    assert updated_first_stored is not None
+    assert updated_first_stored.checkpoint["channel_values"]["model_call_count"] == 4
+    assert updated_first_stored.metadata.get("step") == 1
+    assert stored.checkpoint["channel_values"]["model_call_count"] == 5
     assert stored.parent_config == first_config
     assert len(stored.pending_writes or []) == 1
     assert len(listed) == 2
