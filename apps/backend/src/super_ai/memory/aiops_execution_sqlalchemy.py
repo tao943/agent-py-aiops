@@ -351,10 +351,6 @@ class SQLAlchemyLangGraphCheckpointRepository(LangGraphCheckpointRepository):
     async def put_writes(self, records: Sequence[StoredCheckpointWrite]) -> None:
         if not records:
             return
-        identities = {item.identity for item in records}
-        for identity in identities:
-            if await self.get_tuple(identity) is None:
-                raise TenantScopeError("Checkpoint write target is not accessible.")
         values = [
             {
                 "thread_id": item.identity.thread_id,
@@ -389,6 +385,29 @@ class SQLAlchemyLangGraphCheckpointRepository(LangGraphCheckpointRepository):
                     ]
                 )
             )
+            for record in records:
+                row = await session.get(
+                    AiopsLangGraphWriteModel,
+                    (
+                        record.identity.thread_id,
+                        record.identity.checkpoint_ns,
+                        record.identity.checkpoint_id,
+                        record.write_task_id,
+                        record.task_path,
+                        record.write_index,
+                    ),
+                )
+                if not _same_checkpoint_write(
+                    row,
+                    record,
+                    owner_user_id=self._owner_user_id,
+                    task_id=self._task_id,
+                    graph_version=self._graph_version,
+                ):
+                    await session.rollback()
+                    raise TenantScopeError(
+                        "Checkpoint write identity belongs to another scope or payload."
+                    )
             await session.commit()
 
     async def _require_task(self, session: AsyncSession) -> None:
@@ -425,6 +444,32 @@ def _same_checkpoint_payload(
         and stored.checkpoint_blob == requested.checkpoint_blob
         and stored.metadata_type == requested.metadata_type
         and stored.metadata_blob == requested.metadata_blob
+    )
+
+
+def _same_checkpoint_write(
+    stored: AiopsLangGraphWriteModel | None,
+    requested: StoredCheckpointWrite,
+    *,
+    owner_user_id: str,
+    task_id: str,
+    graph_version: str,
+) -> bool:
+    """Validate idempotent pending writes without requiring a parent checkpoint."""
+    return bool(
+        stored is not None
+        and stored.owner_user_id == owner_user_id
+        and stored.diagnostic_task_id == task_id
+        and stored.graph_version == graph_version
+        and stored.thread_id == requested.identity.thread_id
+        and stored.checkpoint_ns == requested.identity.checkpoint_ns
+        and stored.checkpoint_id == requested.identity.checkpoint_id
+        and stored.write_task_id == requested.write_task_id
+        and stored.task_path == requested.task_path
+        and stored.write_index == requested.write_index
+        and stored.channel == requested.channel
+        and stored.value_type == requested.value_type
+        and stored.value_blob == requested.value_blob
     )
 
 

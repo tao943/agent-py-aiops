@@ -1,10 +1,13 @@
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
+
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from uuid import uuid4
 
 import pytest
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.checkpointing import PostgresDiagnosticCheckpointSaver
 from super_ai.memory.aiops_execution_sqlalchemy import (
@@ -12,6 +15,16 @@ from super_ai.memory.aiops_execution_sqlalchemy import (
 )
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
+
+
+class _CheckpointGraphState(TypedDict):
+    value: int
+
+
+def _increment_checkpoint_graph(
+    state: _CheckpointGraphState,
+) -> _CheckpointGraphState:
+    return {"value": state["value"] + 1}
 
 
 @pytest.mark.asyncio
@@ -124,3 +137,52 @@ def test_saver_rejects_another_task_thread() -> None:
         saver._identity_parts(  # pyright: ignore[reportPrivateUsage]
             cast(Any, {"configurable": {"thread_id": "aiops:task-b:v2"}})
         )
+
+
+@pytest.mark.asyncio
+async def test_postgres_saver_completes_a_real_state_graph(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"saver-graph-task-{uuid4().hex}"
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Checkpoint a real graph.",
+            input_payload={},
+        )
+        repository = SQLAlchemyLangGraphCheckpointRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        saver = PostgresDiagnosticCheckpointSaver(
+            repository,
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        builder = StateGraph(_CheckpointGraphState)
+        builder.add_node("increment", _increment_checkpoint_graph)
+        builder.add_edge(START, "increment")
+        builder.add_edge("increment", END)
+        graph = builder.compile(checkpointer=saver)
+        config = cast(
+            Any,
+            {
+                "configurable": {
+                    "thread_id": f"aiops:{task_id}:aiops-diagnostic-v2",
+                    "checkpoint_ns": "",
+                }
+            },
+        )
+
+        result = await graph.ainvoke({"value": 1}, config=config)
+    finally:
+        await engine.dispose()
+
+    assert result == {"value": 2}

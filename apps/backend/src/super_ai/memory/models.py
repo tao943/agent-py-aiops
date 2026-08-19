@@ -10,7 +10,6 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
-    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -935,15 +934,6 @@ class AiopsLangGraphCheckpointModel(Base):
 class AiopsLangGraphWriteModel(Base):
     __tablename__ = "aiops_langgraph_writes"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["thread_id", "checkpoint_ns", "checkpoint_id"],
-            [
-                "aiops_langgraph_checkpoints.thread_id",
-                "aiops_langgraph_checkpoints.checkpoint_ns",
-                "aiops_langgraph_checkpoints.checkpoint_id",
-            ],
-            ondelete="CASCADE",
-        ),
         UniqueConstraint(
             "thread_id",
             "checkpoint_ns",

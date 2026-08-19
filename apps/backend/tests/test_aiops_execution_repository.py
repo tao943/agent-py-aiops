@@ -16,6 +16,7 @@ from super_ai.memory.repositories import (
     ExecutionClaim,
     StoredCheckpoint,
     StoredCheckpointWrite,
+    TenantScopeError,
 )
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 
@@ -171,6 +172,136 @@ async def test_checkpoint_and_writes_round_trip_idempotently(
     assert stored is not None
     assert stored.checkpoint == checkpoint
     assert stored.writes == (write,)
+
+
+@pytest.mark.asyncio
+async def test_pending_writes_can_precede_their_checkpoint(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"pending-write-task-{uuid4().hex}"
+    identity = CheckpointIdentity(
+        thread_id=f"aiops:{task_id}:aiops-diagnostic-v2",
+        checkpoint_ns="",
+        checkpoint_id="pending-0001",
+    )
+    now = datetime.now(timezone.utc)
+    checkpoint = StoredCheckpoint(
+        identity=identity,
+        parent_checkpoint_id=None,
+        checkpoint_type="msgpack",
+        checkpoint_blob=b"checkpoint-bytes",
+        metadata_type="json",
+        metadata_blob=b"metadata-bytes",
+        created_at=now,
+    )
+    write = StoredCheckpointWrite(
+        identity=identity,
+        write_task_id="langgraph-task-1",
+        task_path="pull:executor",
+        write_index=0,
+        channel="messages",
+        value_type="msgpack",
+        value_blob=b"write-before-checkpoint",
+        created_at=now,
+    )
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Test pending writes.",
+            input_payload={},
+        )
+        repository = SQLAlchemyLangGraphCheckpointRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+
+        await repository.put_writes([write])
+        before_checkpoint = await repository.get_tuple(identity)
+        await repository.put_checkpoint(checkpoint)
+        stored = await repository.get_tuple(identity)
+    finally:
+        await engine.dispose()
+
+    assert before_checkpoint is None
+    assert stored is not None
+    assert stored.checkpoint == checkpoint
+    assert stored.writes == (write,)
+
+
+@pytest.mark.asyncio
+async def test_pending_write_conflicts_reject_changed_payload_and_scope(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    first_task_id = f"pending-write-owner-{uuid4().hex}"
+    second_task_id = f"pending-write-intruder-{uuid4().hex}"
+    identity = CheckpointIdentity(
+        thread_id=f"aiops:{first_task_id}:aiops-diagnostic-v2",
+        checkpoint_ns="",
+        checkpoint_id="pending-0001",
+    )
+    now = datetime.now(timezone.utc)
+    write = StoredCheckpointWrite(
+        identity=identity,
+        write_task_id="langgraph-task-1",
+        task_path="pull:executor",
+        write_index=0,
+        channel="messages",
+        value_type="msgpack",
+        value_blob=b"original-write",
+        created_at=now,
+    )
+    changed_write = StoredCheckpointWrite(
+        identity=identity,
+        write_task_id=write.write_task_id,
+        task_path=write.task_path,
+        write_index=write.write_index,
+        channel=write.channel,
+        value_type=write.value_type,
+        value_blob=b"changed-write",
+        created_at=now,
+    )
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        for task_id, owner_user_id in (
+            (first_task_id, "benchmark-user"),
+            (second_task_id, "another-user"),
+        ):
+            await repositories.diagnostics.create_task(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                status="running",
+                query="Test pending write isolation.",
+                input_payload={},
+            )
+        owner_repository = SQLAlchemyLangGraphCheckpointRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=first_task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        intruder_repository = SQLAlchemyLangGraphCheckpointRepository(
+            session_factory,
+            owner_user_id="another-user",
+            task_id=second_task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+
+        await owner_repository.put_writes([write])
+        with pytest.raises(TenantScopeError, match="scope or payload"):
+            await owner_repository.put_writes([changed_write])
+        with pytest.raises(TenantScopeError, match="scope or payload"):
+            await intruder_repository.put_writes([write])
+    finally:
+        await engine.dispose()
 
 
 def _claim(
