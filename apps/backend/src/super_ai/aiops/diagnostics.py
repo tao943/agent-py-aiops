@@ -1047,12 +1047,12 @@ def _derive_redis_maxclients_observations(
         if fact.public and fact.evidence_id in assessment.evidence_ids
     ]
 
-    def positive_integer(key: str) -> DiagnosticFact | None:
+    def positive_integer(*keys: str) -> DiagnosticFact | None:
         return next(
             (
                 fact
                 for fact in cited
-                if fact.key == key
+                if fact.key in keys
                 and isinstance(fact.value, int)
                 and not isinstance(fact.value, bool)
                 and fact.value > 0
@@ -1060,29 +1060,23 @@ def _derive_redis_maxclients_observations(
             None,
         )
 
-    connected = positive_integer("InspectRedisServer.connectedClients")
-    maximum = positive_integer("InspectRedisServer.maxclients")
-    rejected = positive_integer("GetRedisConnectionMetrics.rejectedConnectionsDelta")
-    successful = positive_integer(
-        "GetRedisConnectionMetrics.successfulExistingOperations"
+    connected = positive_integer(
+        "InspectRedisServerInfo.connectedClients",
+        "InspectRedisServer.connectedClients",
     )
-    network_refused = next(
-        (
-            fact
-            for fact in cited
-            if fact.key
-            == "GetRedisConnectionMetrics.connectionRefusedAtNetworkLayer"
-            and fact.value == 0
-        ),
-        None,
+    maximum = positive_integer(
+        "InspectRedisServerInfo.maxclients",
+        "InspectRedisServer.maxclients",
+    )
+    rejected = positive_integer(
+        "InspectRedisServerInfo.rejectedConnectionsDelta",
+        "GetRedisConnectionMetrics.rejectedConnectionsDelta",
     )
     if (
         connected is None
         or maximum is None
         or connected.value != maximum.value
         or rejected is None
-        or successful is None
-        or network_refused is None
     ):
         return []
     common: JsonDict = {
@@ -1106,8 +1100,8 @@ def _derive_redis_maxclients_observations(
             **common,
             "purpose": "Establish the impact on new Redis connections.",
             "summary": (
-                f"Redis rejected {rejected.value} new connections while existing operations "
-                "continued and the network layer reported no refusals."
+                f"Redis rejected {rejected.value} new connections after client capacity "
+                "was reached."
             ),
             "evidenceIds": [rejected.evidence_id],
             "causalRole": "impact",

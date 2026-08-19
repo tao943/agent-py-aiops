@@ -978,6 +978,64 @@ def test_v4_adjudicator_derives_redis_maxclients_trigger_and_impact() -> None:
     assert all(item["supports"] == ["redis_maxclients"] for item in derived)
 
 
+def test_v4_adjudicator_derives_redis_chain_from_live_server_info() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect live Redis server capacity.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Connected clients reached maxclients and a connection was rejected.",
+                "evidenceIds": ["ev-info"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            }
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="redis_maxclients",
+                disposition="supported",
+                evidence_ids=("ev-info", "ev-cls"),
+                reason_code="evidence_supports",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectRedisServerInfo.connectedClients",
+                value=16,
+                evidence_id="ev-info",
+                source_tool="InspectRedisServerInfo",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectRedisServerInfo.maxclients",
+                value=16,
+                evidence_id="ev-info",
+                source_tool="InspectRedisServerInfo",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectRedisServerInfo.rejectedConnectionsDelta",
+                value=1,
+                evidence_id="ev-info",
+                source_tool="InspectRedisServerInfo",
+                quality="context",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "coverage_repair"
+    ]
+    assert [item["causalRole"] for item in derived] == ["trigger", "impact"]
+    assert [item["evidenceIds"] for item in derived] == [["ev-info"], ["ev-info"]]
+    assert all(item["supports"] == ["redis_maxclients"] for item in derived)
+
+
 @pytest.mark.asyncio
 async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     migrated_database_url: str,
