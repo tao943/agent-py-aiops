@@ -3612,7 +3612,7 @@ class AiopsDiagnosticService:
                 deterministic_valid=validation.get("status") == "valid",
                 used_llm_adjudication=bool(state.get("used_llm_adjudication")),
                 execution_requested=recovery.get("mode")
-                in {"proposal_only", "external_policy_required"},
+                == "external_policy_required",
                 max_risk_tier=_risk_tier(recovery.get("risk")),
                 compound_root_cause=vocabulary.get("compoundRootCause") is True,
                 causal_components=components,

@@ -2492,6 +2492,68 @@ async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recovery_mode", "expected_route", "expected_reason_codes"),
+    [
+        ("proposal_only", "policy_gate", []),
+        ("external_policy_required", "llm_validator", ["execution_requested"]),
+    ],
+)
+async def test_validator_router_distinguishes_proposal_from_execution_request(
+    migrated_database_url: str,
+    recovery_mode: str,
+    expected_route: str,
+    expected_reason_codes: list[str],
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=f"v4-validator-router-{recovery_mode}",
+            status="running",
+            query="Route a deterministic recovery decision.",
+            input_payload={},
+        )
+        service = _service(repositories)
+        update = await service._validator_router_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "decision_validation": {"status": "valid"},
+                    "root_cause_decision": {
+                        "component": "live-eval-upstream",
+                        "mechanism": "upstream_response_timeout",
+                        "trigger": "The gateway read deadline elapsed.",
+                        "causalChain": ["The upstream response exceeded the deadline."],
+                        "evidenceIds": ["ev-timeline"],
+                        "confidence": 1.0,
+                    },
+                    "recovery_plan": {
+                        "mode": recovery_mode,
+                        "risk": "L0",
+                    },
+                    "hypothesis_assessments": [],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    routing = cast(dict[str, object], update["validator_routing"])
+    assert update["next_route"] == expected_route
+    assert routing["validationRequired"] is (expected_route == "llm_validator")
+    assert routing["validationReasonCodes"] == expected_reason_codes
+    assert routing["validationSkipReason"] == (
+        "no_semantic_risk" if expected_route == "policy_gate" else None
+    )
+
+
+@pytest.mark.asyncio
 async def test_invalid_recovery_model_falls_back_to_schema_valid_proposal_only(
     migrated_database_url: str,
 ) -> None:
