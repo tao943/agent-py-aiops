@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops import diagnostics as diagnostics_module
 from super_ai.aiops.adjudication import DiagnosticFact, HypothesisAssessment
 from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
@@ -63,6 +64,56 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
     assert "evidence_evaluator" not in nodes
     assert "decision_validator" not in nodes
     assert {"validator_router", "llm_validator", "manual_review"} <= nodes
+
+
+def test_v4_replanner_uses_public_upstream_service_for_deadline_probe() -> None:
+    derive_steps = getattr(
+        diagnostics_module,
+        "_deterministic_gap_replan_steps",
+        None,
+    )
+    assert callable(derive_steps)
+
+    steps = derive_steps(
+        {
+            "hypothesis_assessments": [
+                {
+                    "hypothesisId": "nginx_upstream_response_timeout",
+                    "disposition": "supported",
+                    "evidenceIds": ["ev-timeline", "ev-timeout"],
+                    "reasonCode": "upstream_read_timeout",
+                    "assessmentSource": "llm_adjudicated",
+                    "hasHighQualityConflict": False,
+                    "transitions": [],
+                }
+            ],
+            "diagnostic_facts": [
+                {
+                    "key": "InspectGatewayRequestTimeline.upstreamService",
+                    "value": "checkout-slow-endpoint",
+                    "evidenceId": "ev-timeline",
+                    "sourceTool": "InspectGatewayRequestTimeline",
+                    "quality": "context",
+                    "public": True,
+                }
+            ],
+            "evidence_sufficiency": {"missingCausalRoles": ["trigger"]},
+        },
+        available_tools={"ProbeUpstreamHealth"},
+    )
+
+    assert steps == [
+        {
+            "id": "refine_upstream_deadline",
+            "tool": "ProbeUpstreamHealth",
+            "arguments": {"service": "checkout-slow-endpoint"},
+            "purpose": "Probe the public upstream endpoint against its gateway deadline.",
+            "testsHypotheses": ["nginx_upstream_response_timeout"],
+            "causalIntent": "mechanism",
+            "causalIntentOrigin": "coverage_repair",
+            "evidenceRules": [],
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -2880,6 +2880,30 @@ class AiopsDiagnosticService:
             accepted.append(step)
             if len(accepted) >= remaining_budget:
                 break
+        if (
+            not accepted
+            and remaining_budget
+            and state.get("workflow_version") == "evidence-driven-v4"
+        ):
+            fallback_steps = _deterministic_gap_replan_steps(
+                state,
+                available_tools=available_tools,
+            )
+            normalized_fallback, _fallback_contract_errors = normalize_tool_plan_steps(
+                fallback_steps,
+                trusted_tool_arguments=self._trusted_tool_arguments,
+                tool_argument_contracts=self._tool_argument_contracts,
+                tool_definitions=tool_definitions,
+            )
+            for step in normalized_fallback:
+                fingerprint = _step_fingerprint(step)
+                if fingerprint in executed or any(
+                    _step_fingerprint(existing) == fingerprint for existing in accepted
+                ):
+                    continue
+                accepted.append(step)
+                if len(accepted) >= remaining_budget:
+                    break
         replan_count = int(state.get("replan_count") or 0) + 1
         termination_reason = "" if accepted else "no_useful_step"
         payload: JsonDict = {
@@ -4529,6 +4553,60 @@ def _new_hypothesis_assessment(hypothesis_id: str) -> HypothesisAssessment:
         reason_code="awaiting_public_evidence",
         assessment_source="deterministic",
     )
+
+
+def _deterministic_gap_replan_steps(
+    state: Mapping[str, object],
+    *,
+    available_tools: set[str],
+) -> list[JsonDict]:
+    """Derive a bounded refinement step from public, persisted diagnostic facts."""
+    if "ProbeUpstreamHealth" not in available_tools:
+        return []
+    missing_roles = {
+        item
+        for item in cast(
+            list[object],
+            _json_dict(state.get("evidence_sufficiency")).get("missingCausalRoles")
+            or [],
+        )
+        if isinstance(item, str)
+    }
+    if "trigger" not in missing_roles:
+        return []
+    supported = [
+        assessment.hypothesis_id
+        for assessment in _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        if assessment.disposition == "supported"
+    ]
+    if supported != ["nginx_upstream_response_timeout"]:
+        return []
+    upstream_services = {
+        fact.value.strip()
+        for fact in _diagnostic_facts_from_payload(
+            cast(list[JsonDict], state.get("diagnostic_facts") or [])
+        )
+        if fact.public
+        and fact.key == "InspectGatewayRequestTimeline.upstreamService"
+        and isinstance(fact.value, str)
+        and fact.value.strip()
+    }
+    if len(upstream_services) != 1:
+        return []
+    return [
+        {
+            "id": "refine_upstream_deadline",
+            "tool": "ProbeUpstreamHealth",
+            "arguments": {"service": next(iter(upstream_services))},
+            "purpose": "Probe the public upstream endpoint against its gateway deadline.",
+            "testsHypotheses": ["nginx_upstream_response_timeout"],
+            "causalIntent": "mechanism",
+            "causalIntentOrigin": "coverage_repair",
+            "evidenceRules": [],
+        }
+    ]
 
 
 def _model_call_audit_payload(
