@@ -2869,7 +2869,11 @@ class AiopsDiagnosticService:
         accepted: list[JsonDict] = []
         causal_intent_rejected_count = 0
         for step in parsed_steps:
-            if missing_roles and step.get("causalIntent") not in missing_roles:
+            if not _step_targets_replan_gap(
+                step,
+                replan_reason=replan_reason,
+                missing_roles=missing_roles,
+            ):
                 causal_intent_rejected_count += 1
                 continue
             fingerprint = _step_fingerprint(step)
@@ -4553,6 +4557,17 @@ def _new_hypothesis_assessment(hypothesis_id: str) -> HypothesisAssessment:
         reason_code="awaiting_public_evidence",
         assessment_source="deterministic",
     )
+
+
+def _step_targets_replan_gap(
+    step: Mapping[str, object],
+    *,
+    replan_reason: str,
+    missing_roles: set[str],
+) -> bool:
+    if replan_reason == "decision_validation_gap":
+        return True
+    return not missing_roles or step.get("causalIntent") in missing_roles
 
 
 def _deterministic_gap_replan_steps(

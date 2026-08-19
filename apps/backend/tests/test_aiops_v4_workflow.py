@@ -116,6 +116,28 @@ def test_v4_replanner_uses_public_upstream_service_for_deadline_probe() -> None:
     ]
 
 
+def test_v4_decision_gap_does_not_reject_mechanism_refinement() -> None:
+    targets_gap = getattr(
+        diagnostics_module,
+        "_step_targets_replan_gap",
+        None,
+    )
+    assert callable(targets_gap)
+
+    mechanism_step = {"causalIntent": "mechanism"}
+
+    assert targets_gap(
+        mechanism_step,
+        replan_reason="decision_validation_gap",
+        missing_roles={"impact"},
+    )
+    assert not targets_gap(
+        mechanism_step,
+        replan_reason="evidence_gap",
+        missing_roles={"impact"},
+    )
+
+
 @pytest.mark.asyncio
 async def test_v4_model_runtime_resumes_count_and_records_only_safe_audit_fields() -> None:
     class CountingModel:
