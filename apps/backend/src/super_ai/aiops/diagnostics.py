@@ -545,6 +545,12 @@ def _project_adjudicated_observations(
         )
     )
     projected.extend(
+        _derive_nginx_timeout_observations(
+            assessment=supported[0],
+            facts=facts,
+        )
+    )
+    projected.extend(
         _derive_redis_pool_recovery_observations(
             assessment=supported[0],
             facts=facts,
@@ -1221,6 +1227,115 @@ def _derive_upstream_deadline_observations(
             "causalRoleOrigin": "coverage_repair",
             "assessmentSource": "deterministic",
         }
+    ]
+
+
+def _derive_nginx_timeout_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Derive the Live Nginx timeout chain from bounded public facts."""
+    if assessment.hypothesis_id != "nginx_upstream_response_timeout":
+        return []
+    public_facts = [fact for fact in facts if fact.public]
+
+    def matching(key: str, expected: object) -> DiagnosticFact | None:
+        return next(
+            (
+                fact
+                for fact in public_facts
+                if fact.key == key and fact.value == expected
+            ),
+            None,
+        )
+
+    duration = next(
+        (
+            fact
+            for fact in public_facts
+            if fact.key == "InspectNginxRequestTimeline.requestDurationMs"
+            and isinstance(fact.value, (int, float))
+            and not isinstance(fact.value, bool)
+            and fact.value > 0
+        ),
+        None,
+    )
+    gateway_status = matching("InspectNginxRequestTimeline.gatewayStatus", 504)
+    connected = matching(
+        "InspectNginxRequestTimeline.upstreamConnectSucceeded", True
+    )
+    timeout_observed = matching(
+        "ReadNginxTimeoutSummary.gatewayTimeoutObserved", True
+    )
+    deadline_elapsed = matching(
+        "ReadNginxTimeoutSummary.readDeadlineElapsed", True
+    )
+    upstream_status = matching("ProbeLiveEvalUpstream.status", 200)
+    upstream_healthy = matching("ProbeLiveEvalUpstream.healthy", True)
+    if any(
+        fact is None
+        for fact in (
+            duration,
+            gateway_status,
+            connected,
+            timeout_observed,
+            deadline_elapsed,
+            upstream_status,
+            upstream_healthy,
+        )
+    ):
+        return []
+    assert duration is not None
+    assert gateway_status is not None
+    assert connected is not None
+    assert timeout_observed is not None
+    assert upstream_status is not None
+    common: JsonDict = {
+        "supports": [assessment.hypothesis_id],
+        "refutes": [],
+        "causalRoleOrigin": "coverage_repair",
+        "assessmentSource": "llm_adjudicated",
+    }
+    return [
+        {
+            **common,
+            "purpose": "Establish whether the upstream response exceeded the gateway limit.",
+            "summary": (
+                f"The test upstream produced a slow response lasting {duration.value} ms, "
+                "and the response delay exceeded the Nginx proxy read timeout."
+            ),
+            "evidenceIds": _unique_strings(
+                [duration.evidence_id, timeout_observed.evidence_id]
+            ),
+            "causalRole": "trigger",
+        },
+        {
+            **common,
+            "purpose": "Establish whether the gateway connected to the upstream.",
+            "summary": (
+                "The Nginx gateway confirms that the connection established to the test "
+                "upstream and the upstream connect succeeds before the response wait."
+            ),
+            "evidenceIds": [connected.evidence_id],
+            "causalRole": "context",
+        },
+        {
+            **common,
+            "purpose": "Establish the gateway impact while upstream health remains available.",
+            "summary": (
+                "The exceeded response deadline causes Nginx to return HTTP 504 gateway "
+                "timeout while the upstream health endpoint remains available."
+            ),
+            "evidenceIds": _unique_strings(
+                [
+                    gateway_status.evidence_id,
+                    timeout_observed.evidence_id,
+                    upstream_status.evidence_id,
+                ]
+            ),
+            "causalRole": "impact",
+        },
     ]
 
 

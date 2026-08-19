@@ -169,6 +169,34 @@ def test_redis_public_fact_projection_satisfies_semantic_contract() -> None:
     )
 
     assert score.total == 20
+
+
+def test_nginx_public_fact_projection_satisfies_semantic_contract() -> None:
+    trigger = (
+        "The test upstream produced a slow response lasting 757 ms, and the response "
+        "delay exceeded the Nginx proxy read timeout."
+    )
+    decision = RootCauseDecision(
+        "live-eval-upstream",
+        "upstream_response_exceeded_proxy_read_timeout",
+        trigger,
+        (
+            trigger,
+            "The Nginx gateway confirms that the connection established to the test "
+            "upstream and the upstream connect succeeds before the response wait.",
+            "The exceeded response deadline causes Nginx to return HTTP 504 gateway "
+            "timeout while the upstream health endpoint remains available.",
+        ),
+        ("ev-timeline", "ev-summary", "ev-health"),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(NGINX_SCENARIO),
+    )
+
+    assert score.total == 20
 RECOVERY = LiveRecoveryRecord(
     "terminate_postgres_backend",
     "synthetic_blocker",

@@ -1060,6 +1060,108 @@ def test_v4_adjudicator_derives_redis_chain_from_live_server_info() -> None:
     assert all(item["supports"] == ["redis_maxclients"] for item in derived)
 
 
+def test_v4_adjudicator_derives_nginx_chain_from_live_timeout_facts() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect the Nginx request timeline.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The gateway returned 504 after the read deadline.",
+                "evidenceIds": ["ev-timeline"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            }
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="nginx_upstream_response_timeout",
+                disposition="supported",
+                evidence_ids=("ev-timeline", "ev-cls"),
+                reason_code="evidence_supports",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectNginxRequestTimeline.gatewayStatus",
+                value=504,
+                evidence_id="ev-timeline",
+                source_tool="InspectNginxRequestTimeline",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectNginxRequestTimeline.requestDurationMs",
+                value=757,
+                evidence_id="ev-timeline",
+                source_tool="InspectNginxRequestTimeline",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectNginxRequestTimeline.upstreamConnectSucceeded",
+                value=True,
+                evidence_id="ev-timeline",
+                source_tool="InspectNginxRequestTimeline",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="ReadNginxTimeoutSummary.gatewayTimeoutObserved",
+                value=True,
+                evidence_id="ev-summary",
+                source_tool="ReadNginxTimeoutSummary",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="ReadNginxTimeoutSummary.readDeadlineElapsed",
+                value=True,
+                evidence_id="ev-summary",
+                source_tool="ReadNginxTimeoutSummary",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="ProbeLiveEvalUpstream.status",
+                value=200,
+                evidence_id="ev-health",
+                source_tool="ProbeLiveEvalUpstream",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="ProbeLiveEvalUpstream.healthy",
+                value=True,
+                evidence_id="ev-health",
+                source_tool="ProbeLiveEvalUpstream",
+                quality="context",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "coverage_repair"
+    ]
+    assert [item["causalRole"] for item in derived] == [
+        "trigger",
+        "context",
+        "impact",
+    ]
+    assert derived[0]["evidenceIds"] == ["ev-timeline", "ev-summary"]
+    assert "slow response" in str(derived[0]["summary"]).lower()
+    assert "proxy read timeout" in str(derived[0]["summary"]).lower()
+    assert derived[1]["evidenceIds"] == ["ev-timeline"]
+    assert "upstream connect succeeds" in str(derived[1]["summary"]).lower()
+    assert derived[2]["evidenceIds"] == [
+        "ev-timeline",
+        "ev-summary",
+        "ev-health",
+    ]
+    assert "causes nginx to return http 504" in str(derived[2]["summary"]).lower()
+    assert all(
+        item["supports"] == ["nginx_upstream_response_timeout"] for item in derived
+    )
+
+
 @pytest.mark.asyncio
 async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     migrated_database_url: str,
