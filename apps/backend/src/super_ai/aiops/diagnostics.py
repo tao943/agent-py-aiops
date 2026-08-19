@@ -4243,7 +4243,13 @@ class AiopsDiagnosticService:
                     proposal_tools=proposal_tools,
                 )
             except Exception:
-                plan = _fallback_recovery_plan(candidate, proposal_tools=proposal_tools)
+                plan = _deterministic_proposal_fallback(
+                    candidate,
+                    proposal_definitions=proposal_definitions,
+                ) or _fallback_recovery_plan(
+                    candidate,
+                    proposal_tools=proposal_tools,
+                )
         payload = _recovery_plan_payload(plan)
         if model_runtime is not None:
             payload["modelCallCount"] = model_runtime.budget.used
@@ -5740,6 +5746,57 @@ def _fallback_recovery_plan(
         verification_steps=(
             "Revalidate the target against current evidence.",
             "Verify service health after an approved external action.",
+        ),
+        evidence_ids=decision.evidence_ids,
+        decision_confidence=decision.confidence,
+        human_approval_required=True,
+    )
+
+
+def _deterministic_proposal_fallback(
+    decision: RootCauseDecision,
+    *,
+    proposal_definitions: Sequence[McpToolDefinition],
+) -> RecoveryPlan | None:
+    """Build a side-effect-free proposal only when one standard contract matches."""
+    if len(proposal_definitions) != 1:
+        return None
+    definition = proposal_definitions[0]
+    arguments: JsonDict = {
+        "target": decision.component,
+        "risk": (
+            "The proposed mitigation could shift latency or resource usage and must be "
+            "reviewed before any later execution."
+        ),
+        "rollback": (
+            "Discard this proposal if review fails; no infrastructure change has been "
+            "applied by this workflow."
+        ),
+        "verificationSteps": [
+            "Re-run the bounded incident probe against the validated target.",
+            "Verify target health and the original alert signal after an approved change.",
+        ],
+        "humanApprovalRequired": True,
+    }
+    if not plan_matches_tool_contracts(
+        [{"tool": definition.name, "arguments": arguments}],
+        proposal_definitions,
+    ):
+        return None
+    return RecoveryPlan(
+        mode="proposal_only",
+        action="record_reviewed_mitigation_proposal",
+        target=decision.component,
+        rationale=(
+            "Record a side-effect-free mitigation proposal for the validated, "
+            "evidence-grounded root cause."
+        ),
+        tool=definition.name,
+        arguments=arguments,
+        risk=cast(str, arguments["risk"]),
+        rollback=cast(str, arguments["rollback"]),
+        verification_steps=tuple(
+            cast(list[str], arguments["verificationSteps"])
         ),
         evidence_ids=decision.evidence_ids,
         decision_confidence=decision.confidence,

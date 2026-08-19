@@ -15,6 +15,7 @@ from super_ai.aiops.diagnostics import (
     _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
 )
 from super_ai.aiops.model_budget import ExecutionDeadlines
+from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import JsonDict
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -2488,6 +2489,123 @@ async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_r
     assert cast(dict[str, object], policy["recovery_policy"])[
         "executionPermitted"
     ] is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_recovery_model_falls_back_to_schema_valid_proposal_only(
+    migrated_database_url: str,
+) -> None:
+    class InvalidModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return "{}"
+
+    class Provider:
+        def create_chat_model(self) -> InvalidModel:
+            return InvalidModel()
+
+    class RecordingMcpClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, object]
+        ) -> dict[str, object]:
+            self.calls.append((name, arguments))
+            return {"accepted": True, "humanApprovalRequired": True}
+
+    definition = McpToolDefinition(
+        "ProposeNginxTimeoutMitigation",
+        "Record a side-effect-free Nginx mitigation proposal.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "risk": {"type": "string", "minLength": 1},
+                "rollback": {"type": "string", "minLength": 1},
+                "verificationSteps": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 2,
+                },
+                "humanApprovalRequired": {"type": "boolean", "const": True},
+            },
+            "required": [
+                "target",
+                "risk",
+                "rollback",
+                "verificationSteps",
+                "humanApprovalRequired",
+            ],
+            "additionalProperties": False,
+        },
+    )
+    mcp = RecordingMcpClient()
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-deterministic-proposal-fallback",
+            status="running",
+            query="Plan a reviewed Nginx mitigation.",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, Provider()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, mcp),
+            cls_region="unused",
+            cls_topic_id="unused",
+            tool_policies={"ProposeNginxTimeoutMitigation": "proposal_only"},
+        )
+        state = cast(
+            Any,
+            {
+                "owner_user_id": task.owner_user_id,
+                "task_id": task.id,
+                "workflow_version": "evidence-driven-v4",
+                "root_cause_decision": {
+                    "component": "live-eval-upstream",
+                    "mechanism": "upstream_response_exceeded_proxy_read_timeout",
+                    "trigger": "The incident log records an upstream timeout.",
+                    "causalChain": [
+                        "The upstream connection succeeded.",
+                        "The gateway read deadline elapsed.",
+                    ],
+                    "evidenceIds": ["ev-timeline", "ev-cls"],
+                    "confidence": 1.0,
+                },
+                "evidence_ids": ["ev-timeline", "ev-cls"],
+                "decision_validation": {
+                    "status": "valid",
+                    "validationOrigin": "deterministic",
+                },
+                "tool_definitions": (definition,),
+            },
+        )
+        recovery = await service._recovery_planner(  # pyright: ignore[reportPrivateUsage]
+            state
+        )
+        policy = await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, {**state, "recovery_plan": recovery["recovery_plan"]})
+        )
+    finally:
+        await engine.dispose()
+
+    plan = cast(dict[str, object], recovery["recovery_plan"])
+    assert plan["mode"] == "proposal_only"
+    assert plan["tool"] == "ProposeNginxTimeoutMitigation"
+    assert cast(dict[str, object], plan["arguments"])["target"] == (
+        "live-eval-upstream"
+    )
+    policy_payload = cast(dict[str, object], policy["recovery_policy"])
+    assert policy_payload["authorizationCode"] == "proposal_recorded"
+    assert policy_payload["executionPermitted"] is False
+    assert len(mcp.calls) == 1
 
 
 @pytest.mark.asyncio
