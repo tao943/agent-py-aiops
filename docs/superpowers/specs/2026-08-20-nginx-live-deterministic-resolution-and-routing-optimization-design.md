@@ -183,11 +183,20 @@ Replanner 调用前先由代码计算是否存在至少一个尚未执行、参�
 ### 6.3 明确不在本阶段做的事项
 
 - 不并行诊断工具；
+- 不把一次批量 Adjudicator 拆成按假设并行的多个 LLM 请求；
+- 不并行 Planner、Adjudicator、Decision、Validator、Recovery Planner 或 Report 等存在状态依赖的
+  主链模型节点；
+- 不新增跨任务或跨 Benchmark Run 的 LLM 裁决结果缓存；
+- 不把相似查询或相似证据当作可以复用根因结论的充分条件；
 - 不异步化或跳过 LLM Report；
 - 不改变任务完成和报告可见时机；
 - 不更换 Planner、Adjudicator、Validator 或 Report 模型；
 - 不改变 LLM Validator 的风险路由；
 - 不降低 Live/Snapshot 评分阈值。
+
+现有 RAG 向量召回与 BM25 并发、owner/知识库版本隔离的 Redis Retrieval Cache、MCP discovery
+cache，以及同一诊断任务内 Planner/工具执行的 PostgreSQL ExecutionCoordinator 幂等复用保持不变。
+它们负责检索加速和中断恢复，不得扩展为跨事故复用诊断结论。
 
 ## 7. 测试设计
 
