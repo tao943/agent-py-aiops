@@ -582,59 +582,73 @@ def _observation_decisions_from_steps(
 ) -> tuple[ObservationDecision, ...]:
     decisions: list[ObservationDecision] = []
     for step in steps:
-        raw = step.payload.get("observationDecision")
-        if step.phase != "evidence_evaluation" or not isinstance(raw, Mapping):
-            continue
-        item = cast(Mapping[str, object], raw)
-        purpose = item.get("purpose")
-        supports = item.get("supports")
-        refutes = item.get("refutes")
-        summary = item.get("summary")
-        causal_role = item.get("causalRole", "context")
-        causal_role_origin = item.get("causalRoleOrigin")
-        reported_causal_role = item.get("reportedCausalRole")
-        causal_role_corrected = item.get("causalRoleCorrected", False)
-        raw_evidence_ids = item.get("evidenceIds")
-        evidence_ids = (
-            [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
-        )
-        support_items = _string_list(supports)
-        refute_items = _string_list(refutes)
-        if (
-            isinstance(purpose, str)
-            and support_items is not None
-            and refute_items is not None
-            and isinstance(summary, str)
-            and evidence_ids is not None
-            and causal_role in {"trigger", "mechanism", "impact", "context"}
-            and causal_role_origin in {None, "model", "plan_contract"}
-            and reported_causal_role
-            in {None, "trigger", "mechanism", "impact", "context"}
-            and isinstance(causal_role_corrected, bool)
-        ):
-            decisions.append(
-                ObservationDecision(
-                    purpose=purpose,
-                    supports=tuple(support_items),
-                    refutes=tuple(refute_items),
-                    summary=summary,
-                    evidence_ids=tuple(evidence_ids),
-                    causal_role=cast(
-                        Literal["trigger", "mechanism", "impact", "context"],
-                        causal_role,
-                    ),
-                    causal_role_origin=cast(
-                        Literal["model", "plan_contract"] | None,
-                        causal_role_origin,
-                    ),
-                    reported_causal_role=cast(
-                        Literal["trigger", "mechanism", "impact", "context"]
-                        | None,
-                        reported_causal_role,
-                    ),
-                    causal_role_corrected=causal_role_corrected,
-                )
+        raw_items: list[Mapping[str, object]] = []
+        legacy = step.payload.get("observationDecision")
+        if step.phase == "evidence_evaluation" and isinstance(legacy, Mapping):
+            raw_items.append(cast(Mapping[str, object], legacy))
+        v4_items = step.payload.get("observationDecisions")
+        if step.phase == "fact_adapter" and isinstance(v4_items, list):
+            raw_items.extend(
+                cast(Mapping[str, object], item)
+                for item in cast(list[object], v4_items)
+                if isinstance(item, Mapping)
             )
+        if not raw_items:
+            continue
+        for item in raw_items:
+            purpose = item.get("purpose")
+            supports = item.get("supports")
+            refutes = item.get("refutes")
+            summary = item.get("summary")
+            causal_role = item.get("causalRole", "context")
+            causal_role_origin = item.get("causalRoleOrigin")
+            reported_causal_role = item.get("reportedCausalRole")
+            causal_role_corrected = item.get("causalRoleCorrected", False)
+            raw_evidence_ids = item.get("evidenceIds")
+            evidence_ids = (
+                [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
+            )
+            support_items = _string_list(supports)
+            refute_items = _string_list(refutes)
+            if (
+                isinstance(purpose, str)
+                and support_items is not None
+                and refute_items is not None
+                and isinstance(summary, str)
+                and evidence_ids is not None
+                and causal_role in {"trigger", "mechanism", "impact", "context"}
+                and causal_role_origin
+                in {None, "model", "plan_contract", "trusted_evidence_rule"}
+                and reported_causal_role
+                in {None, "trigger", "mechanism", "impact", "context"}
+                and isinstance(causal_role_corrected, bool)
+            ):
+                decisions.append(
+                    ObservationDecision(
+                        purpose=purpose,
+                        supports=tuple(support_items),
+                        refutes=tuple(refute_items),
+                        summary=summary,
+                        evidence_ids=tuple(evidence_ids),
+                        causal_role=cast(
+                            Literal["trigger", "mechanism", "impact", "context"],
+                            causal_role,
+                        ),
+                        causal_role_origin=cast(
+                            Literal[
+                                "model", "plan_contract", "trusted_evidence_rule"
+                            ]
+                            | None,
+                            causal_role_origin,
+                        ),
+                        reported_causal_role=cast(
+                            Literal["trigger", "mechanism", "impact", "context"]
+                            | None,
+                            reported_causal_role,
+                        ),
+                        causal_role_corrected=causal_role_corrected,
+                    )
+                )
     return tuple(decisions)
 
 

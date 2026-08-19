@@ -363,6 +363,45 @@ def test_v4_artifact_reads_auditable_hypothesis_dispositions() -> None:
     ]
 
 
+def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [
+                        {
+                            "purpose": "Inspect process state.",
+                            "supports": ["process_down"],
+                            "refutes": [],
+                            "summary": "The process exited.",
+                            "evidenceIds": ["ev-container"],
+                            "causalRole": "trigger",
+                            "causalRoleOrigin": "trusted_evidence_rule",
+                        }
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert artifact.observation_decisions[0].supports == ("process_down",)
+    assert artifact.observation_decisions[0].causal_role == "trigger"
+    assert (
+        artifact.observation_decisions[0].causal_role_origin
+        == "trusted_evidence_rule"
+    )
+
+
 def test_v4_artifact_rejects_unknown_disposition_without_legacy_fallback() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

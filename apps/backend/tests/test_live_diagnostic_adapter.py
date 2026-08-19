@@ -401,6 +401,60 @@ def test_grounded_fallback_requires_one_high_confidence_cause_and_two_evidence()
     assert decision.evidence_ids == ("ev-trigger", "ev-graph", "ev-impact")
 
 
+def test_grounded_fallback_uses_differential_supporting_observation_evidence() -> None:
+    decision = build_grounded_fallback_decision(
+        public_hypotheses=(
+            {"id": "process_down", "description": "The process stopped."},
+            {"id": "port_mismatch", "description": "The port is wrong."},
+        ),
+        hypothesis_states=(
+            {
+                "id": "process_down",
+                "status": "supported",
+                "confidence": 0.95,
+                "evidenceIds": ["ev-container"],
+            },
+            {
+                "id": "port_mismatch",
+                "status": "refuted",
+                "confidence": 0.05,
+                "evidenceIds": ["ev-container", "ev-nginx"],
+            },
+        ),
+        observation_decisions=(
+            {
+                "supports": ["process_down"],
+                "refutes": [],
+                "summary": "The upstream process exited.",
+                "evidenceIds": ["ev-container"],
+                "causalRole": "trigger",
+            },
+            {
+                "supports": ["process_down"],
+                "refutes": ["port_mismatch"],
+                "summary": "Nginx reached the matching route but the connection was refused.",
+                "evidenceIds": ["ev-container", "ev-nginx"],
+                "causalRole": "mechanism",
+            },
+        ),
+        decision_vocabulary={
+            "labelsByHypothesis": {
+                "process_down": {
+                    "component": "checkout-service",
+                    "mechanism": "process_unavailable",
+                },
+                "port_mismatch": {
+                    "component": "nginx",
+                    "mechanism": "upstream_port_mismatch",
+                },
+            }
+        },
+    )
+
+    assert decision is not None
+    assert decision.evidence_ids == ("ev-container", "ev-nginx")
+
+
 def test_grounded_fallback_refuses_ambiguous_high_confidence_causes() -> None:
     assert (
         build_grounded_fallback_decision(

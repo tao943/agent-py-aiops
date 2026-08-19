@@ -338,6 +338,305 @@ async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
 
 
 @pytest.mark.asyncio
+async def test_fact_adapter_records_cross_evidence_differential_support(
+    migrated_database_url: str,
+) -> None:
+    hypotheses: list[JsonDict] = [
+        {"id": "upstream_process_down", "description": "The process stopped."},
+        {"id": "upstream_port_mismatch", "description": "The port is wrong."},
+        {"id": "dns_resolution_failure", "description": "DNS failed."},
+    ]
+    plan: list[JsonDict] = [
+        {
+            "id": "container",
+            "tool": "InspectContainer",
+            "arguments": {},
+            "purpose": "Inspect the process state.",
+            "testsHypotheses": ["upstream_process_down", "upstream_port_mismatch"],
+            "causalIntent": "context",
+            "evidenceRules": [
+                {
+                    "templateId": "container_process_exited",
+                    "hypothesisId": "upstream_process_down",
+                    "parameters": {"statusFact": "InspectContainer.status"},
+                }
+            ],
+        },
+        {
+            "id": "nginx",
+            "tool": "InspectNginx",
+            "arguments": {},
+            "purpose": "Inspect the resolved upstream route.",
+            "testsHypotheses": ["upstream_port_mismatch", "dns_resolution_failure"],
+            "causalIntent": "mechanism",
+            "evidenceRules": [
+                {
+                    "templateId": "nginx_upstream_port_matches_container_port",
+                    "hypothesisId": "upstream_port_mismatch",
+                    "parameters": {
+                        "nginxFact": "InspectNginx.upstreamPort",
+                        "containerFact": "InspectContainer.configuredPorts",
+                    },
+                },
+                {
+                    "templateId": "nginx_resolved_address_present",
+                    "hypothesisId": "dns_resolution_failure",
+                    "parameters": {
+                        "addressesFact": "InspectNginx.resolvedAddresses"
+                    },
+                },
+            ],
+        },
+    ]
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-cross-evidence-support",
+            status="running",
+            query="Inspect an unavailable upstream.",
+            input_payload={},
+        )
+        service = _service(repositories)
+        first = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": hypotheses,
+                    "hypothesis_assessments": _initial_hypothesis_assessments(
+                        hypotheses
+                    ),
+                    "diagnostic_facts": [],
+                    "plan": plan,
+                    "current_plan_step": plan[0],
+                    "current_evidence_id": "ev-container",
+                    "current_evidence_summary": "The upstream process exited.",
+                    "current_tool_output": {
+                        "status": "exited",
+                        "configuredPorts": [8080],
+                    },
+                },
+            )
+        )
+        second = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": hypotheses,
+                    "hypothesis_assessments": first["hypothesis_assessments"],
+                    "diagnostic_facts": first["diagnostic_facts"],
+                    "plan": plan,
+                    "current_plan_step": plan[1],
+                    "current_evidence_id": "ev-nginx",
+                    "current_evidence_summary": (
+                        "Nginx resolved the matching port but the connection was refused."
+                    ),
+                    "current_tool_output": {
+                        "upstreamPort": 8080,
+                        "resolvedAddresses": ["192.0.2.10"],
+                        "responseStatus": 502,
+                    },
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    first_observation = cast(
+        list[dict[str, object]], first["observation_decisions"]
+    )[0]
+    assert first_observation["causalRole"] == "trigger"
+    observation = cast(list[dict[str, object]], second["observation_decisions"])[0]
+    assert observation["supports"] == ["upstream_process_down"]
+    assert observation["refutes"] == [
+        "dns_resolution_failure",
+        "upstream_port_mismatch",
+    ]
+    assert set(cast(list[str], observation["evidenceIds"])) == {
+        "ev-container",
+        "ev-nginx",
+    }
+
+
+@pytest.mark.asyncio
+async def test_v4_sufficiency_requires_a_buildable_causal_decision(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-causal-sufficiency",
+            status="running",
+            query="Inspect an unavailable upstream.",
+            input_payload={},
+        )
+        update = await _service(repositories)._sufficiency_gate_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "hypothesis_assessments": [
+                        {
+                            "hypothesisId": "upstream_process_down",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-container"],
+                            "reasonCode": "upstream_process_not_running",
+                            "assessmentSource": "deterministic",
+                            "hasHighQualityConflict": False,
+                            "transitions": [],
+                        },
+                        {
+                            "hypothesisId": "upstream_port_mismatch",
+                            "disposition": "refuted",
+                            "evidenceIds": ["ev-nginx"],
+                            "reasonCode": "configured_route_port_matches_service",
+                            "assessmentSource": "deterministic",
+                            "hasHighQualityConflict": False,
+                            "transitions": [],
+                        },
+                    ],
+                    "observation_decisions": [
+                        {
+                            "supports": ["upstream_process_down"],
+                            "refutes": [],
+                            "evidenceIds": ["ev-container"],
+                            "causalRole": "mechanism",
+                            "summary": "The upstream process is not running.",
+                        },
+                        {
+                            "supports": [],
+                            "refutes": ["upstream_port_mismatch"],
+                            "evidenceIds": ["ev-nginx"],
+                            "causalRole": "context",
+                            "summary": "The configured upstream port matches.",
+                        },
+                    ],
+                    "plan": [],
+                    "plan_index": 0,
+                    "executor_attempt_count": 2,
+                    "max_total_steps": 6,
+                    "replan_count": 0,
+                    "max_replans": 1,
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    sufficiency = cast(dict[str, object], update["evidence_sufficiency"])
+    assert sufficiency["status"] == "insufficient"
+    assert sufficiency["decisionReady"] is False
+    assert sufficiency["independentPositiveEvidenceCount"] == 1
+    assert sufficiency["missingCausalRoles"] == ["trigger", "impact"]
+    assert update["next_route"] == "replanner"
+
+
+@pytest.mark.asyncio
+async def test_v4_sufficiency_accepts_a_buildable_differential_decision(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-differential-sufficiency",
+            status="running",
+            query="Inspect an unavailable upstream.",
+            input_payload={},
+        )
+        update = await _service(repositories)._sufficiency_gate_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {"id": "process_down", "description": "The process stopped."},
+                        {"id": "port_mismatch", "description": "The port is wrong."},
+                    ],
+                    "decision_vocabulary": {
+                        "labelsByHypothesis": {
+                            "process_down": {
+                                "component": "checkout-service",
+                                "mechanism": "process_unavailable",
+                            },
+                            "port_mismatch": {
+                                "component": "nginx",
+                                "mechanism": "upstream_port_mismatch",
+                            },
+                        }
+                    },
+                    "hypothesis_assessments": [
+                        {
+                            "hypothesisId": "process_down",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-container"],
+                            "reasonCode": "process_not_running",
+                            "assessmentSource": "deterministic",
+                            "hasHighQualityConflict": False,
+                            "transitions": [],
+                        },
+                        {
+                            "hypothesisId": "port_mismatch",
+                            "disposition": "refuted",
+                            "evidenceIds": ["ev-container", "ev-nginx"],
+                            "reasonCode": "route_port_matches",
+                            "assessmentSource": "deterministic",
+                            "hasHighQualityConflict": False,
+                            "transitions": [],
+                        },
+                    ],
+                    "observation_decisions": [
+                        {
+                            "supports": ["process_down"],
+                            "refutes": [],
+                            "evidenceIds": ["ev-container"],
+                            "causalRole": "trigger",
+                            "summary": "The upstream process exited.",
+                        },
+                        {
+                            "supports": ["process_down"],
+                            "refutes": ["port_mismatch"],
+                            "evidenceIds": ["ev-container", "ev-nginx"],
+                            "causalRole": "mechanism",
+                            "summary": "Nginx reached the route but the connection was refused.",
+                        },
+                    ],
+                    "plan": [],
+                    "plan_index": 0,
+                    "executor_attempt_count": 2,
+                    "max_total_steps": 6,
+                    "replan_count": 0,
+                    "max_replans": 1,
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    sufficiency = cast(dict[str, object], update["evidence_sufficiency"])
+    assert sufficiency["status"] == "sufficient"
+    assert sufficiency["decisionReady"] is True
+    assert sufficiency["independentPositiveEvidenceCount"] == 2
+    assert update["next_route"] == "decision"
+
+
+@pytest.mark.asyncio
 async def test_v4_decision_and_validator_use_dispositions_without_model_calls(
     migrated_database_url: str,
 ) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
 
 Disposition = Literal["supported", "refuted", "causally_inactive", "unresolved"]
 AssessmentSource = Literal["deterministic", "llm_adjudicated"]
@@ -85,6 +85,7 @@ class _TrustedRuleTemplate:
     predicate: EvidencePredicate
     when_true: Disposition
     reason_code: str
+    causal_role: Literal["trigger", "mechanism", "impact", "context"]
     parameters: tuple[tuple[str, str], ...]
 
 
@@ -99,6 +100,7 @@ _TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
         ),
         when_true="refuted",
         reason_code="configured_route_port_matches_service",
+        causal_role="mechanism",
         parameters=(
             ("containerFact", "InspectContainer.configuredPorts"),
             ("nginxFact", "InspectNginx.upstreamPort"),
@@ -114,6 +116,7 @@ _TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
         ),
         when_true="supported",
         reason_code="upstream_process_not_running",
+        causal_role="trigger",
         parameters=(("statusFact", "InspectContainer.status"),),
     ),
     "container_process_running": _TrustedRuleTemplate(
@@ -126,6 +129,7 @@ _TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
         ),
         when_true="refuted",
         reason_code="upstream_process_running",
+        causal_role="context",
         parameters=(("statusFact", "InspectContainer.status"),),
     ),
     "nginx_resolved_address_present": _TrustedRuleTemplate(
@@ -137,6 +141,7 @@ _TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
         ),
         when_true="refuted",
         reason_code="upstream_address_resolved",
+        causal_role="context",
         parameters=(("addressesFact", "InspectNginx.resolvedAddresses"),),
     ),
 }
@@ -183,6 +188,25 @@ def trusted_evidence_rule_catalog() -> tuple[dict[str, object], ...]:
             "parameters": dict(template.parameters),
         }
         for template_id, template in sorted(_TRUSTED_RULE_TEMPLATES.items())
+    )
+
+
+def trusted_reason_causal_role(
+    reason_code: str,
+) -> Literal["trigger", "mechanism", "impact", "context"] | None:
+    """Resolve only code-owned rule semantics into an auditable causal role."""
+    roles = {
+        template.causal_role
+        for template in _TRUSTED_RULE_TEMPLATES.values()
+        if template.reason_code == reason_code
+    }
+    return (
+        cast(
+            Literal["trigger", "mechanism", "impact", "context"],
+            next(iter(roles)),
+        )
+        if len(roles) == 1
+        else None
     )
 
 

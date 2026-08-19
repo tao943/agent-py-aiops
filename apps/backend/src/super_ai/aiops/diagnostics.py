@@ -31,6 +31,7 @@ from super_ai.aiops.adjudication import (
     instantiate_trusted_evidence_rule,
     reduce_hypotheses,
     trusted_evidence_rule_catalog,
+    trusted_reason_causal_role,
 )
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.causal_intents import (
@@ -399,12 +400,21 @@ def build_grounded_fallback_decision(
             ]
         )
         hypothesis_id = state.get("id")
-        if isinstance(hypothesis_id, str) and len(evidence_ids) >= 2:
+        if isinstance(hypothesis_id, str) and evidence_ids:
             candidates.append((hypothesis_id, tuple(evidence_ids), float(confidence)))
     if len(candidates) != 1:
         return None
 
-    hypothesis_id, evidence_ids, confidence = candidates[0]
+    hypothesis_id, direct_evidence_ids, confidence = candidates[0]
+    evidence_ids = _supporting_observation_evidence_ids(
+        observation_decisions,
+        hypothesis_id=hypothesis_id,
+    )
+    if (
+        len(evidence_ids) < 2
+        or not set(direct_evidence_ids).issubset(evidence_ids)
+    ):
+        return None
     public_hypothesis = next(
         (item for item in public_hypotheses if item.get("id") == hypothesis_id),
         None,
@@ -442,6 +452,27 @@ def build_grounded_fallback_decision(
         causal_chain=causal_chain,
         evidence_ids=evidence_ids,
         confidence=confidence,
+    )
+
+
+def _supporting_observation_evidence_ids(
+    observations: Sequence[JsonDict],
+    *,
+    hypothesis_id: str,
+) -> tuple[str, ...]:
+    return tuple(
+        _unique_strings(
+            [
+                evidence_id
+                for observation in observations
+                if hypothesis_id
+                in cast(list[object], observation.get("supports") or [])
+                for evidence_id in cast(
+                    list[object], observation.get("evidenceIds") or []
+                )
+                if isinstance(evidence_id, str)
+            ]
+        )
     )
 
 
@@ -1603,6 +1634,19 @@ class AiopsDiagnosticService:
                 if item.disposition in {"refuted", "causally_inactive"}
                 and evidence_id in item.evidence_ids
             ]
+            supported_assessments = [
+                item for item in reduced if item.disposition == "supported"
+            ]
+            unresolved_assessments = [
+                item for item in reduced if item.disposition == "unresolved"
+            ]
+            if (
+                not supports
+                and refutes
+                and len(supported_assessments) == 1
+                and not unresolved_assessments
+            ):
+                supports.append(supported_assessments[0].hypothesis_id)
             linked_ids = _unique_strings(
                 [
                     linked_id
@@ -1611,6 +1655,18 @@ class AiopsDiagnosticService:
                     for linked_id in item.evidence_ids
                 ]
             ) or [evidence_id]
+            rule_causal_roles = {
+                role
+                for item in reduced
+                if evidence_id in item.evidence_ids
+                and (role := trusted_reason_causal_role(item.reason_code)) is not None
+            }
+            if len(rule_causal_roles) == 1:
+                causal_role = next(iter(rule_causal_roles))
+                causal_role_origin = "trusted_evidence_rule"
+            else:
+                causal_role = _safe_causal_role(current_step.get("causalIntent"))
+                causal_role_origin = "plan_contract"
             observation_payloads.append(
                 {
                     "purpose": str(current_step.get("purpose") or "Inspect public evidence."),
@@ -1621,8 +1677,8 @@ class AiopsDiagnosticService:
                         or "A bounded public tool observation was collected."
                     ),
                     "evidenceIds": linked_ids,
-                    "causalRole": _safe_causal_role(current_step.get("causalIntent")),
-                    "causalRoleOrigin": "plan_contract",
+                    "causalRole": causal_role,
+                    "causalRoleOrigin": causal_role_origin,
                     "assessmentSource": "deterministic",
                 }
             )
@@ -1665,7 +1721,71 @@ class AiopsDiagnosticService:
             cast(list[JsonDict], state.get("hypothesis_assessments") or [])
         )
         decision = assess_sufficiency(assessments)
+        projected_states = [
+            _hypothesis_state_payload(project_hypothesis_assessment(item))
+            for item in assessments
+        ]
+        observation_decisions = cast(
+            list[JsonDict], state.get("observation_decisions") or []
+        )
+        causal_coverage = supported_causal_coverage(
+            hypothesis_states=projected_states,
+            observation_decisions=observation_decisions,
+        )
+        supported_assessments = [
+            item for item in assessments if item.disposition == "supported"
+        ]
+        independent_positive_evidence_count = (
+            len(
+                _supporting_observation_evidence_ids(
+                    observation_decisions,
+                    hypothesis_id=supported_assessments[0].hypothesis_id,
+                )
+            )
+            if len(supported_assessments) == 1
+            else 0
+        )
+        buildable_decision = build_grounded_fallback_decision(
+            public_hypotheses=cast(
+                list[JsonDict], state.get("public_hypotheses") or []
+            ),
+            hypothesis_states=projected_states,
+            observation_decisions=observation_decisions,
+            decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+        )
+        decision_ready = (
+            decision.status == "sufficient"
+            and buildable_decision is not None
+        )
+        if decision.status == "sufficient" and not decision_ready:
+            readiness_gaps = [
+                f"causal_role:{role}" for role in causal_coverage.missing_roles
+            ]
+            if independent_positive_evidence_count < 2:
+                readiness_gaps.insert(0, "independent_positive_evidence")
+            decision = replace(
+                decision,
+                status="insufficient",
+                missing_evidence=tuple(
+                    dict.fromkeys((*decision.missing_evidence, *readiness_gaps))
+                ),
+                summary=(
+                    "Hypotheses converged, but the public evidence chain cannot yet "
+                    "produce a grounded causal decision."
+                ),
+            )
         payload = _evidence_sufficiency_payload(decision)
+        payload.update(
+            {
+                "decisionReady": decision_ready,
+                "independentPositiveEvidenceCount": independent_positive_evidence_count,
+                "causalTriggerCount": causal_coverage.trigger_count,
+                "causalMechanismCount": causal_coverage.mechanism_count,
+                "causalImpactCount": causal_coverage.impact_count,
+                "missingCausalRoles": list(causal_coverage.missing_roles),
+                "ambiguousTrigger": causal_coverage.ambiguous_trigger,
+            }
+        )
         plan = cast(list[JsonDict], state.get("plan") or [])
         plan_index = int(state.get("plan_index") or 0)
         attempts = int(state.get("executor_attempt_count") or 0)
@@ -1673,7 +1793,7 @@ class AiopsDiagnosticService:
         soft_expired = _execution_deadlines_from_state(state).soft_expired()
         if plan_index < len(plan) and attempts < maximum:
             next_route = "executor"
-        elif decision.status == "sufficient":
+        elif decision_ready:
             next_route = "decision"
         elif soft_expired:
             next_route = "decision"
