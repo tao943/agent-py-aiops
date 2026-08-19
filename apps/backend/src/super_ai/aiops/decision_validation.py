@@ -10,6 +10,7 @@ from typing import Literal, Protocol, cast
 import openai
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from super_ai.aiops.adjudication import HypothesisAssessment
 from super_ai.aiops.reasoning import (
     RootCauseDecision,
     RootCauseValidationDecision,
@@ -30,6 +31,8 @@ DecisionValidationErrorCategory = Literal[
 DeterministicCheckCode = Literal[
     "unique_supported_hypothesis",
     "no_open_competitor",
+    "no_unresolved_active_competitor",
+    "closed_alternatives_are_grounded",
     "public_label_match",
     "task_evidence_only",
     "supporting_evidence_only",
@@ -629,6 +632,86 @@ def validate_grounded_candidate(
         supported_hypothesis_id=supported_hypothesis_id,
         checks=checks,
         unsupported_fields=tuple(dict.fromkeys(unsupported_fields)),
+        missing_evidence=missing_evidence,
+    )
+
+
+def validate_grounded_assessments(
+    *,
+    candidate: RootCauseDecision,
+    available_evidence_ids: Set[str],
+    hypothesis_assessments: Sequence[HypothesisAssessment],
+    observation_decisions: Sequence[Mapping[str, object]],
+    decision_vocabulary: Mapping[str, object],
+) -> DeterministicValidationResult:
+    """Validate v4 directly from authoritative four-state dispositions."""
+    supported = tuple(
+        item.hypothesis_id
+        for item in hypothesis_assessments
+        if item.disposition == "supported"
+    )
+    unresolved = tuple(
+        item.hypothesis_id
+        for item in hypothesis_assessments
+        if item.disposition == "unresolved"
+    )
+    closed_alternatives_grounded = all(
+        item.evidence_ids
+        for item in hypothesis_assessments
+        if item.disposition in {"refuted", "causally_inactive"}
+    )
+    internal_states: list[dict[str, object]] = []
+    for item in hypothesis_assessments:
+        if item.disposition == "supported":
+            status = "supported"
+        elif item.disposition == "unresolved":
+            status = "open"
+        else:
+            status = "refuted"
+        internal_states.append({"id": item.hypothesis_id, "status": status})
+    base = validate_grounded_candidate(
+        candidate=candidate,
+        available_evidence_ids=available_evidence_ids,
+        hypothesis_states=internal_states,
+        observation_decisions=observation_decisions,
+        decision_vocabulary=decision_vocabulary,
+    )
+    checks: list[DeterministicCheck] = []
+    for check in base.checks:
+        if check.code == "no_open_competitor":
+            checks.append(
+                DeterministicCheck(
+                    "no_unresolved_active_competitor",
+                    not unresolved,
+                )
+            )
+        else:
+            checks.append(check)
+    checks.append(
+        DeterministicCheck(
+            "closed_alternatives_are_grounded",
+            closed_alternatives_grounded,
+        )
+    )
+    v4_evidence_checks = {
+        "unique_supported_hypothesis",
+        "no_unresolved_active_competitor",
+        "closed_alternatives_are_grounded",
+        "task_evidence_only",
+        "supporting_evidence_only",
+        "independent_positive_evidence",
+        "supporting_observations",
+    }
+    missing_evidence = tuple(
+        check.code
+        for check in checks
+        if not check.passed and check.code in v4_evidence_checks
+    )
+    return DeterministicValidationResult(
+        passed=all(check.passed for check in checks),
+        supported_hypothesis_id=supported[0] if len(supported) == 1 else None,
+        checks=tuple(checks),
+        unsupported_fields=base.unsupported_fields,
         missing_evidence=missing_evidence,
     )
 

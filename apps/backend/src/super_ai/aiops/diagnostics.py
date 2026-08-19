@@ -19,7 +19,16 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
-from super_ai.aiops.adjudication import trusted_evidence_rule_catalog
+from super_ai.aiops.adjudication import (
+    DiagnosticFact,
+    HypothesisAssessment,
+    HypothesisEvidenceRule,
+    HypothesisTransition,
+    assess_sufficiency,
+    instantiate_trusted_evidence_rule,
+    reduce_hypotheses,
+    trusted_evidence_rule_catalog,
+)
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.causal_intents import (
     allowed_causal_intents,
@@ -32,8 +41,10 @@ from super_ai.aiops.decision_validation import (
     deterministic_checks_payload,
     invoke_structured_root_cause_decision,
     invoke_structured_root_cause_validation,
+    validate_grounded_assessments,
     validate_grounded_candidate,
 )
+from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.reasoning import (
     CausalRole,
     DiagnosticPlanStep,
@@ -49,6 +60,7 @@ from super_ai.aiops.reasoning import (
     parse_observation_decision,
     parse_plan,
     parse_recovery_plan,
+    project_hypothesis_assessment,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import ChatModel, LlmProvider
@@ -82,6 +94,7 @@ from super_ai.retrieval import (
 
 
 class AiopsDiagnosticState(TypedDict, total=False):
+    workflow_version: str
     owner_user_id: str
     task_id: str
     query: str
@@ -96,6 +109,11 @@ class AiopsDiagnosticState(TypedDict, total=False):
     public_hypotheses: list[JsonDict]
     decision_vocabulary: JsonDict
     hypothesis_states: list[JsonDict]
+    hypothesis_assessments: list[JsonDict]
+    diagnostic_facts: list[JsonDict]
+    current_tool_output: object
+    adjudication_count: int
+    used_llm_adjudication: bool
     observation_decisions: Annotated[list[JsonDict], add]
     root_cause_decision: JsonDict | None
     decision_validation: JsonDict
@@ -106,7 +124,12 @@ class AiopsDiagnosticState(TypedDict, total=False):
     current_plan_step: JsonDict
     evidence_sufficiency: JsonDict
     next_route: Literal[
-        "executor", "replanner", "decision", "report", "recovery_planner"
+        "executor",
+        "replanner",
+        "hypothesis_adjudicator",
+        "decision",
+        "report",
+        "recovery_planner",
     ]
     replan_count: int
     max_replans: int
@@ -592,19 +615,33 @@ class AiopsDiagnosticService:
                 payload=alert,
             )
             initial_evidence_ids.append(alert_evidence.id)
-        graph = self._build_graph()
+        requested_workflow_version = task.input_payload.get("workflowVersion")
+        workflow_version = (
+            "evidence-driven-v4"
+            if requested_workflow_version == "evidence-driven-v4"
+            else "evidence-driven-v3"
+        )
+        graph = self._build_graph(workflow_version=workflow_version)
+        public_hypotheses = _json_list(task.input_payload.get("hypotheses"))
         initial_state: AiopsDiagnosticState = {
+            "workflow_version": workflow_version,
             "owner_user_id": task.owner_user_id,
             "task_id": task.id,
             "query": task.query,
             "alert": alert,
-            "public_hypotheses": _json_list(task.input_payload.get("hypotheses")),
+            "public_hypotheses": public_hypotheses,
             "decision_vocabulary": _json_dict(
                 task.input_payload.get("decisionVocabulary")
             ),
             "hypothesis_states": _initial_hypothesis_states(
-                _json_list(task.input_payload.get("hypotheses"))
+                public_hypotheses
             ),
+            "hypothesis_assessments": _initial_hypothesis_assessments(
+                public_hypotheses
+            ),
+            "diagnostic_facts": [],
+            "adjudication_count": 0,
+            "used_llm_adjudication": False,
             "observation_decisions": [],
             "accessible_knowledge_base_ids": tuple(accessible_knowledge_base_ids),
             "plan_index": 0,
@@ -663,7 +700,9 @@ class AiopsDiagnosticService:
             raise McpClientError("MCP client is unavailable.")
         return self._mcp_client
 
-    def _build_graph(self) -> Any:
+    def _build_graph(self, *, workflow_version: str = "evidence-driven-v3") -> Any:
+        if workflow_version == "evidence-driven-v4":
+            return self._build_v4_graph()
         graph = StateGraph(AiopsDiagnosticState)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
@@ -695,6 +734,46 @@ class AiopsDiagnosticService:
             self._route_after_decision_validation,
             {"replanner": "replanner", "recovery_planner": "recovery_planner"},
         )
+        graph.add_edge("recovery_planner", "policy_gate")
+        graph.add_edge("policy_gate", "report")
+        graph.add_edge("report", END)
+        return graph.compile()
+
+    def _build_v4_graph(self) -> Any:
+        graph = StateGraph(AiopsDiagnosticState)
+        graph.add_node("planner", self._planner)
+        graph.add_node("executor", self._executor)
+        graph.add_node("fact_adapter", self._fact_adapter)
+        graph.add_node("sufficiency_gate", self._sufficiency_gate_v4)
+        graph.add_node("hypothesis_adjudicator", self._hypothesis_adjudicator)
+        graph.add_node("replanner", self._replanner)
+        graph.add_node("decision", self._decision_v4)
+        graph.add_node("deterministic_validator", self._deterministic_validator_v4)
+        graph.add_node("recovery_planner", self._recovery_planner)
+        graph.add_node("policy_gate", self._policy_gate)
+        graph.add_node("report", self._report)
+        graph.add_edge(START, "planner")
+        graph.add_edge("planner", "executor")
+        graph.add_edge("executor", "fact_adapter")
+        graph.add_edge("fact_adapter", "sufficiency_gate")
+        graph.add_conditional_edges(
+            "sufficiency_gate",
+            self._route_after_sufficiency,
+            {
+                "executor": "executor",
+                "replanner": "replanner",
+                "hypothesis_adjudicator": "hypothesis_adjudicator",
+                "decision": "decision",
+            },
+        )
+        graph.add_edge("hypothesis_adjudicator", "sufficiency_gate")
+        graph.add_conditional_edges(
+            "replanner",
+            self._route_after_replanner,
+            {"executor": "executor", "decision": "decision"},
+        )
+        graph.add_edge("decision", "deterministic_validator")
+        graph.add_edge("deterministic_validator", "recovery_planner")
         graph.add_edge("recovery_planner", "policy_gate")
         graph.add_edge("policy_gate", "report")
         graph.add_edge("report", END)
@@ -832,7 +911,9 @@ class AiopsDiagnosticService:
             )
         )
         planner_payload: JsonDict = {
-            "workflowVersion": "evidence-driven-v3",
+            "workflowVersion": str(
+                state.get("workflow_version") or "evidence-driven-v3"
+            ),
             "noSopMatched": no_sop_matched,
             "sopHits": sop_hits,
             "plan": plan,
@@ -1080,6 +1161,7 @@ class AiopsDiagnosticService:
                 "evidence_ids": [evidence_record.id],
                 "current_evidence_id": evidence_record.id,
                 "current_evidence_summary": safe_error,
+                "current_tool_output": {"error": safe_error},
                 "current_plan_step": step,
                 "events": events,
             }
@@ -1144,8 +1226,237 @@ class AiopsDiagnosticService:
             "evidence_ids": [evidence_record.id],
             "current_evidence_id": evidence_record.id,
             "current_evidence_summary": summary,
+            "current_tool_output": _safe_value(output),
             "current_plan_step": step,
             "events": events,
+        }
+
+    async def _fact_adapter(self, state: AiopsDiagnosticState) -> dict[str, object]:
+        """Convert one bounded public tool result into facts and four-state assessments."""
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        evidence_id = str(state.get("current_evidence_id") or "")
+        current_step = _json_dict(state.get("current_plan_step"))
+        output = state.get("current_tool_output")
+        prior_facts = _diagnostic_facts_from_payload(
+            cast(list[JsonDict], state.get("diagnostic_facts") or [])
+        )
+        new_facts: tuple[DiagnosticFact, ...] = ()
+        if evidence_id and isinstance(output, Mapping):
+            new_facts = extract_public_facts(
+                (
+                    PublicToolObservation(
+                        tool_name=str(current_step.get("tool") or "unknown"),
+                        evidence_id=evidence_id,
+                        output=cast(Mapping[str, object], output),
+                    ),
+                )
+            )
+        all_facts = _deduplicate_diagnostic_facts((*prior_facts, *new_facts))
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        if not assessments:
+            assessments = tuple(
+                _new_hypothesis_assessment(str(item["id"]))
+                for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
+                if item.get("id")
+            )
+        rules = _trusted_rules_from_plan(cast(list[JsonDict], state.get("plan") or []))
+        reduced = reduce_hypotheses(
+            assessments=assessments,
+            facts=all_facts,
+            rules=rules,
+        )
+        assessment_payloads = [_hypothesis_assessment_payload(item) for item in reduced]
+        projected_states = [
+            _hypothesis_state_payload(project_hypothesis_assessment(item))
+            for item in reduced
+        ]
+        observation_payloads: list[JsonDict] = []
+        if evidence_id:
+            supports = [
+                item.hypothesis_id
+                for item in reduced
+                if item.disposition == "supported" and evidence_id in item.evidence_ids
+            ]
+            refutes = [
+                item.hypothesis_id
+                for item in reduced
+                if item.disposition in {"refuted", "causally_inactive"}
+                and evidence_id in item.evidence_ids
+            ]
+            linked_ids = _unique_strings(
+                [
+                    linked_id
+                    for item in reduced
+                    if evidence_id in item.evidence_ids
+                    for linked_id in item.evidence_ids
+                ]
+            ) or [evidence_id]
+            observation_payloads.append(
+                {
+                    "purpose": str(current_step.get("purpose") or "Inspect public evidence."),
+                    "supports": supports,
+                    "refutes": refutes,
+                    "summary": str(
+                        state.get("current_evidence_summary")
+                        or "A bounded public tool observation was collected."
+                    ),
+                    "evidenceIds": linked_ids,
+                    "causalRole": _safe_causal_role(current_step.get("causalIntent")),
+                    "causalRoleOrigin": "plan_contract",
+                    "assessmentSource": "deterministic",
+                }
+            )
+        payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v4",
+            "factCount": len(all_facts),
+            "newFactCount": len(new_facts),
+            "hypothesisAssessments": assessment_payloads,
+            "observationDecisions": observation_payloads,
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="fact_adapter",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "fact_adapter", payload)
+        return {
+            "diagnostic_facts": [_diagnostic_fact_payload(item) for item in all_facts],
+            "hypothesis_assessments": assessment_payloads,
+            "hypothesis_states": projected_states,
+            "observation_decisions": observation_payloads,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Fact Adapter: reduced bounded public observations into hypothesis states.",
+                    65,
+                )
+            ],
+        }
+
+    async def _sufficiency_gate_v4(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        decision = assess_sufficiency(assessments)
+        payload = _evidence_sufficiency_payload(decision)
+        plan = cast(list[JsonDict], state.get("plan") or [])
+        plan_index = int(state.get("plan_index") or 0)
+        attempts = int(state.get("executor_attempt_count") or 0)
+        maximum = int(state.get("max_total_steps") or 6)
+        if plan_index < len(plan) and attempts < maximum:
+            next_route = "executor"
+        elif decision.status == "sufficient":
+            next_route = "decision"
+        elif decision.unresolved_hypotheses and int(state.get("adjudication_count") or 0) == 0:
+            next_route = "hypothesis_adjudicator"
+        elif int(state.get("replan_count") or 0) < int(state.get("max_replans") or 1):
+            next_route = "replanner"
+        else:
+            next_route = "decision"
+        gate_payload: JsonDict = {**payload, "nextRoute": next_route}
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="sufficiency_gate",
+            status="completed",
+            payload=gate_payload,
+        )
+        await self._save_checkpoint(state, "sufficiency_gate", gate_payload)
+        return {
+            "evidence_sufficiency": payload,
+            "next_route": next_route,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    f"Sufficiency Gate: deterministically routed to {next_route}.",
+                    70,
+                )
+            ],
+        }
+
+    async def _hypothesis_adjudicator(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        """Use at most one batch model call for rule-unresolved public hypotheses."""
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        facts = _diagnostic_facts_from_payload(
+            cast(list[JsonDict], state.get("diagnostic_facts") or [])
+        )
+        unresolved = {
+            item.hypothesis_id
+            for item in assessments
+            if item.disposition == "unresolved" and not item.has_high_quality_conflict
+        }
+        public_evidence_ids = {item.evidence_id for item in facts if item.public}
+        prompt = (
+            "Return JSON only with an `assessments` array. Adjudicate all unresolved public "
+            "hypotheses in one batch. Each item has hypothesisId, disposition, evidenceIds, "
+            "and reasonCode. disposition is supported, refuted, causally_inactive, or "
+            "unresolved. Closed dispositions require cited public evidence IDs. Do not add "
+            "private reasoning or hidden answers. Unresolved IDs: "
+            f"{json.dumps(sorted(unresolved))}. Public hypotheses: "
+            f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
+            "Public facts: "
+            f"{json.dumps([_diagnostic_fact_payload(item) for item in facts], ensure_ascii=False)}."
+        )
+        accepted = list(assessments)
+        accepted_count = 0
+        try:
+            response = await self._llm_provider.create_chat_model().ainvoke(prompt)
+            accepted, accepted_count = _apply_llm_adjudication_payload(
+                assessments=assessments,
+                text=_model_text(response),
+                unresolved_hypothesis_ids=unresolved,
+                public_evidence_ids=public_evidence_ids,
+            )
+        except Exception:
+            accepted = list(assessments)
+        assessment_payloads = [_hypothesis_assessment_payload(item) for item in accepted]
+        payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v4",
+            "adjudicationAttempt": 1,
+            "acceptedAssessmentCount": accepted_count,
+            "hypothesisAssessments": assessment_payloads,
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="hypothesis_adjudicator",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "hypothesis_adjudicator", payload)
+        return {
+            "hypothesis_assessments": assessment_payloads,
+            "hypothesis_states": [
+                _hypothesis_state_payload(project_hypothesis_assessment(item))
+                for item in accepted
+            ],
+            "adjudication_count": 1,
+            "used_llm_adjudication": True,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Hypothesis Adjudicator: completed one bounded batch review.",
+                    75,
+                )
+            ],
         }
 
     async def _evidence_evaluator(
@@ -1551,6 +1862,140 @@ class AiopsDiagnosticService:
                     "running",
                     f"Replanner: added {len(accepted)} gap-targeted step(s).",
                     75,
+                )
+            ],
+        }
+
+    async def _decision_v4(self, state: AiopsDiagnosticState) -> dict[str, object]:
+        """Assemble the v4 decision without another model call."""
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        projected_states = [
+            _hypothesis_state_payload(project_hypothesis_assessment(item))
+            for item in assessments
+        ]
+        decision = build_grounded_fallback_decision(
+            public_hypotheses=cast(
+                list[JsonDict], state.get("public_hypotheses") or []
+            ),
+            hypothesis_states=projected_states,
+            observation_decisions=cast(
+                list[JsonDict], state.get("observation_decisions") or []
+            ),
+            decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+        )
+        decision_payload = (
+            _root_cause_decision_payload(decision) if decision is not None else None
+        )
+        payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v4",
+            "rootCauseDecision": decision_payload,
+            "evidenceIds": list(decision.evidence_ids) if decision is not None else [],
+            "status": "grounded" if decision is not None else "insufficient_evidence",
+            "decisionOrigin": "deterministic_grounded" if decision is not None else "none",
+            "decisionAttempts": 0,
+            "decisionErrorCategory": None,
+            "decisionErrorCodes": [],
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="decision",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "decision", payload)
+        return {
+            "root_cause_decision": decision_payload,
+            "hypothesis_states": projected_states,
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Decision: assembled a deterministic evidence-grounded conclusion."
+                    if decision is not None
+                    else "Decision: evidence was insufficient for a unique conclusion.",
+                    85,
+                )
+            ],
+        }
+
+    async def _deterministic_validator_v4(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        """Validate v4 from four-state assessments without semantic model review."""
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        assessments = _hypothesis_assessments_from_payload(
+            cast(list[JsonDict], state.get("hypothesis_assessments") or [])
+        )
+        candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
+        evidence_ids = set(
+            _unique_strings(cast(list[str], state.get("evidence_ids") or []))
+        )
+        deterministic_result = (
+            validate_grounded_assessments(
+                candidate=candidate,
+                available_evidence_ids=evidence_ids,
+                hypothesis_assessments=assessments,
+                observation_decisions=cast(
+                    list[JsonDict], state.get("observation_decisions") or []
+                ),
+                decision_vocabulary=_json_dict(state.get("decision_vocabulary")),
+            )
+            if candidate is not None
+            else None
+        )
+        valid = deterministic_result is not None and deterministic_result.passed
+        payload: JsonDict = {
+            "workflowVersion": "evidence-driven-v4",
+            "status": "valid" if valid else "invalid",
+            "validationOrigin": "deterministic",
+            "validationAttempts": 0,
+            "validationErrorCategory": None if valid else "deterministic_gap",
+            "evidenceIds": list(candidate.evidence_ids) if candidate is not None else [],
+            "unsupportedFields": list(
+                deterministic_result.unsupported_fields
+                if deterministic_result is not None
+                else ()
+            ),
+            "missingEvidence": list(
+                deterministic_result.missing_evidence
+                if deterministic_result is not None
+                else ("No grounded root-cause decision was available.",)
+            ),
+            "deterministicChecks": (
+                deterministic_checks_payload(deterministic_result)
+                if deterministic_result is not None
+                else []
+            ),
+            "summary": (
+                "Deterministic public-evidence validation passed."
+                if valid
+                else "Deterministic public-evidence validation failed closed."
+            ),
+            "nextRoute": "recovery_planner",
+        }
+        await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="decision_validator",
+            status="completed",
+            payload=payload,
+        )
+        await self._save_checkpoint(state, "deterministic_validator", payload)
+        return {
+            "decision_validation": payload,
+            "next_route": "recovery_planner",
+            "events": [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Decision Validator: completed deterministic public-evidence checks.",
+                    88,
                 )
             ],
         }
@@ -2509,6 +2954,10 @@ class AiopsDiagnosticService:
 
 
 def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
+    trusted_catalog = {
+        (str(item["templateId"]), str(item["hypothesisId"])): item
+        for item in trusted_evidence_rule_catalog()
+    }
     return {
         "id": step.id,
         "tool": step.tool,
@@ -2521,16 +2970,17 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
             {
                 "templateId": rule.template_id,
                 "hypothesisId": rule.hypothesis_id,
-                "predicate": {
-                    "leftFact": rule.predicate.left_fact,
-                    "operator": rule.predicate.operator,
-                    "expected": rule.predicate.expected,
-                    "rightFact": rule.predicate.right_fact,
-                },
-                "whenTrue": rule.when_true,
-                "reasonCode": rule.reason_code,
+                "parameters": dict(
+                    cast(
+                        Mapping[str, object],
+                        trusted_catalog[(rule.template_id, rule.hypothesis_id)][
+                            "parameters"
+                        ],
+                    )
+                ),
             }
             for rule in step.evidence_rules
+            if (rule.template_id, rule.hypothesis_id) in trusted_catalog
         ],
     }
 
@@ -2677,6 +3127,288 @@ def _evidence_sufficiency_payload(
         "recommendedTools": list(decision.recommended_tools),
         "summary": decision.summary,
     }
+
+
+def _new_hypothesis_assessment(hypothesis_id: str) -> HypothesisAssessment:
+    return HypothesisAssessment(
+        hypothesis_id=hypothesis_id,
+        disposition="unresolved",
+        evidence_ids=(),
+        reason_code="awaiting_public_evidence",
+        assessment_source="deterministic",
+    )
+
+
+def _initial_hypothesis_assessments(
+    public_hypotheses: Sequence[JsonDict],
+) -> list[JsonDict]:
+    return [
+        _hypothesis_assessment_payload(_new_hypothesis_assessment(str(item["id"])))
+        for item in public_hypotheses
+        if item.get("id")
+    ]
+
+
+def _hypothesis_assessment_payload(assessment: HypothesisAssessment) -> JsonDict:
+    return {
+        "hypothesisId": assessment.hypothesis_id,
+        "disposition": assessment.disposition,
+        "evidenceIds": list(assessment.evidence_ids),
+        "reasonCode": assessment.reason_code,
+        "assessmentSource": assessment.assessment_source,
+        "hasHighQualityConflict": assessment.has_high_quality_conflict,
+        "transitions": [
+            {
+                "previousDisposition": transition.previous_disposition,
+                "nextDisposition": transition.next_disposition,
+                "evidenceIds": list(transition.evidence_ids),
+                "reasonCode": transition.reason_code,
+                "assessmentSource": transition.assessment_source,
+            }
+            for transition in assessment.transitions
+        ],
+    }
+
+
+def _hypothesis_assessments_from_payload(
+    payloads: Sequence[JsonDict],
+) -> tuple[HypothesisAssessment, ...]:
+    assessments: list[HypothesisAssessment] = []
+    for payload in payloads:
+        hypothesis_id = payload.get("hypothesisId")
+        disposition = payload.get("disposition")
+        reason_code = payload.get("reasonCode")
+        source = payload.get("assessmentSource")
+        if (
+            not isinstance(hypothesis_id, str)
+            or disposition not in {"supported", "refuted", "causally_inactive", "unresolved"}
+            or not isinstance(reason_code, str)
+            or source not in {"deterministic", "llm_adjudicated"}
+        ):
+            continue
+        transitions: list[HypothesisTransition] = []
+        for raw_transition in cast(list[object], payload.get("transitions") or []):
+            if not isinstance(raw_transition, Mapping):
+                continue
+            transition = cast(Mapping[str, object], raw_transition)
+            previous = transition.get("previousDisposition")
+            next_disposition = transition.get("nextDisposition")
+            transition_reason = transition.get("reasonCode")
+            transition_source = transition.get("assessmentSource")
+            if (
+                previous not in {"supported", "refuted", "causally_inactive", "unresolved"}
+                or next_disposition
+                not in {"supported", "refuted", "causally_inactive", "unresolved"}
+                or not isinstance(transition_reason, str)
+                or transition_source not in {"deterministic", "llm_adjudicated"}
+            ):
+                continue
+            transitions.append(
+                HypothesisTransition(
+                    previous_disposition=cast(Any, previous),
+                    next_disposition=cast(Any, next_disposition),
+                    evidence_ids=tuple(
+                        item
+                        for item in cast(list[object], transition.get("evidenceIds") or [])
+                        if isinstance(item, str)
+                    ),
+                    reason_code=transition_reason,
+                    assessment_source=cast(Any, transition_source),
+                )
+            )
+        try:
+            assessments.append(
+                HypothesisAssessment(
+                    hypothesis_id=hypothesis_id,
+                    disposition=cast(Any, disposition),
+                    evidence_ids=tuple(
+                        item
+                        for item in cast(list[object], payload.get("evidenceIds") or [])
+                        if isinstance(item, str)
+                    ),
+                    reason_code=reason_code,
+                    assessment_source=cast(Any, source),
+                    has_high_quality_conflict=bool(
+                        payload.get("hasHighQualityConflict")
+                    ),
+                    transitions=tuple(transitions),
+                )
+            )
+        except ValueError:
+            continue
+    return tuple(sorted(assessments, key=lambda item: item.hypothesis_id))
+
+
+def _hypothesis_state_payload(state: HypothesisState) -> JsonDict:
+    return {
+        "id": state.id,
+        "status": state.status,
+        "confidence": state.confidence,
+        "evidenceIds": list(state.evidence_ids),
+    }
+
+
+def _diagnostic_fact_payload(fact: DiagnosticFact) -> JsonDict:
+    return {
+        "key": fact.key,
+        "value": _safe_value(fact.value),
+        "evidenceId": fact.evidence_id,
+        "sourceTool": fact.source_tool,
+        "quality": fact.quality,
+        "public": fact.public,
+    }
+
+
+def _diagnostic_facts_from_payload(
+    payloads: Sequence[JsonDict],
+) -> tuple[DiagnosticFact, ...]:
+    facts: list[DiagnosticFact] = []
+    for payload in payloads:
+        key = payload.get("key")
+        evidence_id = payload.get("evidenceId")
+        source_tool = payload.get("sourceTool")
+        quality = payload.get("quality")
+        if (
+            not isinstance(key, str)
+            or not isinstance(evidence_id, str)
+            or not isinstance(source_tool, str)
+            or quality not in {"direct", "context"}
+        ):
+            continue
+        value = payload.get("value")
+        if isinstance(value, list):
+            value = tuple(value)
+        try:
+            facts.append(
+                DiagnosticFact(
+                    key=key,
+                    value=value,
+                    evidence_id=evidence_id,
+                    source_tool=source_tool,
+                    quality=cast(Any, quality),
+                    public=payload.get("public") is not False,
+                )
+            )
+        except ValueError:
+            continue
+    return _deduplicate_diagnostic_facts(facts)
+
+
+def _deduplicate_diagnostic_facts(
+    facts: Sequence[DiagnosticFact],
+) -> tuple[DiagnosticFact, ...]:
+    indexed = {
+        (fact.key, fact.evidence_id, repr(fact.value), fact.quality): fact
+        for fact in facts
+        if fact.public
+    }
+    return tuple(indexed[key] for key in sorted(indexed))
+
+
+def _trusted_rules_from_plan(
+    plan: Sequence[JsonDict],
+) -> tuple[HypothesisEvidenceRule, ...]:
+    rules: dict[tuple[str, str], HypothesisEvidenceRule] = {}
+    for step in plan:
+        tool = step.get("tool")
+        if not isinstance(tool, str):
+            continue
+        for raw_rule in cast(list[object], step.get("evidenceRules") or []):
+            if not isinstance(raw_rule, Mapping):
+                continue
+            rule_payload = cast(Mapping[str, object], raw_rule)
+            template_id = rule_payload.get("templateId")
+            hypothesis_id = rule_payload.get("hypothesisId")
+            parameters = rule_payload.get("parameters")
+            if (
+                not isinstance(template_id, str)
+                or not isinstance(hypothesis_id, str)
+                or not isinstance(parameters, Mapping)
+                or not all(isinstance(key, str) for key in parameters)
+            ):
+                continue
+            rule = instantiate_trusted_evidence_rule(
+                template_id=template_id,
+                hypothesis_id=hypothesis_id,
+                parameters=cast(Mapping[str, object], parameters),
+                step_tool=tool,
+            )
+            if rule is not None:
+                rules[(rule.template_id, rule.hypothesis_id)] = rule
+    return tuple(rules[key] for key in sorted(rules))
+
+
+def _safe_causal_role(value: object) -> CausalRole:
+    if value in {"trigger", "mechanism", "impact", "context"}:
+        return cast(CausalRole, value)
+    return "context"
+
+
+def _apply_llm_adjudication_payload(
+    *,
+    assessments: Sequence[HypothesisAssessment],
+    text: str,
+    unresolved_hypothesis_ids: set[str],
+    public_evidence_ids: set[str],
+) -> tuple[list[HypothesisAssessment], int]:
+    parsed = json.loads(text)
+    if not isinstance(parsed, Mapping):
+        raise ValueError("Adjudicator response must be an object.")
+    raw_items = parsed.get("assessments")
+    if isinstance(raw_items, (str, bytes)) or not isinstance(raw_items, Sequence):
+        raise ValueError("Adjudicator assessments must be an array.")
+    by_id = {item.hypothesis_id: item for item in assessments}
+    accepted_count = 0
+    seen: set[str] = set()
+    for raw_item in cast(Sequence[object], raw_items):
+        if not isinstance(raw_item, Mapping):
+            continue
+        item = cast(Mapping[str, object], raw_item)
+        if set(item) != {"hypothesisId", "disposition", "evidenceIds", "reasonCode"}:
+            continue
+        hypothesis_id = item.get("hypothesisId")
+        disposition = item.get("disposition")
+        reason_code = item.get("reasonCode")
+        raw_evidence = item.get("evidenceIds")
+        if (
+            not isinstance(hypothesis_id, str)
+            or hypothesis_id not in unresolved_hypothesis_ids
+            or hypothesis_id in seen
+            or disposition
+            not in {"supported", "refuted", "causally_inactive", "unresolved"}
+            or not isinstance(reason_code, str)
+            or isinstance(raw_evidence, (str, bytes))
+            or not isinstance(raw_evidence, Sequence)
+            or not all(isinstance(value, str) for value in raw_evidence)
+        ):
+            continue
+        evidence_ids = tuple(sorted(set(cast(Sequence[str], raw_evidence))))
+        if not set(evidence_ids).issubset(public_evidence_ids):
+            continue
+        if disposition != "unresolved" and not evidence_ids:
+            continue
+        previous = by_id[hypothesis_id]
+        try:
+            transition = HypothesisTransition(
+                previous_disposition=previous.disposition,
+                next_disposition=cast(Any, disposition),
+                evidence_ids=evidence_ids,
+                reason_code=reason_code,
+                assessment_source="llm_adjudicated",
+            )
+            by_id[hypothesis_id] = HypothesisAssessment(
+                hypothesis_id=hypothesis_id,
+                disposition=cast(Any, disposition),
+                evidence_ids=evidence_ids,
+                reason_code=reason_code,
+                assessment_source="llm_adjudicated",
+                transitions=previous.transitions + (transition,),
+            )
+        except ValueError:
+            continue
+        accepted_count += 1
+        seen.add(hypothesis_id)
+    return [by_id[key] for key in sorted(by_id)], accepted_count
 
 
 def _initial_hypothesis_states(public_hypotheses: Sequence[JsonDict]) -> list[JsonDict]:

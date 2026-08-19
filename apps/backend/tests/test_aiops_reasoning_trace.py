@@ -10,6 +10,7 @@ import pytest
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops.adjudication import HypothesisAssessment
 from super_ai.aiops.diagnostics import (
+    _diagnostic_plan_step_payload,  # pyright: ignore[reportPrivateUsage]
     _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _next_open_hypothesis_step_index,  # pyright: ignore[reportPrivateUsage]
     _normalize_grounded_decision,  # pyright: ignore[reportPrivateUsage]
@@ -100,6 +101,51 @@ def test_plan_parser_instantiates_a_trusted_evidence_rule_template() -> None:
     assert rule.hypothesis_id == "upstream_port_mismatch"
     assert rule.when_true == "refuted"
     assert rule.reason_code == "configured_route_port_matches_service"
+
+
+def test_trusted_rule_payload_preserves_only_reconstructable_template_input() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Compare the upstream and service ports.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_port_mismatch",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    payload = _diagnostic_plan_step_payload(plan[0])
+
+    assert payload["evidenceRules"] == [
+        {
+            "templateId": "nginx_upstream_port_matches_container_port",
+            "hypothesisId": "upstream_port_mismatch",
+            "parameters": {
+                "containerFact": "InspectContainer.configuredPorts",
+                "nginxFact": "InspectNginx.upstreamPort",
+            },
+        }
+    ]
 
 
 def test_plan_parser_drops_model_defined_disposition_rule() -> None:
