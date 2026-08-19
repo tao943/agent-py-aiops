@@ -4,11 +4,13 @@ import pytest
 
 from super_ai.aiops import RootCauseDecision
 from super_ai.evaluation import ArtifactToolCall, RunArtifact
+from super_ai.evaluation.live import nginx_timeout as nginx_timeout_module
 from super_ai.evaluation.live.domain import LiveCheck, LiveFaultObservation
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutEvidenceMcpClient,
     NginxTimeoutLiveConfig,
+    NginxTimeoutScenarioDriver,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
 from super_ai.mcp_client import McpClientError
@@ -196,3 +198,34 @@ async def test_nginx_read_tools_still_reject_proposal_arguments() -> None:
 def test_nginx_live_config_refuses_non_fixture_ports() -> None:
     with pytest.raises(ValueError, match="18080"):
         NginxTimeoutLiveConfig(gateway_url="http://127.0.0.1:8080")
+
+
+@pytest.mark.asyncio
+async def test_nginx_loopback_health_bypasses_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_options: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def get(self, url: str, **kwargs: object) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr(nginx_timeout_module.httpx, "AsyncClient", FakeClient)
+    driver = NginxTimeoutScenarioDriver(NginxTimeoutLiveConfig())
+
+    await driver.preflight(validate_run_id("run-1"))
+
+    assert client_options == [{"timeout": 2.0, "trust_env": False}]

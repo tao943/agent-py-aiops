@@ -77,7 +77,7 @@ class NginxTimeoutScenarioDriver:
 
     async def preflight(self, identity: LiveRunIdentity) -> None:
         del identity
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             gateway, upstream = await self._health_responses(client)
         if gateway.status_code != 200 or upstream.status_code != 200:
             raise RuntimeError("Nginx Live Eval health preflight failed.")
@@ -88,7 +88,7 @@ class NginxTimeoutScenarioDriver:
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
         if identity.run_id not in self._runs:
             raise RuntimeError("Nginx Live Eval baseline is missing.")
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
             started = time.monotonic()
             response = await client.get(
                 f"{self._config.gateway_url}/slow",
@@ -116,7 +116,7 @@ class NginxTimeoutScenarioDriver:
 
     async def verify(self, identity: LiveRunIdentity) -> LiveVerification:
         state = self._runs[identity.run_id]
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             gateway, upstream = await self._health_responses(client)
         return LiveVerification(
             (
