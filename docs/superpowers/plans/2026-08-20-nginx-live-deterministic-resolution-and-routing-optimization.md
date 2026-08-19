@@ -29,6 +29,7 @@
 - `apps/backend/src/super_ai/aiops/facts.py`：把 Nginx/CLS 的受控字段标记为可参与确定性裁决的 direct public facts。
 - `apps/backend/src/super_ai/aiops/trusted_patterns.py`：保存不依赖场景身份的 Nginx timeout 复合模式和确定性因果 Observation 投影。
 - `apps/backend/src/super_ai/aiops/diagnostics.py`：在 Fact Adapter 中接入复合模式；为 Replanner 增加模型调用前的可用步骤预检。
+- `apps/backend/src/super_ai/evaluation/live/nginx_timeout.py`：增加独立、只读的 Nginx gateway 健康探针，使 gateway pressure 反证在真实 Live 工具链可达。
 - `apps/backend/tests/test_aiops_trusted_patterns.py`：正向、反事实、冲突、身份无关和 Evidence 归属测试。
 - `apps/backend/tests/test_aiops_v4_workflow.py`：Fact Adapter、Sufficiency、Adjudicator/Replanner 路由和模型调用审计测试。
 - `apps/backend/tests/test_live_diagnostic_adapter.py`：真实 Live 工具合同进入生产诊断图后的结构化 Artifact 测试。
@@ -60,7 +61,8 @@ scenario identity, run identity, Oracle, Ground Truth, score rules, or fixture v
 
 #### Scenario: Nginx timeout facts close differentiated alternatives
 - **WHEN** one request has HTTP 504, upstream connect success, read deadline elapsed,
-  an independently healthy upstream, and an incident-scoped upstream-timeout event
+  independently healthy upstream and gateway probes, and an incident-scoped
+  upstream-timeout event
 - **THEN** Workflow SHALL support upstream response timeout
 - **AND** every closed competitor MUST cite the direct Evidence that closes it
 
@@ -111,7 +113,7 @@ git commit -m "spec: define trusted nginx resolution"
 - Create: `apps/backend/tests/test_aiops_trusted_patterns.py`
 
 **Interfaces:**
-- Consumes: `Sequence[HypothesisAssessment]`、`Sequence[DiagnosticFact]`。
+- Consumes: `Sequence[HypothesisAssessment]`、`Sequence[DiagnosticFact]`、由当前任务持久化 Evidence 建立的可信 ID 集。
 - Produces: `TrustedPatternResolution(assessments, observations, matched_pattern_ids)`。
 - Produces: `apply_deterministic_transition(...) -> HypothesisAssessment`，供复合模式复用 reducer 的冲突语义。
 
@@ -124,6 +126,7 @@ def test_nginx_timeout_pattern_closes_each_hypothesis_with_direct_evidence() -> 
     result = resolve_trusted_patterns(
         assessments=initial_nginx_assessments(),
         facts=nginx_timeout_facts(duration_ms=913),
+        trusted_evidence_ids=nginx_timeout_evidence_ids(),
     )
     by_id = {item.hypothesis_id: item for item in result.assessments}
     assert by_id["nginx_upstream_response_timeout"].disposition == "supported"
@@ -137,12 +140,13 @@ def test_nginx_timeout_pattern_closes_each_hypothesis_with_direct_evidence() -> 
     assert result.matched_pattern_ids == ("nginx_upstream_read_timeout",)
 ```
 
-- [ ] **Step 2: 写反事实和防过拟合 RED 测试**
+- [ ] **Step 2: 写反事实、Evidence 归属和防过拟合 RED 测试**
 
-分别覆盖：connect failed、upstream unhealthy、deadline not elapsed、缺少 CLS
-`upstream_timeout`、存在 `gatewayResourcePressureObserved=true`。每个测试断言 timeout 不得成为唯一
-supported，且缺失/冲突项仍为 unresolved。再以不同 duration 和无关 `scenarioId/runId` shaped facts
-证明结果只由允许的语义事实决定。
+分别覆盖：connect failed、upstream unhealthy、gateway 独立探针失败或明显变慢、deadline not elapsed、
+缺少 CLS `upstream_timeout`。每个测试断言 timeout 不得成为唯一 supported，且缺失/冲突项仍为
+unresolved。将结构正确但 Evidence ID 不属于 `trusted_evidence_ids` 的另一任务 Fact 混入时必须忽略且
+不得匹配；再以不同 duration 和无关 `scenarioId/runId` shaped facts 证明结果只由允许的当前任务语义
+事实决定。
 
 - [ ] **Step 3: 运行测试确认正确 RED**
 
@@ -165,6 +169,9 @@ Expected: `ModuleNotFoundError: super_ai.aiops.trusted_patterns` 或缺少接口
 "ReadNginxTimeoutSummary.readDeadlineElapsed",
 "ProbeLiveEvalUpstream.status",
 "ProbeLiveEvalUpstream.healthy",
+"ProbeLiveEvalGateway.status",
+"ProbeLiveEvalGateway.healthy",
+"ProbeLiveEvalGateway.latencyMs",
 "SearchLog.records.event",
 ```
 
@@ -186,9 +193,12 @@ def apply_deterministic_transition(
     """Apply one evidence-cited transition and preserve existing conflict behavior."""
 ```
 
-接口必须：去重 Evidence ID、拒绝无 Evidence 的关闭状态、将已有相反关闭状态转为
-`unresolved/high_quality_evidence_conflict`、追加 `HypothesisTransition`，并保持重复输入幂等。
-`reduce_hypotheses()` 改为复用该接口，现有单事实 reducer 测试必须不变。
+接口必须：去重 Evidence ID、拒绝无 Evidence 的关闭状态、追加 `HypothesisTransition`，并保持重复
+输入幂等。批量 reducer 必须先归并同一 hypothesis 的全部 proposed outcomes，再一次性转换；一旦
+历史 transition 或当前批次存在相反关闭状态，结果必须保持
+`unresolved/high_quality_evidence_conflict`，后续同向事实不得重新关闭。增加 A→B、B→A、重复运行和
+新增无关 Fact 后冲突仍 unresolved 的顺序无关测试。`reduce_hypotheses()` 改为复用该批量语义，现有
+单事实 reducer 测试必须不变。
 
 - [ ] **Step 6: 实现 `trusted_patterns.py`**
 
@@ -205,12 +215,15 @@ def resolve_trusted_patterns(
     *,
     assessments: Sequence[HypothesisAssessment],
     facts: Sequence[DiagnosticFact],
+    trusted_evidence_ids: AbstractSet[str],
 ) -> TrustedPatternResolution:
     """Apply code-owned cross-tool patterns without scenario or Oracle input."""
 ```
 
-实现必须在五类必需事实完整且没有 pressure 冲突时才触发；每个 hypothesis transition 只引用关闭它
-所需的 Evidence。Observation 使用 `assessmentSource="deterministic"`、
+实现必须先丢弃 Evidence ID 不在可信 ID 集中的 Fact，再在 HTTP 504、upstream connect success、
+read deadline elapsed、upstream 独立健康、gateway 独立健康且低延迟、incident-scoped CLS
+`upstream_timeout` 完整时触发；任一健康探针冲突时 fail closed。每个 hypothesis transition 只引用
+关闭它所需的 Evidence。Observation 使用 `assessmentSource="deterministic"`、
 `causalRoleOrigin="trusted_compound_pattern"`，并分别生成 trigger/mechanism/impact。
 
 - [ ] **Step 7: 运行 GREEN 与相邻 reducer 回归**
@@ -234,6 +247,7 @@ git commit -m "fix: resolve nginx timeout from trusted facts"
 
 **Files:**
 - Modify: `apps/backend/src/super_ai/aiops/diagnostics.py`
+- Modify: `apps/backend/src/super_ai/evaluation/live/nginx_timeout.py`
 - Modify: `apps/backend/tests/test_aiops_v4_workflow.py`
 - Modify: `apps/backend/tests/test_live_diagnostic_adapter.py`
 
@@ -256,6 +270,8 @@ assert len(decision["root_cause_decision"]["causalChain"]) >= 2
 ```
 
 模型 stub 的 Adjudicator/Replanner 分支直接 `raise AssertionError`，证明闭环不依赖这两个角色。
+另加跨任务 Evidence 测试：向 `diagnostic_facts` 混入未出现在当前 state `evidence_ids` 中的外部
+Evidence ID，Fact Adapter 必须过滤该 Fact 且复合模式不得据此关闭任何 hypothesis。
 
 - [ ] **Step 2: 运行测试确认 RED**
 
@@ -271,7 +287,12 @@ Expected: 最终 hypothesis 仍 unresolved 或路由仍为 `hypothesis_adjudicat
 
 ```python
 reduced = reduce_hypotheses(...)
-trusted = resolve_trusted_patterns(assessments=reduced, facts=all_facts)
+trusted_ids = frozenset((*state_evidence_ids, current_persisted_evidence_id))
+trusted = resolve_trusted_patterns(
+    assessments=reduced,
+    facts=all_facts,
+    trusted_evidence_ids=trusted_ids,
+)
 reduced = trusted.assessments
 observation_payloads.extend(trusted.observations)
 ```
@@ -280,14 +301,22 @@ observation_payloads.extend(trusted.observations)
 `_derive_nginx_timeout_observations` 对“先有唯一 supported assessment”的循环依赖；其他 PG/Redis
 coverage repair 行为保持不变。
 
-- [ ] **Step 4: 增加 Live Adapter Artifact RED/GREEN 测试**
+`trusted_ids` 只能来自当前任务加载的持久化 `evidence_ids` 与本轮 executor 成功持久化后返回的
+`current_evidence_id`，不得从 Fact payload 自报 Evidence ID 推导。
+
+- [ ] **Step 4: 增加真实 gateway 反证工具和 Live Adapter Artifact RED/GREEN 测试**
+
+在 Nginx driver 的故障观察阶段，对 gateway `/health` 做独立状态和延迟探针，并通过新增零参数只读工具
+`ProbeLiveEvalGateway` 暴露 sanitized 的 `status/healthy/latencyMs`。健康阈值必须是代码拥有的运行合同，
+不得引用 Benchmark 分值或固定故障答案。测试覆盖 healthy 快速响应、非 200、超过阈值三种真实输出；
+后两种必须使 trusted pattern fail closed。
 
 使用真实 `NginxTimeoutEvidenceMcpClient` 的 sanitized 工具响应和内存模型，断言 Artifact：
 
 - 根因 component/mechanism/trigger/causal chain 完整；
 - Evidence ID 全部存在；
 - 不含 Oracle/ground truth；
-- 工具审计包含三个 Nginx 只读工具和 `SearchLog`；
+- 工具审计包含四个 Nginx 只读工具和 `SearchLog`；
 - 不包含 Adjudicator/Replanner model audit；
 - proposal tool 仍由后续 Recovery Planner/Policy Gate 负责。
 
@@ -302,7 +331,7 @@ Expected: PASS。
 - [ ] **Step 6: 提交生产图接入**
 
 ```powershell
-git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_live_diagnostic_adapter.py
+git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/evaluation/live/nginx_timeout.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_live_diagnostic_adapter.py apps/backend/tests/test_live_nginx_timeout_contracts.py
 git commit -m "fix: close nginx live diagnostic evidence"
 ```
 
@@ -375,7 +404,7 @@ git commit -m "docs: record nginx live acceptance"
 - Modify: `apps/backend/tests/test_aiops_v4_workflow.py`
 
 **Interfaces:**
-- Produces: `_bounded_replan_preflight(state, tool_definitions) -> ReplanPreflight`。
+- Produces: `_bounded_replan_preflight(state, tool_definitions, trusted_tool_arguments, tool_argument_contracts, causal_capabilities) -> ReplanPreflight`。
 - `ReplanPreflight` 返回 deterministic steps、`model_allowed` 和 allowlisted reason。
 
 - [ ] **Step 1: 写“工具空间已耗尽”RED 测试**
@@ -420,19 +449,34 @@ def _bounded_replan_preflight(
     state: Mapping[str, object],
     *,
     tool_definitions: Sequence[McpToolDefinition],
+    trusted_tool_arguments: Mapping[str, Mapping[str, object]],
+    tool_argument_contracts: Mapping[str, ToolArgumentContract],
+    causal_capabilities: Mapping[str, AbstractSet[str]],
 ) -> ReplanPreflight:
     ...
 ```
 
-规则顺序：先生成并规范化 deterministic gap steps；若存在未执行步骤，直接返回这些步骤且
-`model_allowed=False`。只有当每个仍可能覆盖 gap 的工具都具有空参数或 execution-owned 固定参数，
-并且相同 canonical fingerprint 已执行时，才返回 `bounded_tool_space_exhausted`。任何自由参数合同均
-返回 `model_allowed=True`，不得猜测没有搜索空间。
+调用者必须把实例上的 `_trusted_tool_arguments`、`_tool_argument_contracts` 和按工具计算的 causal
+capabilities 显式传入纯函数。规则顺序：先生成并按同一生产合同规范化 deterministic gap steps；若存在
+未执行步骤，直接返回这些步骤且 `model_allowed=False`。只有当每个仍可能覆盖当前 gap 的工具都具有
+空参数、JSON Schema `const` 参数或 execution-owned 固定参数，并且相同 canonical fingerprint 已执行时，
+才返回 `bounded_tool_space_exhausted`。任何自由参数合同或 causal intent 覆盖关系不能被证明时均返回
+`model_allowed=True`，不得猜测没有搜索空间。测试分别覆盖空参数、const、trusted runtime-bound、自由
+参数及工具 causal intent 不覆盖当前 gap。
 
 - [ ] **Step 5: 在 `_replanner` 调用模型前接入**
 
 ```python
-preflight = _bounded_replan_preflight(state, tool_definitions=tool_definitions)
+preflight = _bounded_replan_preflight(
+    state,
+    tool_definitions=tool_definitions,
+    trusted_tool_arguments=self._trusted_tool_arguments,
+    tool_argument_contracts=self._tool_argument_contracts,
+    causal_capabilities={
+        definition.name: allowed_causal_intents(definition.name)
+        for definition in tool_definitions
+    },
+)
 if preflight.deterministic_steps:
     parsed_steps = list(preflight.deterministic_steps)
 elif not preflight.model_allowed:
