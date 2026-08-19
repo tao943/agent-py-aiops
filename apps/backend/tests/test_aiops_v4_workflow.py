@@ -385,6 +385,109 @@ async def test_v4_adjudicator_projects_citations_back_to_observations(
 
 
 @pytest.mark.asyncio
+async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
+    migrated_database_url: str,
+) -> None:
+    class CorrectingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "assessments": [
+                            {
+                                "hypothesisId": "cause-a",
+                                "disposition": "supported",
+                                "evidenceIds": ["ev-a"],
+                                "reasonCode": "public_signal_supports_cause_a",
+                                "confidence": 0.9,
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "hypothesisId": "cause-a",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-a"],
+                            "reasonCode": "public_signal_supports_cause_a",
+                        }
+                    ]
+                }
+            )
+
+    class Provider:
+        def __init__(self) -> None:
+            self.model = CorrectingModel()
+
+        def create_chat_model(self) -> CorrectingModel:
+            return self.model
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-adjudicator-correction-retry",
+            status="running",
+            query="Resolve one cause.",
+            input_payload={},
+        )
+        provider = Provider()
+        update = await _service(
+            repositories, provider
+        )._hypothesis_adjudicator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {"id": "cause-a", "description": "First cause."}
+                    ],
+                    "hypothesis_assessments": _initial_hypothesis_assessments(
+                        [{"id": "cause-a"}]
+                    ),
+                    "diagnostic_facts": [
+                        {
+                            "key": "InspectA.signal",
+                            "value": True,
+                            "evidenceId": "ev-a",
+                            "sourceTool": "InspectPostgres",
+                            "quality": "direct",
+                            "public": True,
+                        }
+                    ],
+                    "observation_decisions": [],
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        payload = steps[-1].payload
+    finally:
+        await engine.dispose()
+
+    assert provider.model.calls == 2
+    assert update["adjudication_count"] == 1
+    assert update["model_call_count"] == 2
+    assessments = cast(list[dict[str, object]], update["hypothesis_assessments"])
+    assert assessments[0]["disposition"] == "supported"
+    assert payload["adjudicationAttempts"] == 2
+    assert payload["adjudicationErrorCategory"] == "corrected_invalid_batch"
+
+
+@pytest.mark.asyncio
 async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
     migrated_database_url: str,
 ) -> None:

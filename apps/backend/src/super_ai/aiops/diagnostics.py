@@ -1954,25 +1954,51 @@ class AiopsDiagnosticService:
             "Public facts: "
             f"{json.dumps([_diagnostic_fact_payload(item) for item in facts], ensure_ascii=False)}."
         )
+        model_runtime = self._model_runtime(state)
+        initial_model_count = model_runtime.budget.used
         accepted = list(assessments)
         accepted_count = 0
-        model_runtime = self._model_runtime(state)
-        try:
-            response = await self._invoke_v4_model(
-                model_runtime,
-                role="adjudicator",
-                prompt=prompt,
-            )
-            if response is None:
-                raise RuntimeError("Adjudicator model call was unavailable.")
-            accepted, accepted_count = _apply_llm_adjudication_payload(
-                assessments=assessments,
-                text=_model_text(response),
-                unresolved_hypothesis_ids=unresolved,
-                public_evidence_ids=public_evidence_ids,
-            )
-        except Exception:
-            accepted = list(assessments)
+        adjudication_error_category: str | None = None
+        prompts = (
+            prompt,
+            (
+                f"{prompt} Correct the response format. The top-level object must contain "
+                "exactly one `assessments` array. Every array item must contain exactly "
+                "hypothesisId, disposition, evidenceIds, and reasonCode; no additional fields "
+                "are allowed. Return one item for every unresolved hypothesis. Allowed "
+                f"hypothesis IDs: {json.dumps(sorted(unresolved))}. Allowed public evidence "
+                f"IDs: {json.dumps(sorted(public_evidence_ids))}."
+            ),
+        )
+        for attempt, adjudication_prompt in enumerate(prompts, start=1):
+            candidate = list(assessments)
+            candidate_count = 0
+            try:
+                response = await self._invoke_v4_model(
+                    model_runtime,
+                    role="adjudicator",
+                    prompt=adjudication_prompt,
+                )
+                if response is None:
+                    raise RuntimeError("Adjudicator model call was unavailable.")
+                candidate, candidate_count = _apply_llm_adjudication_payload(
+                    assessments=assessments,
+                    text=_model_text(response),
+                    unresolved_hypothesis_ids=unresolved,
+                    public_evidence_ids=public_evidence_ids,
+                )
+            except Exception:
+                candidate_count = 0
+            if candidate_count > accepted_count:
+                accepted = candidate
+                accepted_count = candidate_count
+            if accepted_count == len(unresolved):
+                if attempt == 2:
+                    adjudication_error_category = "corrected_invalid_batch"
+                break
+        else:
+            adjudication_error_category = "retry_exhausted"
+        adjudication_attempts = model_runtime.budget.used - initial_model_count
         assessment_payloads = [_hypothesis_assessment_payload(item) for item in accepted]
         observation_payloads = _project_adjudicated_observations(
             observations=cast(
@@ -1983,7 +2009,9 @@ class AiopsDiagnosticService:
         )
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
-            "adjudicationAttempt": 1,
+            "adjudicationAttempt": adjudication_attempts,
+            "adjudicationAttempts": adjudication_attempts,
+            "adjudicationErrorCategory": adjudication_error_category,
             "acceptedAssessmentCount": accepted_count,
             "hypothesisAssessments": assessment_payloads,
             "observationDecisions": observation_payloads,
