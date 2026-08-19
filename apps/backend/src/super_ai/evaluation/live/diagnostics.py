@@ -34,9 +34,13 @@ from super_ai.memory.repositories import JsonDict, MemoryRepositories
 from super_ai.retrieval import KnowledgeRetrievalToolRunner
 
 
-def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
+def build_live_diagnostic_input(
+    scenario: LiveScenario,
+    *,
+    workflow_version: str | None = None,
+) -> JsonDict:
     """Build Agent input solely from the public scenario contract."""
-    return {
+    payload: JsonDict = {
         "query": scenario.title,
         "alert": dict(scenario.alert),
         "hypotheses": [
@@ -46,6 +50,9 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         "benchmarkMode": "live",
         "decisionVocabulary": _decision_vocabulary(scenario),
     }
+    if workflow_version is not None:
+        payload["workflowVersion"] = workflow_version
+    return payload
 
 
 def proposal_tool_policies_for_scenario(
@@ -303,6 +310,7 @@ class ApplicationLiveDiagnosticAdapter:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
+        workflow_version: str | None = None,
         cls_mcp_client: LiveMcpClient | None = None,
         component_evidence_factory: Callable[
             [LiveFaultObservation], LiveMcpClient
@@ -313,6 +321,7 @@ class ApplicationLiveDiagnosticAdapter:
         self._retrieval_tool = retrieval_tool
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
+        self._workflow_version = workflow_version
         self._cls_mcp_client = cls_mcp_client
         self._component_evidence_factory = component_evidence_factory
 
@@ -331,7 +340,10 @@ class ApplicationLiveDiagnosticAdapter:
             task_id=task_id,
             status="accepted",
             query=scenario.title,
-            input_payload=build_live_diagnostic_input(scenario),
+            input_payload=build_live_diagnostic_input(
+                scenario,
+                workflow_version=self._workflow_version,
+            ),
             result_payload={},
         )
         scope = evidence_context.cls_scope

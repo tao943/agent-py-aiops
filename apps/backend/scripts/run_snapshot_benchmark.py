@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AgentPy Snapshot SRE benchmark.")
     parser.add_argument("--scenario", required=True, help="Scenario ID, for example APY-003.")
     parser.add_argument("--suite-version", default="v1", help="Benchmark suite version.")
+    parser.add_argument(
+        "--workflow-version",
+        choices=("evidence-driven-v3", "evidence-driven-v4"),
+        default="evidence-driven-v4",
+        help="Production diagnostic workflow version under evaluation.",
+    )
     parser.add_argument("--runs", type=int, default=1, help="Number of repeated runs.")
     parser.add_argument("--output", type=Path, help="Optional UTF-8 JSON report path.")
     parser.add_argument(
@@ -116,6 +122,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
             accessible_knowledge_base_ids=(
                 (knowledge_base_id,) if knowledge_base_id is not None else ()
             ),
+            workflow_version=arguments.workflow_version,
         )
         runner = SnapshotBenchmarkRunner(
             scenario_root=SCENARIO_ROOT,
@@ -127,7 +134,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
         )
         agent_version = AgentVersion(
             git_sha=_git_sha(),
-            workflow_version="agentpy-domainbench-v1",
+            workflow_version=arguments.workflow_version,
         )
         model_configuration: dict[str, object] = {
             "provider": provider_config.provider,

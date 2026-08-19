@@ -45,6 +45,26 @@ def test_snapshot_cli_accepts_and_validates_campaign_id() -> None:
             parser.parse_args(["--scenario", "APY-013", "--campaign-id", invalid])
 
 
+def test_snapshot_cli_defaults_to_auditable_v4_workflow() -> None:
+    parser = MODULE.build_parser()
+
+    assert (
+        parser.parse_args(["--scenario", "APY-013"]).workflow_version
+        == "evidence-driven-v4"
+    )
+    assert (
+        parser.parse_args(
+            [
+                "--scenario",
+                "APY-013",
+                "--workflow-version",
+                "evidence-driven-v3",
+            ]
+        ).workflow_version
+        == "evidence-driven-v3"
+    )
+
+
 def test_snapshot_cli_accepts_explicit_retrieval_scope() -> None:
     arguments = MODULE.build_parser().parse_args(
         [

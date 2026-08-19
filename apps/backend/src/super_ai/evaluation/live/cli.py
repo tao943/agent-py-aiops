@@ -221,6 +221,7 @@ async def _run_live_command(
             retrieval_tool=retrieval_tool,
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
+            workflow_version="evidence-driven-v4",
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )

@@ -473,6 +473,18 @@ def test_live_input_contains_candidate_wide_vocabulary_without_oracle() -> None:
     assert "synthetic_transaction_holds_order_row_lock" not in serialized
     assert "agent_py_live_eval" not in serialized
     assert "run_id" not in serialized
+    assert "workflowVersion" not in payload
+
+
+def test_live_input_can_request_auditable_v4() -> None:
+    scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+
+    payload = build_live_diagnostic_input(
+        scenario,
+        workflow_version="evidence-driven-v4",
+    )
+
+    assert payload["workflowVersion"] == "evidence-driven-v4"
 
 
 @pytest.mark.parametrize(

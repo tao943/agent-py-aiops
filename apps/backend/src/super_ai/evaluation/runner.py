@@ -86,9 +86,13 @@ class BenchmarkEvaluator(Protocol):
     def __call__(self, artifact: RunArtifact, scenario_dir: Path) -> EvaluationResult: ...
 
 
-def build_application_diagnostic_input(scenario: PublicScenario) -> JsonDict:
+def build_application_diagnostic_input(
+    scenario: PublicScenario,
+    *,
+    workflow_version: str | None = None,
+) -> JsonDict:
     """Build the production diagnostic input exclusively from public scenario data."""
-    return {
+    payload: JsonDict = {
         "query": scenario.title,
         "alert": dict(scenario.alert),
         "hypotheses": [
@@ -99,6 +103,9 @@ def build_application_diagnostic_input(scenario: PublicScenario) -> JsonDict:
         "benchmarkMode": "snapshot",
         "decisionVocabulary": _snapshot_decision_vocabulary(scenario),
     }
+    if workflow_version is not None:
+        payload["workflowVersion"] = workflow_version
+    return payload
 
 
 def _snapshot_decision_vocabulary(scenario: PublicScenario) -> JsonDict:
@@ -160,12 +167,14 @@ class ApplicationDiagnosticAdapter:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         owner_user_id: str | None = None,
         accessible_knowledge_base_ids: Sequence[str] = (),
+        workflow_version: str | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._owner_user_id = owner_user_id
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
+        self._workflow_version = workflow_version
 
     async def run(
         self,
@@ -181,7 +190,10 @@ class ApplicationDiagnosticAdapter:
             task_id=task_id,
             status="accepted",
             query=scenario.title,
-            input_payload=build_application_diagnostic_input(scenario),
+            input_payload=build_application_diagnostic_input(
+                scenario,
+                workflow_version=self._workflow_version,
+            ),
             result_payload={},
         )
         service = AiopsDiagnosticService(
