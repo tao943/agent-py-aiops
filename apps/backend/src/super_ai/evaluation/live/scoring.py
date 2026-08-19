@@ -51,6 +51,7 @@ class LiveEvaluationResult:
     failures: tuple[str, ...]
     hard_gate: str | None
     reasons: tuple[ScoreReason, ...]
+    diagnostic_task_id: str | None = None
 
 
 def score_live_run(
@@ -131,6 +132,7 @@ def score_live_run(
         tuple(dict.fromkeys(failures)),
         hard_gate,
         tuple(reasons),
+        diagnostic_task_id=artifact.diagnostic_task_id,
     )
 
 

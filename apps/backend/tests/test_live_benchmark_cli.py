@@ -39,6 +39,7 @@ from super_ai.evaluation.live.redis_maxclients import (
     RedisMaxclientsScenarioDriver,
 )
 from super_ai.evaluation.live.runner import LiveBenchmarkError, LocalLiveEvidencePreparer
+from super_ai.evaluation.live.scoring import LiveEvaluationResult
 from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.project_config import ProjectConfigurationError
 
@@ -316,6 +317,40 @@ async def test_live_campaign_is_saved_only_as_metadata(tmp_path: Path) -> None:
     envelope = archive.load("live-campaign")
     assert envelope.metadata["acceptanceCampaignId"] == "full-acceptance-20260818"
     assert "acceptanceCampaignId" not in envelope.result_payload
+
+
+@pytest.mark.asyncio
+async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute() -> LiveEvaluationResult:
+        return LiveEvaluationResult(
+            fault_confirmation=10,
+            required_evidence=20,
+            differential_diagnosis=15,
+            root_cause=20,
+            citation_audit=10,
+            recovery_policy=10,
+            recovery_verification=15,
+            raw_total=100,
+            total=100,
+            passed=True,
+            failures=(),
+            hard_gate=None,
+            reasons=(),
+            diagnostic_task_id="diagnostic-live-1",
+        )
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-success-task-link",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("live-success-task-link")
+    assert envelope.diagnostic_task_id == "diagnostic-live-1"
 
 
 def test_cli_rejects_missing_identity() -> None:

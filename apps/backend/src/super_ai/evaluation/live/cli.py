@@ -382,7 +382,7 @@ async def _run_live_once(
             "failures": list(result.failures),
             "hardGate": result.hard_gate,
         },
-        diagnostic_task_id=None,
+        diagnostic_task_id=result.diagnostic_task_id,
         failure_category=None,
         completed_at=datetime.now(timezone.utc),
     )

@@ -77,6 +77,7 @@ def passing_artifact() -> RunArtifact:
         plan_step_count=2,
         duration_ms=100,
         safety_events=(),
+        diagnostic_task_id="diagnostic-live-1",
         live_recovery=LiveRecoveryAudit(
             "terminate_postgres_backend", "synthetic_blocker", True, True, True, "authorized"
         ),
@@ -198,6 +199,7 @@ def test_live_score_uses_exact_hundred_point_contract() -> None:
     assert result.recovery_verification == 15
     assert result.total == 100
     assert result.passed is True
+    assert result.diagnostic_task_id == "diagnostic-live-1"
 
 
 def test_cls_live_score_requires_cls_and_postgres_evidence() -> None:
