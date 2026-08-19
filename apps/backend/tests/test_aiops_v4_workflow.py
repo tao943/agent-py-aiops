@@ -249,8 +249,8 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
             "direct",
         ),
         DiagnosticFact(
-            "SearchLog.records",
-            ({"event": "database_contention"}, {"event": "alert_fired"}),
+            "SearchLog.records.event",
+            ("database_contention", "alert_fired"),
             "ev-cls",
             "SearchLog",
             "direct",

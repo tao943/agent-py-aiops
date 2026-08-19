@@ -98,6 +98,33 @@ def test_fact_order_and_list_values_are_canonical() -> None:
     assert facts[1].value == (8081, 8080)
 
 
+def test_object_array_fields_are_projected_as_bounded_scalar_facts() -> None:
+    facts = extract_public_facts(
+        observations=(
+            _observation(
+                "SearchLog",
+                "e-cls",
+                {
+                    "recordCount": 3,
+                    "records": [
+                        {"event": "request_received", "level": "INFO"},
+                        {"event": "database_contention", "level": "ERROR"},
+                        {"event": "alert_fired", "level": "WARN"},
+                    ],
+                },
+            ),
+        )
+    )
+
+    projected = {fact.key: fact.value for fact in facts}
+    assert projected["SearchLog.records.event"] == (
+        "request_received",
+        "database_contention",
+        "alert_fired",
+    )
+    assert projected["SearchLog.records.level"] == ("INFO", "ERROR", "WARN")
+
+
 def test_unknown_public_field_creates_context_fact_without_a_disposition() -> None:
     facts = extract_public_facts(
         observations=(

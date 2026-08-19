@@ -135,6 +135,28 @@ def _flatten_mapping(
         if sequence is not None:
             output.append((".".join(path), sequence))
             continue
+        mapping_sequence = _string_mapping_sequence(value)
+        if mapping_sequence is not None:
+            aggregated: dict[str, list[JsonScalar]] = {}
+            for item in mapping_sequence[:_MAX_FACTS_PER_OBSERVATION]:
+                nested_output: list[
+                    tuple[str, JsonScalar | tuple[JsonScalar, ...]]
+                ] = []
+                _flatten_mapping(
+                    item,
+                    prefix=path,
+                    depth=depth + 1,
+                    output=nested_output,
+                )
+                for nested_path, nested_value in nested_output:
+                    if isinstance(nested_value, tuple):
+                        continue
+                    aggregated.setdefault(nested_path, []).append(nested_value)
+            for nested_path in sorted(aggregated):
+                if len(output) >= _MAX_FACTS_PER_OBSERVATION:
+                    return
+                output.append((nested_path, tuple(aggregated[nested_path])))
+            continue
         nested = _string_mapping(value)
         if nested is not None:
             _flatten_mapping(nested, prefix=path, depth=depth + 1, output=output)
@@ -195,3 +217,15 @@ def _string_mapping(value: object) -> Mapping[str, object] | None:
     if not all(isinstance(key, str) for key in mapping):
         return None
     return cast(Mapping[str, object], mapping)
+
+
+def _string_mapping_sequence(value: object) -> tuple[Mapping[str, object], ...] | None:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return None
+    mappings: list[Mapping[str, object]] = []
+    for item in cast(Sequence[object], value):
+        mapping = _string_mapping(item)
+        if mapping is None:
+            return None
+        mappings.append(mapping)
+    return tuple(mappings) if mappings else None

@@ -647,14 +647,10 @@ def _normalize_postgres_lock_observations(
         (
             fact
             for fact in public_facts
-            if fact.key == "SearchLog.records"
+            if fact.key == "SearchLog.records.event"
             and isinstance(fact.value, Sequence)
             and not isinstance(fact.value, (str, bytes))
-            and any(
-                isinstance(record, Mapping)
-                and record.get("event") == "database_contention"
-                for record in fact.value
-            )
+            and "database_contention" in fact.value
         ),
         None,
     )
