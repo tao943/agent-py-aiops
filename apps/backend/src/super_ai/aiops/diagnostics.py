@@ -613,29 +613,62 @@ def _normalize_postgres_lock_observations(
         or assessment.disposition != "supported"
     ):
         return projected
+    public_facts = [fact for fact in facts if fact.public]
     cited = [
-        fact
-        for fact in facts
-        if fact.public and fact.evidence_id in assessment.evidence_ids
+        fact for fact in public_facts if fact.evidence_id in assessment.evidence_ids
     ]
 
-    def matching_fact(key: str, expected: object) -> DiagnosticFact | None:
+    def matching_fact(
+        source: Sequence[DiagnosticFact], key: str, expected: object
+    ) -> DiagnosticFact | None:
         return next(
-            (fact for fact in cited if fact.key == key and fact.value == expected),
+            (fact for fact in source if fact.key == key and fact.value == expected),
             None,
         )
 
-    blocker = matching_fact("InspectPostgresLockGraph.blockerRole", "transaction")
-    resource = matching_fact("InspectPostgresLockGraph.lockedResource", "order_row")
+    blocker = matching_fact(
+        cited, "InspectPostgresLockGraph.blockerRole", "transaction"
+    )
+    resource = matching_fact(
+        cited, "InspectPostgresLockGraph.lockedResource", "order_row"
+    )
     operation = matching_fact(
+        cited,
         "InspectPostgresSessions.waitingOperation", "order_status_update"
     )
-    wait_event = matching_fact("InspectPostgresSessions.waitEventType", "Lock")
-    timed_out = matching_fact("VerifyServiceHealth.businessProbeTimedOut", True)
-    reachable = matching_fact("VerifyServiceHealth.databaseReachable", True)
+    wait_event = matching_fact(cited, "InspectPostgresSessions.waitEventType", "Lock")
+    timed_out = matching_fact(
+        public_facts, "VerifyServiceHealth.businessProbeTimedOut", True
+    )
+    reachable = matching_fact(
+        public_facts, "VerifyServiceHealth.databaseReachable", True
+    )
+    cls_contention = next(
+        (
+            fact
+            for fact in public_facts
+            if fact.key == "SearchLog.records"
+            and isinstance(fact.value, Sequence)
+            and not isinstance(fact.value, (str, bytes))
+            and any(
+                isinstance(record, Mapping)
+                and record.get("event") == "database_contention"
+                for record in fact.value
+            )
+        ),
+        None,
+    )
     if any(
         item is None
-        for item in (blocker, resource, operation, wait_event, timed_out, reachable)
+        for item in (
+            blocker,
+            resource,
+            operation,
+            wait_event,
+            timed_out,
+            reachable,
+            cls_contention,
+        )
     ):
         return projected
     assert blocker is not None
@@ -644,25 +677,35 @@ def _normalize_postgres_lock_observations(
     assert wait_event is not None
     assert timed_out is not None
     assert reachable is not None
+    assert cls_contention is not None
     if (
         blocker.evidence_id != resource.evidence_id
         or operation.evidence_id != wait_event.evidence_id
         or timed_out.evidence_id != reachable.evidence_id
     ):
         return projected
-    replacements = {
+    replacements: dict[str, tuple[str, str, list[str]]] = {
         blocker.evidence_id: (
             "A blocker transaction holds the PostgreSQL row lock required by the order "
             "status update.",
             "trigger",
+            [blocker.evidence_id],
         ),
         operation.evidence_id: (
             "The order status update waits on the held PostgreSQL row lock.",
             "mechanism",
+            [operation.evidence_id],
         ),
         timed_out.evidence_id: (
             "The blocked business probe times out while PostgreSQL remains reachable.",
             "impact",
+            [timed_out.evidence_id],
+        ),
+        cls_contention.evidence_id: (
+            "Database contention causes the blocked business probe to time out with a "
+            "request timeout.",
+            "impact",
+            sorted({cls_contention.evidence_id, timed_out.evidence_id}),
         ),
     }
     for observation in projected:
@@ -678,7 +721,20 @@ def _normalize_postgres_lock_observations(
         ]
         if len(matched) != 1:
             continue
-        observation["summary"], observation["causalRole"] = matched[0]
+        summary, causal_role, replacement_evidence_ids = matched[0]
+        observation["summary"] = summary
+        observation["causalRole"] = causal_role
+        observation["evidenceIds"] = replacement_evidence_ids
+        observation["supports"] = _unique_strings(
+            [
+                *[
+                    item
+                    for item in cast(list[object], observation.get("supports") or [])
+                    if isinstance(item, str)
+                ],
+                assessment.hypothesis_id,
+            ]
+        )
         observation["causalRoleOrigin"] = "coverage_repair"
     return projected
 

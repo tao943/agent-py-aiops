@@ -171,7 +171,7 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
     assessment = HypothesisAssessment(
         hypothesis_id="postgres_lock_blocking",
         disposition="supported",
-        evidence_ids=("ev-graph", "ev-health", "ev-session"),
+        evidence_ids=("ev-graph", "ev-session"),
         reason_code="evidence_supported",
         assessment_source="llm_adjudicated",
     )
@@ -192,10 +192,17 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
         },
         {
             "summary": "raw health",
-            "supports": ["postgres_lock_blocking"],
-            "refutes": [],
+            "supports": [],
+            "refutes": ["postgres_connectivity_failure"],
             "evidenceIds": ["ev-health"],
             "causalRole": "impact",
+        },
+        {
+            "summary": "raw cls",
+            "supports": [],
+            "refutes": [],
+            "evidenceIds": ["ev-cls"],
+            "causalRole": "context",
         },
     ]
     facts = (
@@ -241,6 +248,13 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
             "VerifyServiceHealth",
             "direct",
         ),
+        DiagnosticFact(
+            "SearchLog.records",
+            ({"event": "database_contention"}, {"event": "alert_fired"}),
+            "ev-cls",
+            "SearchLog",
+            "direct",
+        ),
     )
 
     normalized = cast(
@@ -252,12 +266,16 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
         "A blocker transaction holds the PostgreSQL row lock required by the order status update.",
         "The order status update waits on the held PostgreSQL row lock.",
         "The blocked business probe times out while PostgreSQL remains reachable.",
+        "Database contention causes the blocked business probe to time out with a request timeout.",
     ]
     assert [item["causalRole"] for item in normalized] == [
         "trigger",
         "mechanism",
         "impact",
+        "impact",
     ]
+    assert normalized[-1]["supports"] == ["postgres_lock_blocking"]
+    assert normalized[-1]["evidenceIds"] == ["ev-cls", "ev-health"]
 
 
 @pytest.mark.asyncio
