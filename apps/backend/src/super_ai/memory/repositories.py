@@ -1509,6 +1509,16 @@ class LangGraphCheckpointRepository(Protocol):
     async def put_writes(self, records: Sequence[StoredCheckpointWrite]) -> None: ...
 
 
+class AiopsRuntimeRepositoryProvider(Protocol):
+    def execution_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> AiopsExecutionRepository: ...
+
+    def checkpoint_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> LangGraphCheckpointRepository: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRepositories:
     """Repository bundle for dependency injection."""
@@ -1528,3 +1538,4 @@ class MemoryRepositories:
     evaluations: EvaluationMemoryRepository | None = None
     aiops_executions: AiopsExecutionRepository | None = None
     langgraph_checkpoints: LangGraphCheckpointRepository | None = None
+    aiops_runtime: AiopsRuntimeRepositoryProvider | None = None

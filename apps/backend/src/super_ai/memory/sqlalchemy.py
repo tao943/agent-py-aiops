@@ -1426,24 +1426,36 @@ class SQLAlchemyDiagnosticMemoryRepository:
         tool_call_id: str | None = None,
         created_at: datetime | None = None,
     ) -> DiagnosticEvidenceRecord:
-        row = DiagnosticEvidenceModel(
-            id=evidence_id,
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            step_id=step_id,
-            tool_call_id=tool_call_id,
-            kind=kind,
-            source=source,
-            summary=summary,
-            payload=payload or {},
-            created_at=created_at or utc_now(),
-        )
+        values = {
+            "id": evidence_id,
+            "owner_user_id": owner_user_id,
+            "task_id": task_id,
+            "step_id": step_id,
+            "tool_call_id": tool_call_id,
+            "kind": kind,
+            "source": source,
+            "summary": summary,
+            "payload": payload or {},
+            "created_at": created_at or utc_now(),
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, task_id)
             if step_id is not None:
                 await _require_diagnostic_step(session, owner_user_id, task_id, step_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(DiagnosticEvidenceModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(DiagnosticEvidenceModel, evidence_id)
+        if (
+            row is None
+            or row.owner_user_id != owner_user_id
+            or row.task_id != task_id
+        ):
+            raise TenantScopeError("Diagnostic evidence identity is outside task scope.")
         return _diagnostic_evidence_record(row)
 
     async def list_evidence(
@@ -1575,21 +1587,36 @@ class SQLAlchemyDiagnosticMemoryRepository:
         metadata: JsonDict | None = None,
         created_at: datetime | None = None,
     ) -> GraphCheckpointRecord:
-        row = GraphCheckpointModel(
-            id=checkpoint_record_id,
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            thread_id=thread_id,
-            checkpoint_ns=checkpoint_ns,
-            checkpoint_id=checkpoint_id,
-            checkpoint_payload=checkpoint_payload or {},
-            metadata_json=metadata or {},
-            created_at=created_at or utc_now(),
-        )
+        values = {
+            "id": checkpoint_record_id,
+            "owner_user_id": owner_user_id,
+            "task_id": task_id,
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_payload": checkpoint_payload or {},
+            "metadata_json": metadata or {},
+            "created_at": created_at or utc_now(),
+        }
         async with self._session_factory() as session:
             await _require_task(session, owner_user_id, task_id)
-            session.add(row)
+            await session.execute(
+                postgresql_insert(GraphCheckpointModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
             await session.commit()
+        async with self._session_factory() as session:
+            row = await session.get(GraphCheckpointModel, checkpoint_record_id)
+        if (
+            row is None
+            or row.owner_user_id != owner_user_id
+            or row.task_id != task_id
+            or row.thread_id != thread_id
+            or row.checkpoint_ns != checkpoint_ns
+            or row.checkpoint_id != checkpoint_id
+        ):
+            raise TenantScopeError("Graph checkpoint identity is outside task scope.")
         return _graph_checkpoint_record(row)
 
     async def list_checkpoints(
@@ -2056,6 +2083,9 @@ def create_sqlalchemy_memory_repositories(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> MemoryRepositories:
     """Create a repository bundle backed by SQLAlchemy sessions."""
+    from super_ai.memory.aiops_execution_sqlalchemy import (
+        SQLAlchemyAiopsRuntimeRepositoryProvider,
+    )
     from super_ai.memory.extended_sqlalchemy import (
         SQLAlchemyBackgroundJobRepository,
         SQLAlchemyMcpConnectionRepository,
@@ -2077,6 +2107,7 @@ def create_sqlalchemy_memory_repositories(
         feedback=SQLAlchemyUserFeedbackRepository(session_factory),
         mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
         evaluations=SQLAlchemyEvaluationRepository(session_factory),
+        aiops_runtime=SQLAlchemyAiopsRuntimeRepositoryProvider(session_factory),
     )
 
 

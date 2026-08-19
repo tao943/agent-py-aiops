@@ -2,6 +2,7 @@
 
 from super_ai.memory.aiops_execution_sqlalchemy import (
     SQLAlchemyAiopsExecutionRepository,
+    SQLAlchemyAiopsRuntimeRepositoryProvider,
     SQLAlchemyLangGraphCheckpointRepository,
 )
 from super_ai.memory.database import (
@@ -74,6 +75,7 @@ __all__ = [
     "ReportEvidenceLinkRecord",
     "SQLAlchemyChatMemoryRepository",
     "SQLAlchemyAiopsExecutionRepository",
+    "SQLAlchemyAiopsRuntimeRepositoryProvider",
     "SQLAlchemyLangGraphCheckpointRepository",
     "SQLAlchemyDiagnosticMemoryRepository",
     "SQLAlchemyToolCallAuditRepository",

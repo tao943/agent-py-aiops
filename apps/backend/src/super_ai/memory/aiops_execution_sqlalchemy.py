@@ -19,6 +19,7 @@ from super_ai.memory.models import (
 )
 from super_ai.memory.repositories import (
     AiopsExecutionRepository,
+    AiopsRuntimeRepositoryProvider,
     CheckpointIdentity,
     CheckpointQuery,
     ExecutionClaim,
@@ -33,6 +34,31 @@ from super_ai.memory.repositories import (
     StoredCheckpointWrite,
     TenantScopeError,
 )
+
+
+class SQLAlchemyAiopsRuntimeRepositoryProvider(AiopsRuntimeRepositoryProvider):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    def execution_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> AiopsExecutionRepository:
+        return SQLAlchemyAiopsExecutionRepository(
+            self._session_factory,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            graph_version=graph_version,
+        )
+
+    def checkpoint_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> LangGraphCheckpointRepository:
+        return SQLAlchemyLangGraphCheckpointRepository(
+            self._session_factory,
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            graph_version=graph_version,
+        )
 
 
 class SQLAlchemyAiopsExecutionRepository(AiopsExecutionRepository):

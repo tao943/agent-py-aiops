@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ from uuid import uuid4
 
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import validator_for
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from super_ai.aiops.adjudication import (
@@ -37,6 +39,7 @@ from super_ai.aiops.causal_intents import (
     repair_plan_causal_coverage,
     supported_causal_coverage,
 )
+from super_ai.aiops.checkpointing import PostgresDiagnosticCheckpointSaver
 from super_ai.aiops.decision_validation import (
     can_replan_deterministic_gap,
     deterministic_checks_payload,
@@ -45,6 +48,7 @@ from super_ai.aiops.decision_validation import (
     validate_grounded_assessments,
     validate_grounded_candidate,
 )
+from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.model_budget import (
     ROLE_TIMEOUT_SECONDS,
@@ -632,19 +636,6 @@ class AiopsDiagnosticService:
             task_id=task.id,
             status="running",
         )
-        alert = _json_dict(task.input_payload.get("alert"))
-        initial_evidence_ids: list[str] = []
-        if alert:
-            alert_evidence = await self._repositories.diagnostics.create_evidence(
-                owner_user_id=task.owner_user_id,
-                evidence_id=f"evidence_{uuid4().hex}",
-                task_id=task.id,
-                kind="alert",
-                source="diagnostic-input",
-                summary="Original alert input for the diagnostic.",
-                payload=alert,
-            )
-            initial_evidence_ids.append(alert_evidence.id)
         requested_workflow_version = task.input_payload.get("workflowVersion")
         workflow_version = (
             "evidence-driven-v4"
@@ -652,7 +643,47 @@ class AiopsDiagnosticService:
             else "evidence-driven-v3"
         )
         deadlines = ExecutionDeadlines.start(_now())
-        graph = self._build_graph(workflow_version=workflow_version)
+        checkpointer: PostgresDiagnosticCheckpointSaver | None = None
+        graph_config: dict[str, object] | None = None
+        if workflow_version == "evidence-driven-v4" and self._repositories.aiops_runtime:
+            checkpoint_repository = self._repositories.aiops_runtime.checkpoint_repository(
+                owner_user_id=task.owner_user_id,
+                task_id=task.id,
+                graph_version="aiops-diagnostic-v2",
+            )
+            checkpointer = PostgresDiagnosticCheckpointSaver(
+                checkpoint_repository,
+                task_id=task.id,
+                graph_version="aiops-diagnostic-v2",
+            )
+            graph_config = {
+                "configurable": {
+                    "thread_id": f"aiops:{task.id}:aiops-diagnostic-v2",
+                    "checkpoint_ns": "",
+                }
+            }
+        prior_checkpoint = (
+            await checkpointer.aget_tuple(cast(Any, graph_config))
+            if checkpointer is not None and graph_config is not None
+            else None
+        )
+        alert = _json_dict(task.input_payload.get("alert"))
+        initial_evidence_ids: list[str] = []
+        if alert and prior_checkpoint is None:
+            alert_evidence = await self._repositories.diagnostics.create_evidence(
+                owner_user_id=task.owner_user_id,
+                evidence_id=_stable_public_id("evidence", task.id, "alert"),
+                task_id=task.id,
+                kind="alert",
+                source="diagnostic-input",
+                summary="Original alert input for the diagnostic.",
+                payload=alert,
+            )
+            initial_evidence_ids.append(alert_evidence.id)
+        graph = self._build_graph(
+            workflow_version=workflow_version,
+            checkpointer=checkpointer,
+        )
         public_hypotheses = _json_list(task.input_payload.get("hypotheses"))
         initial_state: AiopsDiagnosticState = {
             "workflow_version": workflow_version,
@@ -693,7 +724,14 @@ class AiopsDiagnosticService:
             "evidence_ids": initial_evidence_ids,
         }
         try:
-            async for update in graph.astream(initial_state, stream_mode="updates"):
+            graph_input: AiopsDiagnosticState | None = initial_state
+            if prior_checkpoint is not None:
+                graph_input = None
+            async for update in graph.astream(
+                graph_input,
+                config=cast(Any, graph_config),
+                stream_mode="updates",
+            ):
                 for node_update in cast(Mapping[str, object], update).values():
                     if not isinstance(node_update, Mapping):
                         continue
@@ -817,9 +855,14 @@ class AiopsDiagnosticService:
         )
         return response
 
-    def _build_graph(self, *, workflow_version: str = "evidence-driven-v3") -> Any:
+    def _build_graph(
+        self,
+        *,
+        workflow_version: str = "evidence-driven-v3",
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+    ) -> Any:
         if workflow_version == "evidence-driven-v4":
-            return self._build_v4_graph()
+            return self._build_v4_graph(checkpointer=checkpointer)
         graph = StateGraph(AiopsDiagnosticState)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
@@ -856,7 +899,9 @@ class AiopsDiagnosticService:
         graph.add_edge("report", END)
         return graph.compile()
 
-    def _build_v4_graph(self) -> Any:
+    def _build_v4_graph(
+        self, *, checkpointer: BaseCheckpointSaver[Any] | None = None
+    ) -> Any:
         graph = StateGraph(AiopsDiagnosticState)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
@@ -912,7 +957,7 @@ class AiopsDiagnosticService:
         graph.add_edge("llm_validator", "policy_gate")
         graph.add_edge("policy_gate", "report")
         graph.add_edge("report", END)
-        return graph.compile()
+        return graph.compile(checkpointer=checkpointer)
 
     async def _planner(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
@@ -1028,21 +1073,69 @@ class AiopsDiagnosticService:
             if state.get("workflow_version") == "evidence-driven-v4"
             else None
         )
-        plan, plan_origin = await self._create_plan(
-            query=query,
-            alert=_json_dict(state.get("alert")),
-            sop_hits=sop_hits,
-            no_sop_matched=no_sop_matched,
-            tool_definitions=[
-                item for item in discovered_tools if item.name not in self._tool_policies
-            ],
-            known_hypotheses=[
-                str(item.get("id"))
-                for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
-                if item.get("id")
-            ],
-            model_runtime=model_runtime,
-        )
+        diagnostic_tools = [
+            item for item in discovered_tools if item.name not in self._tool_policies
+        ]
+        known_hypotheses = [
+            str(item.get("id"))
+            for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
+            if item.get("id")
+        ]
+
+        async def create_plan_operation() -> JsonDict:
+            created_plan, created_origin = await self._create_plan(
+                query=query,
+                alert=_json_dict(state.get("alert")),
+                sop_hits=sop_hits,
+                no_sop_matched=no_sop_matched,
+                tool_definitions=diagnostic_tools,
+                known_hypotheses=known_hypotheses,
+                model_runtime=model_runtime,
+            )
+            return {
+                "plan": created_plan,
+                "planOrigin": created_origin,
+                "modelCallCount": model_runtime.budget.used if model_runtime else 0,
+                "modelCallAudits": model_runtime.audits if model_runtime else [],
+            }
+
+        if model_runtime is not None and self._repositories.aiops_runtime is not None:
+            execution_repository = self._repositories.aiops_runtime.execution_repository(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                graph_version="aiops-diagnostic-v2",
+            )
+            coordinated_plan = await ExecutionCoordinator(
+                execution_repository,
+                worker_id=f"diagnostic-service-{id(self)}",
+            ).run_once(
+                ExecutionIdentity(
+                    task_id=task_id,
+                    graph_version="aiops-diagnostic-v2",
+                    node_name="planner",
+                    logical_iteration=0,
+                    input_payload={
+                        "query": query,
+                        "alert": _json_dict(state.get("alert")),
+                        "sopHits": sop_hits,
+                        "toolContracts": _tool_contracts_payload(diagnostic_tools),
+                        "knownHypotheses": known_hypotheses,
+                    },
+                ),
+                create_plan_operation,
+            )
+            plan = _json_list(coordinated_plan.output.get("plan"))
+            plan_origin = str(coordinated_plan.output.get("planOrigin") or "generic")
+            persisted_count = coordinated_plan.output.get("modelCallCount")
+            if isinstance(persisted_count, int) and not isinstance(persisted_count, bool):
+                model_runtime.budget.used = persisted_count
+            model_runtime.audits = _json_list(
+                coordinated_plan.output.get("modelCallAudits")
+            )
+        else:
+            created = await create_plan_operation()
+            plan = _json_list(created.get("plan"))
+            plan_origin = str(created.get("planOrigin") or "generic")
         events.append(
             _task_status_event(
                 task_id,
@@ -1249,7 +1342,9 @@ class AiopsDiagnosticService:
             arguments=arguments,
         )
 
-        try:
+        tool_cache_hit = False
+
+        async def invoke_tool() -> JsonDict:
             if tool_name == "knowledge_retrieval":
                 result = await self._retrieval_tool.run(
                     KnowledgeRetrievalToolInput(
@@ -1261,15 +1356,49 @@ class AiopsDiagnosticService:
                         Sequence[str], state["accessible_knowledge_base_ids"]
                     ),
                 )
-                output: object = {
+                raw_output: object = {
                     "results": [_sop_hit_payload(hit) for hit in result.results],
-                    "citations": [_citation_payload(citation) for citation in result.citations],
+                    "citations": [
+                        _citation_payload(citation) for citation in result.citations
+                    ],
                 }
             elif tool_name:
                 mcp_client = await self._mcp_client_for(owner_user_id)
-                output = await mcp_client.call_tool(tool_name, arguments)
+                raw_output = await mcp_client.call_tool(tool_name, arguments)
             else:
                 raise ValueError("Diagnostic plan did not specify a tool.")
+            return {"output": _safe_value(raw_output)}
+
+        try:
+            if (
+                state.get("workflow_version") == "evidence-driven-v4"
+                and self._repositories.aiops_runtime is not None
+            ):
+                execution_repository = (
+                    self._repositories.aiops_runtime.execution_repository(
+                        owner_user_id=owner_user_id,
+                        task_id=task_id,
+                        graph_version="aiops-diagnostic-v2",
+                    )
+                )
+                coordinated = await ExecutionCoordinator(
+                    execution_repository,
+                    worker_id=f"diagnostic-service-{id(self)}",
+                ).run_once(
+                    ExecutionIdentity(
+                        task_id=task_id,
+                        graph_version="aiops-diagnostic-v2",
+                        node_name=f"tool:{tool_name}",
+                        logical_iteration=plan_index,
+                        input_payload={"tool": tool_name, "arguments": arguments},
+                        execution_kind="tool",
+                    ),
+                    invoke_tool,
+                )
+                output = coordinated.output.get("output")
+                tool_cache_hit = coordinated.cache_hit
+            else:
+                output = (await invoke_tool())["output"]
         except Exception as exc:
             safe_error = _safe_error(exc)
             evidence: JsonDict = {
@@ -1330,6 +1459,7 @@ class AiopsDiagnosticService:
             "tool": tool_name,
             "status": "completed",
             "summary": summary,
+            "cacheHit": tool_cache_hit,
         }
         events.append(_tool_event(audit_id, tool_name, "completed", _safe_value(output)))
         if tool_name == "knowledge_retrieval" and isinstance(output, Mapping):
@@ -3442,13 +3572,25 @@ class AiopsDiagnosticService:
             "replanCount": int(state.get("replan_count") or 0),
             "maxReplans": int(state.get("max_replans") or 0),
         }
+        logical_iteration = int(state.get("plan_index") or 0) + int(
+            state.get("replan_count") or 0
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                _safe_value({**payload, "executionRuntime": runtime_payload}),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        stable_id = f"{node}_{logical_iteration}_{fingerprint[:32]}"
         await self._repositories.diagnostics.save_checkpoint(
             owner_user_id=str(state["owner_user_id"]),
-            checkpoint_record_id=f"checkpoint_{uuid4().hex}",
+            checkpoint_record_id=f"checkpoint_{stable_id}",
             task_id=task_id,
             thread_id=f"aiops:{task_id}",
             checkpoint_ns=node,
-            checkpoint_id=f"{node}_{uuid4().hex}",
+            checkpoint_id=stable_id,
             checkpoint_payload={**payload, "executionRuntime": runtime_payload},
             metadata={"node": node},
         )
@@ -3654,6 +3796,11 @@ def _model_call_audit_payload(
         "cacheHit": False,
         "safeErrorCode": safe_error_code,
     }
+
+
+def _stable_public_id(prefix: str, *parts: str) -> str:
+    digest = hashlib.sha256(":".join(parts).encode()).hexdigest()
+    return f"{prefix}_{digest[:48]}"
 
 
 def _safe_model_call_error_code(exc: Exception) -> str:
