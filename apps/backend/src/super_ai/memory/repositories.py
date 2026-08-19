@@ -246,6 +246,95 @@ class GraphCheckpointRecord:
     created_at: datetime
 
 
+ExecutionKind = Literal["node", "model", "tool", "recovery"]
+ExecutionStatus = Literal["running", "completed", "failed", "uncertain"]
+ExecutionClaimAction = Literal["acquired", "wait", "reuse", "manual_review"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionClaim:
+    execution_key: str
+    execution_kind: ExecutionKind
+    node_name: str
+    logical_iteration: int
+    input_fingerprint: str
+    lease_owner: str
+    lease_expires_at: datetime
+    side_effecting: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    execution_key: str
+    owner_user_id: str
+    task_id: str
+    graph_version: str
+    execution_kind: ExecutionKind
+    node_name: str
+    logical_iteration: int
+    input_fingerprint: str
+    status: ExecutionStatus
+    attempt_count: int
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    side_effecting: bool
+    outcome_known: bool
+    output_payload: JsonDict
+    safe_error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionClaimResult:
+    action: ExecutionClaimAction
+    record: ExecutionRecord
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointIdentity:
+    thread_id: str
+    checkpoint_ns: str
+    checkpoint_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointQuery:
+    thread_id: str
+    checkpoint_ns: str = ""
+    before_checkpoint_id: str | None = None
+    limit: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredCheckpoint:
+    identity: CheckpointIdentity
+    parent_checkpoint_id: str | None
+    checkpoint_type: str
+    checkpoint_blob: bytes
+    metadata_type: str
+    metadata_blob: bytes
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredCheckpointWrite:
+    identity: CheckpointIdentity
+    write_task_id: str
+    task_path: str
+    write_index: int
+    channel: str
+    value_type: str
+    value_blob: bytes
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredCheckpointTuple:
+    checkpoint: StoredCheckpoint
+    writes: tuple[StoredCheckpointWrite, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationRunRecord:
     run_id: str
@@ -1387,6 +1476,39 @@ class EvaluationMemoryRepository(Protocol):
     ) -> tuple[EvaluationRunRecord, EvaluationResultRecord | None] | None: ...
 
 
+class AiopsExecutionRepository(Protocol):
+    async def claim(self, request: ExecutionClaim) -> ExecutionClaimResult: ...
+
+    async def complete(
+        self, *, execution_key: str, lease_owner: str, output: JsonDict
+    ) -> ExecutionRecord: ...
+
+    async def fail(
+        self,
+        *,
+        execution_key: str,
+        lease_owner: str,
+        error_code: str,
+        outcome_known: bool,
+    ) -> ExecutionRecord: ...
+
+    async def get(self, execution_key: str) -> ExecutionRecord | None: ...
+
+
+class LangGraphCheckpointRepository(Protocol):
+    async def get_tuple(
+        self, identity: CheckpointIdentity
+    ) -> StoredCheckpointTuple | None: ...
+
+    async def list_tuples(
+        self, query: CheckpointQuery
+    ) -> Sequence[StoredCheckpointTuple]: ...
+
+    async def put_checkpoint(self, record: StoredCheckpoint) -> None: ...
+
+    async def put_writes(self, records: Sequence[StoredCheckpointWrite]) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRepositories:
     """Repository bundle for dependency injection."""
@@ -1404,3 +1526,5 @@ class MemoryRepositories:
     feedback: UserFeedbackRepository | None = None
     mcp_connections: McpConnectionRepository | None = None
     evaluations: EvaluationMemoryRepository | None = None
+    aiops_executions: AiopsExecutionRepository | None = None
+    langgraph_checkpoints: LangGraphCheckpointRepository | None = None

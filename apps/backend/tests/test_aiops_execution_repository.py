@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+
+from super_ai.memory.aiops_execution_sqlalchemy import (
+    SQLAlchemyAiopsExecutionRepository,
+    SQLAlchemyLangGraphCheckpointRepository,
+)
+from super_ai.memory.database import create_memory_engine, create_memory_session_factory
+from super_ai.memory.repositories import (
+    CheckpointIdentity,
+    ExecutionClaim,
+    StoredCheckpoint,
+    StoredCheckpointWrite,
+)
+from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
+
+
+@pytest.mark.asyncio
+async def test_concurrent_claim_has_one_owner_and_conflict_keeps_session_usable(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"execution-task-{uuid4().hex}"
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Test execution claim.",
+            input_payload={},
+        )
+        first = SQLAlchemyAiopsExecutionRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        second = SQLAlchemyAiopsExecutionRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        expires = datetime.now(timezone.utc) + timedelta(minutes=1)
+        results = await asyncio.gather(
+            first.claim(_claim("same-key", "worker-a", expires)),
+            second.claim(_claim("same-key", "worker-b", expires)),
+        )
+        owner = next(item for item in results if item.action == "acquired")
+        waiter = next(item for item in results if item.action == "wait")
+        completed = await first.complete(
+            execution_key="same-key",
+            lease_owner=str(owner.record.lease_owner),
+            output={"result": "safe"},
+        )
+        reused = await second.claim(_claim("same-key", "worker-b", expires))
+        readable = await second.get("same-key")
+    finally:
+        await engine.dispose()
+
+    assert waiter.record.attempt_count == 1
+    assert completed.status == "completed"
+    assert reused.action == "reuse"
+    assert readable is not None and readable.output_payload == {"result": "safe"}
+
+
+@pytest.mark.asyncio
+async def test_uncertain_side_effect_is_never_reclaimed(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"uncertain-task-{uuid4().hex}"
+    key = f"recovery-{uuid4().hex}"
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Test uncertain recovery.",
+            input_payload={},
+        )
+        repository = SQLAlchemyAiopsExecutionRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        expires = datetime.now(timezone.utc) + timedelta(minutes=1)
+        await repository.claim(
+            _claim(key, "worker-a", expires, side_effecting=True)
+        )
+        await repository.fail(
+            execution_key=key,
+            lease_owner="worker-a",
+            error_code="connection_lost_after_dispatch",
+            outcome_known=False,
+        )
+        retried = await repository.claim(
+            _claim(key, "worker-b", expires, side_effecting=True)
+        )
+    finally:
+        await engine.dispose()
+
+    assert retried.action == "manual_review"
+    assert retried.record.status == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_and_writes_round_trip_idempotently(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"checkpoint-task-{uuid4().hex}"
+    identity = CheckpointIdentity(
+        thread_id=f"aiops:{task_id}:aiops-diagnostic-v2",
+        checkpoint_ns="",
+        checkpoint_id="0001",
+    )
+    now = datetime.now(timezone.utc)
+    checkpoint = StoredCheckpoint(
+        identity=identity,
+        parent_checkpoint_id=None,
+        checkpoint_type="msgpack",
+        checkpoint_blob=b"checkpoint-bytes",
+        metadata_type="json",
+        metadata_blob=b"metadata-bytes",
+        created_at=now,
+    )
+    write = StoredCheckpointWrite(
+        identity=identity,
+        write_task_id="langgraph-task-1",
+        task_path="pull:executor",
+        write_index=0,
+        channel="messages",
+        value_type="msgpack",
+        value_blob=b"write-bytes",
+        created_at=now,
+    )
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Test checkpoints.",
+            input_payload={},
+        )
+        repository = SQLAlchemyLangGraphCheckpointRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="aiops-diagnostic-v2",
+        )
+        await repository.put_checkpoint(checkpoint)
+        await repository.put_checkpoint(checkpoint)
+        await repository.put_writes([write, write])
+        stored = await repository.get_tuple(identity)
+    finally:
+        await engine.dispose()
+
+    assert stored is not None
+    assert stored.checkpoint == checkpoint
+    assert stored.writes == (write,)
+
+
+def _claim(
+    key: str,
+    lease_owner: str,
+    lease_expires_at: datetime,
+    *,
+    side_effecting: bool = False,
+) -> ExecutionClaim:
+    return ExecutionClaim(
+        execution_key=key,
+        execution_kind="recovery" if side_effecting else "node",
+        node_name="policy_gate" if side_effecting else "executor",
+        logical_iteration=0,
+        input_fingerprint="fingerprint",
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        side_effecting=side_effecting,
+    )

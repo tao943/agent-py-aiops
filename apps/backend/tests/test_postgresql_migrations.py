@@ -40,7 +40,7 @@ def test_alembic_head_renders_offline_for_postgresql() -> None:
 
     command.upgrade(config, "head", sql=True)
 
-    assert "202608170001" in output_buffer.getvalue()
+    assert "202608190001" in output_buffer.getvalue()
 
 
 def test_chat_skill_metadata_backfill_matches_legacy_python_behavior(
@@ -191,6 +191,7 @@ async def test_alembic_head_exists_in_postgresql(migrated_database_url: str) -> 
         ("aiops_tool_call_audits", "result_payload"),
         ("aiops_graph_checkpoints", "checkpoint_payload"),
         ("aiops_graph_checkpoints", "metadata"),
+        ("aiops_execution_records", "output_payload"),
         ("aiops_evaluation_runs", "agent_version"),
         ("aiops_evaluation_runs", "model_configuration"),
         ("aiops_evaluation_runs", "run_metadata"),

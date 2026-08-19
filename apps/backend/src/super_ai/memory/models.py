@@ -10,8 +10,10 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -852,3 +854,125 @@ class GraphCheckpointModel(Base):
         nullable=False,
         default=utc_now,
     )
+
+
+class AiopsExecutionModel(Base):
+    __tablename__ = "aiops_execution_records"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','completed','failed','uncertain')",
+            name="ck_aiops_execution_records_status",
+        ),
+        CheckConstraint(
+            "execution_kind IN ('node','model','tool','recovery')",
+            name="ck_aiops_execution_records_kind",
+        ),
+        Index(
+            "ix_aiops_execution_records_scope",
+            "owner_user_id",
+            "task_id",
+            "graph_version",
+        ),
+    )
+
+    execution_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    graph_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    execution_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    node_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    logical_iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    side_effecting: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    outcome_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    output_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    safe_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AiopsLangGraphCheckpointModel(Base):
+    __tablename__ = "aiops_langgraph_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            name="uq_aiops_langgraph_checkpoints_identity",
+        ),
+        Index(
+            "ix_aiops_langgraph_checkpoints_scope",
+            "owner_user_id",
+            "task_id",
+            "graph_version",
+            "thread_id",
+        ),
+    )
+    thread_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(160), primary_key=True)
+    checkpoint_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    graph_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    parent_checkpoint_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    checkpoint_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    checkpoint_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    metadata_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    metadata_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AiopsLangGraphWriteModel(Base):
+    __tablename__ = "aiops_langgraph_writes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["thread_id", "checkpoint_ns", "checkpoint_id"],
+            [
+                "aiops_langgraph_checkpoints.thread_id",
+                "aiops_langgraph_checkpoints.checkpoint_ns",
+                "aiops_langgraph_checkpoints.checkpoint_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "write_task_id",
+            "task_path",
+            "write_index",
+            name="uq_aiops_langgraph_writes_identity",
+        ),
+        Index(
+            "ix_aiops_langgraph_writes_scope",
+            "owner_user_id",
+            "diagnostic_task_id",
+            "graph_version",
+            "thread_id",
+        ),
+    )
+    thread_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(160), primary_key=True)
+    checkpoint_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    write_task_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    task_path: Mapped[str] = mapped_column(String(300), primary_key=True)
+    write_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    diagnostic_task_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    graph_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    channel: Mapped[str] = mapped_column(String(160), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    value_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
