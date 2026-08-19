@@ -2056,7 +2056,9 @@ class AiopsDiagnosticService:
             "hypotheses in one batch. Each item has hypothesisId, disposition, evidenceIds, "
             "and reasonCode. disposition is supported, refuted, causally_inactive, or "
             "unresolved. Closed dispositions require cited public evidence IDs. Do not add "
-            "private reasoning or hidden answers. Unresolved IDs: "
+            "private reasoning or hidden answers. For a supported hypothesis, cite every "
+            "relevant public evidence ID needed to establish its trigger, mechanism, and "
+            "impact; do not cite unrelated evidence. Unresolved IDs: "
             f"{json.dumps(sorted(unresolved))}. Public hypotheses: "
             f"{json.dumps(state.get('public_hypotheses') or [], ensure_ascii=False)}. "
             "Public facts: "
@@ -2066,7 +2068,17 @@ class AiopsDiagnosticService:
         initial_model_count = model_runtime.budget.used
         accepted = list(assessments)
         accepted_count = 0
+        source_observations = cast(
+            list[JsonDict], state.get("observation_decisions") or []
+        )
+        decision_vocabulary = _json_dict(state.get("decision_vocabulary"))
+        coverage_required = bool(source_observations) and bool(
+            _json_dict(decision_vocabulary.get("labelsByHypothesis"))
+        )
+        accepted_observations = list(source_observations)
+        accepted_quality = (False, 0, 0, 0)
         adjudication_error_category: str | None = None
+        first_failure_category = "invalid_batch"
         prompts = (
             prompt,
             (
@@ -2075,7 +2087,9 @@ class AiopsDiagnosticService:
                 "hypothesisId, disposition, evidenceIds, and reasonCode; no additional fields "
                 "are allowed. Return one item for every unresolved hypothesis. Allowed "
                 f"hypothesis IDs: {json.dumps(sorted(unresolved))}. Allowed public evidence "
-                f"IDs: {json.dumps(sorted(public_evidence_ids))}."
+                f"IDs: {json.dumps(sorted(public_evidence_ids))}. For a supported hypothesis, "
+                "include all and only relevant public evidence IDs needed for a grounded "
+                "trigger, mechanism, and impact chain."
             ),
         )
         for attempt, adjudication_prompt in enumerate(prompts, start=1):
@@ -2097,24 +2111,73 @@ class AiopsDiagnosticService:
                 )
             except Exception:
                 candidate_count = 0
-            if candidate_count > accepted_count:
+            candidate_observations = _project_adjudicated_observations(
+                observations=source_observations,
+                assessments=candidate,
+                facts=facts,
+            )
+            candidate_states = [
+                _hypothesis_state_payload(project_hypothesis_assessment(item))
+                for item in candidate
+            ]
+            coverage = supported_causal_coverage(
+                hypothesis_states=candidate_states,
+                observation_decisions=candidate_observations,
+            )
+            supported_candidates = [
+                item for item in candidate if item.disposition == "supported"
+            ]
+            positive_evidence_count = (
+                len(
+                    _supporting_observation_evidence_ids(
+                        candidate_observations,
+                        hypothesis_id=supported_candidates[0].hypothesis_id,
+                    )
+                )
+                if len(supported_candidates) == 1
+                else 0
+            )
+            candidate_ready = candidate_count == len(unresolved) and (
+                not coverage_required
+                or (
+                    assess_sufficiency(candidate).status == "sufficient"
+                    and build_grounded_fallback_decision(
+                        public_hypotheses=cast(
+                            list[JsonDict], state.get("public_hypotheses") or []
+                        ),
+                        hypothesis_states=candidate_states,
+                        observation_decisions=candidate_observations,
+                        decision_vocabulary=decision_vocabulary,
+                    )
+                    is not None
+                )
+            )
+            candidate_quality = (
+                candidate_ready,
+                candidate_count,
+                3 - len(coverage.missing_roles),
+                positive_evidence_count,
+            )
+            if candidate_quality > accepted_quality:
                 accepted = candidate
                 accepted_count = candidate_count
-            if accepted_count == len(unresolved):
+                accepted_observations = candidate_observations
+                accepted_quality = candidate_quality
+            if candidate_ready:
                 if attempt == 2:
-                    adjudication_error_category = "corrected_invalid_batch"
+                    adjudication_error_category = (
+                        "corrected_insufficient_coverage"
+                        if first_failure_category == "insufficient_coverage"
+                        else "corrected_invalid_batch"
+                    )
                 break
+            if attempt == 1 and candidate_count == len(unresolved):
+                first_failure_category = "insufficient_coverage"
         else:
             adjudication_error_category = "retry_exhausted"
         adjudication_attempts = model_runtime.budget.used - initial_model_count
         assessment_payloads = [_hypothesis_assessment_payload(item) for item in accepted]
-        observation_payloads = _project_adjudicated_observations(
-            observations=cast(
-                list[JsonDict], state.get("observation_decisions") or []
-            ),
-            assessments=accepted,
-            facts=facts,
-        )
+        observation_payloads = accepted_observations
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
             "adjudicationAttempt": adjudication_attempts,

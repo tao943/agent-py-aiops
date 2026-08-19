@@ -608,6 +608,163 @@ async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
 
 
 @pytest.mark.asyncio
+async def test_v4_adjudicator_retries_a_grounded_but_unbuildable_batch(
+    migrated_database_url: str,
+) -> None:
+    class CompletingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            self.calls += 1
+            evidence_ids = (
+                ["ev-trigger"]
+                if self.calls == 1
+                else ["ev-trigger", "ev-mechanism", "ev-impact"]
+            )
+            return json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "hypothesisId": "redis_server_availability",
+                            "disposition": "supported",
+                            "evidenceIds": evidence_ids,
+                            "reasonCode": "redis_server_is_stopped",
+                        }
+                    ]
+                }
+            )
+
+    class Provider:
+        def __init__(self) -> None:
+            self.model = CompletingModel()
+
+        def create_chat_model(self) -> CompletingModel:
+            return self.model
+
+    observations: list[JsonDict] = [
+        {
+            "purpose": "Inspect Redis availability.",
+            "supports": [],
+            "refutes": [],
+            "summary": "Redis is stopped and is not listening.",
+            "evidenceIds": ["ev-trigger"],
+            "causalRole": "context",
+            "causalRoleOrigin": "plan_contract",
+            "assessmentSource": "deterministic",
+        },
+        {
+            "purpose": "Inspect client errors.",
+            "supports": [],
+            "refutes": [],
+            "summary": "The client receives connection refused.",
+            "evidenceIds": ["ev-mechanism"],
+            "causalRole": "mechanism",
+            "causalRoleOrigin": "plan_contract",
+            "assessmentSource": "deterministic",
+        },
+        {
+            "purpose": "Inspect dependency impact.",
+            "supports": [],
+            "refutes": [],
+            "summary": "Redis dependency errors increased.",
+            "evidenceIds": ["ev-impact"],
+            "causalRole": "impact",
+            "causalRoleOrigin": "plan_contract",
+            "assessmentSource": "deterministic",
+        },
+    ]
+    facts = [
+        {
+            "key": "InspectRedis.processStatus",
+            "value": "stopped",
+            "evidenceId": "ev-trigger",
+            "sourceTool": "InspectRedis",
+            "quality": "context",
+            "public": True,
+        },
+        {
+            "key": "InspectRedisClientPool.lastError",
+            "value": "connection refused",
+            "evidenceId": "ev-mechanism",
+            "sourceTool": "InspectRedisClientPool",
+            "quality": "context",
+            "public": True,
+        },
+        {
+            "key": "GetServiceMetrics.redisErrorRatePercent",
+            "value": 74,
+            "evidenceId": "ev-impact",
+            "sourceTool": "GetServiceMetrics",
+            "quality": "context",
+            "public": True,
+        },
+    ]
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-adjudicator-causal-correction",
+            status="running",
+            query="Resolve Redis availability.",
+            input_payload={},
+        )
+        provider = Provider()
+        update = await _service(
+            repositories, provider
+        )._hypothesis_adjudicator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {
+                            "id": "redis_server_availability",
+                            "description": "Redis is unavailable.",
+                        }
+                    ],
+                    "decision_vocabulary": {
+                        "labelsByHypothesis": {
+                            "redis_server_availability": {
+                                "component": "redis-server",
+                                "mechanism": "server_unavailable",
+                            }
+                        }
+                    },
+                    "hypothesis_assessments": _initial_hypothesis_assessments(
+                        [{"id": "redis_server_availability"}]
+                    ),
+                    "diagnostic_facts": facts,
+                    "observation_decisions": observations,
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        payload = steps[-1].payload
+    finally:
+        await engine.dispose()
+
+    assert provider.model.calls == 2
+    assert update["model_call_count"] == 2
+    assert payload["adjudicationAttempts"] == 2
+    assert payload["adjudicationErrorCategory"] == "corrected_insufficient_coverage"
+    assessments = cast(list[dict[str, object]], update["hypothesis_assessments"])
+    assert assessments[0]["evidenceIds"] == [
+        "ev-impact",
+        "ev-mechanism",
+        "ev-trigger",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
     migrated_database_url: str,
 ) -> None:
