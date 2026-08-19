@@ -76,6 +76,7 @@ from super_ai.aiops.reasoning import (
     parse_root_cause_validation,
     project_hypothesis_assessment,
 )
+from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
 from super_ai.aiops.validator_routing import (
     RiskTier,
     ValidatorRiskContext,
@@ -2450,8 +2451,19 @@ class AiopsDiagnosticService:
         evidence_id = str(state.get("current_evidence_id") or "")
         current_step = _json_dict(state.get("current_plan_step"))
         output = state.get("current_tool_output")
-        prior_facts = _diagnostic_facts_from_payload(
-            cast(list[JsonDict], state.get("diagnostic_facts") or [])
+        trusted_evidence_ids = {
+            value
+            for value in cast(list[object], state.get("evidence_ids") or [])
+            if isinstance(value, str) and value
+        }
+        if evidence_id:
+            trusted_evidence_ids.add(evidence_id)
+        prior_facts = tuple(
+            fact
+            for fact in _diagnostic_facts_from_payload(
+                cast(list[JsonDict], state.get("diagnostic_facts") or [])
+            )
+            if fact.evidence_id in trusted_evidence_ids
         )
         new_facts: tuple[DiagnosticFact, ...] = ()
         if evidence_id and isinstance(output, Mapping):
@@ -2480,12 +2492,20 @@ class AiopsDiagnosticService:
             facts=all_facts,
             rules=rules,
         )
+        trusted_resolution = resolve_trusted_patterns(
+            assessments=reduced,
+            facts=all_facts,
+            trusted_evidence_ids=frozenset(trusted_evidence_ids),
+        )
+        reduced = trusted_resolution.assessments
         assessment_payloads = [_hypothesis_assessment_payload(item) for item in reduced]
         projected_states = [
             _hypothesis_state_payload(project_hypothesis_assessment(item))
             for item in reduced
         ]
-        observation_payloads: list[JsonDict] = []
+        observation_payloads: list[JsonDict] = [
+            dict(item) for item in trusted_resolution.observations
+        ]
         if evidence_id:
             supports = [
                 item.hypothesis_id
@@ -2587,6 +2607,9 @@ class AiopsDiagnosticService:
             "newFactCount": len(new_facts),
             "hypothesisAssessments": assessment_payloads,
             "observationDecisions": observation_payloads,
+            "matchedTrustedPatternIds": list(
+                trusted_resolution.matched_pattern_ids
+            ),
         }
         await self._create_step(
             owner_user_id=owner_user_id,

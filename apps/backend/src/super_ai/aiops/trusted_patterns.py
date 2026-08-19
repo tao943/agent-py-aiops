@@ -157,11 +157,11 @@ def _match_nginx_timeout(
     )
     upstream_status = _one_fact(facts, "ProbeLiveEvalUpstream.status", 200)
     upstream_healthy = _one_fact(facts, "ProbeLiveEvalUpstream.healthy", True)
-    gateway_status = _one_fact(facts, "ProbeLiveEvalGateway.status", 200)
-    gateway_healthy = _one_fact(facts, "ProbeLiveEvalGateway.healthy", True)
+    gateway_status = _one_fact(facts, "ProbeLiveEvalUpstream.gatewayStatus", 200)
+    gateway_healthy = _one_fact(facts, "ProbeLiveEvalUpstream.gatewayHealthy", True)
     gateway_latency = _one_numeric_fact(
         facts,
-        "ProbeLiveEvalGateway.latencyMs",
+        "ProbeLiveEvalUpstream.gatewayLatencyMs",
         minimum=0,
         maximum=_GATEWAY_HEALTH_MAX_LATENCY_MS,
     )

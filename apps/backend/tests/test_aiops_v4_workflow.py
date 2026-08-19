@@ -42,6 +42,92 @@ class UnusedMcpClient:
     pass
 
 
+def _nginx_timeout_hypotheses() -> list[dict[str, object]]:
+    return [
+        {"id": hypothesis_id, "description": hypothesis_id.replace("_", " ")}
+        for hypothesis_id in (
+            "nginx_gateway_pressure",
+            "nginx_route_mismatch",
+            "nginx_upstream_response_timeout",
+            "nginx_upstream_unavailable",
+        )
+    ]
+
+
+def _nginx_timeout_steps() -> list[dict[str, object]]:
+    return [
+        {
+            "id": f"nginx-{index}",
+            "tool": tool,
+            "arguments": {},
+            "purpose": purpose,
+            "testsHypotheses": [
+                item["id"] for item in _nginx_timeout_hypotheses()
+            ],
+            "causalIntent": causal_intent,
+            "evidenceRules": [],
+        }
+        for index, (tool, purpose, causal_intent) in enumerate(
+            (
+                (
+                    "InspectNginxRequestTimeline",
+                    "Inspect the affected request timeline.",
+                    "impact",
+                ),
+                (
+                    "ReadNginxTimeoutSummary",
+                    "Inspect the configured read-timeout outcome.",
+                    "mechanism",
+                ),
+                (
+                    "ProbeLiveEvalUpstream",
+                    "Probe the upstream independently.",
+                    "context",
+                ),
+                ("SearchLog", "Search current-incident logs.", "context"),
+            ),
+            start=1,
+        )
+    ]
+
+
+def _nginx_timeout_outputs() -> list[tuple[str, dict[str, object]]]:
+    return [
+        (
+            "ev-timeline",
+            {
+                "gatewayStatus": 504,
+                "requestDurationMs": 913,
+                "upstreamConnectSucceeded": True,
+            },
+        ),
+        (
+            "ev-summary",
+            {"gatewayTimeoutObserved": True, "readDeadlineElapsed": True},
+        ),
+        (
+            "ev-upstream",
+            {
+                "status": 200,
+                "healthy": True,
+                "gatewayStatus": 200,
+                "gatewayHealthy": True,
+                "gatewayLatencyMs": 19,
+            },
+        ),
+        (
+            "ev-cls",
+            {
+                "recordCount": 2,
+                "records": [
+                    {"event": "request_received"},
+                    {"event": "upstream_timeout"},
+                ],
+            },
+        ),
+    ]
+
+
 def _service(repositories: object, provider: object = object()) -> AiopsDiagnosticService:
     return AiopsDiagnosticService(
         repositories=cast(Any, repositories),
@@ -1470,6 +1556,7 @@ async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
                         public_hypotheses
                     ),
                     "diagnostic_facts": [],
+                    "evidence_ids": ["ev-container"],
                     "plan": plan,
                     "current_plan_step": plan[0],
                     "current_evidence_id": "ev-container",
@@ -1565,6 +1652,7 @@ async def test_fact_adapter_records_cross_evidence_differential_support(
                         hypotheses
                     ),
                     "diagnostic_facts": [],
+                    "evidence_ids": ["ev-container"],
                     "plan": plan,
                     "current_plan_step": plan[0],
                     "current_evidence_id": "ev-container",
@@ -1585,6 +1673,7 @@ async def test_fact_adapter_records_cross_evidence_differential_support(
                     "public_hypotheses": hypotheses,
                     "hypothesis_assessments": first["hypothesis_assessments"],
                     "diagnostic_facts": first["diagnostic_facts"],
+                    "evidence_ids": ["ev-container", "ev-nginx"],
                     "plan": plan,
                     "current_plan_step": plan[1],
                     "current_evidence_id": "ev-nginx",
@@ -1763,6 +1852,185 @@ async def test_fact_adapter_deterministically_closes_redis_availability_chain(
         "impact",
     ]
     assert observations[-1]["supports"] == []
+
+
+@pytest.mark.asyncio
+async def test_fact_adapter_closes_nginx_timeout_from_current_task_trusted_pattern(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-nginx-trusted-pattern",
+            status="running",
+            query="Resolve a gateway timeout.",
+            input_payload={},
+        )
+        hypotheses = _nginx_timeout_hypotheses()
+        steps = _nginx_timeout_steps()
+        state: dict[str, object] = {
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "workflow_version": "evidence-driven-v4",
+            "public_hypotheses": hypotheses,
+            "hypothesis_assessments": _initial_hypothesis_assessments(hypotheses),
+            "diagnostic_facts": [],
+            "observation_decisions": [],
+            "evidence_ids": [],
+            "plan": steps,
+            "decision_vocabulary": {
+                "labelsByHypothesis": {
+                    "nginx_upstream_response_timeout": {
+                        "component": "live-eval-upstream",
+                        "mechanism": "upstream_response_exceeded_proxy_read_timeout",
+                    }
+                }
+            },
+        }
+        observations: list[dict[str, object]] = []
+        evidence_ids: list[str] = []
+        service = _service(repositories)
+        for step, (evidence_id, output) in zip(
+            steps, _nginx_timeout_outputs(), strict=True
+        ):
+            evidence_ids.append(evidence_id)
+            update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        **state,
+                        "current_plan_step": step,
+                        "current_evidence_id": evidence_id,
+                        "current_evidence_summary": "Bounded current-task evidence.",
+                        "current_tool_output": output,
+                        "evidence_ids": list(evidence_ids),
+                    },
+                )
+            )
+            state["hypothesis_assessments"] = update["hypothesis_assessments"]
+            state["diagnostic_facts"] = update["diagnostic_facts"]
+            observations.extend(
+                cast(list[dict[str, object]], update["observation_decisions"])
+            )
+            state["observation_decisions"] = observations
+        state.update(
+            {
+                "evidence_ids": evidence_ids,
+                "plan_index": len(steps),
+                "executor_attempt_count": len(steps),
+                "max_total_steps": 6,
+                "max_replans": 1,
+            }
+        )
+        sufficiency = await service._sufficiency_gate_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
+        decision = await service._decision_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
+    finally:
+        await engine.dispose()
+
+    assessments = {
+        item["hypothesisId"]: item
+        for item in cast(
+            list[dict[str, object]], state["hypothesis_assessments"]
+        )
+    }
+    assert assessments["nginx_upstream_response_timeout"]["disposition"] == "supported"
+    assert assessments["nginx_route_mismatch"]["disposition"] == "refuted"
+    assert assessments["nginx_upstream_unavailable"]["disposition"] == "refuted"
+    assert assessments["nginx_gateway_pressure"]["disposition"] == "causally_inactive"
+    trusted = [
+        item
+        for item in observations
+        if item.get("causalRoleOrigin") == "trusted_compound_pattern"
+    ]
+    assert [item["causalRole"] for item in trusted] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    assert cast(dict[str, object], sufficiency["evidence_sufficiency"])["status"] == (
+        "sufficient"
+    )
+    assert sufficiency["next_route"] == "decision"
+    root_cause = cast(dict[str, object], decision["root_cause_decision"])
+    assert root_cause["component"] == "live-eval-upstream"
+    assert root_cause["mechanism"] == (
+        "upstream_response_exceeded_proxy_read_timeout"
+    )
+    assert root_cause["trigger"]
+    assert len(cast(list[object], root_cause["causalChain"])) >= 2
+
+
+@pytest.mark.asyncio
+async def test_fact_adapter_rejects_foreign_task_fact_from_trusted_pattern(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-nginx-foreign-fact",
+            status="running",
+            query="Reject foreign evidence.",
+            input_payload={},
+        )
+        hypotheses = _nginx_timeout_hypotheses()
+        steps = _nginx_timeout_steps()[:-1]
+        outputs = _nginx_timeout_outputs()[:-1]
+        state: dict[str, object] = {
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "public_hypotheses": hypotheses,
+            "hypothesis_assessments": _initial_hypothesis_assessments(hypotheses),
+            "diagnostic_facts": [
+                {
+                    "key": "SearchLog.records.event",
+                    "value": ["upstream_timeout"],
+                    "evidenceId": "ev-another-task",
+                    "sourceTool": "SearchLog",
+                    "quality": "direct",
+                    "public": True,
+                }
+            ],
+            "evidence_ids": [],
+            "plan": steps,
+        }
+        evidence_ids: list[str] = []
+        service = _service(repositories)
+        for step, (evidence_id, output) in zip(steps, outputs, strict=True):
+            evidence_ids.append(evidence_id)
+            update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        **state,
+                        "current_plan_step": step,
+                        "current_evidence_id": evidence_id,
+                        "current_evidence_summary": "Bounded current-task evidence.",
+                        "current_tool_output": output,
+                        "evidence_ids": list(evidence_ids),
+                    },
+                )
+            )
+            state["hypothesis_assessments"] = update["hypothesis_assessments"]
+            state["diagnostic_facts"] = update["diagnostic_facts"]
+    finally:
+        await engine.dispose()
+
+    assessments = cast(
+        list[dict[str, object]], state["hypothesis_assessments"]
+    )
+    assert all(item["disposition"] == "unresolved" for item in assessments)
 
 
 @pytest.mark.asyncio

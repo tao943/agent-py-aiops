@@ -29,7 +29,7 @@
 - `apps/backend/src/super_ai/aiops/facts.py`：把 Nginx/CLS 的受控字段标记为可参与确定性裁决的 direct public facts。
 - `apps/backend/src/super_ai/aiops/trusted_patterns.py`：保存不依赖场景身份的 Nginx timeout 复合模式和确定性因果 Observation 投影。
 - `apps/backend/src/super_ai/aiops/diagnostics.py`：在 Fact Adapter 中接入复合模式；为 Replanner 增加模型调用前的可用步骤预检。
-- `apps/backend/src/super_ai/evaluation/live/nginx_timeout.py`：增加独立、只读的 Nginx gateway 健康探针，使 gateway pressure 反证在真实 Live 工具链可达。
+- `apps/backend/src/super_ai/evaluation/live/nginx_timeout.py`：在现有只读健康工具中加入独立 Nginx gateway 探针结果，使 gateway pressure 反证在真实 Live 工具链可达且不增加工具调用次数。
 - `apps/backend/tests/test_aiops_trusted_patterns.py`：正向、反事实、冲突、身份无关和 Evidence 归属测试。
 - `apps/backend/tests/test_aiops_v4_workflow.py`：Fact Adapter、Sufficiency、Adjudicator/Replanner 路由和模型调用审计测试。
 - `apps/backend/tests/test_live_diagnostic_adapter.py`：真实 Live 工具合同进入生产诊断图后的结构化 Artifact 测试。
@@ -169,9 +169,9 @@ Expected: `ModuleNotFoundError: super_ai.aiops.trusted_patterns` 或缺少接口
 "ReadNginxTimeoutSummary.readDeadlineElapsed",
 "ProbeLiveEvalUpstream.status",
 "ProbeLiveEvalUpstream.healthy",
-"ProbeLiveEvalGateway.status",
-"ProbeLiveEvalGateway.healthy",
-"ProbeLiveEvalGateway.latencyMs",
+"ProbeLiveEvalUpstream.gatewayStatus",
+"ProbeLiveEvalUpstream.gatewayHealthy",
+"ProbeLiveEvalUpstream.gatewayLatencyMs",
 "SearchLog.records.event",
 ```
 
@@ -306,17 +306,18 @@ coverage repair 行为保持不变。
 
 - [ ] **Step 4: 增加真实 gateway 反证工具和 Live Adapter Artifact RED/GREEN 测试**
 
-在 Nginx driver 的故障观察阶段，对 gateway `/health` 做独立状态和延迟探针，并通过新增零参数只读工具
-`ProbeLiveEvalGateway` 暴露 sanitized 的 `status/healthy/latencyMs`。健康阈值必须是代码拥有的运行合同，
-不得引用 Benchmark 分值或固定故障答案。测试覆盖 healthy 快速响应、非 200、超过阈值三种真实输出；
-后两种必须使 trusted pattern fail closed。
+在 Nginx driver 的故障观察阶段，对 gateway `/health` 做独立状态和延迟探针，并通过现有零参数只读
+工具 `ProbeLiveEvalUpstream` 一并暴露 sanitized 的 gateway `status/healthy/latencyMs`；upstream 与
+gateway 仍是两次独立 HTTP 探针，但共享一次工具审计，保持“三个 Nginx 只读工具 + CLS”的四步预算。
+健康阈值必须是代码拥有的运行合同，不得引用 Benchmark 分值或固定故障答案。测试覆盖 healthy 快速
+响应、非 200、超过阈值三种真实输出；后两种必须使 trusted pattern fail closed。
 
 使用真实 `NginxTimeoutEvidenceMcpClient` 的 sanitized 工具响应和内存模型，断言 Artifact：
 
 - 根因 component/mechanism/trigger/causal chain 完整；
 - Evidence ID 全部存在；
 - 不含 Oracle/ground truth；
-- 工具审计包含四个 Nginx 只读工具和 `SearchLog`；
+- 工具审计包含三个 Nginx 只读工具和 `SearchLog`；
 - 不包含 Adjudicator/Replanner model audit；
 - proposal tool 仍由后续 Recovery Planner/Policy Gate 负责。
 
