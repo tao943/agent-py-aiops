@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from super_ai.aiops import RootCauseDecision
 from super_ai.aiops.adjudication import (
     DiagnosticFact,
     Disposition,
@@ -11,6 +13,16 @@ from super_ai.aiops.adjudication import (
     apply_deterministic_transition,
 )
 from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
+from super_ai.evaluation.live.scenarios import load_live_oracle
+from super_ai.evaluation.live.semantic_scoring import score_root_cause_semantics
+
+_NGINX_SCENARIO = (
+    Path(__file__).resolve().parents[3]
+    / "benchmarks"
+    / "agentpy"
+    / "live"
+    / "APY-LIVE-NGINX-TIMEOUT-001"
+)
 
 _HYPOTHESES = (
     "nginx_gateway_pressure",
@@ -142,6 +154,42 @@ def test_nginx_timeout_pattern_closes_each_hypothesis_with_direct_evidence() -> 
         "impact",
     ]
     assert result.matched_pattern_ids == ("nginx_upstream_read_timeout",)
+
+
+def test_nginx_timeout_pattern_projects_explicit_causal_semantics() -> None:
+    result = resolve_trusted_patterns(
+        assessments=_assessments(),
+        facts=_facts(),
+        trusted_evidence_ids=_evidence_ids(),
+    )
+
+    by_role = {str(item["causalRole"]): str(item["summary"]) for item in result.observations}
+    assert "upstream response delay exceeded the gateway read timeout" in by_role[
+        "trigger"
+    ].lower()
+    assert "connection established to the upstream" in by_role["mechanism"].lower()
+    assert "causes the nginx gateway to return http 504" in by_role["impact"].lower()
+
+
+def test_nginx_timeout_pattern_projection_satisfies_live_semantic_contract() -> None:
+    result = resolve_trusted_patterns(
+        assessments=_assessments(),
+        facts=_facts(),
+        trusted_evidence_ids=_evidence_ids(),
+    )
+    by_role = {str(item["causalRole"]): str(item["summary"]) for item in result.observations}
+    decision = RootCauseDecision(
+        "live-eval-upstream",
+        "upstream_response_exceeded_proxy_read_timeout",
+        by_role["trigger"],
+        (by_role["trigger"], by_role["mechanism"], by_role["impact"]),
+        tuple(sorted(_evidence_ids())),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(decision, load_live_oracle(_NGINX_SCENARIO))
+
+    assert score.total == 20
 
 
 @pytest.mark.parametrize(

@@ -148,7 +148,7 @@ async def test_nginx_health_probe_exposes_independent_upstream_and_gateway_facts
     )
 
     assert result == {
-        "benchmarkEvidenceId": "nginx-upstream-and-gateway-health",
+        "benchmarkEvidenceId": "nginx-upstream-health",
         "status": 200,
         "healthy": True,
         "gatewayStatus": 200,

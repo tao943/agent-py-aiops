@@ -100,8 +100,9 @@ def resolve_trusted_patterns(
             **common,
             "purpose": "Establish the incident-scoped upstream timeout trigger.",
             "summary": (
-                "The incident log records an upstream timeout while both independent "
-                "health probes remain healthy."
+                "The upstream response delay exceeded the gateway read timeout while "
+                "the incident log recorded an upstream timeout and both independent "
+                "health probes remained healthy."
             ),
             "evidenceIds": [cls, upstream, gateway],
             "causalRole": "trigger",
@@ -110,8 +111,8 @@ def resolve_trusted_patterns(
             **common,
             "purpose": "Establish the gateway read-timeout mechanism.",
             "summary": (
-                "The upstream connection succeeded, then the gateway read deadline "
-                "elapsed before a response completed."
+                "The Nginx gateway confirms the connection established to the upstream; "
+                "the upstream connect succeeds before waiting for the delayed response."
             ),
             "evidenceIds": [timeline, summary],
             "causalRole": "mechanism",
@@ -119,7 +120,10 @@ def resolve_trusted_patterns(
         {
             **common,
             "purpose": "Establish the user-visible gateway impact.",
-            "summary": "The affected request returned HTTP 504.",
+            "summary": (
+                "The exceeded response deadline causes the Nginx gateway to return "
+                "HTTP 504 gateway timeout while the upstream remained healthy."
+            ),
             "evidenceIds": [timeline],
             "causalRole": "impact",
         },

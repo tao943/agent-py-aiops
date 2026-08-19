@@ -305,7 +305,7 @@ class NginxTimeoutEvidenceMcpClient:
             }
         if name == "ProbeLiveEvalUpstream":
             return {
-                "benchmarkEvidenceId": "nginx-upstream-and-gateway-health",
+                "benchmarkEvidenceId": "nginx-upstream-health",
                 "status": self._observation.safe_fact("upstreamHealthStatus"),
                 "healthy": self._observation.check_passed(
                     "direct_upstream_health_succeeded"
