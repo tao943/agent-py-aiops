@@ -465,6 +465,45 @@ def test_v4_adjudicator_derives_grounded_nginx_port_mismatch_chain() -> None:
     assert all(item["supports"] == ["upstream_port_mismatch"] for item in derived)
 
 
+def test_v4_adjudicator_promotes_supported_redis_server_stop_to_trigger() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect Redis availability.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Redis is stopped and is not listening.",
+                "evidenceIds": ["ev-redis"],
+                "causalRole": "context",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            }
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="redis_server_availability",
+                disposition="supported",
+                evidence_ids=("ev-redis",),
+                reason_code="redis_process_stopped",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectRedis.processStatus",
+                value="stopped",
+                evidence_id="ev-redis",
+                source_tool="InspectRedis",
+                quality="context",
+            )
+        ],
+    )
+
+    assert projected[0]["supports"] == ["redis_server_availability"]
+    assert projected[0]["causalRole"] == "trigger"
+    assert projected[0]["causalRoleOrigin"] == "coverage_repair"
+
+
 @pytest.mark.asyncio
 async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     migrated_database_url: str,

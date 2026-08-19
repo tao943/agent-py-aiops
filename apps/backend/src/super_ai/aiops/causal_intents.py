@@ -46,7 +46,6 @@ _CONTEXT_OR_MECHANISM = frozenset(
         "InspectGatewayRequestTimeline",
         "InspectHostLimits",
         "InspectNginx",
-        "InspectRedis",
         "InspectRedisClientPool",
         "InspectRedisServer",
         "InspectTrafficAndDependencyHealth",
@@ -57,7 +56,7 @@ _CONTEXT_OR_MECHANISM = frozenset(
     }
 )
 _CONTEXT_OR_MECHANISM_OR_IMPACT = frozenset({"GetServiceMetrics"})
-_TRIGGER_OR_CONTEXT_OR_MECHANISM = frozenset({"InspectPostgres"})
+_TRIGGER_OR_CONTEXT_OR_MECHANISM = frozenset({"InspectPostgres", "InspectRedis"})
 _CONTEXT_OR_IMPACT = frozenset({"VerifyServiceHealth"})
 _LOG_EVIDENCE = frozenset({"SearchLog", "SearchLogs"})
 _NON_DIAGNOSTIC_PREFIXES = (
