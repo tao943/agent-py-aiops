@@ -543,6 +543,12 @@ def _project_adjudicated_observations(
             facts=facts,
         )
     )
+    projected.extend(
+        _derive_redis_pool_recovery_observations(
+            assessment=supported[0],
+            facts=facts,
+        )
+    )
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index
@@ -681,6 +687,87 @@ def _derive_nginx_port_mismatch_observations(
             "evidenceIds": [response_status.evidence_id],
             "causalRole": "impact",
         },
+    ]
+
+
+def _derive_redis_pool_recovery_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Derive a bounded pool-recovery trigger from cited public Redis facts."""
+    if assessment.hypothesis_id != "redis_client_connection_lifecycle":
+        return []
+    cited = [
+        fact
+        for fact in facts
+        if fact.public and fact.evidence_id in assessment.evidence_ids
+    ]
+    stale = next(
+        (
+            fact
+            for fact in cited
+            if fact.key == "InspectRedisClientPool.staleConnections"
+            and isinstance(fact.value, int)
+            and not isinstance(fact.value, bool)
+            and fact.value > 0
+        ),
+        None,
+    )
+    waiting = next(
+        (
+            fact
+            for fact in cited
+            if fact.key == "InspectRedisClientPool.waitingRequests"
+            and isinstance(fact.value, int)
+            and not isinstance(fact.value, bool)
+            and fact.value > 0
+        ),
+        None,
+    )
+    generation = next(
+        (
+            fact
+            for fact in cited
+            if fact.key
+            == "InspectRedisClientPool.poolGenerationChangedAfterRecovery"
+            and fact.value is False
+        ),
+        None,
+    )
+    direct_ping = next(
+        (
+            fact
+            for fact in cited
+            if fact.key == "InspectRedisClientPool.directNewConnectionPing"
+            and isinstance(fact.value, str)
+            and fact.value.casefold() == "pong"
+        ),
+        None,
+    )
+    if any(item is None for item in (stale, waiting, generation, direct_ping)):
+        return []
+    evidence_ids = sorted(
+        {
+            cast(DiagnosticFact, item).evidence_id
+            for item in (stale, waiting, generation, direct_ping)
+        }
+    )
+    return [
+        {
+            "purpose": "Establish whether the client pool rotated after recovery.",
+            "supports": [assessment.hypothesis_id],
+            "refutes": [],
+            "summary": (
+                "The Redis client pool generation did not change after recovery while stale "
+                "connections and waiting requests remained, although a new connection "
+                "succeeded."
+            ),
+            "evidenceIds": evidence_ids,
+            "causalRole": "trigger",
+            "causalRoleOrigin": "coverage_repair",
+            "assessmentSource": "llm_adjudicated",
+        }
     ]
 
 

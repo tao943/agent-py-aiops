@@ -504,6 +504,89 @@ def test_v4_adjudicator_promotes_supported_redis_server_stop_to_trigger() -> Non
     assert projected[0]["causalRoleOrigin"] == "coverage_repair"
 
 
+def test_v4_adjudicator_derives_redis_pool_recovery_trigger() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect Redis client-pool recovery.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The pool retains stale connections after recovery.",
+                "evidenceIds": ["ev-pool"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            },
+            {
+                "purpose": "Inspect dependency impact.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Redis pool waiters increased.",
+                "evidenceIds": ["ev-impact"],
+                "causalRole": "impact",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+            },
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="redis_client_connection_lifecycle",
+                disposition="supported",
+                evidence_ids=("ev-pool", "ev-impact"),
+                reason_code="stale_pool_survived_recovery",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectRedisClientPool.staleConnections",
+                value=24,
+                evidence_id="ev-pool",
+                source_tool="InspectRedisClientPool",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectRedisClientPool.waitingRequests",
+                value=26,
+                evidence_id="ev-pool",
+                source_tool="InspectRedisClientPool",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectRedisClientPool.poolGenerationChangedAfterRecovery",
+                value=False,
+                evidence_id="ev-pool",
+                source_tool="InspectRedisClientPool",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectRedisClientPool.directNewConnectionPing",
+                value="PONG",
+                evidence_id="ev-pool",
+                source_tool="InspectRedisClientPool",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="GetServiceMetrics.redisPoolWaiters",
+                value=26,
+                evidence_id="ev-impact",
+                source_tool="GetServiceMetrics",
+                quality="context",
+            ),
+        ],
+    )
+
+    triggers = [
+        item
+        for item in projected
+        if item.get("causalRole") == "trigger"
+        and item.get("causalRoleOrigin") == "coverage_repair"
+    ]
+    assert len(triggers) == 1
+    assert triggers[0]["supports"] == ["redis_client_connection_lifecycle"]
+    assert triggers[0]["evidenceIds"] == ["ev-pool"]
+
+
 @pytest.mark.asyncio
 async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     migrated_database_url: str,
