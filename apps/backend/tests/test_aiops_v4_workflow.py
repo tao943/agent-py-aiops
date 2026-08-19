@@ -175,7 +175,7 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
         reason_code="evidence_supported",
         assessment_source="llm_adjudicated",
     )
-    observations = [
+    observations: list[JsonDict] = [
         {
             "summary": "raw graph",
             "supports": ["postgres_lock_blocking"],
@@ -276,6 +276,100 @@ def test_v4_normalizes_postgres_lock_chain_from_public_facts() -> None:
     ]
     assert normalized[-1]["supports"] == ["postgres_lock_blocking"]
     assert normalized[-1]["evidenceIds"] == ["ev-cls", "ev-health"]
+
+
+def test_v4_derives_postgres_deadlock_chain_from_public_audit_facts() -> None:
+    assessment = HypothesisAssessment(
+        hypothesis_id="postgres_deadlock",
+        disposition="supported",
+        evidence_ids=("ev-audit", "ev-result"),
+        reason_code="evidence_supported",
+        assessment_source="llm_adjudicated",
+    )
+    observations: list[JsonDict] = [
+        {
+            "summary": "raw audit",
+            "supports": ["postgres_deadlock"],
+            "refutes": [],
+            "evidenceIds": ["ev-audit"],
+            "causalRole": "context",
+        },
+        {
+            "summary": "raw result",
+            "supports": ["postgres_deadlock"],
+            "refutes": [],
+            "evidenceIds": ["ev-result"],
+            "causalRole": "impact",
+        },
+    ]
+    facts = (
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.transactionAFirstResource",
+            "order_row_1",
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.transactionASecondResource",
+            "order_row_2",
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.transactionBFirstResource",
+            "order_row_2",
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.transactionBSecondResource",
+            "order_row_1",
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.cycleDetected",
+            True,
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresDeadlockAudit.sqlstate",
+            "40P01",
+            "ev-audit",
+            "InspectPostgresDeadlockAudit",
+            "context",
+        ),
+        DiagnosticFact(
+            "InspectPostgresTransactionResult.aborted",
+            True,
+            "ev-result",
+            "InspectPostgresTransactionResult",
+            "context",
+        ),
+    )
+
+    projected = _project_adjudicated_observations(
+        observations=observations,
+        assessments=(assessment,),
+        facts=facts,
+    )
+    derived = projected[-3:]
+
+    assert [item["causalRole"] for item in derived] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    assert "reverse order" in str(derived[0]["summary"])
+    assert "cyclic wait" in str(derived[1]["summary"])
+    assert "40P01" in str(derived[2]["summary"])
+    assert derived[2]["evidenceIds"] == ["ev-audit", "ev-result"]
 
 
 @pytest.mark.asyncio

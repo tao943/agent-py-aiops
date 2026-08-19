@@ -28,6 +28,10 @@ def _observation() -> LiveFaultObservation:
             ("cycleLength", 2),
             ("victimRef", "transaction-b"),
             ("postgresHealthy", True),
+            ("transactionAFirstResource", "order_row_1"),
+            ("transactionASecondResource", "order_row_2"),
+            ("transactionBFirstResource", "order_row_2"),
+            ("transactionBSecondResource", "order_row_1"),
         ),
     )
 
@@ -105,8 +109,11 @@ async def test_deadlock_evidence_tools_are_read_only_and_pid_free() -> None:
         "VerifyPostgresHealth",
     }
     output = await client.call_tool("InspectPostgresDeadlockAudit", {})
+    assert isinstance(output, Mapping)
     serialized = json.dumps(output)
     assert "40P01" in serialized
+    assert output["transactionAFirstResource"] == "order_row_1"
+    assert output["transactionBFirstResource"] == "order_row_2"
     assert "pid" not in serialized.casefold()
     with pytest.raises(McpClientError):
         await client.call_tool("RetryAbortedBenchmarkTransaction", {})

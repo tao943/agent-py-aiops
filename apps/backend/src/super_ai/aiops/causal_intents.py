@@ -26,11 +26,13 @@ _TRIGGER_OR_MECHANISM = frozenset(
         "GetDeploymentChanges",
         "InspectClientRetryPolicy",
         "InspectHttpAttempts",
+        "InspectPostgresDeadlockAudit",
         "InspectPostgresLockGraph",
         "InspectRateLimitTimeline",
         "InspectTransactionResourceOrder",
     }
 )
+_IMPACT = frozenset({"InspectPostgresTransactionResult"})
 _MECHANISM = frozenset({"InspectPostgresWaitGraph"})
 _MECHANISM_OR_IMPACT = frozenset(
     {"InspectGatewayErrors", "InspectPostgresErrors", "InspectPostgresSessions"}
@@ -99,6 +101,8 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
     """Return the public observation roles a diagnostic tool can establish."""
     if tool_name in _TRIGGER_OR_MECHANISM:
         return frozenset({"trigger", "mechanism"})
+    if tool_name in _IMPACT:
+        return frozenset({"impact"})
     if tool_name in _MECHANISM:
         return frozenset({"mechanism"})
     if tool_name in _MECHANISM_OR_IMPACT:

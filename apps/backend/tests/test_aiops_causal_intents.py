@@ -38,6 +38,12 @@ def test_tool_capabilities_describe_public_observation_semantics() -> None:
     assert allowed_causal_intents("InspectPostgresErrors") == frozenset(
         {"mechanism", "impact"}
     )
+    assert allowed_causal_intents("InspectPostgresDeadlockAudit") == frozenset(
+        {"trigger", "mechanism"}
+    )
+    assert allowed_causal_intents("InspectPostgresTransactionResult") == frozenset(
+        {"impact"}
+    )
     assert allowed_causal_intents("VerifyServiceHealth") == frozenset(
         {"context", "impact"}
     )

@@ -561,6 +561,12 @@ def _project_adjudicated_observations(
         assessment=supported[0],
         facts=facts,
     )
+    projected.extend(
+        _derive_postgres_deadlock_observations(
+            assessment=supported[0],
+            facts=facts,
+        )
+    )
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index
@@ -733,6 +739,98 @@ def _normalize_postgres_lock_observations(
         )
         observation["causalRoleOrigin"] = "coverage_repair"
     return projected
+
+
+def _derive_postgres_deadlock_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Derive a deadlock chain from a current-run public transaction audit."""
+    if (
+        assessment.hypothesis_id != "postgres_deadlock"
+        or assessment.disposition != "supported"
+    ):
+        return []
+    cited = [
+        fact
+        for fact in facts
+        if fact.public and fact.evidence_id in assessment.evidence_ids
+    ]
+
+    def matching_fact(key: str, expected: object | None = None) -> DiagnosticFact | None:
+        return next(
+            (
+                fact
+                for fact in cited
+                if fact.key == key and (expected is None or fact.value == expected)
+            ),
+            None,
+        )
+
+    audit_facts = (
+        matching_fact("InspectPostgresDeadlockAudit.transactionAFirstResource"),
+        matching_fact("InspectPostgresDeadlockAudit.transactionASecondResource"),
+        matching_fact("InspectPostgresDeadlockAudit.transactionBFirstResource"),
+        matching_fact("InspectPostgresDeadlockAudit.transactionBSecondResource"),
+        matching_fact("InspectPostgresDeadlockAudit.cycleDetected", True),
+        matching_fact("InspectPostgresDeadlockAudit.sqlstate", "40P01"),
+    )
+    aborted = matching_fact("InspectPostgresTransactionResult.aborted", True)
+    if any(item is None for item in audit_facts) or aborted is None:
+        return []
+    first_a, second_a, first_b, second_b, cycle, sqlstate = cast(
+        tuple[DiagnosticFact, ...], audit_facts
+    )
+    audit_evidence_ids = {
+        item.evidence_id
+        for item in (first_a, second_a, first_b, second_b, cycle, sqlstate)
+    }
+    if (
+        len(audit_evidence_ids) != 1
+        or first_a.value == second_a.value
+        or first_a.value != second_b.value
+        or second_a.value != first_b.value
+    ):
+        return []
+    audit_evidence_id = next(iter(audit_evidence_ids))
+    common: JsonDict = {
+        "purpose": "Project the public current-run deadlock audit into a causal chain.",
+        "supports": [assessment.hypothesis_id],
+        "refutes": [],
+        "assessmentSource": assessment.assessment_source,
+        "causalRoleOrigin": "fact_projection",
+    }
+    return [
+        {
+            **common,
+            "summary": (
+                "Two concurrent transactions acquire the same order rows in reverse order: "
+                "transaction A acquires order row 1 then order row 2, while transaction B "
+                "acquires order row 2 then order row 1."
+            ),
+            "evidenceIds": [audit_evidence_id],
+            "causalRole": "trigger",
+        },
+        {
+            **common,
+            "summary": (
+                "The reverse resource order causes a cyclic wait relationship and a "
+                "deadlock cycle."
+            ),
+            "evidenceIds": [audit_evidence_id],
+            "causalRole": "mechanism",
+        },
+        {
+            **common,
+            "summary": (
+                "PostgreSQL records an aborted transaction, the victim transaction, with "
+                "deadlock error SQLSTATE 40P01."
+            ),
+            "evidenceIds": sorted({audit_evidence_id, aborted.evidence_id}),
+            "causalRole": "impact",
+        },
+    ]
 
 
 def _derive_nginx_port_mismatch_observations(
