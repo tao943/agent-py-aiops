@@ -537,6 +537,12 @@ def _project_adjudicated_observations(
 
     if len(supported) != 1:
         return projected
+    projected.extend(
+        _derive_nginx_port_mismatch_observations(
+            assessment=supported[0],
+            facts=facts,
+        )
+    )
     supported_id = supported[0].hypothesis_id
     supporting_indexes = [
         index
@@ -574,6 +580,108 @@ def _project_adjudicated_observations(
         projected[index]["causalRoleOrigin"] = "coverage_repair"
         break
     return projected
+
+
+def _derive_nginx_port_mismatch_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Split one cited Nginx mismatch observation into grounded causal roles."""
+    if assessment.hypothesis_id != "upstream_port_mismatch":
+        return []
+    cited = [
+        fact
+        for fact in facts
+        if fact.public and fact.evidence_id in assessment.evidence_ids
+    ]
+    upstream = next(
+        (fact for fact in cited if fact.key == "InspectNginx.upstreamPort"),
+        None,
+    )
+    container = next(
+        (
+            fact
+            for key in (
+                "InspectContainer.listeningPorts",
+                "InspectContainer.configuredPorts",
+            )
+            for fact in cited
+            if fact.key == key
+        ),
+        None,
+    )
+    connection_error = next(
+        (
+            fact
+            for fact in cited
+            if fact.key == "InspectNginx.error"
+            and isinstance(fact.value, str)
+            and (
+                "connection refused" in fact.value.casefold()
+                or "connect() failed" in fact.value.casefold()
+            )
+        ),
+        None,
+    )
+    response_status = next(
+        (
+            fact
+            for fact in cited
+            if fact.key == "InspectNginx.responseStatus"
+            and isinstance(fact.value, int)
+            and not isinstance(fact.value, bool)
+            and 500 <= fact.value < 600
+        ),
+        None,
+    )
+    if (
+        upstream is None
+        or container is None
+        or connection_error is None
+        or response_status is None
+        or isinstance(container.value, (str, bytes))
+        or not isinstance(container.value, Sequence)
+        or upstream.value in cast(Sequence[object], container.value)
+    ):
+        return []
+    mismatch_evidence_ids = sorted(
+        {upstream.evidence_id, container.evidence_id}
+    )
+    common: JsonDict = {
+        "supports": [assessment.hypothesis_id],
+        "refutes": [],
+        "causalRoleOrigin": "coverage_repair",
+        "assessmentSource": "llm_adjudicated",
+    }
+    return [
+        {
+            **common,
+            "purpose": "Compare the configured Nginx upstream with container ports.",
+            "summary": (
+                f"Nginx upstream port {upstream.value} differs from the container "
+                f"listening ports {json.dumps(container.value)}."
+            ),
+            "evidenceIds": mismatch_evidence_ids,
+            "causalRole": "trigger",
+        },
+        {
+            **common,
+            "purpose": "Establish the upstream connection failure mechanism.",
+            "summary": "Nginx failed to connect to the configured upstream endpoint.",
+            "evidenceIds": [connection_error.evidence_id],
+            "causalRole": "mechanism",
+        },
+        {
+            **common,
+            "purpose": "Establish the user-visible gateway impact.",
+            "summary": (
+                f"The Nginx upstream request returned HTTP {response_status.value}."
+            ),
+            "evidenceIds": [response_status.evidence_id],
+            "causalRole": "impact",
+        },
+    ]
 
 
 _MAX_CAUSAL_CHAIN_ITEMS = 6

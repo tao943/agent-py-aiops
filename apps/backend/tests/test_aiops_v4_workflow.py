@@ -8,8 +8,10 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.adjudication import DiagnosticFact, HypothesisAssessment
 from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
+    _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
 )
 from super_ai.aiops.model_budget import ExecutionDeadlines
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -382,6 +384,85 @@ async def test_v4_adjudicator_projects_citations_back_to_observations(
     assert observations[1]["causalRole"] == "trigger"
     assert observations[1]["causalRoleOrigin"] == "coverage_repair"
     assert all(item["assessmentSource"] == "llm_adjudicated" for item in observations)
+
+
+def test_v4_adjudicator_derives_grounded_nginx_port_mismatch_chain() -> None:
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect the checkout container.",
+                "supports": [],
+                "refutes": ["upstream_process_down"],
+                "summary": "The container is healthy and listens on port 8080.",
+                "evidenceIds": ["ev-container"],
+                "causalRole": "context",
+                "causalRoleOrigin": "trusted_evidence_rule",
+                "assessmentSource": "deterministic",
+            },
+            {
+                "purpose": "Inspect the Nginx upstream route.",
+                "supports": [],
+                "refutes": ["dns_resolution_failure"],
+                "summary": "Nginx targets port 8081 and returns HTTP 502.",
+                "evidenceIds": ["ev-nginx"],
+                "causalRole": "context",
+                "causalRoleOrigin": "trusted_evidence_rule",
+                "assessmentSource": "deterministic",
+            },
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id="upstream_port_mismatch",
+                disposition="supported",
+                evidence_ids=("ev-container", "ev-nginx"),
+                reason_code="public_facts_show_port_mismatch",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="InspectContainer.listeningPorts",
+                value=(8080,),
+                evidence_id="ev-container",
+                source_tool="InspectContainer",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectNginx.upstreamPort",
+                value=8081,
+                evidence_id="ev-nginx",
+                source_tool="InspectNginx",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectNginx.error",
+                value="connect() failed (111 Connection refused)",
+                evidence_id="ev-nginx",
+                source_tool="InspectNginx",
+                quality="context",
+            ),
+            DiagnosticFact(
+                key="InspectNginx.responseStatus",
+                value=502,
+                evidence_id="ev-nginx",
+                source_tool="InspectNginx",
+                quality="direct",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "coverage_repair"
+    ]
+    assert [item["causalRole"] for item in derived] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    assert derived[0]["evidenceIds"] == ["ev-container", "ev-nginx"]
+    assert all(item["supports"] == ["upstream_port_mismatch"] for item in derived)
 
 
 @pytest.mark.asyncio
