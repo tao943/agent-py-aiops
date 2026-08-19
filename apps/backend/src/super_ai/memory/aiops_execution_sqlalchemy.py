@@ -329,7 +329,7 @@ class SQLAlchemyLangGraphCheckpointRepository(LangGraphCheckpointRepository):
             )
             await session.commit()
         stored = await self.get_tuple(record.identity)
-        if stored is None or stored.checkpoint != record:
+        if stored is None or not _same_checkpoint_payload(stored.checkpoint, record):
             raise TenantScopeError("Checkpoint identity belongs to another scope or payload.")
 
     async def put_writes(self, records: Sequence[StoredCheckpointWrite]) -> None:
@@ -394,6 +394,21 @@ def _writes_query(identity: CheckpointIdentity):
         AiopsLangGraphWriteModel.thread_id == identity.thread_id,
         AiopsLangGraphWriteModel.checkpoint_ns == identity.checkpoint_ns,
         AiopsLangGraphWriteModel.checkpoint_id == identity.checkpoint_id,
+    )
+
+
+def _same_checkpoint_payload(
+    stored: StoredCheckpoint,
+    requested: StoredCheckpoint,
+) -> bool:
+    """Ignore insertion time while preserving identity, scope, and blob integrity."""
+    return (
+        stored.identity == requested.identity
+        and stored.parent_checkpoint_id == requested.parent_checkpoint_id
+        and stored.checkpoint_type == requested.checkpoint_type
+        and stored.checkpoint_blob == requested.checkpoint_blob
+        and stored.metadata_type == requested.metadata_type
+        and stored.metadata_blob == requested.metadata_blob
     )
 
 
