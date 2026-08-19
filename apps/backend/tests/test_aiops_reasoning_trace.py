@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.adjudication import HypothesisAssessment
 from super_ai.aiops.diagnostics import (
     _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _next_open_hypothesis_step_index,  # pyright: ignore[reportPrivateUsage]
@@ -32,6 +33,7 @@ from super_ai.aiops.reasoning import (
     parse_recovery_plan,
     parse_root_cause_decision,
     parse_root_cause_validation,
+    project_hypothesis_assessment,
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
 from super_ai.evaluation.runner import build_application_diagnostic_input
@@ -44,6 +46,22 @@ from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+def test_causally_inactive_projects_to_legacy_refuted_without_changing_v4_state() -> None:
+    assessment = HypothesisAssessment(
+        hypothesis_id="port_mismatch",
+        disposition="causally_inactive",
+        evidence_ids=("e-route",),
+        reason_code="route_not_on_failure_path",
+        assessment_source="deterministic",
+    )
+
+    projected = project_hypothesis_assessment(assessment)
+
+    assert projected.status == "refuted"
+    assert projected.confidence == 0.1
+    assert assessment.disposition == "causally_inactive"
 
 
 def _model_sufficiency() -> EvidenceSufficiencyDecision:

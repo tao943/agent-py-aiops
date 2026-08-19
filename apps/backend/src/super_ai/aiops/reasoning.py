@@ -8,6 +8,7 @@ from collections.abc import Collection, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
+from super_ai.aiops.adjudication import HypothesisAssessment
 from super_ai.aiops.causal_intents import (
     CausalIntent,
     CausalIntentOrigin,
@@ -32,6 +33,25 @@ class HypothesisState:
     status: Literal["open", "supported", "refuted"]
     confidence: float
     evidence_ids: tuple[str, ...]
+
+
+def project_hypothesis_assessment(assessment: HypothesisAssessment) -> HypothesisState:
+    """Project a v4 assessment for legacy v2/v3 readers only."""
+    if assessment.disposition == "supported":
+        status: Literal["open", "supported", "refuted"] = "supported"
+        confidence = 0.95
+    elif assessment.disposition in {"refuted", "causally_inactive"}:
+        status = "refuted"
+        confidence = 0.1 if assessment.disposition == "causally_inactive" else 0.05
+    else:
+        status = "open"
+        confidence = 0.5
+    return HypothesisState(
+        id=assessment.hypothesis_id,
+        status=status,
+        confidence=confidence,
+        evidence_ids=assessment.evidence_ids,
+    )
 
 
 CausalRole = CausalIntent
