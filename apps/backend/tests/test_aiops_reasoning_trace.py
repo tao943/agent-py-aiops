@@ -64,6 +64,114 @@ def test_causally_inactive_projects_to_legacy_refuted_without_changing_v4_state(
     assert assessment.disposition == "causally_inactive"
 
 
+def test_plan_parser_instantiates_a_trusted_evidence_rule_template() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Compare the upstream and service ports.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_port_mismatch",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    assert len(plan[0].evidence_rules) == 1
+    rule = plan[0].evidence_rules[0]
+    assert rule.hypothesis_id == "upstream_port_mismatch"
+    assert rule.when_true == "refuted"
+    assert rule.reason_code == "configured_route_port_matches_service"
+
+
+def test_plan_parser_drops_model_defined_disposition_rule() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-container",
+                        "tool": "InspectContainer",
+                        "arguments": {"service": "checkout-service"},
+                        "purpose": "Inspect the process.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "hypothesisId": "upstream_port_mismatch",
+                                "predicate": {
+                                    "leftFact": "InspectContainer.status",
+                                    "operator": "eq",
+                                    "expected": "exited",
+                                },
+                                "whenTrue": "refuted",
+                                "reasonCode": "model_invented_causal_mapping",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectContainer"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectContainer": {"mechanism"}},
+    )
+
+    assert plan[0].evidence_rules == ()
+
+
+def test_trusted_template_cannot_close_an_unauthorized_hypothesis() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Inspect the upstream route.",
+                        "testsHypotheses": ["upstream_process_down"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_process_down",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_process_down"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    assert plan[0].evidence_rules == ()
+
+
 def _model_sufficiency() -> EvidenceSufficiencyDecision:
     return EvidenceSufficiencyDecision(
         status="sufficient",

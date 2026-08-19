@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal, cast
+from typing import Literal
 
 Disposition = Literal["supported", "refuted", "causally_inactive", "unresolved"]
 AssessmentSource = Literal["deterministic", "llm_adjudicated"]
@@ -79,6 +79,114 @@ class HypothesisEvidenceRule:
 
 
 @dataclass(frozen=True, slots=True)
+class _TrustedRuleTemplate:
+    step_tool: str
+    hypothesis_id: str
+    predicate: EvidencePredicate
+    when_true: Disposition
+    reason_code: str
+    parameters: tuple[tuple[str, str], ...]
+
+
+_TRUSTED_RULE_TEMPLATES: dict[str, _TrustedRuleTemplate] = {
+    "nginx_upstream_port_matches_container_port": _TrustedRuleTemplate(
+        step_tool="InspectNginx",
+        hypothesis_id="upstream_port_mismatch",
+        predicate=EvidencePredicate(
+            left_fact="InspectNginx.upstreamPort",
+            operator="in",
+            right_fact="InspectContainer.configuredPorts",
+        ),
+        when_true="refuted",
+        reason_code="configured_route_port_matches_service",
+        parameters=(
+            ("containerFact", "InspectContainer.configuredPorts"),
+            ("nginxFact", "InspectNginx.upstreamPort"),
+        ),
+    ),
+    "container_process_exited": _TrustedRuleTemplate(
+        step_tool="InspectContainer",
+        hypothesis_id="upstream_process_down",
+        predicate=EvidencePredicate(
+            left_fact="InspectContainer.status",
+            operator="in",
+            expected=("dead", "exited", "stopped"),
+        ),
+        when_true="supported",
+        reason_code="upstream_process_not_running",
+        parameters=(("statusFact", "InspectContainer.status"),),
+    ),
+    "container_process_running": _TrustedRuleTemplate(
+        step_tool="InspectContainer",
+        hypothesis_id="upstream_process_down",
+        predicate=EvidencePredicate(
+            left_fact="InspectContainer.status",
+            operator="eq",
+            expected="running",
+        ),
+        when_true="refuted",
+        reason_code="upstream_process_running",
+        parameters=(("statusFact", "InspectContainer.status"),),
+    ),
+    "nginx_resolved_address_present": _TrustedRuleTemplate(
+        step_tool="InspectNginx",
+        hypothesis_id="dns_resolution_failure",
+        predicate=EvidencePredicate(
+            left_fact="InspectNginx.resolvedAddresses",
+            operator="truthy",
+        ),
+        when_true="refuted",
+        reason_code="upstream_address_resolved",
+        parameters=(("addressesFact", "InspectNginx.resolvedAddresses"),),
+    ),
+}
+
+
+def instantiate_trusted_evidence_rule(
+    *,
+    template_id: str,
+    hypothesis_id: str,
+    parameters: Mapping[str, object],
+    step_tool: str,
+) -> HypothesisEvidenceRule | None:
+    """Instantiate only an exact code-owned fact-to-disposition contract."""
+    template = _TRUSTED_RULE_TEMPLATES.get(template_id)
+    if template is None:
+        return None
+    expected_parameters = dict(template.parameters)
+    actual_parameters = {
+        key: value for key, value in parameters.items() if isinstance(value, str)
+    }
+    if (
+        template.step_tool != step_tool
+        or template.hypothesis_id != hypothesis_id
+        or actual_parameters != expected_parameters
+        or len(actual_parameters) != len(parameters)
+    ):
+        return None
+    return HypothesisEvidenceRule(
+        template_id=template_id,
+        hypothesis_id=hypothesis_id,
+        predicate=template.predicate,
+        when_true=template.when_true,
+        reason_code=template.reason_code,
+    )
+
+
+def trusted_evidence_rule_catalog() -> tuple[dict[str, object], ...]:
+    """Return the bounded public template choices exposed to Planner."""
+    return tuple(
+        {
+            "templateId": template_id,
+            "tool": template.step_tool,
+            "hypothesisId": template.hypothesis_id,
+            "parameters": dict(template.parameters),
+        }
+        for template_id, template in sorted(_TRUSTED_RULE_TEMPLATES.items())
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class HypothesisTransition:
     previous_disposition: Disposition
     next_disposition: Disposition
@@ -124,16 +232,12 @@ def reduce_hypotheses(
     for rule in sorted(rules, key=lambda item: (item.hypothesis_id, item.template_id)):
         if rule.hypothesis_id not in current:
             raise ValueError(f"Evidence rule references unknown hypothesis: {rule.hypothesis_id}.")
-        matching = tuple(
-            fact
-            for fact in public_facts
-            if fact.quality == "direct" and _predicate_matches(rule.predicate, fact)
-        )
-        if not matching:
+        evidence_ids = _matching_evidence_ids(rule.predicate, public_facts)
+        if not evidence_ids:
             continue
         dispositions = proposed.setdefault(rule.hypothesis_id, {})
         outcomes = dispositions.setdefault(rule.when_true, [])
-        outcomes.extend((rule, fact.evidence_id) for fact in matching)
+        outcomes.extend((rule, evidence_id) for evidence_id in evidence_ids)
 
     reduced: list[HypothesisAssessment] = []
     for hypothesis_id in sorted(current):
@@ -210,32 +314,13 @@ def _deduplicate_public_facts(
     return tuple(deduplicated[key] for key in sorted(deduplicated))
 
 
-def _predicate_matches(predicate: EvidencePredicate, fact: DiagnosticFact) -> bool:
-    if fact.key != predicate.left_fact:
-        return False
-    if predicate.right_fact is not None:
-        return False
-    if predicate.operator == "eq":
-        return fact.value == predicate.expected
-    if predicate.operator == "ne":
-        return fact.value != predicate.expected
-    if predicate.operator == "exists":
-        return True
-    if predicate.operator == "empty":
-        return fact.value in (None, "", (), [], {})
-    if predicate.operator == "truthy":
-        return bool(fact.value)
-    if predicate.operator == "contains":
-        try:
-            return predicate.expected in cast(object, fact.value)  # type: ignore[operator]
-        except TypeError:
-            return False
-    if predicate.operator == "in":
-        try:
-            return fact.value in cast(object, predicate.expected)  # type: ignore[operator]
-        except TypeError:
-            return False
-    return False
+def _matching_evidence_ids(
+    predicate: EvidencePredicate,
+    facts: Sequence[DiagnosticFact],
+) -> tuple[str, ...]:
+    from super_ai.aiops.facts import predicate_evidence_ids
+
+    return predicate_evidence_ids(facts, predicate)
 
 
 def _apply_outcomes(

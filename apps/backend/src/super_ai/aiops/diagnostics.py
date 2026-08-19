@@ -19,6 +19,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from langgraph.graph import END, START, StateGraph
 
+from super_ai.aiops.adjudication import trusted_evidence_rule_catalog
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.causal_intents import (
     allowed_causal_intents,
@@ -213,6 +214,7 @@ def build_generic_live_plan(
             "testsHypotheses": [item for item in hypotheses if item in known],
             "causalIntent": causal_intent,
             "causalIntentOrigin": "generic",
+            "evidenceRules": [],
         }
         for index, (tool, purpose, arguments, hypotheses, causal_intent) in enumerate(
             definitions, start=1
@@ -2365,7 +2367,12 @@ class AiopsDiagnosticService:
         prompt = (
             "Return JSON only for a bounded diagnostic plan with a `steps` array. Each step "
             "has `id`, `tool`, `arguments`, `purpose`, `testsHypotheses`, and "
-            "`causalIntent`. causalIntent must be allowed by the selected tool contract. "
+            "`causalIntent`, plus optional `evidenceRules`. causalIntent must be allowed by "
+            "the selected tool contract. evidenceRules may only contain templateId, "
+            "hypothesisId, and the exact bounded parameters from this trusted catalog: "
+            f"{json.dumps(trusted_evidence_rule_catalog(), ensure_ascii=False)}. "
+            "Do not define a predicate, disposition, reason code, scenario ID, Oracle, or "
+            "unavailable tool in evidenceRules. "
             "Use at most six "
             "steps and only the tools and argument schemas in these discovered contracts. "
             "The initial plan must contain at most four steps: "
@@ -2510,6 +2517,21 @@ def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:
         "testsHypotheses": list(step.tests_hypotheses),
         "causalIntent": step.causal_intent,
         "causalIntentOrigin": step.causal_intent_origin,
+        "evidenceRules": [
+            {
+                "templateId": rule.template_id,
+                "hypothesisId": rule.hypothesis_id,
+                "predicate": {
+                    "leftFact": rule.predicate.left_fact,
+                    "operator": rule.predicate.operator,
+                    "expected": rule.predicate.expected,
+                    "rightFact": rule.predicate.right_fact,
+                },
+                "whenTrue": rule.when_true,
+                "reasonCode": rule.reason_code,
+            }
+            for rule in step.evidence_rules
+        ],
     }
 
 
