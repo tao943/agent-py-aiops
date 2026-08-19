@@ -312,6 +312,76 @@ def reduce_hypotheses(
     return tuple(reduced)
 
 
+def apply_deterministic_transition(
+    assessment: HypothesisAssessment,
+    *,
+    disposition: Disposition,
+    evidence_ids: Sequence[str],
+    reason_code: str,
+) -> HypothesisAssessment:
+    """Apply one evidence-cited transition while preserving sticky conflicts."""
+    normalized_evidence = tuple(
+        sorted(
+            set(assessment.evidence_ids)
+            | {value.strip() for value in evidence_ids if value.strip()}
+        )
+    )
+    if disposition in _CLOSED_DISPOSITIONS and not normalized_evidence:
+        raise ValueError("Closed hypothesis disposition requires public evidence.")
+    if _REASON_CODE_PATTERN.fullmatch(reason_code) is None:
+        raise ValueError("Hypothesis reason code is invalid.")
+
+    if assessment.has_high_quality_conflict:
+        if normalized_evidence == assessment.evidence_ids:
+            return assessment
+        transition = HypothesisTransition(
+            previous_disposition=assessment.disposition,
+            next_disposition="unresolved",
+            evidence_ids=normalized_evidence,
+            reason_code="high_quality_evidence_conflict",
+            assessment_source="deterministic",
+        )
+        return replace(
+            assessment,
+            disposition="unresolved",
+            evidence_ids=normalized_evidence,
+            reason_code="high_quality_evidence_conflict",
+            assessment_source="deterministic",
+            has_high_quality_conflict=True,
+            transitions=assessment.transitions + (transition,),
+        )
+
+    conflicts = (
+        assessment.disposition in _CLOSED_DISPOSITIONS
+        and disposition in _CLOSED_DISPOSITIONS
+        and assessment.disposition != disposition
+    )
+    next_disposition: Disposition = "unresolved" if conflicts else disposition
+    next_reason = "high_quality_evidence_conflict" if conflicts else reason_code
+    if (
+        assessment.disposition == next_disposition
+        and assessment.evidence_ids == normalized_evidence
+        and assessment.reason_code == next_reason
+    ):
+        return assessment
+    transition = HypothesisTransition(
+        previous_disposition=assessment.disposition,
+        next_disposition=next_disposition,
+        evidence_ids=normalized_evidence,
+        reason_code=next_reason,
+        assessment_source="deterministic",
+    )
+    return replace(
+        assessment,
+        disposition=next_disposition,
+        evidence_ids=normalized_evidence,
+        reason_code=next_reason,
+        assessment_source="deterministic",
+        has_high_quality_conflict=conflicts,
+        transitions=assessment.transitions + (transition,),
+    )
+
+
 def assess_sufficiency(
     assessments: Sequence[HypothesisAssessment],
 ):
@@ -392,7 +462,7 @@ def _apply_outcomes(
     assessment: HypothesisAssessment,
     outcomes: dict[Disposition, list[tuple[HypothesisEvidenceRule, str]]],
 ) -> HypothesisAssessment:
-    if not outcomes:
+    if not outcomes or assessment.has_high_quality_conflict:
         return assessment
     active = set(outcomes)
     if assessment.disposition != "unresolved":
@@ -404,38 +474,51 @@ def _apply_outcomes(
         )
     )
     if len(active) > 1:
-        reason_code = "high_quality_evidence_conflict"
-        next_disposition: Disposition = "unresolved"
-        source: AssessmentSource = "deterministic"
-        conflict = True
-    else:
-        next_disposition = next(iter(active))
-        first_rule = sorted(
-            outcomes[next_disposition], key=lambda item: (item[0].template_id, item[1])
-        )[0][0]
-        reason_code = first_rule.reason_code
-        source = "deterministic"
-        conflict = False
+        first_disposition = sorted(active)[0]
+        seeded = assessment
+        if assessment.disposition == "unresolved":
+            first_rule = sorted(
+                outcomes[first_disposition],
+                key=lambda item: (item[0].template_id, item[1]),
+            )[0][0]
+            seeded = apply_deterministic_transition(
+                assessment,
+                disposition=first_disposition,
+                evidence_ids=tuple(
+                    evidence_id for _, evidence_id in outcomes[first_disposition]
+                ),
+                reason_code=first_rule.reason_code,
+            )
+        conflicting_disposition = cast(
+            Disposition,
+            next(
+                disposition
+                for disposition in sorted(active)
+                if disposition != seeded.disposition
+            ),
+        )
+        conflict_values = outcomes.get(conflicting_disposition, [])
+        return apply_deterministic_transition(
+            seeded,
+            disposition=conflicting_disposition,
+            evidence_ids=evidence_ids,
+            reason_code=(
+                sorted(
+                    conflict_values,
+                    key=lambda item: (item[0].template_id, item[1]),
+                )[0][0].reason_code
+                if conflict_values
+                else "high_quality_evidence_conflict"
+            ),
+        )
 
-    if (
-        assessment.disposition == next_disposition
-        and assessment.evidence_ids == evidence_ids
-        and assessment.has_high_quality_conflict == conflict
-    ):
-        return assessment
-    transition = HypothesisTransition(
-        previous_disposition=assessment.disposition,
-        next_disposition=next_disposition,
-        evidence_ids=evidence_ids,
-        reason_code=reason_code,
-        assessment_source=source,
-    )
-    return replace(
+    next_disposition = next(iter(active))
+    first_rule = sorted(
+        outcomes[next_disposition], key=lambda item: (item[0].template_id, item[1])
+    )[0][0]
+    return apply_deterministic_transition(
         assessment,
         disposition=next_disposition,
         evidence_ids=evidence_ids,
-        reason_code=reason_code,
-        assessment_source=source,
-        has_high_quality_conflict=conflict,
-        transitions=assessment.transitions + (transition,),
+        reason_code=first_rule.reason_code,
     )
