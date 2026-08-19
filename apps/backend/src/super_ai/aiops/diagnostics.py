@@ -859,6 +859,69 @@ def _derive_redis_maxclients_observations(
     ]
 
 
+def _derive_upstream_deadline_observations(
+    *,
+    hypothesis_id: str,
+    facts: Sequence[DiagnosticFact],
+    evidence_id: str,
+) -> list[JsonDict]:
+    """Derive a trigger when an upstream probe exceeds the gateway deadline."""
+    if hypothesis_id != "nginx_upstream_response_timeout":
+        return []
+    current = [
+        fact for fact in facts if fact.public and fact.evidence_id == evidence_id
+    ]
+
+    def positive_number(key: str) -> DiagnosticFact | None:
+        return next(
+            (
+                fact
+                for fact in current
+                if fact.key == key
+                and isinstance(fact.value, (int, float))
+                and not isinstance(fact.value, bool)
+                and fact.value > 0
+            ),
+            None,
+        )
+
+    first_byte = positive_number("ProbeUpstreamHealth.firstByteMs")
+    deadline = positive_number("ProbeUpstreamHealth.gatewayReadDeadlineMs")
+    connected = next(
+        (
+            fact
+            for fact in current
+            if fact.key == "ProbeUpstreamHealth.tcpConnect"
+            and isinstance(fact.value, str)
+            and fact.value.casefold() == "success"
+        ),
+        None,
+    )
+    if (
+        first_byte is None
+        or deadline is None
+        or connected is None
+        or cast(float, first_byte.value) <= cast(float, deadline.value)
+    ):
+        return []
+    return [
+        {
+            "purpose": "Establish whether upstream response time exceeded the gateway limit.",
+            "supports": [hypothesis_id],
+            "refutes": [],
+            "summary": (
+                f"The upstream TCP connection succeeded, but first byte time "
+                f"{first_byte.value} ms exceeded the gateway read deadline "
+                f"{deadline.value} ms."
+            ),
+            "evidenceIds": [evidence_id],
+            "causalRole": "trigger",
+            "causalRoleOrigin": "coverage_repair",
+            "assessmentSource": "deterministic",
+        }
+    ]
+
+
 _MAX_CAUSAL_CHAIN_ITEMS = 6
 
 
@@ -2090,6 +2153,16 @@ class AiopsDiagnosticService:
                     "assessmentSource": "deterministic",
                 }
             )
+            if len(supported_assessments) == 1 and (
+                supported_assessments[0].hypothesis_id in supports
+            ):
+                observation_payloads.extend(
+                    _derive_upstream_deadline_observations(
+                        hypothesis_id=supported_assessments[0].hypothesis_id,
+                        facts=new_facts,
+                        evidence_id=evidence_id,
+                    )
+                )
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
             "factCount": len(all_facts),

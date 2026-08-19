@@ -1274,6 +1274,79 @@ async def test_fact_adapter_deterministically_closes_redis_availability_chain(
 
 
 @pytest.mark.asyncio
+async def test_fact_adapter_derives_upstream_deadline_trigger_from_probe(
+    migrated_database_url: str,
+) -> None:
+    hypothesis = "nginx_upstream_response_timeout"
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-upstream-deadline-trigger",
+            status="running",
+            query="Resolve an upstream timeout.",
+            input_payload={},
+        )
+        update = await _service(repositories)._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {"id": hypothesis, "description": "Upstream response timed out."}
+                    ],
+                    "hypothesis_assessments": [
+                        {
+                            "hypothesisId": hypothesis,
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-timeout"],
+                            "reasonCode": "upstream_response_timed_out",
+                            "assessmentSource": "llm_adjudicated",
+                            "hasHighQualityConflict": False,
+                            "transitions": [],
+                        }
+                    ],
+                    "diagnostic_facts": [],
+                    "plan": [],
+                    "current_plan_step": {
+                        "id": "probe",
+                        "tool": "ProbeUpstreamHealth",
+                        "arguments": {},
+                        "purpose": "Probe the slow upstream endpoint.",
+                        "testsHypotheses": [hypothesis],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [],
+                    },
+                    "current_evidence_id": "ev-probe",
+                    "current_evidence_summary": (
+                        "The upstream first byte exceeds the gateway deadline."
+                    ),
+                    "current_tool_output": {
+                        "tcpConnect": "success",
+                        "firstByteMs": 1500,
+                        "gatewayReadDeadlineMs": 750,
+                    },
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    observations = cast(list[dict[str, object]], update["observation_decisions"])
+    assert [item["causalRole"] for item in observations] == [
+        "mechanism",
+        "trigger",
+    ]
+    assert all(item["supports"] == [hypothesis] for item in observations)
+    assert observations[1]["evidenceIds"] == ["ev-probe"]
+    assert observations[1]["causalRoleOrigin"] == "coverage_repair"
+
+
+@pytest.mark.asyncio
 async def test_v4_sufficiency_requires_a_buildable_causal_decision(
     migrated_database_url: str,
 ) -> None:
