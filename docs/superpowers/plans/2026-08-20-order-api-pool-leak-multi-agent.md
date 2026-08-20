@@ -94,8 +94,11 @@ git commit -m "docs: specify order pool leak live scenario"
 - Create: `apps/backend/tests/test_live_order_api_service.py`
 
 **Interfaces:**
-- Consumes: PostgreSQL DSN、`LIVE_ORDER_API_CONTROL_TOKEN`、固定 `pool_size=3`。
-- Produces: `create_app(settings: OrderApiSettings) -> FastAPI`；`OrderApiRuntime`; `/health`、`/internal/runs/start`、`/internal/runs/{run_id}/fault`、`/internal/runs/{run_id}/probe`、`/internal/runs/{run_id}/state`、`/internal/runs/{run_id}/events`、`DELETE /internal/runs/{run_id}`。
+- Consumes: `POSTGRES_HOST/PORT/USER/PASSWORD/DB`、`LIVE_ORDER_API_CONTROL_TOKEN`、固定 `pool_size=3`。
+- Produces: `load_settings_from_environment() -> OrderApiSettings`；无参 `create_app() -> FastAPI`；
+  `OrderApiRuntime`; `/health`、`/internal/runs/start`、`/internal/runs/{run_id}/fault`、
+  `/internal/runs/{run_id}/probe`、`/internal/runs/{run_id}/state`、`/internal/runs/{run_id}/events`、
+  `DELETE /internal/runs/{run_id}`。
 
 - [ ] **Step 1: 写 service RED tests**
 
@@ -130,9 +133,21 @@ async def test_normal_probe_always_returns_connection() -> None:
         "connection_checkout",
         "connection_checkin",
     ]
+
+
+def test_factory_loads_only_environment_and_fails_closed_when_required_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_complete_order_api_environment(monkeypatch)
+    assert create_app().state.settings.postgres_database == "agent_py_live_eval"
+    monkeypatch.delenv("LIVE_ORDER_API_CONTROL_TOKEN")
+    with pytest.raises(OrderApiConfigurationError, match="missing_required_environment"):
+        create_app()
 ```
 
-另测：错误 token 拒绝、另一 active run 拒绝、事件上限、状态输出无 DSN/SQL/异常原文、pool timeout 记录 `pool_acquire_timeout`。
+另测：错误 token 拒绝、另一 active run 拒绝、事件上限、状态输出无 DSN/SQL/异常原文、pool timeout
+记录 `pool_acquire_timeout`；数据库名不是 `agent_py_live_eval` 时 fail-closed；baseline 会创建 run-scoped
+测试订单并完成一次真实更新，fault update 在 checkout 后因确定性业务异常失败且不归还连接，clear 删除订单。
 
 - [ ] **Step 2: 运行 RED**
 
@@ -159,13 +174,18 @@ class PoolBoundary(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class OrderApiSettings:
-    postgres_dsn: str = field(repr=False)
+    postgres_host: str
+    postgres_port: int
+    postgres_user: str
+    postgres_password: str = field(repr=False)
+    postgres_database: Literal["agent_py_live_eval"] = "agent_py_live_eval"
     control_token: str = field(repr=False)
     pool_size: int = 3
 
 
 class OrderApiRuntime:
     async def start_run(self, run_id: str, fault_token: str) -> None: ...
+    async def baseline_update(self, run_id: str, request_id: str) -> None: ...
     async def execute_fault(self, run_id: str, fault_token: str, request_id: str) -> None: ...
     async def probe(self, run_id: str, *, timeout_seconds: float) -> bool: ...
     async def state(self, run_id: str) -> dict[str, object]: ...
@@ -173,10 +193,17 @@ class OrderApiRuntime:
     async def clear_run(self, run_id: str) -> None: ...
 ```
 
-真实 pool 使用 `min_size=0`、`max_size=3`。fault path 在 checkout 后设置 run-scoped
-`application_name`，保存 connection 引用并记录 checkout/error，不调用 release；正常 probe 使用
-`try/finally` 归还。事件只允许 `run_id`、`request_id`、`event`、`service`、`component`、
-`generation`、`timestamp`、`level`。
+`load_settings_from_environment()` 必须读取上述拆分环境变量、拒绝缺失值和非隔离数据库，并由无参
+`create_app()` 构造 DSN、asyncpg pool 和 runtime；这样与 Uvicorn `--factory` 合同一致。不得从命令行
+参数或请求体接受 DSN、数据库名或 compose service name。
+
+真实 pool 使用 `min_size=0`、`max_size=3`。服务启动时以固定 DDL 创建最小表
+`live_eval_orders(run_id text, order_id text, status text, updated_at timestamptz, primary key(run_id, order_id))`。
+`start_run()` 只创建当前 run 的测试订单；baseline/probe 执行参数化 `UPDATE live_eval_orders ... WHERE
+run_id=$1` 并在 `try/finally` 中归还。fault path 在 checkout 后设置 run-scoped `application_name`，执行同一
+参数化更新后触发确定性业务异常，保存 connection 引用并记录 checkout/error，不调用 release；
+`clear_run()` 释放当前 run 持有的连接并参数化删除该 run 的订单。事件只允许 `run_id`、`request_id`、
+`event`、`service`、`component`、`generation`、`timestamp`、`level`。
 
 Dockerfile 使用 root build context `infra/`，固定：
 
@@ -336,7 +363,8 @@ async def test_recovery_restarts_only_owned_isolated_instance_once() -> None:
 ```
 
 另测：错误 component/mechanism、另一 active run、generation 变化前、数据库不可达、非隔离 compose
-路径均拒绝；config repr 不含 token/password；cleanup 两次幂等；audit 只返回残留数量。
+路径均拒绝；config repr 不含 token/password；baseline 真实订单更新成功、fault update 失败、恢复后更新
+成功；cleanup 两次幂等并删除当前 run 订单；audit 只返回残留数量。
 
 - [ ] **Step 2: 运行 RED**
 
@@ -517,6 +545,7 @@ git commit -m "feat: upload actual order api live events"
 - Modify: `apps/backend/tests/test_aiops_investigation_router.py`
 - Modify: `apps/backend/tests/test_aiops_causal_intents.py`
 - Modify: `apps/backend/tests/test_live_diagnostic_adapter.py`
+- Modify: `apps/backend/tests/test_aiops_multi_agent_runtime.py`
 
 **Interfaces:**
 - Consumes: Task 4 的真实 Runtime checks；CLS 官方 `SearchLog`。
@@ -544,11 +573,22 @@ def test_single_and_multi_receive_the_same_order_pool_tool_catalog() -> None:
     multi = build_strategy_fixture("multi", tools)
     assert single.available_tool_names == multi.available_tool_names
     assert {"InspectOrderPoolState", "InspectOrderDatabaseSessions", "SearchLog"} <= set(single.available_tool_names)
+
+
+@pytest.mark.asyncio
+async def test_multi_investigators_share_one_global_budget_and_fail_closed() -> None:
+    runtime = build_order_pool_workflow(strategy="multi", global_step_budget=4, global_model_budget=2)
+    result = await runtime.run_same_runtime_and_log_evidence_concurrently()
+    assert result.total_step_calls <= 4
+    assert result.total_model_calls <= 2
+    assert result.budget_scope_count == 1
+    assert result.on_exhaustion == "budget_exhausted_fail_closed"
 ```
 
 另测：forced Single 实际 `single_agent` 且计划包含 Runtime + SearchLog；forced Multi 实际
 `multi_agent` 且 selected investigators 为 runtime/log；两个策略的 trusted arguments 和 budget 相等；
-未知 server 或写工具不能成为 Investigator capability。
+未知 server 或写工具不能成为 Investigator capability；两个并行 Investigator 竞争最后一个步骤/模型额度时
+只允许一个成功领取，另一个返回确定性预算耗尽状态，不得各复制一份预算。
 
 - [ ] **Step 2: 运行 RED**
 
@@ -573,6 +613,10 @@ Expected: tool/capability/generic plan missing FAIL。
 `TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES` 的 Runtime allowlist，把 `order-pool-live` 加入可信 Runtime
 server。`SearchLog` 允许 `trigger` causal intent，但默认 generic SearchLog step 仍为 `context`，避免改变
 旧场景计划；当连接生命周期是缺失 trigger 时 coverage repair 才能选择它。
+
+Runtime/Log dispatch 必须接收同一个并发安全的全局 budget ledger，而不是每个 Investigator 各自复制
+计数器。额度领取采用已有 ExecutionCoordinator/checkpoint 的原子 claim；claim 失败立即 fail-closed，
+并把耗尽状态写入 route audit，不追加未经执行的 Evidence。
 
 - [ ] **Step 4: 运行 GREEN 与跨源回归**
 
@@ -721,6 +765,18 @@ async def test_replayed_order_pool_recovery_restarts_once() -> None:
     second = await coordinator.execute(prepared_restart_intent())
     assert first == second
     assert restarter.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_crash_window_is_not_replayed_after_coordinator_rebuild() -> None:
+    first = build_coordinator(repository, restarter, fail_after_side_effect=True)
+    with pytest.raises(InjectedPersistenceFailure):
+        await first.execute(prepared_restart_intent())
+
+    rebuilt = build_coordinator(repository, restarter)
+    result = await rebuilt.execute(prepared_restart_intent())
+    assert result.status == "uncertain_side_effect_requires_manual_review"
+    assert restarter.call_count == 1
 ```
 
 - [ ] **Step 2: 运行 RED**
@@ -746,6 +802,11 @@ Expected: registry/action missing FAIL。
 ```
 
 不得把任意 restart 工具加入 Agent tool allowlist。
+
+恢复 intent 在副作用前持久化 `started`，副作用成功后再持久化 terminal result。若进程在 Docker restart
+生效后、terminal result 写入前崩溃，重建 coordinator/repository 后必须把同一 intent 判为
+`uncertain_side_effect_requires_manual_review`，不得依据“没有 completed row”再次执行 restart。测试使用
+可重建的持久化 repository fake 或临时 PostgreSQL 合同，不能只复用同一 Python coordinator 对象。
 
 - [ ] **Step 4: 运行 GREEN 与恢复回归**
 
@@ -845,6 +906,13 @@ async def test_real_order_pool_leak_recovery_and_idempotent_cleanup() -> None:
         await driver.baseline(identity)
         observation = await driver.inject(identity)
         assert observation.confirmed
+        records = await OrderPoolClsRecordProvider(driver).records(
+            identity=identity,
+            scenario=order_pool_scenario(),
+            observation=observation,
+            now=fixed_now(),
+        )
+        assert_lifecycle_records_are_real_scoped_and_answer_isolated(records)
         recovery = await OrderPoolRecoveryService(driver, real_compose_restarter()).recover(
             identity=identity,
             diagnostic_artifact=passing_order_pool_artifact(),
@@ -866,8 +934,11 @@ cd apps/backend
 uv run pytest tests/test_live_order_pool_docker.py -q -p no:cacheprovider -m live_docker
 ```
 
-Expected: 真实 checkout 累积、pool timeout、scoped restart、generation 更新、业务恢复、双 cleanup
-全部 PASS。失败时必须先运行 cleanup/audit，不能继续真实 A/B。
+Expected: baseline 真实订单更新、异常 update 后 checkout 累积、pool timeout、`/events` 经
+`OrderPoolClsRecordProvider` 产生 checkout/error/timeout 且同 run/request/generation 可关联、缺失对应
+checkin、无 Oracle/凭据字段；随后 scoped restart、generation 更新、业务更新恢复、测试订单删除与双
+cleanup 全部 PASS。此测试不调用真实 CLS，只验证实际事件到安全上传 records 的完整接线。失败时必须
+先运行 cleanup/audit，不能继续真实 A/B。
 
 - [ ] **Step 3: 更新知识卡验证状态**
 
