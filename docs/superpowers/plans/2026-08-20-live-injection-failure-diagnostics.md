@@ -24,8 +24,9 @@
 ## File Structure
 
 - Modify `apps/backend/src/super_ai/evaluation/live/runner.py`: own the typed error diagnostic projection and attach it only for an unconfirmed Observation.
+- Create `apps/backend/src/super_ai/evaluation/live/failure_diagnostics.py`: own the single canonical structural validator, typed projection, Artifact consistency validation, and public failed-name normalization.
 - Modify `apps/backend/src/super_ai/evaluation/live/cli.py`: serialize the typed diagnostic into the terminal envelope and expose only failed check names through safe CLI/report output.
-- Modify `apps/backend/src/super_ai/evaluation/history.py`: allow the three optional Live `resultPayload` fields while retaining recursive forbidden-key validation.
+- Modify `apps/backend/src/super_ai/evaluation/history.py`: allow the three optional Live `resultPayload` fields and invoke the canonical structural validator after recursive forbidden-key validation.
 - Modify `apps/backend/tests/test_live_benchmark_runner.py`: verify typed capture, cleanup preservation, direct-inject failure behavior, and invalid diagnostic omission.
 - Modify `apps/backend/tests/test_live_benchmark_cli.py`: verify Archive/repository payloads and bounded public output.
 - Modify `apps/backend/tests/test_evaluation_history.py`: verify v1 round-trip, old-artifact compatibility, and recursive answer isolation.
@@ -34,12 +35,13 @@
 ### Task 1: Capture Typed Failure Diagnostics at the Runner Boundary
 
 **Files:**
+- Create: `apps/backend/src/super_ai/evaluation/live/failure_diagnostics.py`
 - Modify: `apps/backend/src/super_ai/evaluation/live/runner.py`
 - Test: `apps/backend/tests/test_live_benchmark_runner.py`
 
 **Interfaces:**
 - Consumes: `LiveFaultObservation.checks` and `LiveFaultObservation.safe_facts`.
-- Produces: `LiveFailureDiagnostics.from_observation(observation) -> LiveFailureDiagnostics | None`, `LiveFailureDiagnostics.failed_checks -> tuple[str, ...]`, and `LiveBenchmarkError.diagnostics: LiveFailureDiagnostics | None` for Task 2.
+- Produces: `LiveFailureDiagnostics.from_observation(observation) -> LiveFailureDiagnostics | None`, `LiveFailureDiagnostics.failed_checks -> tuple[str, ...]`, `validate_serialized_failure_diagnostics(payload: Mapping[str, object]) -> None`, `normalize_public_failed_checks(value: object) -> list[str] | None`, and `LiveBenchmarkError.diagnostics: LiveFailureDiagnostics | None` for Task 2.
 
 - [ ] **Step 1: Write RED tests for confirmed-false observations**
 
@@ -64,7 +66,7 @@ assert captured.value.cleanup_succeeded is True
 
 - [ ] **Step 2: Write RED tests for absent and invalid diagnostics**
 
-Keep the direct `fail_at="inject"` case and assert `captured.value.diagnostics is None`. Add an Observation whose fact name is `ground_truth` and assert it remains `fault_injection_failed`, cleanup succeeds, and diagnostics are omitted rather than persisted or changing the failure classification.
+Keep the direct `fail_at="inject"` case and assert `captured.value.diagnostics is None`. Add table-driven invalid Observations and assert each remains `fault_injection_failed`, cleanup succeeds, and diagnostics are omitted rather than persisted or changing the failure classification. Cases must cover forbidden check name/source/fact name; duplicate check/fact names; 0 and 65 checks; 65 facts; overlong name/source/string fact; `NaN` and infinity; and runtime-injected list/dict fact values.
 
 ```python
 assert captured.value.category == "fault_injection_failed"
@@ -85,7 +87,7 @@ Expected: new assertions fail because `LiveBenchmarkError` has no `diagnostics` 
 
 - [ ] **Step 4: Implement the bounded typed projection**
 
-In `runner.py`, add an immutable type next to `LiveBenchmarkError`:
+In the new `failure_diagnostics.py`, add the immutable type and canonical validators:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -108,9 +110,13 @@ class LiveFailureDiagnostics:
         return cls(observation.checks, observation.safe_facts)
 ```
 
-Validation must require 1-64 checks, 0-64 facts, bounded safe identifiers, bounded check sources, finite floats, strings no longer than 256 characters, and JSON scalar values only. Canonicalized identifiers equal to any existing forbidden Artifact token are rejected. Do not accept an arbitrary Mapping.
+Validation must require 1-64 checks, 0-64 facts, unique check/fact names, bounded safe identifiers, bounded check sources, finite floats, strings no longer than 256 characters, and JSON scalar values only. Canonicalized identifiers equal to any existing forbidden Artifact token are rejected. Define the forbidden identifier set and normalization once in this module; `history.py` must import and reuse it rather than copy the set. Do not accept an arbitrary Mapping.
 
-Extend `LiveBenchmarkError.__init__` with keyword-only
+The same module must implement `validate_serialized_failure_diagnostics`: either all three diagnostic fields are absent, or all are present and structurally valid. `checkResults` must be a 1-64 item list of exact `{name, passed, source}` mappings, names must be unique, `safeFacts` must be a 0-64 item mapping of bounded scalar values, and `failedChecks` must exactly equal the ordered names of false check results. `normalize_public_failed_checks` accepts only a 1-64 item unique list of bounded safe strings and returns `None` for any invalid value.
+
+Move the existing recursive forbidden-key helper/token set from `history.py` into this module as shared public-within-package helpers so Artifact validation, Runner projection, and CLI normalization cannot drift. `history.py` continues to call the same recursive validator for every evaluation kind.
+
+In `runner.py`, import the type and extend `LiveBenchmarkError.__init__` with keyword-only
 `diagnostics: LiveFailureDiagnostics | None = None` and assign it without including values in the exception message. When `observation.confirmed` is false, raise:
 
 ```python
@@ -132,7 +138,7 @@ Expected: all `test_live_benchmark_runner.py` tests pass.
 - [ ] **Step 6: Commit Task 1**
 
 ```powershell
-git add apps/backend/src/super_ai/evaluation/live/runner.py apps/backend/tests/test_live_benchmark_runner.py
+git add apps/backend/src/super_ai/evaluation/live/failure_diagnostics.py apps/backend/src/super_ai/evaluation/live/runner.py apps/backend/tests/test_live_benchmark_runner.py
 git commit -m "feat: capture live injection check failures"
 ```
 
@@ -169,7 +175,7 @@ result_payload={
 }
 ```
 
-Assert `EvaluationRunEnvelope.from_json(envelope.to_json()) == envelope`, the checksum is stable, and the artifact version remains `v1`. Retain an existing Live envelope without the new fields to prove backward compatibility. Add parametrized nested `oracle`, `ground_truth`, `primary_cause`, `token`, and non-allowlisted top-level field rejection tests.
+Assert `EvaluationRunEnvelope.from_json(envelope.to_json()) == envelope`, the checksum is stable, and the artifact version remains `v1`. Retain an existing Live envelope without the new fields to prove backward compatibility. Add parametrized nested `oracle`, `ground_truth`, `primary_cause`, `token`, and non-allowlisted top-level field rejection tests. Add structural rejection tests for missing one of the three fields; extra/missing check keys; non-list results; duplicate/0/65 checks; duplicate, reordered, missing, or extra failed names; non-mapping/65 safe facts; non-scalar/overlong/non-finite facts; forbidden identifiers; and `failedChecks` inconsistent with false check order.
 
 - [ ] **Step 2: Write RED CLI persistence/output tests**
 
@@ -179,7 +185,7 @@ Construct `LiveFailureDiagnostics` and raise a `LiveBenchmarkError` from the fak
 "failedChecks": ["business_probe_timed_out"]
 ```
 
-and does not contain `checkResults` or `safeFacts`. Assert `_live_failure_payload`, `write_safe_report`, and `read_safe_report` preserve `failedChecks` but drop injected `rawLogs`, `oracle`, and credential fields.
+and does not contain `checkResults` or `safeFacts`. Assert `_live_failure_payload`, `write_safe_report`, and `read_safe_report` preserve valid `failedChecks` but drop the entire field when it is an object, contains nested objects, contains duplicates, uses a forbidden/overlong name, or exceeds 64 items. Also drop injected `rawLogs`, `oracle`, and credential fields.
 
 - [ ] **Step 3: Run focused contract tests and confirm RED**
 
@@ -194,9 +200,9 @@ Expected: new Artifact fields are rejected and CLI persistence assertions fail.
 
 - [ ] **Step 4: Extend the existing allowlists and serializers**
 
-In `history.py`, add `checkResults`, `failedChecks`, and `safeFacts` only to the Live `_RESULT_KEYS` set.
+In `history.py`, add `checkResults`, `failedChecks`, and `safeFacts` only to the Live `_RESULT_KEYS` set, then call `validate_serialized_failure_diagnostics` for Live result payloads. Reuse the recursive forbidden-key helper imported from the new module for all evaluation kinds.
 
-In `cli.py`, add only `failedChecks` to `_SAFE_RESULT_FIELDS`. Introduce typed helper functions:
+In `cli.py`, do not blindly copy `failedChecks` through `_SAFE_RESULT_FIELDS`. Introduce typed helper functions:
 
 ```python
 def _failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:
@@ -219,7 +225,7 @@ def _public_failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, o
     return {"failedChecks": list(error.diagnostics.failed_checks)}
 ```
 
-Merge `_failure_diagnostic_payload(exc)` only into the terminal envelope `result_payload`, and merge `_public_failure_diagnostic_payload(error)` into `_live_failure_payload` before `safe_output`. Do not put full diagnostics in metrics, metadata, stdout, report, or exception text.
+Merge `_failure_diagnostic_payload(exc)` only into the terminal envelope `result_payload`, and merge `_public_failure_diagnostic_payload(error)` into `_live_failure_payload` before `safe_output`. In `safe_output`, handle `failedChecks` separately through `normalize_public_failed_checks`; never include the raw input value. This same path is reapplied by `read_safe_report`, so a tampered report cannot bypass validation. Do not put full diagnostics in metrics, metadata, stdout, report, or exception text.
 
 - [ ] **Step 5: Run focused contract tests and confirm GREEN**
 
@@ -256,8 +262,8 @@ Expected: all selected tests pass; no LLM, CLS, or Docker marker is invoked.
 - [ ] **Step 2: Run Ruff and Pyright on changed Python files**
 
 ```powershell
-uv run ruff check src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py src/super_ai/evaluation/history.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py tests/test_evaluation_history.py
-uv run pyright src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py src/super_ai/evaluation/history.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py tests/test_evaluation_history.py
+uv run ruff check src/super_ai/evaluation/live/failure_diagnostics.py src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py src/super_ai/evaluation/history.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py tests/test_evaluation_history.py
+uv run pyright src/super_ai/evaluation/live/failure_diagnostics.py src/super_ai/evaluation/live/runner.py src/super_ai/evaluation/live/cli.py src/super_ai/evaluation/history.py tests/test_live_benchmark_runner.py tests/test_live_benchmark_cli.py tests/test_evaluation_history.py
 ```
 
 Expected: Ruff reports `All checks passed!`; Pyright reports zero errors.
@@ -290,6 +296,6 @@ Expected: only intended files have changed and the worktree is clean after the c
 ## Self-Review
 
 - Spec coverage: typed projection, optional v1 fields, Archive/PostgreSQL persistence, bounded CLI output, direct-exception fallback, invalid-data fail-closed behavior, backward compatibility, security isolation, and targeted verification each map to an explicit task.
-- Type consistency: Task 1 produces `LiveFailureDiagnostics.checks`, `.safe_facts`, and `.failed_checks`; Task 2 consumes those exact names.
+- Type consistency: Task 1 produces `LiveFailureDiagnostics.checks`, `.safe_facts`, `.failed_checks`, `validate_serialized_failure_diagnostics`, and `normalize_public_failed_checks`; Task 2 consumes those exact names.
 - Scope: no dependency, migration, scoring, Agent, RAG, CLS, recovery authorization, or fault-threshold change is included.
 - Placeholder scan: the plan contains no deferred implementation markers; every code edit and verification step has an exact file, interface, command, and expected result.
