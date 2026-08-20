@@ -598,8 +598,6 @@ class OrderPoolClsRecordProvider:
         incident_id = f"{scenario.id}-{identity.run_id}"
         projected: list[dict[str, str]] = []
         for event in await self._driver.events(identity):
-            if event.get("run_id") != identity.run_id:
-                raise RuntimeError("order_pool_cls_cross_run_event")
             projected.append(
                 {
                     **dict(event),

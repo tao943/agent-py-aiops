@@ -11,6 +11,7 @@ from super_ai.aiops.investigation import (
     build_investigator_capabilities,
 )
 from super_ai.evaluation import RunArtifact
+from super_ai.evaluation.live.diagnostics import build_live_diagnostic_input
 from super_ai.evaluation.live.domain import LiveRunIdentity
 from super_ai.evaluation.live.order_pool_leak import (
     OrderPoolLeakScenarioDriver,
@@ -18,7 +19,7 @@ from super_ai.evaluation.live.order_pool_leak import (
     OrderPoolRecoveryService,
     OrderPoolRuntimeEvidenceMcpClient,
 )
-from super_ai.evaluation.live.scenarios import validate_run_id
+from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 
@@ -322,3 +323,37 @@ async def test_cleanup_is_idempotent_and_audit_reports_only_counts() -> None:
         "oldGenerationSessionCount": 0,
         "clean": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_order_pool_agent_input_and_tools_do_not_expose_oracle_or_restart() -> None:
+    scenario_root = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks"
+        / "agentpy"
+        / "live"
+        / "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    scenario = load_live_scenario(scenario_root)
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    client = OrderPoolRuntimeEvidenceMcpClient(observation)
+    definitions = await client.discover_tools()
+    outputs = [await client.call_tool(item.name, {}) for item in definitions]
+    serialized = str(
+        {
+            "input": build_live_diagnostic_input(scenario),
+            "tools": outputs,
+            "toolNames": [item.name for item in definitions],
+        }
+    ).casefold()
+    for forbidden in (
+        "ground_truth",
+        "primary_cause",
+        "connection_leak_confirmed",
+        "fault_token",
+        "restart_live_eval_order_api",
+    ):
+        assert forbidden not in serialized

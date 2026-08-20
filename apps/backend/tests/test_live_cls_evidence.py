@@ -163,9 +163,15 @@ def _preparer(
 
 
 class RecordingOrderPoolProvider:
-    def __init__(self, *, invalid_key: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        invalid_key: str | None = None,
+        record_run_id: str | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.invalid_key = invalid_key
+        self.record_run_id = record_run_id
 
     async def records(
         self,
@@ -180,7 +186,7 @@ class RecordingOrderPoolProvider:
         scenario_id = scenario.id
         self.calls.append(run_id)
         common = {
-            "run_id": run_id,
+            "run_id": self.record_run_id or run_id,
             "scenario_id": scenario_id,
             "incident_id": f"{scenario_id}-{run_id}",
             "service": "order-api",
@@ -254,6 +260,20 @@ async def test_order_pool_preparer_rejects_oracle_shaped_provider_keys() -> None
             searcher=SequenceSearcher(([_record()],)),
             clock=FakeClock(),
             record_provider=RecordingOrderPoolProvider(invalid_key="primary_cause"),
+        ).prepare(identity=IDENTITY, scenario=scenario, observation=observation)
+    assert captured.value.category == "cls_records_invalid"
+
+
+@pytest.mark.asyncio
+async def test_order_pool_preparer_rejects_cross_run_provider_records() -> None:
+    scenario = replace(SCENARIO, id="APY-LIVE-ORDER-POOL-LEAK-001")
+    observation = replace(OBSERVATION, scenario_id=scenario.id)
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=RecordingUploader(),
+            searcher=SequenceSearcher(([_record()],)),
+            clock=FakeClock(),
+            record_provider=RecordingOrderPoolProvider(record_run_id="other-run"),
         ).prepare(identity=IDENTITY, scenario=scenario, observation=observation)
     assert captured.value.category == "cls_records_invalid"
 
