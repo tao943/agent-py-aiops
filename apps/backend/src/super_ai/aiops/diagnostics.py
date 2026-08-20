@@ -5685,8 +5685,41 @@ def _evidence_packet_payload(packet: EvidencePacket) -> JsonDict:
 
 
 def _evidence_packet_from_payload(payload: Mapping[str, object]) -> EvidencePacket:
+    _reject_unknown_packet_fields(
+        payload,
+        frozenset(
+            {
+                "taskId",
+                "ownerUserId",
+                "dispatchId",
+                "investigatorType",
+                "status",
+                "claims",
+                "limitations",
+                "toolCallIds",
+                "modelCallsUsed",
+            }
+        ),
+    )
     claims: list[EvidenceClaim] = []
     for raw_claim in _json_list(payload.get("claims")):
+        _reject_unknown_packet_fields(
+            raw_claim,
+            frozenset(
+                {
+                    "claimId",
+                    "value",
+                    "quality",
+                    "causalRole",
+                    "supports",
+                    "refutes",
+                    "evidenceIds",
+                    "targetComponent",
+                    "observedAt",
+                    "timeScope",
+                }
+            ),
+        )
         observed_value = raw_claim.get("observedAt")
         claims.append(
             EvidenceClaim(
@@ -5738,6 +5771,13 @@ def _evidence_packet_from_payload(payload: Mapping[str, object]) -> EvidencePack
         ),
         model_calls_used=model_calls_used,
     )
+
+
+def _reject_unknown_packet_fields(
+    payload: Mapping[str, object], allowed: frozenset[str]
+) -> None:
+    if set(payload) - allowed:
+        raise ValueError("Evidence packet contains unknown fields.")
 
 
 def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:

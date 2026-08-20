@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -136,3 +137,49 @@ async def test_retry_reuses_committed_diagnostic_side_effects(
     assert len(steps) == 1
     assert len(evidence) == 1
     assert len(audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_workers_allocate_unique_increasing_step_sequences(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    first_repository = create_sqlalchemy_memory_repositories(session_factory).diagnostics
+    second_repository = create_sqlalchemy_memory_repositories(session_factory).diagnostics
+    try:
+        await first_repository.create_task(
+            owner_user_id="sequence-user",
+            task_id="diagnostic-sequence-race",
+            status="running",
+            query="Investigate concurrent branches",
+            input_payload={"benchmarkMode": "live"},
+        )
+        await asyncio.gather(
+            first_repository.create_step(
+                owner_user_id="sequence-user",
+                step_id="step-runtime",
+                task_id="diagnostic-sequence-race",
+                sequence=1,
+                phase="investigator_dispatch",
+                status="completed",
+                payload={"dispatchId": "runtime"},
+            ),
+            second_repository.create_step(
+                owner_user_id="sequence-user",
+                step_id="step-log",
+                task_id="diagnostic-sequence-race",
+                sequence=1,
+                phase="investigator_dispatch",
+                status="completed",
+                payload={"dispatchId": "log"},
+            ),
+        )
+        steps = await first_repository.list_steps(
+            owner_user_id="sequence-user",
+            task_id="diagnostic-sequence-race",
+        )
+    finally:
+        await engine.dispose()
+
+    assert [step.sequence for step in steps] == [1, 2]

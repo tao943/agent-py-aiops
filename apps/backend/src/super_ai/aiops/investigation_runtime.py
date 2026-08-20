@@ -314,6 +314,8 @@ class InvestigatorExecutor:
         self._runtime = runtime
         self._packet_store = packet_store
         self._collector_semaphore = asyncio.Semaphore(collector_concurrency)
+        self._inflight_lock = asyncio.Lock()
+        self._inflight: dict[tuple[str, str, str], asyncio.Task[EvidencePacket]] = {}
 
     async def execute(self, dispatch: InvestigationDispatch) -> EvidencePacket:
         cached = await self._packet_store.load(
@@ -323,6 +325,27 @@ class InvestigatorExecutor:
         )
         if cached is not None:
             return cached
+        inflight_key = (
+            dispatch.owner_user_id,
+            dispatch.task_id,
+            dispatch.dispatch_key,
+        )
+        async with self._inflight_lock:
+            task = self._inflight.get(inflight_key)
+            if task is None:
+                task = asyncio.create_task(self._execute_with_collector_limit(dispatch))
+                self._inflight[inflight_key] = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._inflight_lock:
+                    if self._inflight.get(inflight_key) is task:
+                        self._inflight.pop(inflight_key, None)
+
+    async def _execute_with_collector_limit(
+        self, dispatch: InvestigationDispatch
+    ) -> EvidencePacket:
         async with self._collector_semaphore:
             cached = await self._packet_store.load(
                 owner_user_id=dispatch.owner_user_id,

@@ -1394,7 +1394,32 @@ class SQLAlchemyDiagnosticMemoryRepository:
             "created_at": created_at or utc_now(),
         }
         async with self._session_factory() as session:
-            await _require_task(session, owner_user_id, task_id)
+            task = (
+                await session.scalars(
+                    select(DiagnosticTaskModel)
+                    .where(
+                        DiagnosticTaskModel.id == task_id,
+                        DiagnosticTaskModel.owner_user_id == owner_user_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if task is None:
+                raise TenantScopeError("Diagnostic task is outside owner scope.")
+            existing = await session.get(DiagnosticStepModel, step_id)
+            if existing is None:
+                latest_sequence = (
+                    await session.scalars(
+                        select(DiagnosticStepModel.sequence)
+                        .where(
+                            DiagnosticStepModel.owner_user_id == owner_user_id,
+                            DiagnosticStepModel.task_id == task_id,
+                        )
+                        .order_by(DiagnosticStepModel.sequence.desc())
+                        .limit(1)
+                    )
+                ).one_or_none()
+                values["sequence"] = max(sequence, (latest_sequence or 0) + 1)
             await session.execute(
                 postgresql_insert(DiagnosticStepModel)
                 .values(**values)

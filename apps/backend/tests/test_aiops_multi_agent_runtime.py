@@ -7,6 +7,9 @@ from typing import Any, cast
 
 import pytest
 
+from super_ai.aiops.diagnostics import (
+    _evidence_packet_from_payload,  # pyright: ignore[reportPrivateUsage]
+)
 from super_ai.aiops.investigation import InvestigatorCapability
 from super_ai.aiops.investigation_runtime import (
     DiagnosticToolExecutionRequest,
@@ -303,6 +306,66 @@ async def test_investigator_executor_reuses_completed_packet_by_dispatch_scope()
     assert len(first.claims) == 1
     assert len(runtime.prepared) == 2
     assert third.owner_user_id == "owner-2"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_dispatch_executes_tools_once() -> None:
+    dispatch = build_investigation_dispatches(
+        task_id="diagnostic-concurrent-dispatch",
+        owner_user_id="owner-1",
+        plan=_plan(),
+        capabilities=cast(Any, _capabilities()),
+        selected_investigators=("runtime",),
+        policy_version="investigation-router-v1",
+        evidence_snapshot_hash="9" * 64,
+        existing_evidence_ids=(),
+        deadline_ms=30_000,
+        model_call_budget=0,
+    )[0]
+    runtime = ConcurrencyRecordingRuntime()
+    executor = InvestigatorExecutor(
+        runtime=runtime,
+        packet_store=InMemoryInvestigationPacketStore(),
+    )
+
+    first, second = await asyncio.gather(
+        executor.execute(dispatch),
+        executor.execute(dispatch),
+    )
+
+    assert first == second
+    assert len(runtime.prepared) == 1
+
+
+def test_packet_payload_rejects_nested_evaluator_private_fields() -> None:
+    payload: dict[str, object] = {
+        "taskId": "diagnostic-1",
+        "ownerUserId": "owner-1",
+        "dispatchId": "dispatch-1",
+        "investigatorType": "runtime",
+        "status": "completed",
+        "claims": [
+            {
+                "claimId": "runtime.observation",
+                "value": {"healthy": True},
+                "quality": "direct",
+                "causalRole": "mechanism",
+                "supports": [],
+                "refutes": [],
+                "evidenceIds": ["evidence-1"],
+                "targetComponent": "postgres",
+                "observedAt": "2026-08-20T09:00:00+00:00",
+                "timeScope": "incident_window",
+                "oracle": {"primary_cause": "private"},
+            }
+        ],
+        "limitations": [],
+        "toolCallIds": ["tool-1"],
+        "modelCallsUsed": 0,
+    }
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        _evidence_packet_from_payload(payload)
 
 
 @pytest.mark.asyncio

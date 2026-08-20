@@ -815,15 +815,15 @@ git commit -m "feat: expose benchmark investigation strategy"
 - Modify: `apps/backend/tests/test_knowledge_candidate_safety.py`
 - Modify: `apps/backend/tests/test_snapshot_evaluation_tools.py`
 
-- [ ] **Step 1: 写完整失败路径 RED**
+- [x] **Step 1: 写完整失败路径 RED**
 
 增加：相同 dispatch key 并发创建、重复 Packet/Aggregator 保存、PostgreSQL 唯一冲突后安全读取、Worker 在一个 branch 完成后重启、两个 branch 完成但 fan-in 未提交时重启、CLI 同 run-id 重试。断言工具调用/Evidence/Packet/共享 observations 不重复。
 
-- [ ] **Step 2: 写答案隔离 RED**
+- [x] **Step 2: 写答案隔离 RED**
 
 增加：`--scenario ../APY-003`、symlink/path traversal、Packet/claim 嵌套字段伪装 `oracle`/`primary_cause`、Router 输入伪装 `ground_truth.yaml`、Investigator 尝试 `ReadGroundTruth`、RAG 文档携带 evaluator-private shaped 字段。全部必须在进入 Prompt、Packet、checkpoint、Artifact 前拒绝或过滤。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_network_resume.py tests/test_aiops_execution_coordinator.py tests/test_evaluation_scenarios.py tests/test_live_evaluation_scenarios.py tests/test_knowledge_candidate_safety.py tests/test_snapshot_evaluation_tools.py -q -p no:cacheprovider
@@ -831,11 +831,11 @@ uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_network_r
 
 Expected: 新恢复/隔离用例至少一个 FAIL，且失败原因对应缺失保护而不是 fixture 错误。
 
-- [ ] **Step 4: 最小补强生产代码**
+- [x] **Step 4: 最小补强生产代码**
 
 只修复测试暴露的幂等或过滤缺口；不新增 Redis lock；不放宽 Packet schema；状态不确定的任何可写动作继续 manual review。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_network_resume.py tests/test_aiops_execution_coordinator.py tests/test_evaluation_scenarios.py tests/test_live_evaluation_scenarios.py tests/test_knowledge_candidate_safety.py tests/test_snapshot_evaluation_tools.py -q -p no:cacheprovider
