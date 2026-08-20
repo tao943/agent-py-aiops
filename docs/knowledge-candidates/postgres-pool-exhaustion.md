@@ -52,5 +52,7 @@
 ## 验证状态
 
 content_type: agentpy-original-summary
-docker_validation: passed-order-api-pool-leak-2026-08-20
+docker_validation: verified
+docker_validation_date: 2026-08-20
+docker_validation_scope: isolated_order_api_pool_leak_fixture
 reviewed_on: 2026-08-13

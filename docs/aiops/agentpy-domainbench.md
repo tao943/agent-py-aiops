@@ -555,6 +555,25 @@ cleanup 和独立验证通过。
 但 Evidence Recall 与 Root Cause Top-1 均无能力增益；同时缺少第二个完整有效场景。未降低
 评分阈值、required Evidence、Validator 或恢复授权规则。生产 `auto` 不默认升级 Multi。
 
+### Order API 连接池生命周期 Live 合同（2026-08-20）
+
+新增 `APY-LIVE-ORDER-POOL-LEAK-001`，实现提交基线为 `4b0c2be`。隔离
+`live-eval-order-api` 使用固定容量 asyncpg pool 和 `agent_py_live_eval` 中的 run-scoped 测试订单；
+异常订单路径在 checkout 和真实参数化更新后进入错误分支并有界保留连接。Runtime 证据只证明池饱和、
+业务 acquire timeout、PostgreSQL 可达和无锁等待；CLS records 来自 order-api `/events` 的真实
+checkout/error/checkin/timeout 生命周期，不使用 evaluator 合成答案。
+
+Docker run `docker-order-pool-contract` 已验证：基线订单更新成功、3 个异常连接累积、池 free 为 0、
+业务探针超时、旧 generation 连接在 scoped restart 后释放、新 generation ready、业务更新恢复、测试订单
+删除、双 cleanup 和最终 audit clean。首次运行发现 Compose restart 完成早于 HTTP ready，现已加入有界
+健康轮询；知识卡 `postgres-pool-exhaustion.md` 只标记为本隔离 order-api fixture 已验证，不外推到所有
+连接池实现。
+
+目标回归、Ruff、Pyright、Compose config 与 OpenSpec strict validation 均通过，未运行全量 pytest。
+Single 与 Multi 的 Runtime/CLS 工具、可信参数和评分器相同；并行 Dispatch 共享一次全局模型预算，
+不能给每个 Investigator 复制额度。尚未执行真实 LLM+CLS 3×3 A/B，因此当前只能证明场景、路由和安全
+闭环成立，不能宣称 Multi-Agent 具有能力增益或适合生产默认启用。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

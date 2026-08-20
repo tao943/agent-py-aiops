@@ -6,9 +6,19 @@ import pytest
 KNOWLEDGE = Path(__file__).resolve().parents[3] / "docs" / "knowledge-candidates"
 DIFFERENTIAL_CARDS = tuple(sorted(path.name for path in KNOWLEDGE.glob("*.md")))
 DOCKER_VERIFIED_CARDS = {
-    "nginx-upstream-timeout.md",
-    "postgres-deadlock.md",
-    "redis-maxclients-pressure.md",
+    "nginx-upstream-timeout.md": (
+        "2026-08-14",
+        "isolated_live_eval_fixture",
+    ),
+    "postgres-deadlock.md": ("2026-08-14", "isolated_live_eval_fixture"),
+    "postgres-pool-exhaustion.md": (
+        "2026-08-20",
+        "isolated_order_api_pool_leak_fixture",
+    ),
+    "redis-maxclients-pressure.md": (
+        "2026-08-14",
+        "isolated_live_eval_fixture",
+    ),
 }
 REQUIRED_HEADINGS = (
     "## 适用现象",
@@ -57,9 +67,10 @@ def test_differential_card_has_reviewed_structure_and_no_benchmark_answers(
     assert text.count("https://") >= 2
     assert "content_type: agentpy-original-summary" in text
     if filename in DOCKER_VERIFIED_CARDS:
+        validation_date, validation_scope = DOCKER_VERIFIED_CARDS[filename]
         assert "docker_validation: verified" in text
-        assert "docker_validation_date: 2026-08-14" in text
-        assert "docker_validation_scope: isolated_live_eval_fixture" in text
+        assert f"docker_validation_date: {validation_date}" in text
+        assert f"docker_validation_scope: {validation_scope}" in text
         assert "docker_validation: pending" not in text
     else:
         assert "docker_validation: pending" in text
