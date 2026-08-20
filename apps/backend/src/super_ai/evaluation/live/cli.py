@@ -41,6 +41,16 @@ from super_ai.evaluation.live.nginx_timeout import (
     NginxTimeoutLiveConfig,
     NginxTimeoutScenarioDriver,
 )
+from super_ai.evaluation.live.order_pool_leak import (
+    ComposeServiceRestarter,
+    HttpOrderApiControl,
+    OrderPoolClsRecordProvider,
+    OrderPoolLeakScenarioDriver,
+    OrderPoolLiveConfig,
+    OrderPoolRecoveryService,
+    OrderPoolRuntimeEvidenceMcpClient,
+    PostgresOrderPoolObserver,
+)
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
@@ -647,6 +657,26 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
         )
 
     registry.register("APY-LIVE-NGINX-TIMEOUT-001", nginx_timeout_components)
+
+    def order_pool_components() -> LiveScenarioComponents:
+        config = _order_pool_config_from_environment()
+        driver = OrderPoolLeakScenarioDriver(
+            config,
+            api=HttpOrderApiControl(config),
+            postgres=PostgresOrderPoolObserver(_postgres_config_from_environment()),
+        )
+        return LiveScenarioComponents(
+            driver_name="order_pool_leak",
+            driver=driver,
+            recovery=OrderPoolRecoveryService(
+                driver,
+                ComposeServiceRestarter(config),
+            ),
+            component_evidence_factory=OrderPoolRuntimeEvidenceMcpClient,
+            cls_record_provider=OrderPoolClsRecordProvider(driver),
+        )
+
+    registry.register("APY-LIVE-ORDER-POOL-LEAK-001", order_pool_components)
     return registry
 
 
@@ -716,6 +746,16 @@ def _nginx_config_from_environment() -> NginxTimeoutLiveConfig:
         upstream_url=os.getenv(
             "LIVE_NGINX_UPSTREAM_URL", "http://127.0.0.1:18081"
         ),
+    )
+
+
+def _order_pool_config_from_environment() -> OrderPoolLiveConfig:
+    return OrderPoolLiveConfig(
+        base_url=os.getenv("LIVE_ORDER_API_URL", "http://127.0.0.1:18082"),
+        control_token=os.getenv(
+            "LIVE_ORDER_API_CONTROL_TOKEN", "agentpy-live-eval-control"
+        ),
+        compose_file=REPOSITORY_ROOT / "infra" / "compose.yaml",
     )
 
 

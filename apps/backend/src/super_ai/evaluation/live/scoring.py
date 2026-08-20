@@ -464,6 +464,7 @@ def _executed_action_is_scoped(recovery: LiveRecoveryRecord) -> bool:
             "transaction-b",
         },
         "close_current_run_benchmark_clients": {"current_run_named_clients"},
+        "restart_live_eval_order_api": {"current_run_order_api_instance"},
     }
     return recovery.target_ref in allowed_targets.get(recovery.action, set())
 

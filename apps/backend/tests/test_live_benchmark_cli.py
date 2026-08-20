@@ -27,6 +27,10 @@ from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutScenarioDriver,
 )
+from super_ai.evaluation.live.order_pool_leak import (
+    OrderPoolLeakScenarioDriver,
+    OrderPoolRecoveryService,
+)
 from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
@@ -43,6 +47,15 @@ from super_ai.evaluation.live.runner import LiveBenchmarkError, LocalLiveEvidenc
 from super_ai.evaluation.live.scoring import LiveEvaluationResult
 from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.project_config import ProjectConfigurationError
+
+
+def test_registry_resolves_order_pool_runtime() -> None:
+    components = build_live_scenario_registry().resolve(
+        "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    assert isinstance(components.driver, OrderPoolLeakScenarioDriver)
+    assert isinstance(components.recovery, OrderPoolRecoveryService)
+    assert components.cls_record_provider is not None
 
 
 class AvailableEvaluationRepository:
