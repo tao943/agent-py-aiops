@@ -315,6 +315,7 @@ class InvestigationRoute:
 _RUNTIME_SERVER_NAMES = frozenset(
     {
         "default",
+        "docker-live-postgres",
         "live-eval-local",
         "nginx-timeout-live",
         "postgres-deadlock-live",

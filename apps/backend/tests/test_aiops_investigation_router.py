@@ -8,6 +8,7 @@ import pytest
 from super_ai.aiops.investigation import (
     InvestigationRouterPolicy,
     InvestigationRoutingInput,
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     TrustedToolCapability,
     build_investigator_capabilities,
     normalize_plan_source_domains,
@@ -69,6 +70,24 @@ def test_capability_registry_exposes_only_discovered_explicit_read_only_tools() 
         capabilities["change"].reason_code
         == "deployment_change_source_not_configured"
     )
+
+
+def test_project_owned_postgres_live_server_is_a_trusted_runtime_source() -> None:
+    capabilities = build_investigator_capabilities(
+        discovered_tools=(
+            _tool("InspectPostgresSessions", server="docker-live-postgres"),
+            _tool("SearchLog", server="cls"),
+        ),
+        trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+        tool_policies={},
+        retrieval_available=True,
+        cls_available=True,
+    )
+
+    assert capabilities["runtime"].allowed_tools == frozenset(
+        {"InspectPostgresSessions"}
+    )
+    assert capabilities["log"].allowed_tools == frozenset({"SearchLog"})
 
 
 def test_capability_registry_fails_closed_for_policy_tools_and_missing_sources() -> None:
