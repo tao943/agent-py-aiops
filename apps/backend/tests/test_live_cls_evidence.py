@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
+    LiveClsRecordProvider,
     McpClsSearcher,
     build_cls_search_arguments,
     build_live_cls_records,
@@ -19,6 +21,8 @@ from super_ai.evaluation.live.domain import (
     LiveClsScope,
     LiveFaultObservation,
     LiveInfrastructureError,
+    LiveRunIdentity,
+    LiveScenario,
 )
 from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
 from super_ai.mcp_client import McpToolDefinition
@@ -138,7 +142,11 @@ def _record(*, run_id: str = "run-1") -> dict[str, object]:
 
 
 def _preparer(
-    *, uploader: RecordingUploader, searcher: SequenceSearcher, clock: FakeClock
+    *,
+    uploader: RecordingUploader,
+    searcher: SequenceSearcher,
+    clock: FakeClock,
+    record_provider: LiveClsRecordProvider | None = None,
 ) -> LiveClsEvidencePreparer:
     return LiveClsEvidencePreparer(
         region="ap-guangzhou",
@@ -150,7 +158,104 @@ def _preparer(
         now=clock.now,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
+        record_provider=record_provider,
     )
+
+
+class RecordingOrderPoolProvider:
+    def __init__(self, *, invalid_key: str | None = None) -> None:
+        self.calls: list[str] = []
+        self.invalid_key = invalid_key
+
+    async def records(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+        now: datetime,
+    ) -> Sequence[Mapping[str, str]]:
+        del observation, now
+        run_id = identity.run_id
+        scenario_id = scenario.id
+        self.calls.append(run_id)
+        common = {
+            "run_id": run_id,
+            "scenario_id": scenario_id,
+            "incident_id": f"{scenario_id}-{run_id}",
+            "service": "order-api",
+            "component": "order-api",
+            "generation": "gen-1",
+            "timestamp": "2026-08-20T12:00:00+00:00",
+            "environment": "live-eval",
+            "trace": f"{run_id}-request-1",
+        }
+        first = {
+            **common,
+            "request_id": "request-1",
+            "event": "connection_checkout",
+            "level": "INFO",
+        }
+        if self.invalid_key is not None:
+            first[self.invalid_key] = "forbidden"
+        return (
+            first,
+            {
+                **common,
+                "request_id": "request-1",
+                "event": "order_update_failed",
+                "level": "ERROR",
+            },
+            {
+                **common,
+                "request_id": "business-probe",
+                "event": "pool_acquire_timeout",
+                "level": "ERROR",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_order_pool_preparer_uploads_actual_provider_records() -> None:
+    provider = RecordingOrderPoolProvider()
+    scenario = replace(SCENARIO, id="APY-LIVE-ORDER-POOL-LEAK-001")
+    observation = replace(OBSERVATION, scenario_id=scenario.id)
+    uploader = RecordingUploader()
+    searcher = SequenceSearcher(
+        ([
+            {
+                "run_id": IDENTITY.run_id,
+                "scenario_id": scenario.id,
+                "incident_id": f"{scenario.id}-{IDENTITY.run_id}",
+            }
+        ] * 3,)
+    )
+
+    context = await _preparer(
+        uploader=uploader,
+        searcher=searcher,
+        clock=FakeClock(),
+        record_provider=provider,
+    ).prepare(identity=IDENTITY, scenario=scenario, observation=observation)
+
+    assert provider.calls == ["run-1"]
+    assert uploader.records[0]["event"] == "connection_checkout"
+    assert context.readiness is not None
+    assert context.readiness.expected_log_count == 3
+
+
+@pytest.mark.asyncio
+async def test_order_pool_preparer_rejects_oracle_shaped_provider_keys() -> None:
+    scenario = replace(SCENARIO, id="APY-LIVE-ORDER-POOL-LEAK-001")
+    observation = replace(OBSERVATION, scenario_id=scenario.id)
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await _preparer(
+            uploader=RecordingUploader(),
+            searcher=SequenceSearcher(([_record()],)),
+            clock=FakeClock(),
+            record_provider=RecordingOrderPoolProvider(invalid_key="primary_cause"),
+        ).prepare(identity=IDENTITY, scenario=scenario, observation=observation)
+    assert captured.value.category == "cls_records_invalid"
 
 
 @pytest.mark.parametrize(

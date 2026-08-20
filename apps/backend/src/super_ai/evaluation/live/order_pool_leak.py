@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import urlparse
@@ -21,6 +22,7 @@ from super_ai.evaluation.live.domain import (
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveRunIdentity,
+    LiveScenario,
     LiveVerification,
 )
 from super_ai.evaluation.live.postgres import PostgresConnectionConfig
@@ -576,6 +578,38 @@ class OrderPoolRuntimeEvidenceMcpClient:
                 ),
             }
         raise McpClientError("Order pool Live evidence tool is not allowed.")
+
+
+class OrderPoolClsRecordProvider:
+    def __init__(self, driver: OrderPoolLeakScenarioDriver) -> None:
+        self._driver = driver
+
+    async def records(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+        now: datetime,
+    ) -> Sequence[Mapping[str, str]]:
+        del now
+        if scenario.id != SCENARIO_ID or observation.scenario_id != SCENARIO_ID:
+            raise RuntimeError("order_pool_cls_scope_invalid")
+        incident_id = f"{scenario.id}-{identity.run_id}"
+        projected: list[dict[str, str]] = []
+        for event in await self._driver.events(identity):
+            if event.get("run_id") != identity.run_id:
+                raise RuntimeError("order_pool_cls_cross_run_event")
+            projected.append(
+                {
+                    **dict(event),
+                    "scenario_id": scenario.id,
+                    "incident_id": incident_id,
+                    "environment": "live-eval",
+                    "trace": f"{identity.run_id}-{event.get('request_id', 'unknown')}",
+                }
+            )
+        return tuple(projected)
 
 
 def _required_text(value: object, error: str) -> str:

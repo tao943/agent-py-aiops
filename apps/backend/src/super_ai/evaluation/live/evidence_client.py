@@ -199,6 +199,7 @@ def _cls_evidence_id(scenario_id: str) -> str:
         "APY-LIVE-PG-DEADLOCK-001": "cls-live-database-deadlock",
         "APY-LIVE-REDIS-MAXCLIENTS-001": "cls-live-redis-connection-rejected",
         "APY-LIVE-NGINX-TIMEOUT-001": "cls-live-nginx-upstream-timeout",
+        "APY-LIVE-ORDER-POOL-LEAK-001": "cls-order-connection-lifecycle",
     }
     try:
         return identifiers[scenario_id]

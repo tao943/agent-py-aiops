@@ -26,6 +26,7 @@ from super_ai.evaluation.history import (
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     LiveClsLogUploader,
+    LiveClsRecordProvider,
     McpClsSearcher,
 )
 from super_ai.evaluation.live.diagnostics import (
@@ -207,12 +208,13 @@ async def _run_live_command(
     )
 
     async def execute() -> LiveEvaluationResult:
+        components = build_live_scenario_registry().resolve(
+            cast(str, arguments.scenario)
+        )
         evidence_preparer, cls_mcp_client = build_live_evidence_runtime(
             evidence_source=evidence_source,
             config_path=config_path,
-        )
-        components = build_live_scenario_registry().resolve(
-            cast(str, arguments.scenario)
+            record_provider=components.cls_record_provider,
         )
         repositories = create_sqlalchemy_memory_repositories(session_factory)
         llm_provider = build_default_llm_provider(config_path=config_path)
@@ -559,6 +561,7 @@ def build_live_evidence_runtime(
     *,
     evidence_source: EvidenceSource,
     config_path: str | Path | None,
+    record_provider: LiveClsRecordProvider | None = None,
 ) -> tuple[LiveEvidencePreparer, LiveMcpClient | None]:
     if evidence_source == "local":
         return LocalLiveEvidencePreparer(), None
@@ -592,6 +595,7 @@ def build_live_evidence_runtime(
         searcher=McpClsSearcher(cls_client, limit=required_int(live, "queryLimit")),
         timeout_seconds=float(required_int(live, "indexWaitSeconds")),
         poll_interval_seconds=float(required_int(live, "pollIntervalSeconds")),
+        record_provider=record_provider,
     )
     return preparer, cls_client
 
