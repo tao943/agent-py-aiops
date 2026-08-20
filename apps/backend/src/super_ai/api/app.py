@@ -2825,6 +2825,7 @@ def _aiops_execution_observability(
     steps: Sequence[DiagnosticStepRecord],
 ) -> dict[str, object]:
     workflow_version: str | None = None
+    graph_version: str | None = None
     model_call_count = 0
     model_calls: list[dict[str, object]] = []
     seen_model_calls: set[tuple[object, ...]] = set()
@@ -2840,6 +2841,9 @@ def _aiops_execution_observability(
         workflow = payload.get("workflowVersion")
         if isinstance(workflow, str) and workflow in _AIOPS_WORKFLOW_VERSIONS:
             workflow_version = workflow
+        persisted_graph = payload.get("graphVersion")
+        if persisted_graph in {"aiops-diagnostic-v2", "aiops-diagnostic-v3"}:
+            graph_version = cast(str, persisted_graph)
         count = payload.get("modelCallCount")
         if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 8:
             model_call_count = max(model_call_count, count)
@@ -2858,7 +2862,8 @@ def _aiops_execution_observability(
         if step.phase == "execution_resume":
             resume_count += 1
     return {
-        "graphVersion": (
+        "graphVersion": graph_version
+        or (
             "aiops-diagnostic-v2"
             if workflow_version == "evidence-driven-v4"
             else None

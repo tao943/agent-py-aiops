@@ -211,6 +211,7 @@ def test_application_diagnostic_input_can_request_auditable_v4() -> None:
     )
 
     assert payload["workflowVersion"] == "evidence-driven-v4"
+    assert payload["graphVersion"] == "aiops-diagnostic-v3"
 
 
 def test_snapshot_decision_vocabulary_rejects_conflicting_mechanism_aliases() -> None:

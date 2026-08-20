@@ -53,6 +53,7 @@ from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.investigation import (
     TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    StrategyMode,
     build_investigator_capabilities,
     normalize_plan_source_domains,
 )
@@ -113,18 +114,22 @@ from super_ai.retrieval import (
     KnowledgeRetrievalError,
     KnowledgeRetrievalHit,
     KnowledgeRetrievalToolInput,
-    KnowledgeRetrievalToolResult,
     KnowledgeRetrievalToolRunner,
 )
 
 
 class AiopsDiagnosticState(TypedDict, total=False):
     workflow_version: str
+    graph_version: str
     owner_user_id: str
     task_id: str
     query: str
     alert: JsonDict
     accessible_knowledge_base_ids: tuple[str, ...]
+    knowledge_context: JsonDict
+    knowledge_evidence_ids: list[str]
+    knowledge_completed: bool
+    investigation_strategy_mode: StrategyMode
     sop_hits: list[JsonDict]
     no_sop_matched: bool
     plan: list[JsonDict]
@@ -193,11 +198,21 @@ class _ModelRuntime:
     audits: list[JsonDict]
 
 AIOPS_REPORT_TITLE = "告警分析报告"
+AIOPS_GRAPH_VERSION = "aiops-diagnostic-v3"
+AIOPS_LEGACY_GRAPH_VERSION = "aiops-diagnostic-v2"
 AIOPS_REPORT_REQUIRED_HEADINGS = (
     "# 告警分析报告",
     "## 📋 活跃告警清单",
     "## 📊 结论",
 )
+
+
+def _graph_version_for_task(input_payload: Mapping[str, object]) -> str:
+    """Keep unmarked historical v4 tasks on their original topology."""
+    requested = input_payload.get("graphVersion")
+    if requested == AIOPS_GRAPH_VERSION:
+        return AIOPS_GRAPH_VERSION
+    return AIOPS_LEGACY_GRAPH_VERSION
 
 
 def _provider_structured_output_method(
@@ -1546,23 +1561,29 @@ class AiopsDiagnosticService:
             if requested_workflow_version == "evidence-driven-v4"
             else "evidence-driven-v3"
         )
+        graph_version = (
+            _graph_version_for_task(task.input_payload)
+            if workflow_version == "evidence-driven-v4"
+            else None
+        )
         deadlines = ExecutionDeadlines.start(_now())
         checkpointer: PostgresDiagnosticCheckpointSaver | None = None
         graph_config: dict[str, object] | None = None
         if workflow_version == "evidence-driven-v4" and self._repositories.aiops_runtime:
+            assert graph_version is not None
             checkpoint_repository = self._repositories.aiops_runtime.checkpoint_repository(
                 owner_user_id=task.owner_user_id,
                 task_id=task.id,
-                graph_version="aiops-diagnostic-v2",
+                graph_version=graph_version,
             )
             checkpointer = PostgresDiagnosticCheckpointSaver(
                 checkpoint_repository,
                 task_id=task.id,
-                graph_version="aiops-diagnostic-v2",
+                graph_version=graph_version,
             )
             graph_config = {
                 "configurable": {
-                    "thread_id": f"aiops:{task.id}:aiops-diagnostic-v2",
+                    "thread_id": f"aiops:{task.id}:{graph_version}",
                     "checkpoint_ns": "",
                 }
             }
@@ -1586,11 +1607,13 @@ class AiopsDiagnosticService:
             initial_evidence_ids.append(alert_evidence.id)
         graph = self._build_graph(
             workflow_version=workflow_version,
+            graph_version=graph_version,
             checkpointer=checkpointer,
         )
         public_hypotheses = _json_list(task.input_payload.get("hypotheses"))
         initial_state: AiopsDiagnosticState = {
             "workflow_version": workflow_version,
+            "graph_version": graph_version or "",
             "owner_user_id": task.owner_user_id,
             "task_id": task.id,
             "query": task.query,
@@ -1616,6 +1639,10 @@ class AiopsDiagnosticService:
             "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
             "observation_decisions": [],
             "accessible_knowledge_base_ids": tuple(accessible_knowledge_base_ids),
+            "knowledge_context": {},
+            "knowledge_evidence_ids": [],
+            "knowledge_completed": False,
+            "investigation_strategy_mode": "auto",
             "plan_index": 0,
             "replan_count": 0,
             "max_replans": 1 if workflow_version == "evidence-driven-v4" else 2,
@@ -1775,10 +1802,22 @@ class AiopsDiagnosticService:
         self,
         *,
         workflow_version: str = "evidence-driven-v3",
+        graph_version: str | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
     ) -> Any:
         if workflow_version == "evidence-driven-v4":
-            return self._build_v4_graph(checkpointer=checkpointer)
+            selected_graph_version = graph_version or AIOPS_GRAPH_VERSION
+            if selected_graph_version not in {
+                AIOPS_GRAPH_VERSION,
+                AIOPS_LEGACY_GRAPH_VERSION,
+            }:
+                raise ValueError("Unsupported AIOps graph version.")
+            return self._build_v4_graph(
+                checkpointer=checkpointer,
+                include_knowledge_investigator=(
+                    selected_graph_version == AIOPS_GRAPH_VERSION
+                ),
+            )
         graph = StateGraph(AiopsDiagnosticState)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
@@ -1816,9 +1855,14 @@ class AiopsDiagnosticService:
         return graph.compile()
 
     def _build_v4_graph(
-        self, *, checkpointer: BaseCheckpointSaver[Any] | None = None
+        self,
+        *,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+        include_knowledge_investigator: bool = True,
     ) -> Any:
         graph = StateGraph(AiopsDiagnosticState)
+        if include_knowledge_investigator:
+            graph.add_node("knowledge_investigator", self._knowledge_investigator)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
         graph.add_node("fact_adapter", self._fact_adapter)
@@ -1833,7 +1877,11 @@ class AiopsDiagnosticService:
         graph.add_node("llm_validator", self._llm_validator_v4)
         graph.add_node("policy_gate", self._policy_gate)
         graph.add_node("report", self._report)
-        graph.add_edge(START, "planner")
+        if include_knowledge_investigator:
+            graph.add_edge(START, "knowledge_investigator")
+            graph.add_edge("knowledge_investigator", "planner")
+        else:
+            graph.add_edge(START, "planner")
         graph.add_edge("planner", "executor")
         graph.add_edge("executor", "fact_adapter")
         graph.add_edge("fact_adapter", "sufficiency_gate")
@@ -1875,11 +1923,23 @@ class AiopsDiagnosticService:
         graph.add_edge("report", END)
         return graph.compile(checkpointer=checkpointer)
 
-    async def _planner(self, state: AiopsDiagnosticState) -> dict[str, object]:
+    async def _run_knowledge_retrieval(
+        self,
+        state: AiopsDiagnosticState,
+        *,
+        actor: str,
+    ) -> tuple[JsonDict, list[dict[str, object]]]:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
         query = str(state["query"])
-        events = [_task_status_event(task_id, "running", "Planner: retrieving SOP evidence.", 15)]
+        events = [
+            _task_status_event(
+                task_id,
+                "running",
+                f"{actor}: retrieving SOP evidence.",
+                15,
+            )
+        ]
         retrieval_audit_id = _stable_public_id(
             "tool", task_id, "knowledge_retrieval", query
         )
@@ -1899,28 +1959,75 @@ class AiopsDiagnosticService:
             arguments={"query": query},
         )
 
-        retrieval_result: KnowledgeRetrievalToolResult | None = None
-        retrieval_error: str | None = None
-        try:
-            retrieval_result = await self._retrieval_tool.run(
-                KnowledgeRetrievalToolInput(query=query, top_k=3),
-                owner_user_id=owner_user_id,
-                accessible_knowledge_base_ids=cast(
-                    Sequence[str], state["accessible_knowledge_base_ids"]
-                ),
-            )
-        except KnowledgeRetrievalError as exc:
-            retrieval_error = exc.message
-
-        sop_hits: list[JsonDict] = []
-        if retrieval_result is not None:
-            sop_hits = [_sop_hit_payload(hit) for hit in retrieval_result.results]
-            retrieval_payload = {
-                "query": retrieval_result.query,
-                "results": sop_hits,
+        async def retrieve_operation() -> JsonDict:
+            try:
+                result = await self._retrieval_tool.run(
+                    KnowledgeRetrievalToolInput(query=query, top_k=3),
+                    owner_user_id=owner_user_id,
+                    accessible_knowledge_base_ids=cast(
+                        Sequence[str], state["accessible_knowledge_base_ids"]
+                    ),
+                )
+            except KnowledgeRetrievalError as exc:
+                return {
+                    "retrievalAvailable": False,
+                    "retrievalError": exc.message,
+                    "sopHits": [],
+                    "citations": [],
+                    "noSopMatched": True,
+                }
+            sop_hits = [_sop_hit_payload(hit) for hit in result.results]
+            return {
+                "retrievalAvailable": True,
+                "retrievalError": None,
+                "sopHits": sop_hits,
                 "citations": [
-                    _citation_payload(citation) for citation in retrieval_result.citations
+                    _citation_payload(citation) for citation in result.citations
                 ],
+                "noSopMatched": not sop_hits,
+            }
+
+        graph_version = str(state.get("graph_version") or AIOPS_LEGACY_GRAPH_VERSION)
+        if (
+            graph_version == AIOPS_GRAPH_VERSION
+            and self._repositories.aiops_runtime is not None
+        ):
+            execution_repository = self._repositories.aiops_runtime.execution_repository(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                graph_version=graph_version,
+            )
+            coordinated = await ExecutionCoordinator(
+                execution_repository,
+                worker_id=f"diagnostic-service-{id(self)}",
+            ).run_once(
+                ExecutionIdentity(
+                    task_id=task_id,
+                    graph_version=graph_version,
+                    node_name="knowledge_investigator",
+                    logical_iteration=0,
+                    input_payload={
+                        "query": query,
+                        "accessibleKnowledgeBaseIds": sorted(
+                            cast(
+                                Sequence[str],
+                                state["accessible_knowledge_base_ids"],
+                            )
+                        ),
+                    },
+                ),
+                retrieve_operation,
+            )
+            context = dict(coordinated.output)
+        else:
+            context = await retrieve_operation()
+
+        citations = _json_list(context.get("citations"))
+        if context.get("retrievalAvailable") is True:
+            retrieval_payload: JsonDict = {
+                "query": query,
+                "results": _json_list(context.get("sopHits")),
+                "citations": citations,
             }
             events.append(
                 _tool_event(
@@ -1936,9 +2043,13 @@ class AiopsDiagnosticService:
                 status="completed",
                 result_summary=_bounded_json(retrieval_payload),
             )
-            events.extend(_reference_event(citation) for citation in retrieval_result.citations)
+            events.extend(_reference_event_from_payload(item) for item in citations)
         else:
-            safe_error = retrieval_error or "Knowledge retrieval was unavailable."
+            safe_error = str(
+                context.get("retrievalError")
+                or "Knowledge retrieval was unavailable."
+            )
+            context["retrievalError"] = safe_error
             events.extend(
                 [
                     _tool_event(
@@ -1956,17 +2067,121 @@ class AiopsDiagnosticService:
                 status="failed",
                 error_message=safe_error,
             )
-
-        no_sop_matched = not sop_hits
-        if no_sop_matched:
+        if context.get("noSopMatched") is True:
             events.append(
                 _task_status_event(
                     task_id,
                     "running",
-                    "Planner: no SOP matched; using a generic evidence-gathering plan.",
+                    f"{actor}: no SOP matched; using a generic evidence-gathering plan.",
                     25,
                 )
             )
+        return context, events
+
+    async def _knowledge_investigator(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        context, events = await self._run_knowledge_retrieval(
+            state,
+            actor="Knowledge Investigator",
+        )
+        step_payload: JsonDict = {
+            "workflowVersion": str(
+                state.get("workflow_version") or "evidence-driven-v4"
+            ),
+            "graphVersion": str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
+            "retrievalAvailable": context.get("retrievalAvailable") is True,
+            "retrievalError": context.get("retrievalError"),
+            "sopHits": _json_list(context.get("sopHits")),
+            "noSopMatched": context.get("noSopMatched") is True,
+        }
+        step = await self._create_step(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+            phase="knowledge_investigator",
+            status="completed",
+            payload=step_payload,
+        )
+        persisted_evidence_ids: list[str] = []
+        for citation_payload in _json_list(context.get("citations")):
+            citation_id = str(citation_payload.get("id") or "")
+            if not citation_id:
+                continue
+            evidence_record = await self._repositories.diagnostics.create_evidence(
+                owner_user_id=owner_user_id,
+                evidence_id=_stable_public_id(
+                    "evidence", task_id, "knowledge_reference", citation_id
+                ),
+                task_id=task_id,
+                step_id=step.id,
+                kind="knowledge_reference",
+                source=str(citation_payload.get("source") or "knowledge_retrieval"),
+                summary=str(citation_payload.get("title") or "Knowledge reference"),
+                payload=citation_payload,
+            )
+            persisted_evidence_ids.append(evidence_record.id)
+        retrieval_error = context.get("retrievalError")
+        if context.get("retrievalAvailable") is not True and isinstance(
+            retrieval_error, str
+        ):
+            evidence_record = await self._repositories.diagnostics.create_evidence(
+                owner_user_id=owner_user_id,
+                evidence_id=_stable_public_id(
+                    "evidence", task_id, "knowledge_retrieval_error"
+                ),
+                task_id=task_id,
+                step_id=step.id,
+                kind="knowledge_reference",
+                source="knowledge_retrieval",
+                summary=retrieval_error,
+                payload={"error": retrieval_error},
+            )
+            persisted_evidence_ids.append(evidence_record.id)
+        await self._save_checkpoint(state, "knowledge_investigator", step_payload)
+        public_context: JsonDict = {
+            "retrievalAvailable": context.get("retrievalAvailable") is True,
+            "retrievalError": context.get("retrievalError"),
+            "sopHits": _json_list(context.get("sopHits")),
+            "noSopMatched": context.get("noSopMatched") is True,
+        }
+        return {
+            "knowledge_context": public_context,
+            "knowledge_evidence_ids": persisted_evidence_ids,
+            "knowledge_completed": True,
+            "evidence_ids": persisted_evidence_ids,
+            "events": events,
+        }
+
+    async def _planner(self, state: AiopsDiagnosticState) -> dict[str, object]:
+        task_id = str(state["task_id"])
+        owner_user_id = str(state["owner_user_id"])
+        query = str(state["query"])
+        knowledge_completed = state.get("knowledge_completed") is True
+        if knowledge_completed:
+            knowledge_context = _json_dict(state.get("knowledge_context"))
+            events = [
+                _task_status_event(
+                    task_id,
+                    "running",
+                    "Planner: creating a plan from collected knowledge.",
+                    25,
+                )
+            ]
+        else:
+            knowledge_context, events = await self._run_knowledge_retrieval(
+                state,
+                actor="Planner",
+            )
+        sop_hits = _json_list(knowledge_context.get("sopHits"))
+        no_sop_matched = knowledge_context.get("noSopMatched") is True
+        retrieval_available = knowledge_context.get("retrievalAvailable") is True
+        retrieval_error_value = knowledge_context.get("retrievalError")
+        retrieval_error = (
+            retrieval_error_value if isinstance(retrieval_error_value, str) else None
+        )
+        citation_payloads = _json_list(knowledge_context.get("citations"))
 
         try:
             mcp_client = await self._mcp_client_for(owner_user_id)
@@ -2017,11 +2232,12 @@ class AiopsDiagnosticService:
                 "modelCallAudits": model_runtime.audits if model_runtime else [],
             }
 
+        graph_version = str(state.get("graph_version") or AIOPS_LEGACY_GRAPH_VERSION)
         if model_runtime is not None and self._repositories.aiops_runtime is not None:
             execution_repository = self._repositories.aiops_runtime.execution_repository(
                 owner_user_id=owner_user_id,
                 task_id=task_id,
-                graph_version="aiops-diagnostic-v2",
+                graph_version=graph_version,
             )
             coordinated_plan = await ExecutionCoordinator(
                 execution_repository,
@@ -2029,7 +2245,7 @@ class AiopsDiagnosticService:
             ).run_once(
                 ExecutionIdentity(
                     task_id=task_id,
-                    graph_version="aiops-diagnostic-v2",
+                    graph_version=graph_version,
                     node_name="planner",
                     logical_iteration=0,
                     input_payload={
@@ -2058,7 +2274,7 @@ class AiopsDiagnosticService:
             discovered_tools=discovered_tools,
             trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
             tool_policies=self._tool_policies,
-            retrieval_available=retrieval_result is not None,
+            retrieval_available=retrieval_available,
             cls_available=any(
                 item.name in {"SearchLog", "SearchLogs"}
                 for item in discovered_tools
@@ -2077,6 +2293,7 @@ class AiopsDiagnosticService:
             "workflowVersion": str(
                 state.get("workflow_version") or "evidence-driven-v3"
             ),
+            "graphVersion": graph_version,
             "noSopMatched": no_sop_matched,
             "sopHits": sop_hits,
             "plan": plan,
@@ -2095,13 +2312,15 @@ class AiopsDiagnosticService:
             payload=planner_payload,
         )
         persisted_evidence_ids: list[str] = []
-        if retrieval_result is not None:
-            for citation in retrieval_result.citations:
-                citation_payload = _citation_payload(citation)
+        if not knowledge_completed and retrieval_available:
+            for citation_payload in citation_payloads:
+                citation_id = str(citation_payload.get("id") or "")
+                if not citation_id:
+                    continue
                 evidence_record = await self._repositories.diagnostics.create_evidence(
                     owner_user_id=owner_user_id,
                     evidence_id=_stable_public_id(
-                        "evidence", task_id, "knowledge_reference", citation.id
+                        "evidence", task_id, "knowledge_reference", citation_id
                     ),
                     task_id=task_id,
                     step_id=planner_step.id,
@@ -2111,7 +2330,7 @@ class AiopsDiagnosticService:
                     payload=citation_payload,
                 )
                 persisted_evidence_ids.append(evidence_record.id)
-        elif retrieval_error is not None:
+        elif not knowledge_completed and retrieval_error is not None:
             evidence_record = await self._repositories.diagnostics.create_evidence(
                 owner_user_id=owner_user_id,
                 evidence_id=_stable_public_id(
@@ -2314,7 +2533,10 @@ class AiopsDiagnosticService:
                     self._repositories.aiops_runtime.execution_repository(
                         owner_user_id=owner_user_id,
                         task_id=task_id,
-                        graph_version="aiops-diagnostic-v2",
+                        graph_version=str(
+                            state.get("graph_version")
+                            or AIOPS_LEGACY_GRAPH_VERSION
+                        ),
                     )
                 )
                 coordinated = await ExecutionCoordinator(
@@ -2323,7 +2545,10 @@ class AiopsDiagnosticService:
                 ).run_once(
                     ExecutionIdentity(
                         task_id=task_id,
-                        graph_version="aiops-diagnostic-v2",
+                        graph_version=str(
+                            state.get("graph_version")
+                            or AIOPS_LEGACY_GRAPH_VERSION
+                        ),
                         node_name=f"tool:{tool_name}",
                         logical_iteration=plan_index,
                         input_payload={"tool": tool_name, "arguments": arguments},
@@ -4834,15 +5059,18 @@ class AiopsDiagnosticService:
             ).encode()
         ).hexdigest()
         stable_id = f"{node}_{logical_iteration}_{fingerprint[:32]}"
+        graph_version = str(
+            state.get("graph_version") or AIOPS_LEGACY_GRAPH_VERSION
+        )
         await self._repositories.diagnostics.save_checkpoint(
             owner_user_id=str(state["owner_user_id"]),
             checkpoint_record_id=f"checkpoint_{stable_id}",
             task_id=task_id,
-            thread_id=f"aiops:{task_id}",
+            thread_id=f"aiops:{task_id}:{graph_version}",
             checkpoint_ns=node,
             checkpoint_id=stable_id,
             checkpoint_payload={**payload, "executionRuntime": runtime_payload},
-            metadata={"node": node},
+            metadata={"node": node, "graphVersion": graph_version},
         )
 
 
@@ -5955,10 +6183,6 @@ def _citation_payload(citation: KnowledgeRetrievalCitationSource) -> JsonDict:
         "rrfScore": citation.rrf_score,
         "rerankScore": citation.rerank_score,
     }
-
-
-def _reference_event(citation: KnowledgeRetrievalCitationSource) -> dict[str, object]:
-    return _sse_event("reference.source", {"reference": _citation_payload(citation)})
 
 
 def _reference_event_from_payload(citation: object) -> dict[str, object]:

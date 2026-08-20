@@ -424,13 +424,13 @@ async def AiopsDiagnosticService._knowledge_investigator(
 
 State 新增：`knowledge_context`、`knowledge_evidence_ids`、`knowledge_completed`、`investigation_strategy_mode`。Planner 只消费 `knowledge_context`，不再直接调用 retrieval tool。
 
-- [ ] **Step 1: 写图版本隔离与 RAG 单次调用 RED**
+- [x] **Step 1: 写图版本隔离与 RAG 单次调用 RED**
 
 断言新拓扑固定使用 `graph_version="aiops-diagnostic-v3"` 与 `aiops:{task_id}:aiops-diagnostic-v3`；同一 task 的 v2 未完成 checkpoint 不会被 v3 repository/checkpointer 查询或恢复；旧任务明确继续由旧 v2 graph/version 处理，不能把旧 channel state 注入新节点。Artifact 对新执行投影 v3，对历史 v4 Artifact 仍保留已持久化/推导的 v2。
 
 构造计数 RetrievalTool：新图运行后调用恰好1次；Planner 重试或 v3 checkpoint 恢复不重复调用；Citation/reference event 与现有内容一致；空召回仍允许 Planner；Knowledge claim 质量只能是 reference，不能直接支持根因。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_checkpointing.py tests/test_aiops_network_resume.py tests/test_evaluation_artifacts.py tests/test_live_diagnostic_adapter.py -q -p no:cacheprovider -k "knowledge or retrieval or graph_version or checkpoint or legacy"
@@ -438,15 +438,15 @@ uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_checkpointing.py 
 
 Expected: `_knowledge_investigator`/v3 graph version 缺失、v2 checkpoint 被复用，或 retrieval 仍在 Planner 导致 FAIL。
 
-- [ ] **Step 3: 抽取现有 Planner 的 retrieval 代码**
+- [x] **Step 3: 抽取现有 Planner 的 retrieval 代码**
 
 保留现有 owner/knowledge-base 隔离、Milvus/BM25L/RRF/rerank、Redis cache、Citation、Tool Audit、Evidence 持久化和安全过滤。使用稳定 execution identity：`node_name="knowledge_investigator"`，`logical_iteration=0`，input fingerprint 只包含公开 query 和允许 knowledge base IDs。
 
-- [ ] **Step 4: 调整 v4 图起点并隔离 checkpoint namespace**
+- [x] **Step 4: 调整 v4 图起点并隔离 checkpoint namespace**
 
 `START -> knowledge_investigator -> planner`；旧 workflow 图不改。为新拓扑定义常量 `AIOPS_GRAPH_VERSION = "aiops-diagnostic-v3"`，Execution repository、Coordinator、checkpointer、thread ID、模型/工具 execution identity 和 Artifact 全部使用该常量。恢复时按任务 input 中已持久化的 graph/workflow version 选择旧 v2 或新 v3；缺失版本的历史任务保持 v2，绝不自动迁移未完成 checkpoint。Planner 只读取同 v3 checkpoint 恢复的 knowledge state；不得在知识节点添加默认 LLM 调用。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_checkpointing.py tests/test_aiops_network_resume.py tests/test_evaluation_artifacts.py tests/test_live_diagnostic_adapter.py -q -p no:cacheprovider -k "knowledge or retrieval or graph or checkpoint or resume or legacy"
@@ -454,7 +454,7 @@ uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_checkpointing.py 
 
 Expected: 目标测试 PASS，RAG 调用计数为1。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/evaluation/artifacts.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_aiops_checkpointing.py apps/backend/tests/test_aiops_network_resume.py apps/backend/tests/test_evaluation_artifacts.py apps/backend/tests/test_live_diagnostic_adapter.py

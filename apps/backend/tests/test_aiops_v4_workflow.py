@@ -19,7 +19,12 @@ from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import JsonDict
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
-from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
+from super_ai.retrieval import (
+    KnowledgeRetrievalCitationSource,
+    KnowledgeRetrievalHit,
+    KnowledgeRetrievalToolInput,
+    KnowledgeRetrievalToolResult,
+)
 
 
 class EmptyRetrieval:
@@ -36,6 +41,25 @@ class EmptyRetrieval:
             top_k=input.top_k or 3,
             results=[],
             citations=[],
+        )
+
+
+class CountingEmptyRetrieval(EmptyRetrieval):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(
+        self,
+        input: KnowledgeRetrievalToolInput,
+        *,
+        owner_user_id: str,
+        accessible_knowledge_base_ids: Sequence[str],
+    ) -> KnowledgeRetrievalToolResult:
+        self.calls += 1
+        return await super().run(
+            input,
+            owner_user_id=owner_user_id,
+            accessible_knowledge_base_ids=accessible_knowledge_base_ids,
         )
 
 
@@ -151,6 +175,229 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
     assert "evidence_evaluator" not in nodes
     assert "decision_validator" not in nodes
     assert {"validator_router", "llm_validator", "manual_review"} <= nodes
+    assert "knowledge_investigator" in nodes
+
+
+def test_v4_graph_version_selection_is_explicit_and_legacy_safe() -> None:
+    select_graph_version = getattr(
+        diagnostics_module,
+        "_graph_version_for_task",
+        None,
+    )
+    assert callable(select_graph_version)
+
+    assert (
+        select_graph_version(
+            {
+                "workflowVersion": "evidence-driven-v4",
+                "graphVersion": "aiops-diagnostic-v3",
+            }
+        )
+        == "aiops-diagnostic-v3"
+    )
+    assert (
+        select_graph_version({"workflowVersion": "evidence-driven-v4"})
+        == "aiops-diagnostic-v2"
+    )
+    service = _service(object())
+    legacy_graph = service._build_graph(  # pyright: ignore[reportPrivateUsage]
+        workflow_version="evidence-driven-v4",
+        graph_version="aiops-diagnostic-v2",
+    )
+    current_graph = service._build_graph(  # pyright: ignore[reportPrivateUsage]
+        workflow_version="evidence-driven-v4",
+        graph_version="aiops-diagnostic-v3",
+    )
+    assert "knowledge_investigator" not in legacy_graph.get_graph().nodes
+    assert "knowledge_investigator" in current_graph.get_graph().nodes
+    assert (
+        select_graph_version(
+            {
+                "workflowVersion": "evidence-driven-v4",
+                "graphVersion": "aiops-diagnostic-v2",
+            }
+        )
+        == "aiops-diagnostic-v2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_knowledge_investigator_runs_retrieval_once_before_planner(
+    migrated_database_url: str,
+) -> None:
+    class EmptyDiscoveryMcpClient:
+        async def discover_tools(self) -> list[McpToolDefinition]:
+            return []
+
+    class InvalidPlanModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return "[]"
+
+    class Provider:
+        def create_chat_model(self) -> InvalidPlanModel:
+            return InvalidPlanModel()
+
+    engine = create_memory_engine(migrated_database_url)
+    retrieval = CountingEmptyRetrieval()
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-knowledge-once",
+            status="running",
+            query="Inspect the incident.",
+            input_payload={
+                "workflowVersion": "evidence-driven-v4",
+                "graphVersion": "aiops-diagnostic-v3",
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, Provider()),
+            retrieval_tool=retrieval,
+            mcp_client=cast(Any, EmptyDiscoveryMcpClient()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+        state = cast(
+            Any,
+            {
+                "workflow_version": "evidence-driven-v4",
+                "graph_version": "aiops-diagnostic-v3",
+                "owner_user_id": task.owner_user_id,
+                "task_id": task.id,
+                "query": task.query,
+                "alert": {},
+                "accessible_knowledge_base_ids": ("kb-public",),
+                "public_hypotheses": [],
+                "hypothesis_states": [],
+                "hypothesis_assessments": [],
+                "model_call_count": 0,
+                "model_call_audits": [],
+            },
+        )
+
+        knowledge = await service._knowledge_investigator(  # pyright: ignore[reportPrivateUsage]
+            state
+        )
+        repeated_knowledge = await service._knowledge_investigator(  # pyright: ignore[reportPrivateUsage]
+            state
+        )
+        planner = await service._planner(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, {**state, **knowledge})
+        )
+    finally:
+        await engine.dispose()
+
+    assert retrieval.calls == 1
+    assert repeated_knowledge["knowledge_context"] == knowledge["knowledge_context"]
+    assert knowledge["knowledge_completed"] is True
+    assert knowledge["knowledge_context"] == {
+        "retrievalAvailable": True,
+        "retrievalError": None,
+        "sopHits": [],
+        "noSopMatched": True,
+    }
+    assert planner["sop_hits"] == []
+
+
+@pytest.mark.asyncio
+async def test_knowledge_investigator_persists_citations_as_reference_evidence(
+    migrated_database_url: str,
+) -> None:
+    class CitationRetrieval:
+        async def run(
+            self,
+            input: KnowledgeRetrievalToolInput,
+            *,
+            owner_user_id: str,
+            accessible_knowledge_base_ids: Sequence[str],
+        ) -> KnowledgeRetrievalToolResult:
+            del accessible_knowledge_base_ids
+            hit = KnowledgeRetrievalHit(
+                chunk_id="chunk-1",
+                document_id="document-1",
+                knowledge_base_id="kb-public",
+                owner_user_id=owner_user_id,
+                tenant_id=owner_user_id,
+                content="Inspect the lock graph before considering recovery.",
+                source="public-runbook",
+                metadata={"knowledgeType": "diagnostic_card"},
+                score=0.91,
+            )
+            citation = KnowledgeRetrievalCitationSource(
+                id="citation-1",
+                title="PostgreSQL lock investigation",
+                source_type="knowledge_chunk",
+                chunk_id=hit.chunk_id,
+                document_id=hit.document_id,
+                knowledge_base_id=hit.knowledge_base_id,
+                source=hit.source,
+                metadata=hit.metadata,
+                score=hit.score,
+                excerpt=hit.content,
+                knowledge_type="diagnostic_card",
+            )
+            return KnowledgeRetrievalToolResult(
+                query=input.query,
+                top_k=input.top_k or 3,
+                results=[hit],
+                citations=[citation],
+            )
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-knowledge-reference",
+            status="running",
+            query="Inspect database locks.",
+            input_payload={
+                "workflowVersion": "evidence-driven-v4",
+                "graphVersion": "aiops-diagnostic-v3",
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, object()),
+            retrieval_tool=CitationRetrieval(),
+            mcp_client=cast(Any, UnusedMcpClient()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+        update = await service._knowledge_investigator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "workflow_version": "evidence-driven-v4",
+                    "graph_version": "aiops-diagnostic-v3",
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "query": task.query,
+                    "accessible_knowledge_base_ids": ("kb-public",),
+                },
+            )
+        )
+        evidence = await repositories.diagnostics.list_evidence(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert len(cast(list[str], update["knowledge_evidence_ids"])) == 1
+    assert any(
+        event.get("type") == "reference.source"
+        for event in cast(list[dict[str, object]], update["events"])
+    )
+    assert len(evidence) == 1
+    assert evidence[0].kind == "knowledge_reference"
 
 
 def test_v4_replanner_uses_public_upstream_service_for_deadline_probe() -> None:

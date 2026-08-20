@@ -363,6 +363,38 @@ def test_v4_artifact_reads_auditable_hypothesis_dispositions() -> None:
     ]
 
 
+def test_new_v4_artifact_projects_persisted_v3_graph_version() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "knowledge_investigator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "sopHits": [],
+                },
+            ),
+            _step(
+                2,
+                "planner",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "plan": [],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.workflow_version == "evidence-driven-v4"
+    assert artifact.graph_version == "aiops-diagnostic-v3"
+
+
 def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

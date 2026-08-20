@@ -539,6 +539,7 @@ def test_live_input_can_request_auditable_v4() -> None:
     )
 
     assert payload["workflowVersion"] == "evidence-driven-v4"
+    assert payload["graphVersion"] == "aiops-diagnostic-v3"
 
 
 @pytest.mark.parametrize(

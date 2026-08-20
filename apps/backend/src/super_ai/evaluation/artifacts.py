@@ -147,6 +147,7 @@ def build_run_artifact(
     mode = _required_task_text(task.input_payload, "benchmarkMode")
     ordered_steps = sorted(steps, key=lambda item: item.sequence)
     workflow_version = _workflow_version(ordered_steps)
+    graph_version = _graph_version(ordered_steps, workflow_version=workflow_version)
     decision = _decision_from_steps(ordered_steps)
     hypothesis_states = _hypothesis_states_from_steps(ordered_steps)
     hypothesis_assessments, artifact_errors = _hypothesis_assessments_from_steps(
@@ -186,11 +187,7 @@ def build_run_artifact(
         diagnostic_task_id=task.id,
         validation_audit=_validation_audit_from_steps(ordered_steps),
         workflow_version=workflow_version,
-        graph_version=(
-            "aiops-diagnostic-v2"
-            if workflow_version == "evidence-driven-v4"
-            else None
-        ),
+        graph_version=graph_version,
         hypothesis_assessments=hypothesis_assessments,
         artifact_valid=not artifact_errors,
         artifact_errors=artifact_errors,
@@ -208,6 +205,20 @@ def _workflow_version(steps: Sequence[DiagnosticStepRecord]) -> str | None:
         if isinstance((value := step.payload.get("workflowVersion")), str)
     ]
     return versions[-1] if versions else None
+
+
+def _graph_version(
+    steps: Sequence[DiagnosticStepRecord], *, workflow_version: str | None
+) -> str | None:
+    versions = [
+        value
+        for step in steps
+        if isinstance((value := step.payload.get("graphVersion")), str)
+        and value in {"aiops-diagnostic-v2", "aiops-diagnostic-v3"}
+    ]
+    if versions:
+        return versions[-1]
+    return "aiops-diagnostic-v2" if workflow_version == "evidence-driven-v4" else None
 
 
 def _hypothesis_assessments_from_steps(

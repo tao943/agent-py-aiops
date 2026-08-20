@@ -52,6 +52,8 @@ def build_live_diagnostic_input(
     }
     if workflow_version is not None:
         payload["workflowVersion"] = workflow_version
+        if workflow_version == "evidence-driven-v4":
+            payload["graphVersion"] = "aiops-diagnostic-v3"
     return payload
 
 
