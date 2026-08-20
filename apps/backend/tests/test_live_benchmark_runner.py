@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -204,6 +206,14 @@ async def test_runner_executes_live_phases_and_always_cleans_up() -> None:
 @pytest.mark.asyncio
 async def test_runner_stops_before_diagnosis_when_fault_is_not_confirmed() -> None:
     driver = RecordingDriver(confirmed=False)
+    driver.observation = LiveFaultObservation(
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        checks=(
+            LiveCheck("pool_at_capacity", True, "driver"),
+            LiveCheck("business_probe_timed_out", False, "driver"),
+        ),
+        safe_facts=(("poolCapacity", 3), ("businessProbeTimedOut", False)),
+    )
     runner = LiveBenchmarkRunner(
         scenario_root=LIVE_ROOT,
         driver=driver,
@@ -217,6 +227,11 @@ async def test_runner_stops_before_diagnosis_when_fault_is_not_confirmed() -> No
         await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
 
     assert captured.value.category == "fault_injection_failed"
+    assert captured.value.diagnostics is not None
+    assert captured.value.diagnostics.failed_checks == ("business_probe_timed_out",)
+    assert captured.value.diagnostics.checks == driver.observation.checks
+    assert captured.value.diagnostics.safe_facts == driver.observation.safe_facts
+    assert captured.value.cleanup_succeeded is True
     assert driver.events == ["preflight", "baseline", "inject", "cleanup"]
 
 
@@ -237,8 +252,97 @@ async def test_runner_cleans_up_and_redacts_driver_failure() -> None:
 
     assert captured.value.category == "fault_injection_failed"
     assert captured.value.stage == "inject"
+    assert captured.value.diagnostics is None
+    assert captured.value.cleanup_succeeded is True
     assert "secret" not in str(captured.value)
     assert driver.events[-1] == "cleanup"
+
+
+def _invalid_observations() -> tuple[LiveFaultObservation, ...]:
+    scalar_facts = cast(
+        tuple[tuple[str, str | int | float | bool], ...],
+        (("runtimeList", ["must-not-persist"]),),
+    )
+    return (
+        LiveFaultObservation("APY-LIVE-PG-LOCK-001", (LiveCheck("ground_truth", False),)),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001", (LiveCheck("probe_failed", False, "oracle"),)
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            (("primary_cause", "hidden"),),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("duplicate", False), LiveCheck("duplicate", True)),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            (("duplicate", 1), ("duplicate", 2)),
+        ),
+        LiveFaultObservation("APY-LIVE-PG-LOCK-001", ()),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            tuple(LiveCheck(f"check_{index}", False) for index in range(65)),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            tuple((f"fact_{index}", index) for index in range(65)),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001", (LiveCheck("x" * 81, False),)
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001", (LiveCheck("probe_failed", False, "x" * 81),)
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            (("message", "x" * 257),),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            (("ratio", math.nan),),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            (("ratio", math.inf),),
+        ),
+        LiveFaultObservation(
+            "APY-LIVE-PG-LOCK-001",
+            (LiveCheck("probe_failed", False),),
+            scalar_facts,
+        ),
+    )
+
+
+@pytest.mark.parametrize("observation", _invalid_observations())
+@pytest.mark.asyncio
+async def test_runner_omits_invalid_failure_diagnostics_without_changing_classification(
+    observation: LiveFaultObservation,
+) -> None:
+    driver = RecordingDriver(confirmed=False)
+    driver.observation = observation
+    runner = LiveBenchmarkRunner(
+        scenario_root=LIVE_ROOT,
+        driver=driver,
+        evidence_preparer=RecordingEvidencePreparer(driver.events),
+        diagnostic=RecordingDiagnostic(driver.events),
+        recovery=RecordingRecovery(driver.events),
+        evaluator=RecordingEvaluator(driver.events),
+    )
+
+    with pytest.raises(LiveBenchmarkError) as captured:
+        await runner.run("APY-LIVE-PG-LOCK-001", run_id="run-1")
+
+    assert captured.value.category == "fault_injection_failed"
+    assert captured.value.diagnostics is None
+    assert captured.value.cleanup_succeeded is True
 
 
 @pytest.mark.asyncio

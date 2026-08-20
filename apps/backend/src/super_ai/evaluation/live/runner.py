@@ -26,6 +26,7 @@ from super_ai.evaluation.live.domain import (
     LiveVerification,
     RecoveryExpectation,
 )
+from super_ai.evaluation.live.failure_diagnostics import LiveFailureDiagnostics
 from super_ai.evaluation.live.scenarios import (
     load_live_oracle,
     load_live_scenario,
@@ -48,12 +49,14 @@ class LiveBenchmarkError(RuntimeError):
         stage: str | None = None,
         authorization_code: str | None = None,
         cleanup_succeeded: bool | None = None,
+        diagnostics: LiveFailureDiagnostics | None = None,
     ) -> None:
         super().__init__("Docker Live benchmark failed at a classified boundary.")
         self.category = category
         self.stage = stage
         self.authorization_code = authorization_code
         self.cleanup_succeeded = cleanup_succeeded
+        self.diagnostics = diagnostics
 
 
 class LiveScenarioDriver(Protocol):
@@ -169,7 +172,11 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 self._driver.inject(identity), "fault_injection_failed", "inject"
             )
             if not observation.confirmed:
-                raise LiveBenchmarkError("fault_injection_failed", stage="inject")
+                raise LiveBenchmarkError(
+                    "fault_injection_failed",
+                    stage="inject",
+                    diagnostics=LiveFailureDiagnostics.from_observation(observation),
+                )
             evidence_context = await self._classified(
                 self._evidence_preparer.prepare(
                     identity=identity,
