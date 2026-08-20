@@ -28,6 +28,17 @@ def _step(
     }
 
 
+def _hypothesis_step(
+    step_id: str,
+    tool: str,
+    causal_intent: str,
+    hypotheses: tuple[str, ...],
+) -> JsonDict:
+    step = _step(step_id, tool, causal_intent)
+    step["testsHypotheses"] = list(hypotheses)
+    return step
+
+
 def test_tool_capabilities_describe_public_observation_semantics() -> None:
     assert allowed_causal_intents("InspectTransactionResourceOrder") == frozenset(
         {"trigger", "mechanism"}
@@ -95,13 +106,49 @@ def test_plan_coverage_minimally_repairs_all_mechanism_plan() -> None:
     assert result.ambiguous_trigger is False
 
 
+def test_plan_coverage_rejects_roles_split_across_hypotheses() -> None:
+    result = repair_plan_causal_coverage(
+        (
+            _hypothesis_step(
+                "pool",
+                "InspectOrderPoolState",
+                "context",
+                ("lifecycle", "traffic"),
+            ),
+            _hypothesis_step(
+                "sessions",
+                "InspectOrderDatabaseSessions",
+                "mechanism",
+                ("slow", "lock"),
+            ),
+            _hypothesis_step(
+                "health",
+                "VerifyOrderDatabaseReachability",
+                "impact",
+                ("unavailable",),
+            ),
+            _hypothesis_step(
+                "logs",
+                "SearchLog",
+                "trigger",
+                ("slow", "lifecycle", "traffic"),
+            ),
+        )
+    )
+
+    assert result.complete is False
+    assert result.target_hypothesis_id == "slow"
+    assert result.missing_roles == ("impact",)
+
+
 def test_plan_coverage_does_not_claim_completion_without_capable_tools() -> None:
     result = repair_plan_causal_coverage(
         (_step("metrics", "GetDatabaseMetrics", "context"),)
     )
 
     assert result.complete is False
-    assert result.missing_roles == ("trigger", "mechanism", "impact")
+    assert result.target_hypothesis_id == "postgres_deadlock"
+    assert result.missing_roles == ("trigger", "impact")
     assert result.ambiguous_trigger is False
 
 

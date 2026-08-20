@@ -45,8 +45,11 @@ def test_plan_coverage_rejects_roles_split_across_hypotheses() -> None:
     )
     result = repair_plan_causal_coverage(plan)
     assert result.complete is False
-    assert result.target_hypothesis_id == "lifecycle"
-    assert result.missing_roles == ("mechanism", "impact")
+    # The generic algorithm must not prefer the eventual answer. The "slow"
+    # candidate already owns trigger + mechanism without relabeling, so it is
+    # the nearest deterministic investigation target and still lacks impact.
+    assert result.target_hypothesis_id == "slow"
+    assert result.missing_roles == ("impact",)
 ```
 
 - [ ] **Step 2: Verify RED**

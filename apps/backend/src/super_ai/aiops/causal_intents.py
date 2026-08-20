@@ -80,6 +80,7 @@ _NON_DIAGNOSTIC_PREFIXES = (
 class PlanCausalCoverage:
     steps: tuple[JsonDict, ...]
     complete: bool
+    target_hypothesis_id: str | None
     missing_roles: tuple[CoreCausalRole, ...]
     ambiguous_trigger: bool
 
@@ -140,54 +141,99 @@ def repair_plan_causal_coverage(
         for step in original
     )
 
-    candidates: list[tuple[int, tuple[int, ...], tuple[CausalIntent, ...]]] = []
+    hypotheses = sorted(
+        {
+            hypothesis_id
+            for step in original
+            for hypothesis_id in _string_set(step.get("testsHypotheses"))
+            if hypothesis_id.strip()
+        }
+    )
+    candidates: list[
+        tuple[
+            int,
+            int,
+            tuple[int, ...],
+            str,
+            tuple[CoreCausalRole, ...],
+            tuple[CausalIntent, ...],
+        ]
+    ] = []
     if all(allowed_by_step):
         for assignment in product(*allowed_by_step):
             typed_assignment = cast(tuple[CausalIntent, ...], assignment)
-            if typed_assignment.count("trigger") != 1:
-                continue
-            if "mechanism" not in typed_assignment or "impact" not in typed_assignment:
-                continue
             changes = sum(
                 role != step.get("causalIntent")
                 for step, role in zip(original, typed_assignment, strict=True)
             )
             priority = tuple(_ROLE_PRIORITY.index(role) for role in typed_assignment)
-            candidates.append((changes, priority, typed_assignment))
+            for hypothesis_id in hypotheses:
+                roles = tuple(
+                    role
+                    for step, role in zip(original, typed_assignment, strict=True)
+                    if hypothesis_id in _string_set(step.get("testsHypotheses"))
+                )
+                missing = cast(
+                    tuple[CoreCausalRole, ...],
+                    tuple(
+                        role
+                        for role in _CORE_ROLES
+                        if (
+                            roles.count("trigger") != 1
+                            if role == "trigger"
+                            else role not in roles
+                        )
+                    ),
+                )
+                candidates.append(
+                    (
+                        len(missing),
+                        changes,
+                        priority,
+                        hypothesis_id,
+                        missing,
+                        typed_assignment,
+                    )
+                )
 
     if candidates:
-        _, _, assignment = min(candidates)
-        repaired: list[JsonDict] = []
-        for step, role in zip(original, assignment, strict=True):
-            updated = dict(step)
-            if role != step.get("causalIntent"):
-                updated["causalIntent"] = role
-                updated["causalIntentOrigin"] = "coverage_repair"
-            repaired.append(updated)
+        _, _, _, hypothesis_id, missing_roles, assignment = min(candidates)
+        if not missing_roles:
+            repaired: list[JsonDict] = []
+            for step, role in zip(original, assignment, strict=True):
+                updated = dict(step)
+                if role != step.get("causalIntent"):
+                    updated["causalIntent"] = role
+                    updated["causalIntentOrigin"] = "coverage_repair"
+                repaired.append(updated)
+            return PlanCausalCoverage(
+                steps=tuple(repaired),
+                complete=True,
+                target_hypothesis_id=hypothesis_id,
+                missing_roles=(),
+                ambiguous_trigger=False,
+            )
+
+        trigger_count = sum(
+            step.get("causalIntent") == "trigger"
+            and hypothesis_id in _string_set(step.get("testsHypotheses"))
+            for step in original
+        )
+        ambiguous_trigger = trigger_count > 1
         return PlanCausalCoverage(
-            steps=tuple(repaired),
-            complete=True,
-            missing_roles=(),
-            ambiguous_trigger=False,
+            steps=original,
+            complete=False,
+            target_hypothesis_id=hypothesis_id,
+            missing_roles=_CORE_ROLES if ambiguous_trigger else missing_roles,
+            ambiguous_trigger=ambiguous_trigger,
         )
 
-    trigger_count = sum(step.get("causalIntent") == "trigger" for step in original)
-    ambiguous_trigger = trigger_count > 1
-    missing_roles: tuple[CoreCausalRole, ...]
-    if ambiguous_trigger:
-        missing_roles = _CORE_ROLES
-    else:
-        present = {
-            cast(CoreCausalRole, step.get("causalIntent"))
-            for step in original
-            if step.get("causalIntent") in _CORE_ROLES
-        }
-        missing_roles = tuple(role for role in _CORE_ROLES if role not in present)
     return PlanCausalCoverage(
         steps=original,
         complete=False,
-        missing_roles=missing_roles,
-        ambiguous_trigger=ambiguous_trigger,
+        target_hypothesis_id=None,
+        missing_roles=_CORE_ROLES,
+        ambiguous_trigger=False,
     )
 
 
