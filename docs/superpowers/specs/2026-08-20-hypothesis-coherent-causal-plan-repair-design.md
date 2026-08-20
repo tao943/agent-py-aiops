@@ -54,15 +54,15 @@ hypothesis 计算覆盖；只有可信公共合同允许时才补充 `testsHypot
 
 ### 5.1 可信工具调查能力
 
-在 `super_ai.aiops.causal_intents` 增加公开的工具调查能力边界。能力只描述：
+在 `super_ai.aiops.causal_intents` 增加单一公开的工具调查能力 registry。能力只描述：
 
 - 工具允许承担的 causal roles；
 - 工具能够检验的公开 hypothesis IDs；
 - 未登记工具只能保留模型已提供且通过 known-hypothesis 校验的绑定，不能自动扩展。
 
-Order Pool 的能力来源于现有 `build_generic_live_plan()` 公共合同。例如数据库会话工具能区分连接
-生命周期、数据库不可达、慢语句和锁等待；数据库可达性工具能区分连接生命周期与数据库不可达。
-能力目录不得包含场景 ID、Oracle 字段、primary cause 或答案语义。
+`allowed_causal_intents()`、`build_generic_live_plan()` 与 binding repair 必须共同消费该 registry，不能互相
+反推或各自维护能力。Order Pool 的条目表达数据库会话、可达性、连接池与日志工具能够验证的公开候选，
+不得包含场景 ID、Oracle 字段、primary cause 或答案语义；未登记工具不得获得额外 hypothesis 或角色。
 
 ### 5.2 计划绑定规范化
 
@@ -84,13 +84,16 @@ Planner 输出完成既有 schema/tool/argument 校验后，对每个步骤执�
 exactly one trigger + at least one mechanism + at least one impact
 ```
 
-角色修复的优化顺序保持现有行为：最少修改模型角色，其次按既有 role priority 稳定选择。若没有任何
-hypothesis 可闭环，返回 `complete=false` 和按候选计算的缺口，不能将不同候选的角色拼接为完整计划。
+角色修复的优化顺序保持现有行为：缺失角色最少、最少修改模型角色、既有 role priority，最后用
+hypothesis ID 稳定打破平局。若没有任何 hypothesis 可闭环，返回 `complete=false`、最接近闭环的公开
+hypothesis 及其缺失角色；不能退回全局角色统计，也不能将不同候选的角色拼接为完整计划。
 
 ### 5.4 Evidence 复用与 Replanner
 
-现有 Fact Adapter 的 `converged_causal_link` 只在当前步骤确实测试唯一受支持 hypothesis 时补充
-mechanism/impact 链接；该安全条件保持不变。
+Fact Adapter 只能从明确、结构化且公开的 observation facts 或已有 trusted evidence rule 投影
+mechanism/impact。仅有非空 summary、`not refuted`、模型措辞或候选绑定均不足以生成正 Evidence；
+neutral、error、缺失 Evidence ID、未知工具或未命中可信事实组合时必须 fail closed。trigger 仍必须来自
+直接可信或 Adjudicated Evidence，不允许由投影合成。
 
 若工具均已执行、唯一 hypothesis 已收敛、缺口仅来自旧计划绑定，Replanner 可以在可信能力允许的
 范围内重新投影持久化 Evidence，并进行最多一次有界 Adjudication。不得重新调用工具、创建新 Evidence
@@ -111,15 +114,17 @@ ID 或执行恢复动作。若可信能力仍不能闭环，继续 `no_useful_st
 
 ### 6.1 单元回归
 
-- 角色齐全但分属不同 hypothesis 的计划必须 `complete=false`。
+- 角色齐全但分属不同 hypothesis 的计划必须 `complete=false`，并返回最接近闭环候选的真实缺口。
 - 可信能力补充后，同一 hypothesis 可以覆盖 trigger/mechanism/impact。
-- 未知工具、未知 hypothesis、非公开字段不得被补充。
+- capability registry 与 allowed roles、generic plan、binding repair 保持一致。
+- 未知工具、未知 hypothesis、空值、重复项、嵌套伪装字段不得被补充。
 - 通用 causal-intent 源码继续通过 Oracle/场景答案隔离扫描。
 
 ### 6.2 Workflow 回归
 
 使用脱敏后的失败计划结构与公开工具 Evidence：
 
+- 只有命中结构化 trusted facts/rules 的候选获得新增链接，neutral/error/default summary 不得升级；
 - 正确候选获得至少两条独立 Evidence；
 - trigger/mechanism/impact 均来自持久化 Evidence；
 - 竞争候选仍能被 refute；
@@ -149,4 +154,5 @@ Evidence 绑定，但没有可直接复用的 hypothesis-role-tool 一致性算�
 - 可信修复不包含 Oracle 或答案数据，未知工具不能扩大权限。
 - 不降低任何 Validator、评分、Evidence 或恢复门禁。
 - 本地有效模型配置为 `qwen3.7-plus` 与 `qwen3-vl-rerank`，配置文件继续被 Git 忽略。
-- 目标测试、Ruff、Pyright 和一次真实 Single canary 提供新鲜证据。
+- 目标测试、Ruff、Pyright 和一次唯一 Run ID 的真实 Single canary 提供新鲜证据。
+- canary 结果同时写入 PostgreSQL 与 Evaluation Archive，cleanup 终态被持久化；旧失败 Run 保持不变。

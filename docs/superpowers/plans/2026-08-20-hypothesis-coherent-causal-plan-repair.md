@@ -4,7 +4,7 @@
 
 **Goal:** Prevent trigger, mechanism, and impact steps for different hypotheses from being accepted as one complete causal plan, then reuse trusted persisted Evidence to close a uniquely supported hypothesis without repeating tools.
 
-**Architecture:** Keep `causal_intents.py` provider- and scenario-neutral by making causal coverage hypothesis-aware. Reuse `build_generic_live_plan()` as the public Live tool/hypothesis capability source, merge only known public hypothesis bindings into model plans, and project already persisted mechanism/impact observations after bounded adjudication. The recovery policy, validators, scores, Evidence thresholds, and tool permissions remain unchanged.
+**Architecture:** Keep `causal_intents.py` provider- and scenario-neutral by making causal coverage hypothesis-aware and placing public Live tool capabilities in one registry consumed by role validation, generic planning, and binding repair. Merge only known public hypothesis bindings into model plans, and project already persisted mechanism/impact observations only from explicit trusted facts/rules. The recovery policy, validators, scores, Evidence thresholds, and tool permissions remain unchanged.
 
 **Tech Stack:** Python 3.10, LangGraph 1.2, Pydantic v2, pytest, Ruff, strict Pyright, PostgreSQL, Milvus, Tencent CLS, DashScope Qwen.
 
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: normalized `Sequence[JsonDict]` with `testsHypotheses`, `causalIntent`, and tool names.
-- Produces: unchanged `repair_plan_causal_coverage(steps) -> PlanCausalCoverage` API with hypothesis-coherent `complete` semantics.
+- Produces: unchanged `repair_plan_causal_coverage(steps) -> PlanCausalCoverage` call signature, plus `target_hypothesis_id` and hypothesis-coherent `missing_roles` semantics.
 
 - [ ] **Step 1: Write the failing regression test**
 
@@ -45,6 +45,8 @@ def test_plan_coverage_rejects_roles_split_across_hypotheses() -> None:
     )
     result = repair_plan_causal_coverage(plan)
     assert result.complete is False
+    assert result.target_hypothesis_id == "lifecycle"
+    assert result.missing_roles == ("mechanism", "impact")
 ```
 
 - [ ] **Step 2: Verify RED**
@@ -59,7 +61,7 @@ Expected: FAIL because the current function reports `complete=True`.
 
 - [ ] **Step 3: Implement hypothesis-coherent candidate selection**
 
-For each allowed role assignment, collect public hypothesis IDs from `testsHypotheses`. Accept the assignment only when one hypothesis has exactly one trigger and at least one mechanism and impact among steps that test that same hypothesis. Keep the current minimal-change and role-priority ordering; use the hypothesis ID only as a final deterministic tie-breaker.
+For each allowed role assignment, collect public hypothesis IDs from `testsHypotheses`. Accept the assignment only when one hypothesis has exactly one trigger and at least one mechanism and impact among steps that test that same hypothesis. If none is complete, select the nearest hypothesis and return its actual missing roles instead of global missing roles. Order by missing-role count, minimal role changes, existing role priority, then hypothesis ID.
 
 ```python
 candidates: list[
@@ -91,7 +93,7 @@ git add apps/backend/src/super_ai/aiops/causal_intents.py apps/backend/tests/tes
 git commit -m "fix: require hypothesis-coherent causal plans"
 ```
 
-### Task 2: Repair model hypothesis bindings from trusted Live capabilities
+### Task 2: Centralize trusted Live capabilities and repair model bindings
 
 **Files:**
 - Modify: `apps/backend/src/super_ai/aiops/diagnostics.py:281`
@@ -102,11 +104,11 @@ git commit -m "fix: require hypothesis-coherent causal plans"
 
 **Interfaces:**
 - Consumes: model plan, known public hypothesis IDs, and the existing `build_generic_live_plan()` public contract.
-- Produces: `merge_trusted_live_hypothesis_bindings(plan, *, known_hypotheses) -> list[JsonDict]`.
+- Produces: one public capability registry shared by `allowed_causal_intents()`, `build_generic_live_plan()`, and `merge_trusted_live_hypothesis_bindings()`.
 
 - [ ] **Step 1: Write failing binding tests**
 
-Add one test showing that the failed model plan receives only the hypotheses the same tools already expose through `build_generic_live_plan()`. Assert lifecycle is added to sessions and reachability, unknown IDs are removed, stable order is preserved, and `testsHypothesesOrigin` is recorded only for changed steps.
+Add one test showing that the failed model plan receives only hypotheses registered for the same tools. Assert lifecycle is added to sessions and reachability, unknown/empty/duplicate/nested values are removed, stable order is preserved, and `testsHypothesesOrigin` is recorded only for changed steps. Add consistency tests proving role validation, generic planning, and repair consume the same registry.
 
 ```python
 repaired = merge_trusted_live_hypothesis_bindings(
@@ -118,7 +120,7 @@ assert "lifecycle" in repaired[2]["testsHypotheses"]
 assert repaired[1]["testsHypothesesOrigin"] == "trusted_capability_repair"
 ```
 
-Add a negative test where `InspectFutureSubsystem` cannot gain model-omitted hypotheses.
+Add negative tests where `InspectFutureSubsystem` cannot gain model-omitted hypotheses, nested `oracle`/`primary_cause`-like fields cannot affect bindings, unchanged steps preserve their origin, and Create Plan/Replanner produce the same normalized binding result.
 
 - [ ] **Step 2: Verify RED**
 
@@ -130,7 +132,7 @@ Expected: FAIL because the merge helper does not exist.
 
 - [ ] **Step 3: Implement the merge helper**
 
-Build a generic-plan lookup for tools already present in the model plan. Intersect trusted and model bindings with `known_hypotheses`; union only for tools returned by `build_generic_live_plan()`. Do not change tool arguments or causal roles in this helper.
+Introduce an immutable public capability registry in `causal_intents.py`. Refactor `allowed_causal_intents()` and `build_generic_live_plan()` to read it, then have the merge helper read the same entries. Intersect model and trusted bindings with flat string `known_hypotheses`; union only for registered tools. Do not change tool arguments or causal roles in this helper.
 
 ```python
 def merge_trusted_live_hypothesis_bindings(
@@ -220,11 +222,11 @@ When exactly one hypothesis is supported, add that ID to a persisted observation
 
 - the observation tests that hypothesis;
 - its role is `mechanism` or `impact`;
-- it has a non-empty summary and persisted Evidence IDs;
+- it has persisted Evidence IDs and explicit structured public facts matching a registered trusted rule;
 - it does not refute the supported hypothesis;
-- the role is allowed by the source tool capability derived from normalized facts.
+- the role is allowed by the source tool capability registry.
 
-Never synthesize a trigger; the trigger must remain directly supported by adjudicated or trusted-rule Evidence. Record `assessmentSource=converged_causal_link` and keep the original Evidence IDs.
+Never infer support from summary text or merely `not refuted`. Neutral/error/default observations fail closed. Never synthesize a trigger; the trigger must remain directly supported by adjudicated or trusted-rule Evidence. Record `assessmentSource=trusted_fact_projection` and keep the original Evidence IDs. If model adjudication is required, allow at most one bounded call and fail closed on any model error.
 
 - [ ] **Step 5: Verify GREEN and no duplicate tool execution**
 
@@ -306,11 +308,11 @@ Expected: zero Ruff and Pyright errors.
 
 - [ ] **Step 3: Audit real dependencies**
 
-Run `audit_knowledge_index_scope.py` for the existing owner/KB and require 30 documents, 180 chunks, and zero scope mismatch. Require CLS SSE reachable and both PostgreSQL/order-api healthy.
+Run `audit_knowledge_index_scope.py` for the existing owner/KB and require 30 documents, 180 chunks, and zero scope mismatch. Require CLS SSE reachable and both PostgreSQL/order-api healthy. Query the old failed Run before the canary and record its immutable status, result identity, and cleanup terminal state for a post-run equality check.
 
 - [ ] **Step 4: Run one new Single canary**
 
-Use a new run ID and campaign, fixed Git SHA, `--evidence-source cls`, `--strategy single`, and the ignored main project config. Save every terminal state.
+Generate and preflight a unique run ID and campaign, then use fixed Git SHA, `--evidence-source cls`, `--strategy single`, and the ignored main project config. Save every terminal state. After completion, assert the new Run exists in both PostgreSQL and Evaluation Archive and that persisted cleanup state is terminal. Re-query the old failed Run and assert the previously recorded fields are unchanged.
 
 Success requires:
 
@@ -338,5 +340,5 @@ git commit -m "docs: record causal repair canary"
 
 - Spec coverage: hypothesis coherence, trusted binding repair, persisted Evidence reuse, fail-closed recovery, controlled models, targeted tests, and one canary are each mapped to a task.
 - Placeholder scan: runtime IDs are intentionally generated at execution time and are not source-code placeholders; all code interfaces and commands are explicit.
-- Type consistency: existing `PlanCausalCoverage` and `repair_plan_causal_coverage()` signatures stay stable; the only new public helper returns `list[JsonDict]`.
+- Type consistency: `repair_plan_causal_coverage()` call signature stays stable; `PlanCausalCoverage` gains a nullable target hypothesis, and the new registry/helper types are explicit and immutable.
 - Scope: no UI, schema migration, dependency, API, evaluator threshold, recovery permission, or full A/B change is included.
