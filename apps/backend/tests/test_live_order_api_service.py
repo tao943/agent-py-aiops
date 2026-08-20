@@ -30,6 +30,29 @@ def _load_order_api() -> ModuleType:
     return module
 
 
+def test_fault_session_application_name_is_bounded_for_maximum_run_id() -> None:
+    module = _load_order_api()
+    run_id = "r" * 64
+    generation = "0123456789abcdef" * 2
+
+    application_name = module._session_application_name(run_id, generation)
+
+    assert application_name == "agentpy-order-api:c9ea6f42c8efcb14:0123456789abcdef"
+    assert len(application_name.encode("ascii")) == 51
+    assert len(application_name.encode("ascii")) <= 63
+
+
+def test_fault_session_application_name_separates_runs_and_generations() -> None:
+    module = _load_order_api()
+
+    assert module._session_application_name("run-1", "generation-a") != (
+        module._session_application_name("run-2", "generation-a")
+    )
+    assert module._session_application_name("run-1", "generation-a") != (
+        module._session_application_name("run-1", "generation-b")
+    )
+
+
 class FakeConnection:
     def __init__(self) -> None:
         self.executions: list[tuple[str, tuple[object, ...]]] = []

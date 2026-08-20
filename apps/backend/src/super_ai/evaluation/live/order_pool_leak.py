@@ -31,6 +31,23 @@ from super_ai.mcp_client import McpClientError, McpToolDefinition
 SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
 _SERVICE_NAME = "live-eval-order-api"
 _MECHANISM = "exception_path_connection_not_released"
+_SESSION_PREFIX = "agentpy-order-api"
+_SESSION_TOKEN_LENGTH = 16
+
+
+def _session_run_scope(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:_SESSION_TOKEN_LENGTH]
+
+
+def _session_run_pattern(run_id: str) -> str:
+    return f"{_SESSION_PREFIX}:{_session_run_scope(run_id)}:%"
+
+
+def _session_application_name(run_id: str, generation: str) -> str:
+    return (
+        f"{_SESSION_PREFIX}:{_session_run_scope(run_id)}:"
+        f"{generation[:_SESSION_TOKEN_LENGTH]}"
+    )
 
 
 def _default_compose_file() -> Path:
@@ -198,7 +215,7 @@ class PostgresOrderPoolObserver:
         return _count(
             await self._fetch_value(
                 "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE $1",
-                f"agentpy-order-api:{run_id}:%",
+                _session_run_pattern(run_id),
             )
         )
 
@@ -207,7 +224,7 @@ class PostgresOrderPoolObserver:
             await self._fetch_value(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
                 "WHERE application_name LIKE $1 AND wait_event_type = 'Lock')",
-                f"agentpy-order-api:{run_id}:%",
+                _session_run_pattern(run_id),
             )
         )
 
@@ -215,7 +232,7 @@ class PostgresOrderPoolObserver:
         return _count(
             await self._fetch_value(
                 "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
-                f"agentpy-order-api:{run_id}:{generation}",
+                _session_application_name(run_id, generation),
             )
         )
 

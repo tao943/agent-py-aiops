@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 from collections.abc import AsyncGenerator, Callable
@@ -17,6 +18,8 @@ from pydantic import BaseModel
 
 _ISOLATED_DATABASE = "agent_py_live_eval"
 _MAX_EVENTS = 256
+_SESSION_PREFIX = "agentpy-order-api"
+_SESSION_TOKEN_LENGTH = 16
 _ORDER_DDL = """
 CREATE TABLE IF NOT EXISTS live_eval_orders (
     run_id text NOT NULL,
@@ -185,7 +188,7 @@ class OrderApiRuntime:
         connection = await self._pool.acquire(timeout=1.0)
         await connection.execute(
             "SELECT set_config('application_name', $1, false)",
-            _app_name(run_id, self._generation),
+            _session_application_name(run_id, self._generation),
         )
         self._record(run_id, request_id, "connection_checkout", "info")
         await connection.execute(_UPDATE_ORDER, run_id)
@@ -400,5 +403,9 @@ def _validate_identifier(value: str, error: str) -> None:
         raise OrderApiAccessError(error)
 
 
-def _app_name(run_id: str, generation: str) -> str:
-    return f"agentpy-order-api:{run_id}:{generation}"
+def _session_application_name(run_id: str, generation: str) -> str:
+    run_scope = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[
+        :_SESSION_TOKEN_LENGTH
+    ]
+    generation_scope = generation[:_SESSION_TOKEN_LENGTH]
+    return f"{_SESSION_PREFIX}:{run_scope}:{generation_scope}"

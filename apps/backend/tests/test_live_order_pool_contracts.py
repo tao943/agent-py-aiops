@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -18,7 +19,9 @@ from super_ai.evaluation.live.order_pool_leak import (
     OrderPoolLiveConfig,
     OrderPoolRecoveryService,
     OrderPoolRuntimeEvidenceMcpClient,
+    PostgresOrderPoolObserver,
 )
+from super_ai.evaluation.live.postgres import PostgresConnectionConfig
 from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 
@@ -147,6 +150,55 @@ class FakePostgresObserver:
 
     async def unrelated_sessions(self) -> frozenset[str]:
         return frozenset(self.unrelated_session_ids)
+
+
+class RecordingConnection:
+    def __init__(self, queries: list[tuple[str, tuple[object, ...]]]) -> None:
+        self._queries = queries
+
+    async def fetchval(self, query: str, *arguments: object) -> object:
+        self._queries.append((query, arguments))
+        return False if "EXISTS" in query else 0
+
+    async def close(self) -> None:
+        return None
+
+
+class RecordingPostgresConfig:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[object, ...]]] = []
+
+    async def connect(self, *, application_name: str) -> RecordingConnection:
+        assert application_name == "order-pool-observer"
+        return RecordingConnection(self.queries)
+
+
+@pytest.mark.asyncio
+async def test_postgres_observer_uses_bounded_run_and_generation_scope() -> None:
+    config = RecordingPostgresConfig()
+    observer = PostgresOrderPoolObserver(cast(PostgresConnectionConfig, config))
+    run_id = "r" * 64
+    generation = "0123456789abcdef" * 2
+
+    await observer.run_scoped_session_count(run_id)
+    await observer.lock_wait_observed(run_id)
+    await observer.generation_session_count(run_id, generation)
+
+    expected_run_pattern = "agentpy-order-api:c9ea6f42c8efcb14:%"
+    expected_generation_name = (
+        "agentpy-order-api:c9ea6f42c8efcb14:0123456789abcdef"
+    )
+    assert [arguments for _, arguments in config.queries] == [
+        (expected_run_pattern,),
+        (expected_run_pattern,),
+        (expected_generation_name,),
+    ]
+    assert all(
+        run_id not in str(argument)
+        for _, arguments in config.queries
+        for argument in arguments
+    )
+    assert len(expected_generation_name.encode("ascii")) <= 63
 
 
 class FakeRestarter:
