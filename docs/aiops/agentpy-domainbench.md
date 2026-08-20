@@ -497,7 +497,72 @@ Step、Checkpoint 与 Run Artifact 仅保存允许列表模型名和错误分类
 Pydantic Schema 并返回 `valid`。该 readiness 未读取 APY、RAG、CLS 或 PostgreSQL 诊断证据，
 也没有运行 APY-013，因此没有产生新的 Benchmark 分数或达标声明。
 
+### Nginx LLM + CLS 正式验收（2026-08-20）
+
+`APY-LIVE-NGINX-TIMEOUT-001` 的正式 Run ID 为
+`accept-apy-live-nginx-timeout-001-1787183288`。本次使用 30 卡 active/indexed 知识库、真实
+CLS 证据源和 `evidence-driven-v4` Workflow，结果为 `VALID_PASS`、总分 100、raw total 100，
+没有 hard gate 或失败项；Diagnostic Task 为 `succeeded`，Evaluation Run 为 `passed`，
+Artifact checksum 已持久化。总耗时 143,924 ms。
+
+本次 Agent 完成 `knowledge_retrieval`、三个 Nginx 只读工具、`SearchLog` 和无副作用
+`ProposeNginxTimeoutMitigation`，六条工具审计均为 `completed`。可信公开事实模式形成唯一
+upstream response timeout 根因和完整 trigger/mechanism/impact；未调用 Adjudicator、Replanner
+或 LLM Validator。模型角色只有 Planner、Recovery Planner 和同步 Report，共三次调用；Report
+由 LLM 生成。Validator Router 记录 `validationRequired=false` 和 `no_semantic_risk`。
+
+Recovery 保持 `proposal_only`，Policy Gate 仅记录供人工审阅的提案：
+`proposalRecorded=true`、`executionPermitted=false`，没有修改或 reload Nginx。独立 Verify 与
+Cleanup 均通过，Nginx 配置 diff 为 0。历史审计为 85 个 Artifact、85 个 checksum、0 conflict、
+0 database pending。本轮关键修复提交为 `39dc6e9` 和 `0716c84`；只运行目标回归，没有运行
+全量 pytest。
+
+### Single/Multi 数据源路由 A/B（2026-08-20）
+
+本轮新增 Benchmark-only `--strategy single|multi`、请求/实际策略审计、可从
+PostgreSQL 终态重建的定长指标，以及只读 Runtime/Log fan-out。普通诊断 API 仍固定
+`auto`，生产 Router policy 默认 `multi_agent_enabled=false`；只有显式 Benchmark Multi
+才临时开启 Multi 候选，且不能绕过 capability、deadline、预算、两轮上限或恢复门禁。
+
+固定 campaign `route-ab-20260820` 使用同一 Git 工作树、30 卡 active/indexed KB、模型配置、
+CLS 证据源和工具白名单。Nginx timeout 得到三次真正 Single 与三次真正 Multi 的完整配对：
+
+| 指标 | Single | Multi | 门禁结果 |
+| --- | ---: | ---: | --- |
+| 有效 Run | 3 | 3 | 6/6 `VALID_PASS` |
+| 平均总分 | 100 | 100 | 无下降 |
+| Root Cause Top-1 | 100% | 100% | 增益 0 个百分点 |
+| Evidence Recall | 100% | 100% | 增益 0 个百分点 |
+| P50 / P95 | 152,694 / 176,330 ms | 169,608 / 172,314 ms | Multi P95 为 Single 的 0.977 倍 |
+| 每次模型调用 | 2 | 2 | 额外调用 0 |
+| 最大重复 Evidence | 0% | 0% | 通过 |
+| 安全硬门禁 | 3/3 通过 | 3/3 通过 | 通过 |
+
+Single Run 为 `route-ab-nginx-single-01-20260820`、`-02-`、`-03-`；对应 checksum
+分别为 `004af1af...e7a2`、`67651110...abf`、`da2f9118...a2f9`。Multi Run 为
+`route-ab-nginx-multi-02-20260820`、`-03-`、`-04-`；checksum 分别为
+`3d497a38...a115`、`011ac487...7170`、`4ad6eca3...7f39`。六次均无 fallback，
+cleanup 和独立验证通过。
+
+第二场景未形成可发布配对。PostgreSQL 行锁的三次 `--strategy multi` 因 Planner 未形成
+两个可信并行数据域，Router 按 `insufficient_parallel_sources` 保持 effective Single；其中
+`route-ab-pglock-multi-03-20260820` 为 73 分 `VALID_FAIL`，不能挑选性重跑覆盖。Redis
+`route-ab-redis-multi-01-20260820` 实际执行 Multi，但在恢复边界以
+`recovery_denied/redis_decision_required` 结束，cleanup 成功，未进入完整 evaluator 终态。
+这些结果证明硬门禁有效，但不能被计为完整 Multi A/B 样本。
+
+发布判定为 `benchmark_only`：Nginx 性能、模型预算、重复 Evidence 和安全门禁均通过，
+但 Evidence Recall 与 Root Cause Top-1 均无能力增益；同时缺少第二个完整有效场景。未降低
+评分阈值、required Evidence、Validator 或恢复授权规则。生产 `auto` 不默认升级 Multi。
+
 ## 当前阶段边界
+
+### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
+
+公开 PostgreSQL Lock hypotheses、项目内 `docker-live-postgres` Runtime 工具和受作用域约束的
+CLS `SearchLog` 可形成 `runtime + log` 两个可信 Dispatch；Benchmark forced Multi 的离线路由结果为
+`multi_agent`。该测试不调用 Oracle、真实 LLM 或 CLS，只证明路由可用性；真实能力增益与生产默认启用
+仍需完整 A/B 门禁。
 
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
 PostgreSQL deadlock、Redis maxclients 与 Nginx timeout 四个隔离场景；driver、证据工具、

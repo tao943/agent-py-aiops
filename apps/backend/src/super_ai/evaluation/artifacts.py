@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
+from super_ai.aiops.adjudication import AssessmentSource, Disposition
 from super_ai.memory.repositories import (
     AgentToolCallAuditRecord,
     DiagnosticEvidenceRecord,
@@ -20,6 +21,36 @@ from super_ai.memory.repositories import (
 
 def _empty_json_dict() -> JsonDict:
     return {}
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationAudit:
+    strategy: str
+    score: int
+    reason_codes: tuple[str, ...]
+    policy_version: str
+    selected_investigators: tuple[str, ...]
+    dispatch_count: int
+    packet_statuses: tuple[str, ...]
+    fallback_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationBenchmarkMetrics:
+    strategy: str
+    effective_strategy: str
+    policy_version: str
+    root_cause_top1_correct: bool
+    evidence_recall_basis_points: int
+    duration_ms: int
+    model_call_count: int
+    duplicate_evidence_basis_points: int
+    fallback_reason: str | None
+    security_hard_gate_passed: bool
+    total_score: int
+    run_id: str = ""
+    scenario_id: str = ""
+    campaign_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +111,32 @@ class ValidationAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactHypothesisAssessment:
+    id: str
+    disposition: Disposition
+    evidence_ids: tuple[str, ...]
+    reason_code: str | None
+    assessment_source: AssessmentSource | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallAudit:
+    role: str
+    attempt: int
+    duration_ms: int
+    cache_hit: bool
+    safe_error_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorRoutingAudit:
+    required: bool
+    skipped: bool
+    reason_codes: tuple[str, ...]
+    skip_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunArtifact:
     scenario_id: str
     mode: str
@@ -97,6 +154,16 @@ class RunArtifact:
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
     validation_audit: ValidationAudit | None = None
+    workflow_version: str | None = None
+    graph_version: str | None = None
+    hypothesis_assessments: tuple[ArtifactHypothesisAssessment, ...] = ()
+    artifact_valid: bool = True
+    artifact_errors: tuple[str, ...] = ()
+    model_call_count: int = 0
+    model_call_audits: tuple[ModelCallAudit, ...] = ()
+    validator_routing: ValidatorRoutingAudit | None = None
+    resume_count: int = 0
+    investigation_audit: InvestigationAudit | None = None
 
 
 def build_run_artifact(
@@ -110,8 +177,16 @@ def build_run_artifact(
     scenario_id = _required_task_text(task.input_payload, "benchmarkScenarioId")
     mode = _required_task_text(task.input_payload, "benchmarkMode")
     ordered_steps = sorted(steps, key=lambda item: item.sequence)
+    workflow_version = _workflow_version(ordered_steps)
+    graph_version = _graph_version(ordered_steps, workflow_version=workflow_version)
     decision = _decision_from_steps(ordered_steps)
     hypothesis_states = _hypothesis_states_from_steps(ordered_steps)
+    hypothesis_assessments, artifact_errors = _hypothesis_assessments_from_steps(
+        ordered_steps,
+        workflow_version=workflow_version,
+        legacy_states=hypothesis_states,
+    )
+    model_call_count, model_call_audits = _model_call_observability(ordered_steps)
     observation_decisions = _observation_decisions_from_steps(ordered_steps)
     plan_step_count = _plan_step_count(ordered_steps)
     duration_ms = 0
@@ -142,6 +217,289 @@ def build_run_artifact(
         safety_events=(),
         diagnostic_task_id=task.id,
         validation_audit=_validation_audit_from_steps(ordered_steps),
+        workflow_version=workflow_version,
+        graph_version=graph_version,
+        hypothesis_assessments=hypothesis_assessments,
+        artifact_valid=not artifact_errors,
+        artifact_errors=artifact_errors,
+        model_call_count=model_call_count,
+        model_call_audits=model_call_audits,
+        validator_routing=_validator_routing_from_steps(ordered_steps),
+        resume_count=sum(1 for step in ordered_steps if step.phase == "execution_resume"),
+        investigation_audit=_investigation_audit_from_steps(ordered_steps),
+    )
+
+
+def _workflow_version(steps: Sequence[DiagnosticStepRecord]) -> str | None:
+    versions = [
+        value
+        for step in steps
+        if isinstance((value := step.payload.get("workflowVersion")), str)
+    ]
+    return versions[-1] if versions else None
+
+
+def _graph_version(
+    steps: Sequence[DiagnosticStepRecord], *, workflow_version: str | None
+) -> str | None:
+    versions = [
+        value
+        for step in steps
+        if isinstance((value := step.payload.get("graphVersion")), str)
+        and value in {"aiops-diagnostic-v2", "aiops-diagnostic-v3"}
+    ]
+    if versions:
+        return versions[-1]
+    return "aiops-diagnostic-v2" if workflow_version == "evidence-driven-v4" else None
+
+
+def _investigation_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> InvestigationAudit | None:
+    router_steps = [step for step in steps if step.phase == "strategy_router"]
+    if not router_steps:
+        return None
+    router_payload = router_steps[-1].payload
+    for candidate_step in reversed(router_steps):
+        candidate_route = candidate_step.payload.get("route")
+        if isinstance(candidate_route, Mapping) and (
+            cast(Mapping[str, object], candidate_route).get("strategy")
+            == "multi_agent"
+        ):
+            router_payload = candidate_step.payload
+            break
+    route = router_payload.get("route")
+    if not isinstance(route, Mapping):
+        return None
+    safe_route = cast(Mapping[str, object], route)
+    strategy = safe_route.get("strategy")
+    score = safe_route.get("score")
+    policy_version = safe_route.get("policyVersion")
+    reasons = safe_route.get("reasonCodes")
+    investigators = safe_route.get("selectedInvestigators")
+    dispatch_ids: set[str] = set()
+    for step in router_steps:
+        raw_dispatches = step.payload.get("dispatches")
+        if not isinstance(raw_dispatches, list):
+            return None
+        for raw_dispatch in cast(list[object], raw_dispatches):
+            if not isinstance(raw_dispatch, Mapping):
+                return None
+            dispatch_id = cast(Mapping[str, object], raw_dispatch).get("dispatchId")
+            if not isinstance(dispatch_id, str) or not dispatch_id:
+                return None
+            dispatch_ids.add(dispatch_id)
+    if (
+        strategy not in {"deterministic_fast_path", "single_agent", "multi_agent"}
+        or not isinstance(score, int)
+        or isinstance(score, bool)
+        or not 0 <= score <= 20
+        or not isinstance(policy_version, str)
+        or not policy_version
+        or not isinstance(reasons, list)
+        or not all(
+            isinstance(item, str) for item in cast(list[object], reasons)
+        )
+        or not isinstance(investigators, list)
+        or not all(
+            item in {"knowledge", "runtime", "log", "change"}
+            for item in cast(list[object], investigators)
+        )
+    ):
+        return None
+    aggregator_steps = [step for step in steps if step.phase == "evidence_aggregator"]
+    packet_statuses: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+    if aggregator_steps:
+        aggregation_payload = aggregator_steps[-1].payload
+        raw_statuses = aggregation_payload.get("packetStatuses")
+        if isinstance(raw_statuses, list) and all(
+            item in {"completed", "inconclusive", "failed", "timeout"}
+            for item in cast(list[object], raw_statuses)
+        ):
+            packet_statuses = tuple(cast(list[str], raw_statuses))
+        raw_fallback = aggregation_payload.get("fallbackReason")
+        if raw_fallback in {
+            "fallback_to_single_agent",
+            "manual_review_required",
+            "late_result_ignored",
+        }:
+            fallback_reason = cast(str, raw_fallback)
+    return InvestigationAudit(
+        strategy=cast(str, strategy),
+        score=score,
+        reason_codes=tuple(cast(list[str], reasons)),
+        policy_version=policy_version,
+        selected_investigators=tuple(cast(list[str], investigators)),
+        dispatch_count=len(dispatch_ids),
+        packet_statuses=packet_statuses,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _hypothesis_assessments_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+    *,
+    workflow_version: str | None,
+    legacy_states: Sequence[HypothesisState],
+) -> tuple[tuple[ArtifactHypothesisAssessment, ...], tuple[str, ...]]:
+    if workflow_version != "evidence-driven-v4":
+        legacy_dispositions = {
+            "open": "unresolved",
+            "supported": "supported",
+            "refuted": "refuted",
+        }
+        return (
+            tuple(
+                ArtifactHypothesisAssessment(
+                    id=item.id,
+                    disposition=cast(Disposition, legacy_dispositions[item.status]),
+                    evidence_ids=item.evidence_ids,
+                    reason_code=None,
+                    assessment_source=None,
+                )
+                for item in legacy_states
+            ),
+            (),
+        )
+
+    raw_assessments: object | None = None
+    for step in reversed(steps):
+        candidate = step.payload.get("hypothesisAssessments")
+        if candidate is not None:
+            raw_assessments = candidate
+            break
+    if not isinstance(raw_assessments, list):
+        return (), ("missing_hypothesis_assessments",)
+
+    assessments: list[ArtifactHypothesisAssessment] = []
+    errors: list[str] = []
+    allowed_dispositions = {
+        "supported",
+        "refuted",
+        "causally_inactive",
+        "unresolved",
+    }
+    allowed_sources = {"deterministic", "llm_adjudicated"}
+    for raw in cast(list[object], raw_assessments):
+        if not isinstance(raw, Mapping):
+            errors.append("invalid_hypothesis_assessment")
+            continue
+        item = cast(Mapping[str, object], raw)
+        identifier = item.get("id") or item.get("hypothesisId")
+        disposition = item.get("disposition")
+        evidence_ids = _string_list(item.get("evidenceIds"))
+        reason_code = item.get("reasonCode")
+        source = item.get("assessmentSource")
+        if disposition not in allowed_dispositions:
+            errors.append("invalid_hypothesis_disposition")
+            continue
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or evidence_ids is None
+            or not isinstance(reason_code, str)
+            or not reason_code
+            or source not in allowed_sources
+        ):
+            errors.append("invalid_hypothesis_assessment")
+            continue
+        assessments.append(
+            ArtifactHypothesisAssessment(
+                id=identifier,
+                disposition=cast(Disposition, disposition),
+                evidence_ids=tuple(evidence_ids),
+                reason_code=reason_code,
+                assessment_source=cast(AssessmentSource, source),
+            )
+        )
+    return tuple(assessments), tuple(dict.fromkeys(errors))
+
+
+_MODEL_CALL_ROLES = frozenset(
+    {"planner", "adjudicator", "replanner", "validator", "report"}
+)
+
+
+def _model_call_observability(
+    steps: Sequence[DiagnosticStepRecord],
+) -> tuple[int, tuple[ModelCallAudit, ...]]:
+    count = 0
+    audits: list[ModelCallAudit] = []
+    seen: set[tuple[object, ...]] = set()
+    for step in steps:
+        count_value = step.payload.get("modelCallCount")
+        if (
+            isinstance(count_value, int)
+            and not isinstance(count_value, bool)
+            and 0 <= count_value <= 8
+        ):
+            count = max(count, count_value)
+        raw_audits = step.payload.get("modelCallAudits")
+        if not isinstance(raw_audits, list):
+            continue
+        for raw in cast(list[object], raw_audits):
+            if not isinstance(raw, Mapping):
+                continue
+            item = cast(Mapping[str, object], raw)
+            role = item.get("role")
+            attempt = item.get("attempt")
+            duration_ms = item.get("durationMs")
+            cache_hit = item.get("cacheHit")
+            error_code = item.get("safeErrorCode")
+            if (
+                role not in _MODEL_CALL_ROLES
+                or not isinstance(attempt, int)
+                or isinstance(attempt, bool)
+                or not 1 <= attempt <= 8
+                or not isinstance(duration_ms, int)
+                or isinstance(duration_ms, bool)
+                or duration_ms < 0
+                or not isinstance(cache_hit, bool)
+                or (error_code is not None and not isinstance(error_code, str))
+            ):
+                continue
+            identity = (role, attempt, duration_ms, cache_hit, error_code)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            audits.append(
+                ModelCallAudit(
+                    role=cast(str, role),
+                    attempt=attempt,
+                    duration_ms=duration_ms,
+                    cache_hit=cache_hit,
+                    safe_error_code=error_code,
+                )
+            )
+    return count, tuple(audits)
+
+
+def _validator_routing_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> ValidatorRoutingAudit | None:
+    routing = next(
+        (step for step in reversed(steps) if step.phase == "validator_router"),
+        None,
+    )
+    if routing is None:
+        return None
+    raw_codes = routing.payload.get("validationReasonCodes")
+    reason_codes = (
+        tuple(
+            item
+            for item in cast(list[object], raw_codes)
+            if isinstance(item, str)
+        )[:6]
+        if isinstance(raw_codes, list)
+        else ()
+    )
+    skip_reason = routing.payload.get("validationSkipReason")
+    return ValidatorRoutingAudit(
+        required=routing.payload.get("validationRequired") is True,
+        skipped=routing.payload.get("validationSkipped") is True,
+        reason_codes=reason_codes,
+        skip_reason=skip_reason if isinstance(skip_reason, str) else None,
     )
 
 
@@ -350,60 +708,97 @@ def _observation_decisions_from_steps(
     steps: Sequence[DiagnosticStepRecord],
 ) -> tuple[ObservationDecision, ...]:
     decisions: list[ObservationDecision] = []
+    adjudicator_projection = next(
+        (
+            step
+            for step in reversed(steps)
+            if step.phase == "hypothesis_adjudicator"
+            and isinstance(step.payload.get("observationDecisions"), list)
+        ),
+        None,
+    )
     for step in steps:
-        raw = step.payload.get("observationDecision")
-        if step.phase != "evidence_evaluation" or not isinstance(raw, Mapping):
-            continue
-        item = cast(Mapping[str, object], raw)
-        purpose = item.get("purpose")
-        supports = item.get("supports")
-        refutes = item.get("refutes")
-        summary = item.get("summary")
-        causal_role = item.get("causalRole", "context")
-        causal_role_origin = item.get("causalRoleOrigin")
-        reported_causal_role = item.get("reportedCausalRole")
-        causal_role_corrected = item.get("causalRoleCorrected", False)
-        raw_evidence_ids = item.get("evidenceIds")
-        evidence_ids = (
-            [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
+        raw_items: list[Mapping[str, object]] = []
+        legacy = step.payload.get("observationDecision")
+        if step.phase == "evidence_evaluation" and isinstance(legacy, Mapping):
+            raw_items.append(cast(Mapping[str, object], legacy))
+        v4_items = step.payload.get("observationDecisions")
+        use_v4_items = (
+            step is adjudicator_projection
+            if adjudicator_projection is not None
+            else step.phase == "fact_adapter"
         )
-        support_items = _string_list(supports)
-        refute_items = _string_list(refutes)
-        if (
-            isinstance(purpose, str)
-            and support_items is not None
-            and refute_items is not None
-            and isinstance(summary, str)
-            and evidence_ids is not None
-            and causal_role in {"trigger", "mechanism", "impact", "context"}
-            and causal_role_origin in {None, "model", "plan_contract"}
-            and reported_causal_role
-            in {None, "trigger", "mechanism", "impact", "context"}
-            and isinstance(causal_role_corrected, bool)
-        ):
-            decisions.append(
-                ObservationDecision(
-                    purpose=purpose,
-                    supports=tuple(support_items),
-                    refutes=tuple(refute_items),
-                    summary=summary,
-                    evidence_ids=tuple(evidence_ids),
-                    causal_role=cast(
-                        Literal["trigger", "mechanism", "impact", "context"],
-                        causal_role,
-                    ),
-                    causal_role_origin=cast(
-                        Literal["model", "plan_contract"] | None,
-                        causal_role_origin,
-                    ),
-                    reported_causal_role=cast(
-                        Literal["trigger", "mechanism", "impact", "context"]
-                        | None,
-                        reported_causal_role,
-                    ),
-                    causal_role_corrected=causal_role_corrected,
-                )
+        if use_v4_items and isinstance(v4_items, list):
+            raw_items.extend(
+                cast(Mapping[str, object], item)
+                for item in cast(list[object], v4_items)
+                if isinstance(item, Mapping)
             )
+        if not raw_items:
+            continue
+        for item in raw_items:
+            purpose = item.get("purpose")
+            supports = item.get("supports")
+            refutes = item.get("refutes")
+            summary = item.get("summary")
+            causal_role = item.get("causalRole", "context")
+            causal_role_origin = item.get("causalRoleOrigin")
+            reported_causal_role = item.get("reportedCausalRole")
+            causal_role_corrected = item.get("causalRoleCorrected", False)
+            raw_evidence_ids = item.get("evidenceIds")
+            evidence_ids = (
+                [] if raw_evidence_ids is None else _string_list(raw_evidence_ids)
+            )
+            support_items = _string_list(supports)
+            refute_items = _string_list(refutes)
+            if (
+                isinstance(purpose, str)
+                and support_items is not None
+                and refute_items is not None
+                and isinstance(summary, str)
+                and evidence_ids is not None
+                and causal_role in {"trigger", "mechanism", "impact", "context"}
+                and causal_role_origin
+                in {
+                    None,
+                    "model",
+                    "plan_contract",
+                    "trusted_evidence_rule",
+                    "coverage_repair",
+                }
+                and reported_causal_role
+                in {None, "trigger", "mechanism", "impact", "context"}
+                and isinstance(causal_role_corrected, bool)
+            ):
+                decisions.append(
+                    ObservationDecision(
+                        purpose=purpose,
+                        supports=tuple(support_items),
+                        refutes=tuple(refute_items),
+                        summary=summary,
+                        evidence_ids=tuple(evidence_ids),
+                        causal_role=cast(
+                            Literal["trigger", "mechanism", "impact", "context"],
+                            causal_role,
+                        ),
+                        causal_role_origin=cast(
+                            Literal[
+                                "model",
+                                "plan_contract",
+                                "trusted_evidence_rule",
+                                "coverage_repair",
+                            ]
+                            | None,
+                            causal_role_origin,
+                        ),
+                        reported_causal_role=cast(
+                            Literal["trigger", "mechanism", "impact", "context"]
+                            | None,
+                            reported_causal_role,
+                        ),
+                        causal_role_corrected=causal_role_corrected,
+                    )
+                )
     return tuple(decisions)
 
 

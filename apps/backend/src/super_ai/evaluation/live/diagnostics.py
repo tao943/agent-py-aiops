@@ -10,6 +10,7 @@ from uuid import uuid4
 from langchain_core.tools import StructuredTool
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.investigation import InvestigationRouterPolicy, StrategyMode
 from super_ai.evaluation.artifacts import (
     LiveEvidenceAudit,
     LiveRecoveryAudit,
@@ -34,9 +35,14 @@ from super_ai.memory.repositories import JsonDict, MemoryRepositories
 from super_ai.retrieval import KnowledgeRetrievalToolRunner
 
 
-def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
+def build_live_diagnostic_input(
+    scenario: LiveScenario,
+    *,
+    workflow_version: str | None = None,
+    investigation_strategy: StrategyMode = "auto",
+) -> JsonDict:
     """Build Agent input solely from the public scenario contract."""
-    return {
+    payload: JsonDict = {
         "query": scenario.title,
         "alert": dict(scenario.alert),
         "hypotheses": [
@@ -44,8 +50,21 @@ def build_live_diagnostic_input(scenario: LiveScenario) -> JsonDict:
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "live",
+        "investigationStrategyMode": investigation_strategy,
         "decisionVocabulary": _decision_vocabulary(scenario),
     }
+    if workflow_version is not None:
+        payload["workflowVersion"] = workflow_version
+        if workflow_version == "evidence-driven-v4":
+            payload["graphVersion"] = "aiops-diagnostic-v3"
+    return payload
+
+
+def benchmark_investigation_router_policy(
+    strategy: StrategyMode,
+) -> InvestigationRouterPolicy:
+    """Enable Multi only for an explicit internal Benchmark request."""
+    return InvestigationRouterPolicy(multi_agent_enabled=strategy == "multi")
 
 
 def proposal_tool_policies_for_scenario(
@@ -195,6 +214,7 @@ class LivePostgresEvidenceMcpClient:
         if name == "InspectPostgresSessions":
             return {
                 "waitingSession": "waiter",
+                "waitingOperation": "order_status_update",
                 "waitEventType": (
                     "Lock"
                     if self._observation.check_passed("waiter_has_lock_event")
@@ -205,6 +225,8 @@ class LivePostgresEvidenceMcpClient:
         if name == "InspectPostgresLockGraph":
             return {
                 "edge": "blocker->waiter",
+                "blockerRole": "transaction",
+                "lockedResource": "order_row",
                 "blockerEdgeConfirmed": self._observation.check_passed(
                     "blocker_edge_confirmed"
                 ),
@@ -215,6 +237,7 @@ class LivePostgresEvidenceMcpClient:
                 "databaseReachable": True,
                 "connectivityStatus": "healthy",
                 "businessProbeSucceeded": not self._observation.confirmed,
+                "businessProbeTimedOut": self._observation.confirmed,
                 "businessProbeStatus": (
                     "degraded" if self._observation.confirmed else "healthy"
                 ),
@@ -303,6 +326,8 @@ class ApplicationLiveDiagnosticAdapter:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
+        workflow_version: str | None = None,
+        investigation_strategy: StrategyMode = "auto",
         cls_mcp_client: LiveMcpClient | None = None,
         component_evidence_factory: Callable[
             [LiveFaultObservation], LiveMcpClient
@@ -313,6 +338,8 @@ class ApplicationLiveDiagnosticAdapter:
         self._retrieval_tool = retrieval_tool
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
+        self._workflow_version = workflow_version
+        self._investigation_strategy: StrategyMode = investigation_strategy
         self._cls_mcp_client = cls_mcp_client
         self._component_evidence_factory = component_evidence_factory
 
@@ -331,7 +358,11 @@ class ApplicationLiveDiagnosticAdapter:
             task_id=task_id,
             status="accepted",
             query=scenario.title,
-            input_payload=build_live_diagnostic_input(scenario),
+            input_payload=build_live_diagnostic_input(
+                scenario,
+                workflow_version=self._workflow_version,
+                investigation_strategy=self._investigation_strategy,
+            ),
             result_payload={},
         )
         scope = evidence_context.cls_scope
@@ -353,6 +384,10 @@ class ApplicationLiveDiagnosticAdapter:
                 else None
             ),
             tool_policies=proposal_tool_policies_for_scenario(scenario),
+            investigation_router_policy=benchmark_investigation_router_policy(
+                self._investigation_strategy
+            ),
+            require_trusted_log_scope=True,
         )
         async for _ in service.stream(
             task=task,

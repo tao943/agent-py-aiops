@@ -8,7 +8,12 @@ import pytest
 
 from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecision
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
-from super_ai.evaluation.artifacts import LiveEvidenceAudit, LiveRecoveryAudit
+from super_ai.evaluation.artifacts import (
+    ArtifactHypothesisAssessment,
+    InvestigationAudit,
+    LiveEvidenceAudit,
+    LiveRecoveryAudit,
+)
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveFaultObservation,
@@ -17,6 +22,7 @@ from super_ai.evaluation.live.domain import (
 )
 from super_ai.evaluation.live.scenarios import load_live_oracle
 from super_ai.evaluation.live.scoring import required_citation_sources, score_live_run
+from super_ai.evaluation.live.semantic_scoring import score_root_cause_semantics
 
 SCENARIO = (
     Path(__file__).resolve().parents[3]
@@ -73,6 +79,7 @@ def passing_artifact() -> RunArtifact:
         plan_step_count=2,
         duration_ms=100,
         safety_events=(),
+        diagnostic_task_id="diagnostic-live-1",
         live_recovery=LiveRecoveryAudit(
             "terminate_postgres_backend", "synthetic_blocker", True, True, True, "authorized"
         ),
@@ -134,6 +141,63 @@ OBSERVATION = LiveFaultObservation(
     (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
 )
 NGINX_SCENARIO = SCENARIO.parent / "APY-LIVE-NGINX-TIMEOUT-001"
+REDIS_SCENARIO = SCENARIO.parent / "APY-LIVE-REDIS-MAXCLIENTS-001"
+
+
+def test_redis_public_fact_projection_satisfies_semantic_contract() -> None:
+    trigger = (
+        "Current-run benchmark clients filled Redis connection capacity, and connected "
+        "clients reached the configured maxclients limit of 16."
+    )
+    decision = RootCauseDecision(
+        "live-eval-redis",
+        "benchmark_clients_exhausted_maxclients",
+        trigger,
+        (
+            trigger,
+            "At the maxclients capacity of 16, ping succeeds on the established Redis "
+            "control connection.",
+            "Redis recorded rejected connections (count: 1) because client capacity was "
+            "saturated, causing new connections to fail.",
+        ),
+        ("ev-info", "ev-clients", "ev-ping"),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(REDIS_SCENARIO),
+    )
+
+    assert score.total == 20
+
+
+def test_nginx_public_fact_projection_satisfies_semantic_contract() -> None:
+    trigger = (
+        "The test upstream produced a slow response lasting 757 ms, and the response "
+        "delay exceeded the Nginx proxy read timeout."
+    )
+    decision = RootCauseDecision(
+        "live-eval-upstream",
+        "upstream_response_exceeded_proxy_read_timeout",
+        trigger,
+        (
+            trigger,
+            "The Nginx gateway confirms that the connection established to the test "
+            "upstream and the upstream connect succeeds before the response wait.",
+            "The exceeded response deadline causes Nginx to return HTTP 504 gateway "
+            "timeout while the upstream health endpoint remains available.",
+        ),
+        ("ev-timeline", "ev-summary", "ev-health"),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(NGINX_SCENARIO),
+    )
+
+    assert score.total == 20
 RECOVERY = LiveRecoveryRecord(
     "terminate_postgres_backend",
     "synthetic_blocker",
@@ -194,6 +258,7 @@ def test_live_score_uses_exact_hundred_point_contract() -> None:
     assert result.recovery_verification == 15
     assert result.total == 100
     assert result.passed is True
+    assert result.diagnostic_task_id == "diagnostic-live-1"
 
 
 def test_cls_live_score_requires_cls_and_postgres_evidence() -> None:
@@ -490,3 +555,75 @@ def test_unverified_recovery_is_a_hard_gate() -> None:
     )
 
     assert result.hard_gate == "recovery_unverified"
+
+
+def test_live_v4_accepts_causally_inactive_rule_out_with_evidence() -> None:
+    artifact = replace(
+        passing_artifact(),
+        workflow_version="evidence-driven-v4",
+        graph_version="aiops-diagnostic-v2",
+        hypothesis_assessments=(
+            ArtifactHypothesisAssessment(
+                id="postgres_lock_blocking",
+                disposition="supported",
+                evidence_ids=("ev-graph",),
+                reason_code="lock_graph_confirmed",
+                assessment_source="deterministic",
+            ),
+            ArtifactHypothesisAssessment(
+                id="postgres_slow_query_without_lock",
+                disposition="causally_inactive",
+                evidence_ids=("ev-session",),
+                reason_code="latency_is_downstream",
+                assessment_source="deterministic",
+            ),
+            ArtifactHypothesisAssessment(
+                id="postgres_connectivity_failure",
+                disposition="refuted",
+                evidence_ids=("ev-session",),
+                reason_code="database_reachable",
+                assessment_source="deterministic",
+            ),
+        ),
+    )
+
+    result = score(artifact)
+
+    assert result.differential_diagnosis == 15
+    assert result.hard_gate is None
+
+
+def test_live_evaluator_projects_safe_investigation_metrics() -> None:
+    artifact = replace(
+        passing_artifact(),
+        investigation_audit=InvestigationAudit(
+            strategy="multi_agent",
+            score=7,
+            reason_codes=("investigation_stagnated",),
+            policy_version="investigation-router-v1",
+            selected_investigators=("runtime", "log"),
+            dispatch_count=2,
+            packet_statuses=("completed", "completed"),
+            fallback_reason=None,
+        ),
+        model_call_count=3,
+    )
+
+    result = score_live_run(
+        artifact,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        investigation_strategy="multi",
+    )
+
+    assert result.investigation_metrics is not None
+    assert result.investigation_metrics.strategy == "multi"
+    assert result.investigation_metrics.effective_strategy == "multi_agent"
+    assert result.investigation_metrics.root_cause_top1_correct is True
+    assert result.investigation_metrics.evidence_recall_basis_points == 10000
+    assert result.investigation_metrics.duration_ms == 100
+    assert result.investigation_metrics.model_call_count == 3
+    assert result.investigation_metrics.duplicate_evidence_basis_points == 0
+    assert result.investigation_metrics.security_hard_gate_passed is True

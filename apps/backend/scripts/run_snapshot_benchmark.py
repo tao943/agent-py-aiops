@@ -22,6 +22,7 @@ from super_ai.evaluation.history import (
     interrupted_envelope,
     running_envelope,
     terminal_envelope,
+    validate_run_id,
 )
 from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.recording import EvaluationRunRecorder
@@ -46,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AgentPy Snapshot SRE benchmark.")
     parser.add_argument("--scenario", required=True, help="Scenario ID, for example APY-003.")
     parser.add_argument("--suite-version", default="v1", help="Benchmark suite version.")
+    parser.add_argument(
+        "--workflow-version",
+        choices=("evidence-driven-v3", "evidence-driven-v4"),
+        default="evidence-driven-v4",
+        help="Production diagnostic workflow version under evaluation.",
+    )
     parser.add_argument("--runs", type=int, default=1, help="Number of repeated runs.")
     parser.add_argument("--output", type=Path, help="Optional UTF-8 JSON report path.")
     parser.add_argument(
@@ -68,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--knowledge-base-id",
         help="Authorized knowledge base; defaults to kb_<owner-user-id>.",
+    )
+    parser.add_argument(
+        "--campaign-id",
+        type=validate_run_id,
+        help="Optional safe acceptance campaign identifier.",
     )
     return parser
 
@@ -110,6 +122,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
             accessible_knowledge_base_ids=(
                 (knowledge_base_id,) if knowledge_base_id is not None else ()
             ),
+            workflow_version=arguments.workflow_version,
         )
         runner = SnapshotBenchmarkRunner(
             scenario_root=SCENARIO_ROOT,
@@ -121,7 +134,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
         )
         agent_version = AgentVersion(
             git_sha=_git_sha(),
-            workflow_version="agentpy-domainbench-v1",
+            workflow_version=arguments.workflow_version,
         )
         model_configuration: dict[str, object] = {
             "provider": provider_config.provider,
@@ -142,6 +155,7 @@ async def run_command(arguments: argparse.Namespace) -> int:
                 model_configuration=model_configuration,
                 runner=runner,
                 recorder=recorder,
+                campaign_id=arguments.campaign_id,
             )
             reports.append(report)
             database_pending = database_pending or pending
@@ -172,19 +186,23 @@ async def _run_snapshot_once(
     model_configuration: dict[str, object],
     runner: SnapshotBenchmarkRunner,
     recorder: EvaluationRunRecorder,
+    campaign_id: str | None = None,
 ) -> tuple[dict[str, object], bool]:
     created_at = datetime.now(timezone.utc)
+    metadata: dict[str, object] = {
+        "gitSha": agent_version.git_sha,
+        "workflowVersion": agent_version.workflow_version,
+        "modelConfiguration": model_configuration,
+        "ragMode": rag_mode,
+    }
+    if campaign_id is not None:
+        metadata["acceptanceCampaignId"] = campaign_id
     running = running_envelope(
         run_id=run_id,
         evaluation_kind="snapshot",
         scenario_id=scenario_id,
         suite_version=suite_version,
-        metadata={
-            "gitSha": agent_version.git_sha,
-            "workflowVersion": agent_version.workflow_version,
-            "modelConfiguration": model_configuration,
-            "ragMode": rag_mode,
-        },
+        metadata=metadata,
         created_at=created_at,
         started_at=created_at,
     )

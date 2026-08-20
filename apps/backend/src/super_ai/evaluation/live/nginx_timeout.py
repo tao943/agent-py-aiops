@@ -25,6 +25,11 @@ from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 SCENARIO_ID = "APY-LIVE-NGINX-TIMEOUT-001"
 _FORBIDDEN_TOOL_TERMS = ("write", "reload", "restart", "switch", "update")
+_GATEWAY_HEALTH_MAX_LATENCY_MS = 250
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _default_nginx_config_path() -> Path:
@@ -77,7 +82,7 @@ class NginxTimeoutScenarioDriver:
 
     async def preflight(self, identity: LiveRunIdentity) -> None:
         del identity
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             gateway, upstream = await self._health_responses(client)
         if gateway.status_code != 200 or upstream.status_code != 200:
             raise RuntimeError("Nginx Live Eval health preflight failed.")
@@ -88,14 +93,17 @@ class NginxTimeoutScenarioDriver:
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
         if identity.run_id not in self._runs:
             raise RuntimeError("Nginx Live Eval baseline is missing.")
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            started = time.monotonic()
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+            started = _monotonic()
             response = await client.get(
                 f"{self._config.gateway_url}/slow",
                 params={"delay_ms": "1500"},
             )
-            duration_ms = int((time.monotonic() - started) * 1_000)
+            duration_ms = int((_monotonic() - started) * 1_000)
             upstream = await client.get(f"{self._config.upstream_url}/health")
+            gateway_started = _monotonic()
+            gateway_health = await client.get(f"{self._config.gateway_url}/health")
+            gateway_latency_ms = int((_monotonic() - gateway_started) * 1_000)
         deadline_elapsed = 500 <= duration_ms <= 1_400
         return LiveFaultObservation(
             scenario_id=SCENARIO_ID,
@@ -105,18 +113,25 @@ class NginxTimeoutScenarioDriver:
                 LiveCheck(
                     "direct_upstream_health_succeeded", upstream.status_code == 200
                 ),
+                LiveCheck(
+                    "independent_gateway_health_succeeded",
+                    gateway_health.status_code == 200
+                    and gateway_latency_ms <= _GATEWAY_HEALTH_MAX_LATENCY_MS,
+                ),
             ),
             safe_facts=(
                 ("gatewayStatus", response.status_code),
                 ("requestDurationMs", duration_ms),
                 ("upstreamHealthStatus", upstream.status_code),
                 ("upstreamConnectSucceeded", upstream.status_code == 200),
+                ("gatewayHealthStatus", gateway_health.status_code),
+                ("gatewayHealthLatencyMs", gateway_latency_ms),
             ),
         )
 
     async def verify(self, identity: LiveRunIdentity) -> LiveVerification:
         state = self._runs[identity.run_id]
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             gateway, upstream = await self._health_responses(client)
         return LiveVerification(
             (
@@ -294,6 +309,13 @@ class NginxTimeoutEvidenceMcpClient:
                 "status": self._observation.safe_fact("upstreamHealthStatus"),
                 "healthy": self._observation.check_passed(
                     "direct_upstream_health_succeeded"
+                ),
+                "gatewayStatus": self._observation.safe_fact("gatewayHealthStatus"),
+                "gatewayHealthy": self._observation.check_passed(
+                    "independent_gateway_health_succeeded"
+                ),
+                "gatewayLatencyMs": self._observation.safe_fact(
+                    "gatewayHealthLatencyMs"
                 ),
             }
         if name == "ReadNginxTimeoutSummary":

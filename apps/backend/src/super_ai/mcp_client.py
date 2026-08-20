@@ -3,22 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from super_ai.observability import elapsed_ms, emit_event
 
 logger = logging.getLogger(__name__)
+
+
+def _trust_environment_for_mcp_url(url: str) -> bool:
+    hostname = (urlsplit(url).hostname or "").rstrip(".").casefold()
+    if hostname == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return True
+
+
+def _create_direct_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        auth=auth,
+        follow_redirects=True,
+        trust_env=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +253,11 @@ class LocalMcpClient:
             connection.url,
             timeout=connection.timeout_seconds,
             sse_read_timeout=connection.timeout_seconds,
+            httpx_client_factory=(
+                create_mcp_http_client
+                if _trust_environment_for_mcp_url(connection.url)
+                else _create_direct_mcp_http_client
+            ),
         ) as streams:
             return await _run_initialized_session(
                 streams[0],
@@ -239,7 +271,10 @@ class LocalMcpClient:
         connection: McpServerConnection,
         operation: Callable[[Any], Awaitable[Any]],
     ) -> Any:
-        async with httpx.AsyncClient(timeout=connection.timeout_seconds) as http_client:
+        async with httpx.AsyncClient(
+            timeout=connection.timeout_seconds,
+            trust_env=_trust_environment_for_mcp_url(connection.url),
+        ) as http_client:
             async with streamable_http_client(
                 connection.url,
                 http_client=http_client,

@@ -320,6 +320,417 @@ def test_artifact_counts_all_six_persisted_executor_attempts() -> None:
     assert artifact.plan_step_count == 6
 
 
+def test_v4_artifact_reads_auditable_hypothesis_dispositions() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [
+                        {
+                            "id": "postgres_lock_blocking",
+                            "disposition": "supported",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "lock_graph_confirmed",
+                            "assessmentSource": "deterministic",
+                        },
+                        {
+                            "id": "postgres_slow_query_without_lock",
+                            "disposition": "causally_inactive",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "latency_is_downstream_of_lock",
+                            "assessmentSource": "deterministic",
+                        },
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.workflow_version == "evidence-driven-v4"
+    assert artifact.graph_version == "aiops-diagnostic-v2"
+    assert artifact.artifact_valid is True
+    assert [item.disposition for item in artifact.hypothesis_assessments] == [
+        "supported",
+        "causally_inactive",
+    ]
+
+
+def test_new_v4_artifact_projects_persisted_v3_graph_version() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "knowledge_investigator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "sopHits": [],
+                },
+            ),
+            _step(
+                2,
+                "planner",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "plan": [],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.workflow_version == "evidence-driven-v4"
+    assert artifact.graph_version == "aiops-diagnostic-v3"
+
+
+def test_artifact_projects_safe_investigation_routing_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "strategy_router",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "route": {
+                        "strategy": "multi_agent",
+                        "score": 7,
+                        "reasonCodes": ["investigation_stagnated"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": ["runtime", "log"],
+                    },
+                    "dispatches": [
+                        {"dispatchId": "dispatch-runtime"},
+                        {"dispatchId": "dispatch-log"},
+                    ],
+                    "prompt": "private-sentinel",
+                },
+            ),
+            _step(
+                2,
+                "evidence_aggregator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "packetStatuses": ["completed", "timeout"],
+                    "fallbackReason": None,
+                    "rawOutput": "private-sentinel",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is not None
+    assert artifact.investigation_audit.strategy == "multi_agent"
+    assert artifact.investigation_audit.score == 7
+    assert artifact.investigation_audit.selected_investigators == (
+        "runtime",
+        "log",
+    )
+    assert artifact.investigation_audit.dispatch_count == 2
+    assert artifact.investigation_audit.packet_statuses == (
+        "completed",
+        "timeout",
+    )
+    assert "private-sentinel" not in repr(artifact.investigation_audit)
+
+
+def test_artifact_keeps_multi_effective_after_bounded_single_fallback() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "strategy_router",
+                {
+                    "route": {
+                        "strategy": "multi_agent",
+                        "score": 7,
+                        "reasonCodes": ["investigation_stagnated"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": ["runtime", "log"],
+                    },
+                    "dispatches": [
+                        {"dispatchId": "dispatch-runtime"},
+                        {"dispatchId": "dispatch-log"},
+                    ],
+                },
+            ),
+            _step(
+                2,
+                "strategy_router",
+                {
+                    "route": {
+                        "strategy": "single_agent",
+                        "score": 9,
+                        "reasonCodes": ["maximum_investigation_waves_reached"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": [],
+                    },
+                    "dispatches": [],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is not None
+    assert artifact.investigation_audit.strategy == "multi_agent"
+    assert artifact.investigation_audit.dispatch_count == 2
+
+
+def test_legacy_artifact_has_no_investigation_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (_step(1, "planner", {"workflowVersion": "evidence-driven-v4"}),),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is None
+
+
+def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [
+                        {
+                            "purpose": "Inspect process state.",
+                            "supports": ["process_down"],
+                            "refutes": [],
+                            "summary": "The process exited.",
+                            "evidenceIds": ["ev-container"],
+                            "causalRole": "trigger",
+                            "causalRoleOrigin": "trusted_evidence_rule",
+                        }
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert artifact.observation_decisions[0].supports == ("process_down",)
+    assert artifact.observation_decisions[0].causal_role == "trigger"
+    assert (
+        artifact.observation_decisions[0].causal_role_origin
+        == "trusted_evidence_rule"
+    )
+
+
+def test_v4_artifact_prefers_adjudicator_observation_projection() -> None:
+    base_observation = {
+        "purpose": "Inspect database work.",
+        "supports": [],
+        "refutes": [],
+        "summary": "Long transactions retain connections.",
+        "evidenceIds": ["ev-postgres"],
+        "causalRole": "mechanism",
+        "causalRoleOrigin": "plan_contract",
+    }
+    adjudicated_observation = {
+        **base_observation,
+        "supports": ["slow_database_work"],
+        "causalRole": "trigger",
+        "causalRoleOrigin": "coverage_repair",
+    }
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [base_observation],
+                },
+            ),
+            _step(
+                3,
+                "hypothesis_adjudicator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [adjudicated_observation],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert artifact.observation_decisions[0].supports == ("slow_database_work",)
+    assert artifact.observation_decisions[0].causal_role == "trigger"
+    assert artifact.observation_decisions[0].causal_role_origin == "coverage_repair"
+
+
+def test_v4_artifact_rejects_unknown_disposition_without_legacy_fallback() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "hypothesisAssessments": [
+                        {
+                            "id": "postgres_lock_blocking",
+                            "disposition": "probably_supported",
+                            "status": "supported",
+                            "evidenceIds": ["ev-lock"],
+                            "reasonCode": "unknown",
+                            "assessmentSource": "deterministic",
+                        }
+                    ]
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.artifact_valid is False
+    assert artifact.hypothesis_assessments == ()
+    assert "invalid_hypothesis_disposition" in artifact.artifact_errors
+
+
+def test_v3_artifact_projects_legacy_status_without_changing_it() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v3", "plan": []}),
+            _step(
+                2,
+                "evidence_evaluation",
+                {
+                    "hypothesisStates": [
+                        {
+                            "id": "legacy-open",
+                            "status": "open",
+                            "confidence": 0.3,
+                            "evidenceIds": [],
+                        },
+                        {
+                            "id": "legacy-refuted",
+                            "status": "refuted",
+                            "confidence": 0.1,
+                            "evidenceIds": ["ev-1"],
+                        },
+                    ]
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert [item.disposition for item in artifact.hypothesis_assessments] == [
+        "unresolved",
+        "refuted",
+    ]
+    assert [item.status for item in artifact.hypothesis_states] == ["open", "refuted"]
+
+
+def test_v4_artifact_projects_only_safe_model_and_validator_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "planner",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "modelCallCount": 2,
+                    "modelCallAudits": [
+                        {
+                            "role": "planner",
+                            "attempt": 1,
+                            "durationMs": 120,
+                            "cacheHit": False,
+                            "safeErrorCode": None,
+                            "prompt": "sentinel-private-prompt",
+                        }
+                    ],
+                },
+            ),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "hypothesisAssessments": [
+                        {
+                            "id": "cause-a",
+                            "disposition": "unresolved",
+                            "evidenceIds": [],
+                            "reasonCode": "awaiting_evidence",
+                            "assessmentSource": "deterministic",
+                        }
+                    ]
+                },
+            ),
+            _step(
+                3,
+                "validator_router",
+                {
+                    "validationRequired": False,
+                    "validationSkipped": True,
+                    "validationReasonCodes": [],
+                    "validationSkipReason": "deterministic_evidence_sufficient",
+                },
+            ),
+            _step(4, "execution_resume", {"resumeReason": "worker_restart"}),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.model_call_count == 2
+    assert artifact.model_call_audits[0].role == "planner"
+    assert "sentinel" not in repr(artifact.model_call_audits)
+    assert artifact.validator_routing is not None
+    assert artifact.validator_routing.skipped is True
+    assert artifact.validator_routing.skip_reason == "deterministic_evidence_sufficient"
+    assert artifact.resume_count == 1
+
+
 def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
     task = DiagnosticTaskRecord(
         id="task-1",

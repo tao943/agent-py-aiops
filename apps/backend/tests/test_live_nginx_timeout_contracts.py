@@ -4,11 +4,13 @@ import pytest
 
 from super_ai.aiops import RootCauseDecision
 from super_ai.evaluation import ArtifactToolCall, RunArtifact
+from super_ai.evaluation.live import nginx_timeout as nginx_timeout_module
 from super_ai.evaluation.live.domain import LiveCheck, LiveFaultObservation
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutEvidenceMcpClient,
     NginxTimeoutLiveConfig,
+    NginxTimeoutScenarioDriver,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
 from super_ai.mcp_client import McpClientError
@@ -21,12 +23,15 @@ def _observation() -> LiveFaultObservation:
             LiveCheck("gateway_returned_504", True),
             LiveCheck("read_deadline_elapsed", True),
             LiveCheck("direct_upstream_health_succeeded", True),
+            LiveCheck("independent_gateway_health_succeeded", True),
         ),
         safe_facts=(
             ("gatewayStatus", 504),
             ("requestDurationMs", 760),
             ("upstreamHealthStatus", 200),
             ("upstreamConnectSucceeded", True),
+            ("gatewayHealthStatus", 200),
+            ("gatewayHealthLatencyMs", 18),
         ),
     )
 
@@ -135,6 +140,66 @@ async def test_nginx_component_client_exposes_read_and_proposal_only_tools() -> 
     }
 
 
+@pytest.mark.asyncio
+async def test_nginx_health_probe_exposes_independent_upstream_and_gateway_facts() -> None:
+    result = await NginxTimeoutEvidenceMcpClient(_observation()).call_tool(
+        "ProbeLiveEvalUpstream",
+        {},
+    )
+
+    assert result == {
+        "benchmarkEvidenceId": "nginx-upstream-health",
+        "status": 200,
+        "healthy": True,
+        "gatewayStatus": 200,
+        "gatewayHealthy": True,
+        "gatewayLatencyMs": 18,
+    }
+
+
+@pytest.mark.asyncio
+async def test_nginx_inject_records_an_independent_gateway_health_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    class FakeClient:
+        def __init__(self, **options: object) -> None:
+            assert options == {"timeout": 3.0, "trust_env": False}
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def get(self, url: str, **kwargs: object) -> FakeResponse:
+            del kwargs
+            if url.endswith("/slow"):
+                return FakeResponse(504)
+            return FakeResponse(200)
+
+    clock = iter((10.0, 10.76, 20.0, 20.018))
+    monkeypatch.setattr(nginx_timeout_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        nginx_timeout_module,
+        "_monotonic",
+        lambda: next(clock),
+        raising=False,
+    )
+    driver = NginxTimeoutScenarioDriver(NginxTimeoutLiveConfig())
+    identity = validate_run_id("run-gateway-probe")
+    await driver.baseline(identity)
+
+    observation = await driver.inject(identity)
+
+    assert observation.safe_fact("gatewayHealthStatus") == 200
+    assert observation.safe_fact("gatewayHealthLatencyMs") == 18
+    assert observation.check_passed("independent_gateway_health_succeeded") is True
+
+
 def _proposal_arguments() -> dict[str, object]:
     return {
         "target": "live-eval-upstream",
@@ -196,3 +261,34 @@ async def test_nginx_read_tools_still_reject_proposal_arguments() -> None:
 def test_nginx_live_config_refuses_non_fixture_ports() -> None:
     with pytest.raises(ValueError, match="18080"):
         NginxTimeoutLiveConfig(gateway_url="http://127.0.0.1:8080")
+
+
+@pytest.mark.asyncio
+async def test_nginx_loopback_health_bypasses_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_options: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+        async def get(self, url: str, **kwargs: object) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr(nginx_timeout_module.httpx, "AsyncClient", FakeClient)
+    driver = NginxTimeoutScenarioDriver(NginxTimeoutLiveConfig())
+
+    await driver.preflight(validate_run_id("run-1"))
+
+    assert client_options == [{"timeout": 2.0, "trust_env": False}]

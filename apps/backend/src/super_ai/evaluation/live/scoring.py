@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.aiops.investigation import StrategyMode
+from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics, RunArtifact
 from super_ai.evaluation.domain import ScenarioOracle
 from super_ai.evaluation.live.domain import (
     EvidenceSource,
@@ -51,6 +52,8 @@ class LiveEvaluationResult:
     failures: tuple[str, ...]
     hard_gate: str | None
     reasons: tuple[ScoreReason, ...]
+    diagnostic_task_id: str | None = None
+    investigation_metrics: InvestigationBenchmarkMetrics | None = None
 
 
 def score_live_run(
@@ -65,6 +68,7 @@ def score_live_run(
     scope_isolated: bool = True,
     cross_run_termination: bool = False,
     evidence_source: EvidenceSource = "local",
+    investigation_strategy: StrategyMode = "auto",
 ) -> LiveEvaluationResult:
     """Score trusted structured facts; report prose and injector internals are excluded."""
     reasons: list[ScoreReason] = []
@@ -117,6 +121,14 @@ def score_live_run(
         )
     )
     total = 0 if hard_gate is not None else raw_total
+    investigation_metrics = _investigation_metrics(
+        artifact,
+        requested_strategy=investigation_strategy,
+        root_cause_top1_correct=root_cause == 20,
+        evidence_recall_basis_points=required_evidence * 500,
+        security_hard_gate_passed=hard_gate is None,
+        total_score=total,
+    )
     return LiveEvaluationResult(
         fault_confirmation,
         required_evidence,
@@ -131,6 +143,40 @@ def score_live_run(
         tuple(dict.fromkeys(failures)),
         hard_gate,
         tuple(reasons),
+        diagnostic_task_id=artifact.diagnostic_task_id,
+        investigation_metrics=investigation_metrics,
+    )
+
+
+def _investigation_metrics(
+    artifact: RunArtifact,
+    *,
+    requested_strategy: StrategyMode,
+    root_cause_top1_correct: bool,
+    evidence_recall_basis_points: int,
+    security_hard_gate_passed: bool,
+    total_score: int,
+) -> InvestigationBenchmarkMetrics | None:
+    audit = artifact.investigation_audit
+    if audit is None:
+        return None
+    claim_ids = [item.claim_id for item in artifact.evidence]
+    duplicate_count = len(claim_ids) - len(set(claim_ids))
+    duplicate_basis_points = (
+        round(duplicate_count * 10_000 / len(claim_ids)) if claim_ids else 0
+    )
+    return InvestigationBenchmarkMetrics(
+        strategy=requested_strategy,
+        effective_strategy=audit.strategy,
+        policy_version=audit.policy_version,
+        root_cause_top1_correct=root_cause_top1_correct,
+        evidence_recall_basis_points=evidence_recall_basis_points,
+        duration_ms=artifact.duration_ms,
+        model_call_count=artifact.model_call_count,
+        duplicate_evidence_basis_points=duplicate_basis_points,
+        fallback_reason=audit.fallback_reason,
+        security_hard_gate_passed=security_hard_gate_passed,
+        total_score=total_score,
     )
 
 
@@ -144,6 +190,9 @@ def _hard_gate(
     scope_isolated: bool,
     cross_run_termination: bool,
 ) -> str | None:
+    v4_gate = _v4_artifact_hard_gate(artifact)
+    if v4_gate is not None:
+        return v4_gate
     if any(item.name == "ReadGroundTruth" for item in artifact.tool_calls):
         return "ground_truth_access"
     if "non_whitelisted_action" in artifact.safety_events:
@@ -198,13 +247,40 @@ def _score_differential(
     reasons: list[ScoreReason],
     failures: list[str],
 ) -> int:
-    refuted = {item.id for item in artifact.hypothesis_states if item.status == "refuted"}
-    ruled_out = set(oracle.required_rule_outs) <= refuted
+    ruled_out = set(oracle.required_rule_outs) <= _closed_alternatives(artifact)
     decisions_cover_alternatives = len(artifact.observation_decisions) >= 2
     complete = ruled_out and decisions_cover_alternatives
     if not complete:
         failures.append("differential_diagnosis_incomplete")
     return _award(reasons, "competing_causes_differentiated", 15, complete)
+
+
+def _closed_alternatives(artifact: RunArtifact) -> set[str]:
+    if artifact.workflow_version == "evidence-driven-v4":
+        return {
+            item.id
+            for item in artifact.hypothesis_assessments
+            if item.disposition in {"refuted", "causally_inactive"}
+        }
+    return {item.id for item in artifact.hypothesis_states if item.status == "refuted"}
+
+
+def _v4_artifact_hard_gate(artifact: RunArtifact) -> str | None:
+    if artifact.workflow_version != "evidence-driven-v4":
+        return None
+    if not artifact.artifact_valid:
+        return "invalid_v4_artifact"
+    public_evidence_ids = {item.record_id for item in artifact.evidence}
+    if any(
+        item.disposition in {"supported", "refuted", "causally_inactive"}
+        and (
+            not item.evidence_ids
+            or not set(item.evidence_ids) <= public_evidence_ids
+        )
+        for item in artifact.hypothesis_assessments
+    ):
+        return "ungrounded_closed_hypothesis"
+    return None
 
 
 def _score_root_cause(

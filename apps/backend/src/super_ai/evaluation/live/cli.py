@@ -12,12 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from super_ai.aiops.execution import ExecutionCoordinator
+from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.history import (
     EvaluationStatus,
-    interrupted_envelope,
     running_envelope,
     terminal_envelope,
+)
+from super_ai.evaluation.history import (
+    validate_run_id as validate_evaluation_id,
 )
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
@@ -69,6 +73,7 @@ from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.llm import build_default_llm_provider
 from super_ai.mcp_client import LocalMcpClient
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
+from super_ai.memory.repositories import AiopsRuntimeRepositoryProvider
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.project_config import (
     load_project_config,
@@ -101,6 +106,21 @@ _SAFE_RESULT_FIELDS = frozenset(
 )
 
 
+def build_live_recovery_coordinator(
+    *,
+    runtime_provider: AiopsRuntimeRepositoryProvider,
+    owner_user_id: str,
+    diagnostic_task_id: str,
+    run_id: str,
+) -> ExecutionCoordinator:
+    repository = runtime_provider.execution_repository(
+        owner_user_id=owner_user_id,
+        task_id=diagnostic_task_id,
+        graph_version="live-eval-v1",
+    )
+    return ExecutionCoordinator(repository, worker_id=f"live-recovery:{run_id}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run or inspect the isolated AgentPy Docker Live benchmark."
@@ -115,9 +135,18 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--knowledge-base-id", required=True)
             command.add_argument("--config")
             command.add_argument(
+                "--campaign-id",
+                type=validate_evaluation_id,
+            )
+            command.add_argument(
                 "--evidence-source",
                 choices=("local", "cls"),
                 default="local",
+            )
+            command.add_argument(
+                "--strategy",
+                choices=("auto", "single", "multi"),
+                default="auto",
             )
     return parser
 
@@ -198,16 +227,34 @@ async def _run_live_command(
             retrieval_tool=retrieval_tool,
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
+            workflow_version="evidence-driven-v4",
+            investigation_strategy=cast(StrategyMode, arguments.strategy),
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )
+        runtime_provider = repositories.aiops_runtime
+        if runtime_provider is None:
+            raise RuntimeError("AIOps runtime repository is required for Live recovery.")
+
+        def recovery_coordinator_factory(task_id: str) -> ExecutionCoordinator:
+            return build_live_recovery_coordinator(
+                runtime_provider=runtime_provider,
+                owner_user_id=cast(str, arguments.owner_user_id),
+                diagnostic_task_id=task_id,
+                run_id=cast(str, arguments.run_id),
+            )
+
         runner = LiveBenchmarkRunner[LiveEvaluationResult](
             scenario_root=LIVE_SCENARIO_ROOT,
             driver=components.driver,
             evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
             recovery=components.recovery,
-            evaluator=_LiveScoringEvaluator(evidence_source),
+            evaluator=_LiveScoringEvaluator(
+                evidence_source,
+                investigation_strategy=cast(StrategyMode, arguments.strategy),
+            ),
+            recovery_coordinator_factory=recovery_coordinator_factory,
         )
         return await runner.run(
             cast(str, arguments.scenario),
@@ -221,6 +268,8 @@ async def _run_live_command(
             evidence_source=evidence_source,
             execute=execute,
             recorder=recorder,
+            campaign_id=cast(str | None, arguments.campaign_id),
+            investigation_strategy=cast(StrategyMode, arguments.strategy),
         )
     finally:
         await engine.dispose()
@@ -235,26 +284,43 @@ async def _run_live_once(
     evidence_source: EvidenceSource,
     execute: Callable[[], Awaitable[LiveEvaluationResult]],
     recorder: EvaluationRunRecorder,
+    campaign_id: str | None = None,
+    investigation_strategy: StrategyMode = "auto",
 ) -> tuple[dict[str, object], int]:
     timestamp = datetime.now(timezone.utc)
+    metadata: dict[str, object] = {
+        "workflowVersion": "live-v1",
+        "evidenceSource": evidence_source,
+        "investigationStrategy": investigation_strategy,
+        "investigationPolicyVersion": "investigation-router-v1",
+    }
+    if campaign_id is not None:
+        metadata["acceptanceCampaignId"] = campaign_id
     running = running_envelope(
         run_id=run_id,
         evaluation_kind="live",
         scenario_id=scenario_id,
         suite_version="v1",
-        metadata={
-            "workflowVersion": "live-v1",
-            "evidenceSource": evidence_source,
-        },
+        metadata=metadata,
         created_at=timestamp,
         started_at=timestamp,
     )
     start = await recorder.start(running)
     try:
         result = await execute()
-    except (KeyboardInterrupt, asyncio.CancelledError):
+    except (KeyboardInterrupt, asyncio.CancelledError) as exc:
         await recorder.fail(
-            interrupted_envelope(running, completed_at=datetime.now(timezone.utc))
+            terminal_envelope(
+                running=running,
+                status="interrupted",
+                validity=None,
+                passed=None,
+                metrics=_cleanup_metrics(exc),
+                result_payload={},
+                diagnostic_task_id=None,
+                failure_category=None,
+                completed_at=datetime.now(timezone.utc),
+            )
         )
         raise
     except LiveBenchmarkError as exc:
@@ -277,7 +343,7 @@ async def _run_live_once(
             status=cast(EvaluationStatus, status),
             validity=validity,
             passed=False if status == "failed" else None,
-            metrics={},
+            metrics=_cleanup_metrics(exc),
             result_payload=result_payload,
             diagnostic_task_id=None,
             failure_category=exc.category,
@@ -285,13 +351,13 @@ async def _run_live_once(
         )
         finish = await recorder.fail(terminal)
         return payload, 2 if start.database_pending or finish.database_pending else exit_code
-    except Exception:
+    except Exception as exc:
         terminal = terminal_envelope(
             running=running,
             status="infra_invalid",
             validity="INFRA_INVALID",
             passed=None,
-            metrics={},
+            metrics=_cleanup_metrics(exc),
             result_payload={"failures": ["live_runtime_error"]},
             diagnostic_task_id=None,
             failure_category="live_runtime_error",
@@ -315,22 +381,47 @@ async def _run_live_once(
 
     live_result = _live_result_payload(result, evidence_source=evidence_source)
     status = "passed" if result.passed else "failed"
+    metrics: dict[str, object] = {
+        "total": result.total,
+        "rawTotal": result.raw_total,
+        "verificationPassed": result.recovery_verification == 15,
+        "cleanupSucceeded": True,
+    }
+    investigation_metrics = result.investigation_metrics
+    if investigation_metrics is not None:
+        if investigation_metrics.strategy != investigation_strategy:
+            raise ValueError("Investigation metric strategy does not match the run request.")
+        metrics.update(
+            {
+                "rootCauseTop1Correct": investigation_metrics.root_cause_top1_correct,
+                "evidenceRecallBasisPoints": (
+                    investigation_metrics.evidence_recall_basis_points
+                ),
+                "durationMs": investigation_metrics.duration_ms,
+                "modelCallCount": investigation_metrics.model_call_count,
+                "duplicateEvidenceBasisPoints": (
+                    investigation_metrics.duplicate_evidence_basis_points
+                ),
+                "fallbackReason": investigation_metrics.fallback_reason,
+                "effectiveInvestigationStrategy": (
+                    investigation_metrics.effective_strategy
+                ),
+                "securityHardGatePassed": (
+                    investigation_metrics.security_hard_gate_passed
+                ),
+            }
+        )
     terminal = terminal_envelope(
         running=running,
         status=cast(EvaluationStatus, status),
         validity="VALID_PASS" if result.passed else "VALID_FAIL",
         passed=result.passed,
-        metrics={
-            "total": result.total,
-            "rawTotal": result.raw_total,
-            "verificationPassed": result.recovery_verification == 15,
-            "cleanupSucceeded": True,
-        },
+        metrics=metrics,
         result_payload={
             "failures": list(result.failures),
             "hardGate": result.hard_gate,
         },
-        diagnostic_task_id=None,
+        diagnostic_task_id=result.diagnostic_task_id,
         failure_category=None,
         completed_at=datetime.now(timezone.utc),
     )
@@ -348,9 +439,22 @@ async def _run_live_once(
     return payload, exit_code
 
 
+def _cleanup_metrics(error: BaseException) -> dict[str, object]:
+    cleanup_succeeded = getattr(error, "cleanup_succeeded", None)
+    if isinstance(cleanup_succeeded, bool):
+        return {"cleanupSucceeded": cleanup_succeeded}
+    return {}
+
+
 class _LiveScoringEvaluator:
-    def __init__(self, evidence_source: EvidenceSource) -> None:
+    def __init__(
+        self,
+        evidence_source: EvidenceSource,
+        *,
+        investigation_strategy: StrategyMode = "auto",
+    ) -> None:
         self._evidence_source: EvidenceSource = evidence_source
+        self._investigation_strategy: StrategyMode = investigation_strategy
 
     def evaluate(self, **values: object) -> LiveEvaluationResult:
         from super_ai.evaluation.artifacts import RunArtifact
@@ -383,6 +487,7 @@ class _LiveScoringEvaluator:
             recovery=recovery,
             verification=verification,
             evidence_source=self._evidence_source,
+            investigation_strategy=self._investigation_strategy,
         )
 
 

@@ -199,6 +199,19 @@ def test_application_diagnostic_input_contains_only_public_scenario_fields() -> 
     assert "evidence" not in json.dumps(vocabulary).lower()
     assert "oracle" not in json.dumps(vocabulary).lower()
     assert "concurrent_updates_acquired_order_and_inventory_rows_in_reverse_order" not in serialized
+    assert "workflowVersion" not in payload
+
+
+def test_application_diagnostic_input_can_request_auditable_v4() -> None:
+    scenario = load_public_scenario(SCENARIOS / "APY-013")
+
+    payload = build_application_diagnostic_input(
+        scenario,
+        workflow_version="evidence-driven-v4",
+    )
+
+    assert payload["workflowVersion"] == "evidence-driven-v4"
+    assert payload["graphVersion"] == "aiops-diagnostic-v3"
 
 
 def test_snapshot_decision_vocabulary_rejects_conflicting_mechanism_aliases() -> None:

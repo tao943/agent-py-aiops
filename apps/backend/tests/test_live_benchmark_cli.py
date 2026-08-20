@@ -9,10 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics
 from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
     build_live_evidence_runtime,
+    build_live_recovery_coordinator,
     build_live_scenario_registry,
     build_parser,
     classify_live_failure,
@@ -38,6 +40,7 @@ from super_ai.evaluation.live.redis_maxclients import (
     RedisMaxclientsScenarioDriver,
 )
 from super_ai.evaluation.live.runner import LiveBenchmarkError, LocalLiveEvidencePreparer
+from super_ai.evaluation.live.scoring import LiveEvaluationResult
 from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.project_config import ProjectConfigurationError
 
@@ -48,6 +51,45 @@ class AvailableEvaluationRepository:
 
     async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
         del envelope, artifact_checksum
+
+
+class RecordingAiopsRuntimeProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self.repository = object()
+
+    def execution_repository(
+        self, *, owner_user_id: str, task_id: str, graph_version: str
+    ) -> object:
+        self.calls.append(
+            {
+                "owner_user_id": owner_user_id,
+                "task_id": task_id,
+                "graph_version": graph_version,
+            }
+        )
+        return self.repository
+
+
+def test_live_recovery_coordinator_uses_diagnostic_task_scope() -> None:
+    provider = RecordingAiopsRuntimeProvider()
+
+    coordinator = build_live_recovery_coordinator(
+        runtime_provider=provider,  # type: ignore[arg-type]
+        owner_user_id="eval-user",
+        diagnostic_task_id="diagnostic-task-1",
+        run_id="live-run-1",
+    )
+
+    assert provider.calls == [
+        {
+            "owner_user_id": "eval-user",
+            "task_id": "diagnostic-task-1",
+            "graph_version": "live-eval-v1",
+        }
+    ]
+    assert coordinator._repository is provider.repository  # pyright: ignore[reportPrivateUsage]
+    assert coordinator._worker_id == "live-recovery:live-run-1"  # pyright: ignore[reportPrivateUsage]
 
 
 def live_recorder(tmp_path: Path) -> tuple[EvaluationRunRecorder, EvaluationArchive]:
@@ -68,7 +110,9 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise LiveBenchmarkError("recovery_denied", stage="recover")
+        error = LiveBenchmarkError("recovery_denied", stage="recover")
+        error.cleanup_succeeded = True
+        raise error
 
     payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
@@ -82,6 +126,7 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     assert payload["status"] == "failed"
     assert envelope.status == "failed"
     assert envelope.validity == "VALID_FAIL"
+    assert envelope.metrics["cleanupSucceeded"] is True
 
 
 @pytest.mark.asyncio
@@ -89,7 +134,9 @@ async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise LiveBenchmarkError("cls_index_timeout", stage="evidence")
+        error = LiveBenchmarkError("cls_index_timeout", stage="evidence")
+        error.cleanup_succeeded = True
+        raise error
 
     payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
         scenario_id="APY-LIVE-PG-LOCK-001",
@@ -102,6 +149,7 @@ async def test_cls_timeout_is_saved_as_infra_invalid(tmp_path: Path) -> None:
     assert exit_code == 2
     assert payload["status"] == "infra_invalid"
     assert envelope.metadata["evidenceSource"] == "cls"
+    assert envelope.metrics["cleanupSucceeded"] is True
 
 
 @pytest.mark.asyncio
@@ -109,7 +157,9 @@ async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        raise asyncio.CancelledError
+        error = asyncio.CancelledError()
+        error.cleanup_succeeded = True  # type: ignore[attr-defined]
+        raise error
 
     with pytest.raises(asyncio.CancelledError):
         await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
@@ -119,7 +169,55 @@ async def test_live_cancellation_is_saved_as_interrupted(tmp_path: Path) -> None
             execute=execute,
             recorder=recorder,
         )
-    assert archive.load("live-cancelled").status == "interrupted"
+    envelope = archive.load("live-cancelled")
+    assert envelope.status == "interrupted"
+    assert envelope.metrics["cleanupSucceeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_live_failure_saves_failed_cleanup_result(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = LiveBenchmarkError("diagnostic_failed", stage="diagnose")
+        error.cleanup_succeeded = False
+        raise error
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-cleanup-failed",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("live-cleanup-failed")
+    assert envelope.failure_category == "diagnostic_failed"
+    assert envelope.metrics["cleanupSucceeded"] is False
+
+
+@pytest.mark.asyncio
+async def test_live_runtime_error_saves_known_cleanup_result(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = RuntimeError("sensitive runtime detail")
+        error.cleanup_succeeded = False  # type: ignore[attr-defined]
+        raise error
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-runtime-cleanup-failed",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+
+    envelope = archive.load("live-runtime-cleanup-failed")
+    assert exit_code == 2
+    assert payload["status"] == "infra_invalid"
+    assert envelope.failure_category == "live_runtime_error"
+    assert envelope.metrics["cleanupSucceeded"] is False
 
 
 def test_cli_resolves_repository_live_scenario_root() -> None:
@@ -175,6 +273,102 @@ def test_cli_requires_explicit_scenario_and_run_id(command: str) -> None:
     assert args.command == command
     assert args.scenario == "APY-LIVE-PG-LOCK-001"
     assert args.run_id == "live-run-1"
+
+
+def test_live_run_cli_accepts_and_validates_campaign_id() -> None:
+    parser = build_parser()
+    base = [
+        "run",
+        "--scenario",
+        "APY-LIVE-PG-LOCK-001",
+        "--run-id",
+        "live-run-1",
+        "--owner-user-id",
+        "eval-user",
+        "--knowledge-base-id",
+        "kb-30-cards",
+        "--campaign-id",
+    ]
+
+    arguments = parser.parse_args([*base, "full-acceptance-20260818"])
+    assert arguments.campaign_id == "full-acceptance-20260818"
+    for invalid in ("", "../campaign", "x" * 81):
+        with pytest.raises(SystemExit):
+            parser.parse_args([*base, invalid])
+
+
+@pytest.mark.asyncio
+async def test_live_campaign_is_saved_only_as_metadata(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute():
+        error = LiveBenchmarkError("diagnostic_failed", stage="diagnose")
+        error.cleanup_succeeded = True
+        raise error
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-campaign",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+        campaign_id="full-acceptance-20260818",
+    )
+
+    envelope = archive.load("live-campaign")
+    assert envelope.metadata["acceptanceCampaignId"] == "full-acceptance-20260818"
+    assert "acceptanceCampaignId" not in envelope.result_payload
+
+
+@pytest.mark.asyncio
+async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute() -> LiveEvaluationResult:
+        return LiveEvaluationResult(
+            fault_confirmation=10,
+            required_evidence=20,
+            differential_diagnosis=15,
+            root_cause=20,
+            citation_audit=10,
+            recovery_policy=10,
+            recovery_verification=15,
+            raw_total=100,
+            total=100,
+            passed=True,
+            failures=(),
+            hard_gate=None,
+            reasons=(),
+            diagnostic_task_id="diagnostic-live-1",
+            investigation_metrics=InvestigationBenchmarkMetrics(
+                strategy="multi",
+                effective_strategy="multi_agent",
+                policy_version="investigation-router-v1",
+                root_cause_top1_correct=True,
+                evidence_recall_basis_points=10000,
+                duration_ms=1200,
+                model_call_count=3,
+                duplicate_evidence_basis_points=0,
+                fallback_reason=None,
+                security_hard_gate_passed=True,
+                total_score=100,
+            ),
+        )
+
+    await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-success-task-link",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+        investigation_strategy="multi",
+    )
+
+    envelope = archive.load("live-success-task-link")
+    assert envelope.diagnostic_task_id == "diagnostic-live-1"
+    assert envelope.metadata["investigationStrategy"] == "multi"
+    assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
+    assert envelope.metrics["rootCauseTop1Correct"] is True
 
 
 def test_cli_rejects_missing_identity() -> None:

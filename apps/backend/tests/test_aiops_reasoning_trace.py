@@ -8,12 +8,16 @@ from uuid import uuid4
 import pytest
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.adjudication import HypothesisAssessment
 from super_ai.aiops.diagnostics import (
+    _diagnostic_plan_step_payload,  # pyright: ignore[reportPrivateUsage]
     _fallback_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _next_open_hypothesis_step_index,  # pyright: ignore[reportPrivateUsage]
     _normalize_grounded_decision,  # pyright: ignore[reportPrivateUsage]
     _project_evidence_sufficiency,  # pyright: ignore[reportPrivateUsage]
     _step_fingerprint,  # pyright: ignore[reportPrivateUsage]
+    _supporting_decision_evidence_ids,  # pyright: ignore[reportPrivateUsage]
+    _update_hypothesis_states,  # pyright: ignore[reportPrivateUsage]
     _validator_chat_model,  # pyright: ignore[reportPrivateUsage]
     _validator_model_name,  # pyright: ignore[reportPrivateUsage]
     _validator_structured_output_method,  # pyright: ignore[reportPrivateUsage]
@@ -30,6 +34,7 @@ from super_ai.aiops.reasoning import (
     parse_recovery_plan,
     parse_root_cause_decision,
     parse_root_cause_validation,
+    project_hypothesis_assessment,
 )
 from super_ai.evaluation import SnapshotMcpClient, load_public_scenario
 from super_ai.evaluation.runner import build_application_diagnostic_input
@@ -42,6 +47,175 @@ from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.retrieval import KnowledgeRetrievalToolInput, KnowledgeRetrievalToolResult
 
 SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "scenarios"
+
+
+def test_causally_inactive_projects_to_legacy_refuted_without_changing_v4_state() -> None:
+    assessment = HypothesisAssessment(
+        hypothesis_id="port_mismatch",
+        disposition="causally_inactive",
+        evidence_ids=("e-route",),
+        reason_code="route_not_on_failure_path",
+        assessment_source="deterministic",
+    )
+
+    projected = project_hypothesis_assessment(assessment)
+
+    assert projected.status == "refuted"
+    assert projected.confidence == 0.1
+    assert assessment.disposition == "causally_inactive"
+
+
+def test_plan_parser_instantiates_a_trusted_evidence_rule_template() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Compare the upstream and service ports.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_port_mismatch",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    assert len(plan[0].evidence_rules) == 1
+    rule = plan[0].evidence_rules[0]
+    assert rule.hypothesis_id == "upstream_port_mismatch"
+    assert rule.when_true == "refuted"
+    assert rule.reason_code == "configured_route_port_matches_service"
+
+
+def test_trusted_rule_payload_preserves_only_reconstructable_template_input() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Compare the upstream and service ports.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_port_mismatch",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    payload = _diagnostic_plan_step_payload(plan[0])
+
+    assert payload["evidenceRules"] == [
+        {
+            "templateId": "nginx_upstream_port_matches_container_port",
+            "hypothesisId": "upstream_port_mismatch",
+            "parameters": {
+                "containerFact": "InspectContainer.configuredPorts",
+                "nginxFact": "InspectNginx.upstreamPort",
+            },
+        }
+    ]
+
+
+def test_plan_parser_drops_model_defined_disposition_rule() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-container",
+                        "tool": "InspectContainer",
+                        "arguments": {"service": "checkout-service"},
+                        "purpose": "Inspect the process.",
+                        "testsHypotheses": ["upstream_port_mismatch"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "hypothesisId": "upstream_port_mismatch",
+                                "predicate": {
+                                    "leftFact": "InspectContainer.status",
+                                    "operator": "eq",
+                                    "expected": "exited",
+                                },
+                                "whenTrue": "refuted",
+                                "reasonCode": "model_invented_causal_mapping",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectContainer"},
+        known_hypotheses={"upstream_port_mismatch"},
+        causal_capabilities={"InspectContainer": {"mechanism"}},
+    )
+
+    assert plan[0].evidence_rules == ()
+
+
+def test_trusted_template_cannot_close_an_unauthorized_hypothesis() -> None:
+    plan = parse_plan(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "id": "inspect-nginx",
+                        "tool": "InspectNginx",
+                        "arguments": {"route": "checkout"},
+                        "purpose": "Inspect the upstream route.",
+                        "testsHypotheses": ["upstream_process_down"],
+                        "causalIntent": "mechanism",
+                        "evidenceRules": [
+                            {
+                                "templateId": "nginx_upstream_port_matches_container_port",
+                                "hypothesisId": "upstream_process_down",
+                                "parameters": {
+                                    "nginxFact": "InspectNginx.upstreamPort",
+                                    "containerFact": "InspectContainer.configuredPorts",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        available_tools={"InspectNginx"},
+        known_hypotheses={"upstream_process_down"},
+        causal_capabilities={"InspectNginx": {"mechanism"}},
+    )
+
+    assert plan[0].evidence_rules == ()
 
 
 def _model_sufficiency() -> EvidenceSufficiencyDecision:
@@ -839,12 +1013,14 @@ def test_plan_rejects_intent_outside_tool_capability() -> None:
 
 
 @pytest.mark.asyncio
-async def test_evidence_evaluator_normalizes_role_to_plan_contract(
+async def test_evidence_evaluator_retains_known_support_and_allowed_model_role(
     migrated_database_url: str,
 ) -> None:
+    prompts: list[str] = []
+
     class StaticChatModel:
         async def ainvoke(self, prompt: object) -> str:
-            del prompt
+            prompts.append(str(prompt))
             return json.dumps(
                 {
                     "purpose": "Inspect transaction resource order.",
@@ -924,13 +1100,113 @@ async def test_evidence_evaluator_normalizes_role_to_plan_contract(
     observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
     assert observation["summary"] == "Transactions acquired rows in opposite order."
     assert observation["supports"] == ["postgres_deadlock"]
-    assert observation["refutes"] == []
+    assert observation["refutes"] == ["postgres_slow_query"]
     assert observation["evidenceIds"] == ["ev-order"]
-    assert observation["causalRole"] == "trigger"
-    assert observation["causalRoleOrigin"] == "plan_contract"
+    assert observation["causalRole"] == "mechanism"
+    assert observation["causalRoleOrigin"] == "model"
     assert observation["reportedCausalRole"] == "mechanism"
-    assert observation["causalRoleCorrected"] is True
+    assert observation["causalRoleCorrected"] is False
     assert steps[-1].payload["observationDecision"] == observation
+    assert "compatible with a hypothesis is not sufficient to support it" in prompts[0]
+    assert "decisively contradicts" in prompts[0]
+    assert "Evaluate every hypothesis named by testsHypotheses" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_evidence_evaluator_corrects_disallowed_model_role_to_plan_contract(
+    migrated_database_url: str,
+) -> None:
+    class StaticChatModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "purpose": "Inspect the PostgreSQL wait graph.",
+                    "supports": ["postgres_deadlock"],
+                    "refutes": [],
+                    "summary": "A two-session wait cycle exists.",
+                    "causalRole": "trigger",
+                }
+            )
+
+    class StaticLlmProvider:
+        def create_chat_model(self) -> StaticChatModel:
+            return StaticChatModel()
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="disallowed-causal-role-contract",
+            status="running",
+            query="Inspect a database incident.",
+            input_payload={},
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, StaticLlmProvider()),
+            retrieval_tool=cast(Any, object()),
+            mcp_client=cast(Any, object()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+
+        update = await service._evidence_evaluator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "current_evidence_id": "ev-cycle",
+                    "current_evidence_summary": "bounded observation",
+                    "current_plan_step": {
+                        "id": "wait-graph",
+                        "tool": "InspectPostgresWaitGraph",
+                        "arguments": {},
+                        "purpose": "Inspect the PostgreSQL wait graph.",
+                        "testsHypotheses": ["postgres_deadlock"],
+                        "causalIntent": "mechanism",
+                    },
+                    "public_hypotheses": [{"id": "postgres_deadlock"}],
+                    "hypothesis_states": [
+                        {
+                            "id": "postgres_deadlock",
+                            "status": "open",
+                            "confidence": 0.5,
+                            "evidenceIds": [],
+                        }
+                    ],
+                },
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    observation = cast(list[dict[str, object]], update["observation_decisions"])[0]
+    assert observation["causalRole"] == "mechanism"
+    assert observation["causalRoleOrigin"] == "plan_contract"
+    assert observation["reportedCausalRole"] == "trigger"
+    assert observation["causalRoleCorrected"] is True
+
+
+def test_supporting_decision_evidence_includes_incidental_known_support() -> None:
+    assert _supporting_decision_evidence_ids(
+        hypothesis_states=[{"id": "slow_database_work", "status": "supported"}],
+        observation_decisions=[
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["ev-postgres"],
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["ev-pool"],
+            },
+        ],
+        persisted_evidence_ids=["ev-postgres", "ev-pool", "ev-deployment"],
+    ) == ["ev-postgres", "ev-pool"]
 
 
 def test_observation_decision_requires_known_hypotheses() -> None:
@@ -948,6 +1224,120 @@ def test_observation_decision_cannot_support_and_refute_same_hypothesis() -> Non
             '"refutes":["process-down"],"summary":"x"}',
             known_hypotheses={"process-down"},
         )
+
+
+def test_strong_accumulated_support_survives_one_conflicting_observation() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["database_work"],'
+        '"summary":"One observation conflicts.","causalRole":"context"}',
+        known_hypotheses={"database_work"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "database_work",
+                "status": "supported",
+                "confidence": 1.0,
+                "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-conflict",
+    )
+
+    assert states == [
+        {
+            "id": "database_work",
+            "status": "supported",
+            "confidence": 0.6,
+            "evidenceIds": ["ev-1", "ev-2", "ev-3", "ev-conflict"],
+        }
+    ]
+
+
+def test_weak_support_becomes_open_when_evidence_conflicts() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["database_work"],'
+        '"summary":"One observation conflicts.","causalRole":"context"}',
+        known_hypotheses={"database_work"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "database_work",
+                "status": "supported",
+                "confidence": 0.75,
+                "evidenceIds": ["ev-support"],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-conflict",
+    )
+
+    assert states[0]["status"] == "open"
+    assert states[0]["confidence"] == pytest.approx(0.35)
+
+
+def test_open_hypothesis_becomes_refuted_after_one_refuting_observation() -> None:
+    decision = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["traffic"],'
+        '"summary":"Traffic stayed flat.","causalRole":"context"}',
+        known_hypotheses={"traffic"},
+    )
+
+    states = _update_hypothesis_states(
+        [
+            {
+                "id": "traffic",
+                "status": "open",
+                "confidence": 0.5,
+                "evidenceIds": [],
+            }
+        ],
+        decision=decision,
+        evidence_id="ev-traffic",
+    )
+
+    assert states[0]["status"] == "refuted"
+    assert states[0]["confidence"] == pytest.approx(0.1)
+
+
+def test_context_support_cannot_outweigh_later_direct_refutation() -> None:
+    context = parse_observation_decision(
+        '{"purpose":"check","supports":["port_mismatch"],"refutes":[],'
+        '"summary":"The symptom is compatible.","causalRole":"context"}',
+        known_hypotheses={"port_mismatch"},
+    )
+    direct_refutation = parse_observation_decision(
+        '{"purpose":"check","supports":[],"refutes":["port_mismatch"],'
+        '"summary":"The process is not listening.","causalRole":"mechanism"}',
+        known_hypotheses={"port_mismatch"},
+    )
+
+    after_context = _update_hypothesis_states(
+        [
+            {
+                "id": "port_mismatch",
+                "status": "open",
+                "confidence": 0.5,
+                "evidenceIds": [],
+            }
+        ],
+        decision=context,
+        evidence_id="ev-context",
+    )
+    after_direct = _update_hypothesis_states(
+        after_context,
+        decision=direct_refutation,
+        evidence_id="ev-direct",
+    )
+
+    assert after_context[0]["status"] == "open"
+    assert after_context[0]["confidence"] == pytest.approx(0.6)
+    assert after_direct[0]["status"] == "refuted"
+    assert after_direct[0]["confidence"] == pytest.approx(0.2)
 
 
 def test_root_cause_decision_requires_available_evidence_ids() -> None:
@@ -1671,6 +2061,7 @@ class ReplanningChatModel:
                         "supports": ["upstream_process_down"],
                         "refutes": [],
                         "summary": "The checkout container is exited and has no listener.",
+                        "causalRole": "mechanism",
                     }
                 )
             return json.dumps(
@@ -1681,6 +2072,7 @@ class ReplanningChatModel:
                     "summary": (
                         "Nginx resolves checkout on port 8080 but the connection is refused."
                     ),
+                    "causalRole": "context",
                 }
             )
         if "evidence sufficiency decision" in prompt:
@@ -2666,6 +3058,123 @@ async def test_apy_013_routes_only_validation_to_dedicated_validator(
     returned = cast(dict[str, object], result["decision_validation"])
     assert returned["validationModel"] == "qwen3.8-max"
     assert returned["validationErrorCodes"] == []
+
+
+def _semantic_expression_gap_state() -> dict[str, object]:
+    return {
+        "owner_user_id": "benchmark-user",
+        "task_id": "diagnostic-semantic-expression-gap",
+        "evidence_ids": ["evidence_a1", "evidence_b2", "evidence_c3"],
+        "root_cause_decision": {
+            "component": "postgresql",
+            "mechanism": "slow_transaction_pool_exhaustion",
+            "trigger": "A reporting transaction retained a lock for more than 428 seconds.",
+            "causalChain": [
+                "The long transaction held a database lock.",
+                "Blocked requests retained every pooled connection.",
+                "Pool acquisition attempts timed out.",
+            ],
+            "evidenceIds": ["evidence_a1", "evidence_b2", "evidence_c3"],
+            "confidence": 0.96,
+        },
+        "public_hypotheses": [{"id": "slow_database_work"}],
+        "hypothesis_states": [{"id": "slow_database_work", "status": "supported"}],
+        "observation_decisions": [
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_a1"],
+                "summary": "reporting-worker has held a transactionid lock for 428 seconds.",
+                "causalRole": "trigger",
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_b2"],
+                "summary": "The pool is 20/20 checked out while borrowers wait on a DB lock.",
+                "causalRole": "mechanism",
+            },
+            {
+                "supports": ["slow_database_work"],
+                "evidenceIds": ["evidence_c3"],
+                "summary": "There were 37 pool acquire timeouts and a 21 percent error rate.",
+                "causalRole": "impact",
+            },
+        ],
+        "decision_vocabulary": {
+            "labelsByHypothesis": {
+                "slow_database_work": {
+                    "component": "postgresql",
+                    "mechanism": "slow_transaction_pool_exhaustion",
+                }
+            }
+        },
+        "evidence_sufficiency": {"recommendedTools": []},
+        "tool_definitions": (),
+        "evidence": [],
+        "replan_count": 0,
+        "max_replans": 0,
+        "plan_index": 0,
+        "plan": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_semantic_expression_gap_reaches_dedicated_validator() -> None:
+    provider = DedicatedValidatorLlmProvider()
+    repositories = RecordingMemoryRepositories()
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, repositories),
+        llm_provider=cast(LlmProvider, provider),
+        retrieval_tool=cast(Any, EmptyRetrieval()),
+        mcp_client=cast(Any, object()),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+
+    result = await service._decision_validator(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, _semantic_expression_gap_state())
+    )
+
+    assert provider.validator_model.wrapper_calls == 1
+    assert len(provider.validator_model.inputs) == 1
+    prompt = provider.validator_model.inputs[0]
+    assert "every candidate field" in prompt
+    assert "every causalChain fact" in prompt
+    validation = cast(dict[str, object], result["decision_validation"])
+    assert validation["status"] == "valid"
+    assert validation["validationOrigin"] == "llm_confirmed"
+    assert result["root_cause_decision"] is not None
+
+
+@pytest.mark.asyncio
+async def test_semantic_expression_gap_fails_closed_when_validator_is_unavailable() -> None:
+    class TimeoutValidatorModel(RecordingDedicatedValidatorModel):
+        async def ainvoke(self, input: object) -> object:
+            self.inputs.append(str(input))
+            raise TimeoutError("validator provider timeout")
+
+    provider = DedicatedValidatorLlmProvider()
+    provider.validator_model = TimeoutValidatorModel()
+    repositories = RecordingMemoryRepositories()
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, repositories),
+        llm_provider=cast(LlmProvider, provider),
+        retrieval_tool=cast(Any, EmptyRetrieval()),
+        mcp_client=cast(Any, object()),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+
+    result = await service._decision_validator(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, _semantic_expression_gap_state())
+    )
+
+    assert provider.validator_model.wrapper_calls == 1
+    validation = cast(dict[str, object], result["decision_validation"])
+    assert validation["status"] == "invalid"
+    assert validation["validationErrorCategory"] == "model_call_failed"
+    assert validation["validationWarning"] == "llm_validator_unavailable"
+    assert validation["validationOrigin"] == "none"
+    assert result["root_cause_decision"] is None
 
 
 @pytest.mark.asyncio

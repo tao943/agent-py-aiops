@@ -8,6 +8,11 @@ from collections.abc import Collection, Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
+from super_ai.aiops.adjudication import (
+    HypothesisAssessment,
+    HypothesisEvidenceRule,
+    instantiate_trusted_evidence_rule,
+)
 from super_ai.aiops.causal_intents import (
     CausalIntent,
     CausalIntentOrigin,
@@ -24,6 +29,7 @@ class DiagnosticPlanStep:
     tests_hypotheses: tuple[str, ...]
     causal_intent: CausalIntent
     causal_intent_origin: CausalIntentOrigin = "model"
+    evidence_rules: tuple[HypothesisEvidenceRule, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +38,25 @@ class HypothesisState:
     status: Literal["open", "supported", "refuted"]
     confidence: float
     evidence_ids: tuple[str, ...]
+
+
+def project_hypothesis_assessment(assessment: HypothesisAssessment) -> HypothesisState:
+    """Project a v4 assessment for legacy v2/v3 readers only."""
+    if assessment.disposition == "supported":
+        status: Literal["open", "supported", "refuted"] = "supported"
+        confidence = 0.95
+    elif assessment.disposition in {"refuted", "causally_inactive"}:
+        status = "refuted"
+        confidence = 0.1 if assessment.disposition == "causally_inactive" else 0.05
+    else:
+        status = "open"
+        confidence = 0.5
+    return HypothesisState(
+        id=assessment.hypothesis_id,
+        status=status,
+        confidence=confidence,
+        evidence_ids=assessment.evidence_ids,
+    )
 
 
 CausalRole = CausalIntent
@@ -45,7 +70,9 @@ class ObservationDecision:
     summary: str
     evidence_ids: tuple[str, ...] = ()
     causal_role: CausalRole = "context"
-    causal_role_origin: Literal["model", "plan_contract"] | None = None
+    causal_role_origin: Literal[
+        "model", "plan_contract", "trusted_evidence_rule", "coverage_repair"
+    ] | None = None
     reported_causal_role: CausalRole | None = None
     causal_role_corrected: bool = False
 
@@ -185,6 +212,12 @@ def parse_plan(
             raise ValueError(
                 f"Plan causalIntent {causal_intent!r} is not allowed for tool {tool}."
             )
+        evidence_rules = _trusted_plan_evidence_rules(
+            step.get("evidenceRules"),
+            step_tool=tool,
+            tested_hypotheses=set(tested),
+            known_hypotheses=set(known_hypotheses),
+        )
         parsed.append(
             DiagnosticPlanStep(
                 id=step_id,
@@ -193,9 +226,54 @@ def parse_plan(
                 purpose=_required_str(step, "purpose"),
                 tests_hypotheses=tested,
                 causal_intent=causal_intent,
+                evidence_rules=evidence_rules,
             )
         )
     return tuple(parsed)
+
+
+def _trusted_plan_evidence_rules(
+    value: object,
+    *,
+    step_tool: str,
+    tested_hypotheses: set[str],
+    known_hypotheses: set[str],
+) -> tuple[HypothesisEvidenceRule, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return ()
+    rules: dict[tuple[str, str], HypothesisEvidenceRule] = {}
+    for item in cast(Sequence[object], value):
+        if not isinstance(item, Mapping):
+            continue
+        payload = cast(Mapping[object, object], item)
+        template_id = payload.get("templateId")
+        hypothesis_id = payload.get("hypothesisId")
+        parameters = payload.get("parameters")
+        parameter_mapping = (
+            cast(Mapping[object, object], parameters)
+            if isinstance(parameters, Mapping)
+            else None
+        )
+        if (
+            not isinstance(template_id, str)
+            or not isinstance(hypothesis_id, str)
+            or hypothesis_id not in tested_hypotheses
+            or hypothesis_id not in known_hypotheses
+            or parameter_mapping is None
+            or not all(isinstance(key, str) for key in parameter_mapping)
+        ):
+            continue
+        rule = instantiate_trusted_evidence_rule(
+            template_id=template_id,
+            hypothesis_id=hypothesis_id,
+            parameters=cast(Mapping[str, object], parameter_mapping),
+            step_tool=step_tool,
+        )
+        if rule is not None:
+            rules[(rule.template_id, rule.hypothesis_id)] = rule
+    return tuple(rules[key] for key in sorted(rules))
 
 
 def parse_observation_decision(

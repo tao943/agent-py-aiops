@@ -16,6 +16,7 @@ tools:
           upstreamConnectTimeMs: 4
           requestTimeMs: 752
           upstreamAddressMatchedRoute: true
+          upstreamService: checkout-slow-endpoint
   - name: InspectGatewayErrors
     description: Read frozen normalized gateway error events without raw logs.
     input_schema:

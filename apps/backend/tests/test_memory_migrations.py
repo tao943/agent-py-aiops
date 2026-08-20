@@ -13,6 +13,9 @@ REQUIRED_MEMORY_TABLES = {
     "aiops_diagnostic_reports",
     "aiops_tool_call_audits",
     "aiops_graph_checkpoints",
+    "aiops_execution_records",
+    "aiops_langgraph_checkpoints",
+    "aiops_langgraph_writes",
     "tool_call_audits",
     "user_chat_configurations",
     "user_chat_prompts",
@@ -67,6 +70,9 @@ def test_memory_metadata_exposes_required_tables_and_json_columns() -> None:
     assert "chat_session_id" in tables["tool_call_audits"].c
     assert "diagnostic_task_id" in tables["tool_call_audits"].c
     assert isinstance(tables["aiops_graph_checkpoints"].c["checkpoint_payload"].type, JSON)
+    assert isinstance(tables["aiops_execution_records"].c["output_payload"].type, JSON)
+    assert "checkpoint_blob" in tables["aiops_langgraph_checkpoints"].c
+    assert "value_blob" in tables["aiops_langgraph_writes"].c
     assert "content" in tables["user_chat_prompts"].c
     assert "content" in tables["user_chat_skills"].c
     assert "name" in tables["user_chat_skills"].c

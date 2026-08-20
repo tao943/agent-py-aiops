@@ -25,6 +25,50 @@ def _running(*, metadata: dict[str, object] | None = None):
     )
 
 
+def _running_live():  # type: ignore[no-untyped-def]
+    return running_envelope(
+        run_id="live-ab-1",
+        evaluation_kind="live",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        suite_version="v1",
+        metadata={
+            "gitSha": "abc123",
+            "workflowVersion": "evidence-driven-v4",
+            "investigationStrategy": "multi_agent",
+            "investigationPolicyVersion": "investigation-router-v1",
+        },
+        created_at=FIXED_TIME,
+        started_at=FIXED_TIME,
+    )
+
+
+def test_investigation_metrics_are_flat_allowlisted_and_round_trip() -> None:
+    envelope = terminal_envelope(
+        running=_running_live(),
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={
+            "total": 96,
+            "rootCauseTop1Correct": True,
+            "evidenceRecallBasisPoints": 9000,
+            "durationMs": 1234,
+            "modelCallCount": 3,
+            "duplicateEvidenceBasisPoints": 0,
+            "securityHardGatePassed": True,
+        },
+        result_payload={"failures": [], "hardGate": None},
+        diagnostic_task_id="diagnostic-1",
+        failure_category=None,
+        completed_at=FIXED_TIME,
+    )
+
+    restored = type(envelope).from_json(envelope.to_json())
+
+    assert restored == envelope
+    assert artifact_checksum(restored) == artifact_checksum(envelope)
+
+
 def test_terminal_envelope_checksum_is_stable_after_round_trip() -> None:
     envelope = terminal_envelope(
         running=_running(),

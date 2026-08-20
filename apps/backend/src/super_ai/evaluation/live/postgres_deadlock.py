@@ -312,6 +312,10 @@ class PostgresDeadlockScenarioDriver:
                 ("cycleLength", 2),
                 ("victimRef", state.victim_ref),
                 ("postgresHealthy", True),
+                ("transactionAFirstResource", "order_row_1"),
+                ("transactionASecondResource", "order_row_2"),
+                ("transactionBFirstResource", "order_row_2"),
+                ("transactionBSecondResource", "order_row_1"),
             ),
         )
 
@@ -404,6 +408,18 @@ class PostgresDeadlockEvidenceMcpClient:
                 "sqlstate": self._observation.safe_fact("sqlstate"),
                 "cycleDetected": self._observation.check_passed("deadlock_cycle_audited"),
                 "cycleLength": self._observation.safe_fact("cycleLength"),
+                "transactionAFirstResource": self._observation.safe_fact(
+                    "transactionAFirstResource"
+                ),
+                "transactionASecondResource": self._observation.safe_fact(
+                    "transactionASecondResource"
+                ),
+                "transactionBFirstResource": self._observation.safe_fact(
+                    "transactionBFirstResource"
+                ),
+                "transactionBSecondResource": self._observation.safe_fact(
+                    "transactionBSecondResource"
+                ),
             }
         if name == "InspectPostgresTransactionResult":
             return {

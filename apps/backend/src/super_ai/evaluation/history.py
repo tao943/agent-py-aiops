@@ -55,6 +55,9 @@ _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "workflowVersion",
             "modelConfiguration",
             "ragMode",
+            "acceptanceCampaignId",
+            "investigationStrategy",
+            "investigationPolicyVersion",
             "importSource",
         }
     ),
@@ -75,6 +78,9 @@ _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "workflowVersion",
             "modelConfiguration",
             "evidenceSource",
+            "acceptanceCampaignId",
+            "investigationStrategy",
+            "investigationPolicyVersion",
             "importSource",
         }
     ),
@@ -90,6 +96,14 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "efficiency",
             "total",
             "rawTotal",
+            "rootCauseTop1Correct",
+            "evidenceRecallBasisPoints",
+            "durationMs",
+            "modelCallCount",
+            "duplicateEvidenceBasisPoints",
+            "fallbackReason",
+            "effectiveInvestigationStrategy",
+            "securityHardGatePassed",
         }
     ),
     "retrieval": frozenset(
@@ -113,6 +127,14 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "rawTotal",
             "verificationPassed",
             "cleanupSucceeded",
+            "rootCauseTop1Correct",
+            "evidenceRecallBasisPoints",
+            "durationMs",
+            "modelCallCount",
+            "duplicateEvidenceBasisPoints",
+            "fallbackReason",
+            "effectiveInvestigationStrategy",
+            "securityHardGatePassed",
         }
     ),
 }

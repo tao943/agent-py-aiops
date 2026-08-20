@@ -18,6 +18,7 @@ from super_ai.mcp_client import LocalMcpClient, McpClientError, McpToolDefinitio
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import DiagnosticTaskRecord, TenantScopeError
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
+from super_ai.redis_runtime.rate_limit import RateLimitDecision
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import StoredVectorChunk, VectorSearchResult
 
@@ -463,6 +464,17 @@ class UnavailableRedisClient:
         raise RedisError("Redis is unavailable")
 
 
+class AllowAllRateLimits:
+    async def acquire(self, *, owner_id: str, action: str) -> RateLimitDecision:
+        del owner_id, action
+        return RateLimitDecision(
+            allowed=True,
+            remaining=1,
+            retry_after_seconds=0,
+            mode="local_fallback",
+        )
+
+
 @pytest.mark.asyncio
 async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_unavailable(
     migrated_database_url: str,
@@ -472,6 +484,8 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
         database_url=migrated_database_url,
         aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
         redis_client=cast(Redis, UnavailableRedisClient()),
+        vector_store=cast(Any, FakeVectorStore([])),
+        rate_limit_service=AllowAllRateLimits(),
     )
     transport = httpx.ASGITransport(
         app=app
@@ -485,19 +499,67 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
             json={"query": "Inspect CPU", "alert": {"severity": "high"}},
         )
         diagnostic_id = create_response.json()["data"]["id"]
+        repositories = app.state.memory_repositories
+        owner_user_id = owner["user"]["id"]
+        background_jobs = repositories.background_jobs
+        assert background_jobs is not None
+        diagnostic_job = await background_jobs.find_for_resource(
+            owner_user_id=owner_user_id,
+            resource_type="aiops_diagnostic",
+            resource_id=diagnostic_id,
+        )
+        assert diagnostic_job is not None
+        assert diagnostic_job.max_attempts == 3
         stream = await client.post(
             f"/aiops/diagnostics/{diagnostic_id}:stream",
             headers=_auth_headers(owner["accessToken"]),
         )
-        repositories = app.state.memory_repositories
-        owner_user_id = owner["user"]["id"]
         phases = (
+            "planner",
+            "validator_router",
             "sufficiency_gate",
             "decision_validation",
             "recovery_planning",
             "policy_gate",
         )
         for sequence, phase in enumerate(phases, start=1):
+            payload: dict[str, object] = {"phase": phase}
+            if phase == "planner":
+                payload.update(
+                    {
+                        "workflowVersion": "evidence-driven-v4",
+                        "modelCallCount": 2,
+                        "modelCallAudits": [
+                            {
+                                "role": "planner",
+                                "attempt": 1,
+                                "durationMs": 120,
+                                "cacheHit": False,
+                                "safeErrorCode": None,
+                                "prompt": "sentinel-private-prompt",
+                            }
+                        ],
+                        "hypothesisAssessments": [
+                            {
+                                "id": "cause-a",
+                                "disposition": "causally_inactive",
+                                "evidenceIds": ["evidence-owner"],
+                                "reasonCode": "not_in_active_path",
+                                "assessmentSource": "deterministic",
+                            }
+                        ],
+                        "rawResponse": "sentinel-private-response",
+                    }
+                )
+            elif phase == "validator_router":
+                payload.update(
+                    {
+                        "validationRequired": False,
+                        "validationSkipped": True,
+                        "validationReasonCodes": [],
+                        "validationSkipReason": "deterministic_evidence_sufficient",
+                    }
+                )
             await repositories.diagnostics.create_step(
                 owner_user_id=owner_user_id,
                 step_id=f"step-owner-{sequence}",
@@ -505,7 +567,7 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
                 sequence=sequence,
                 phase=phase,
                 status="completed",
-                payload={"phase": phase},
+                payload=payload,
             )
             await repositories.diagnostics.save_checkpoint(
                 owner_user_id=owner_user_id,
@@ -514,7 +576,10 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
                 thread_id=f"aiops:{diagnostic_id}",
                 checkpoint_ns=phase,
                 checkpoint_id=f"checkpoint-id-{sequence}",
-                checkpoint_payload={"phase": phase},
+                checkpoint_payload={
+                    "phase": phase,
+                    "executionBlob": "sentinel-private-checkpoint",
+                },
                 metadata={"node": phase},
             )
         await repositories.diagnostics.create_evidence(
@@ -565,6 +630,36 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
     assert [
         item["checkpointNamespace"] for item in owner_chain.json()["data"]["checkpoints"]
     ] == list(phases)
+    execution = owner_chain.json()["data"]["execution"]
+    assert execution == {
+        "graphVersion": "aiops-diagnostic-v2",
+        "workflowVersion": "evidence-driven-v4",
+        "modelCallCount": 2,
+        "modelCalls": [
+            {
+                "role": "planner",
+                "attempt": 1,
+                "durationMs": 120,
+                "cacheHit": False,
+                "safeErrorCode": None,
+            }
+        ],
+        "validator": {
+            "required": False,
+            "skipped": True,
+            "reasonCodes": [],
+            "skipReason": "deterministic_evidence_sufficient",
+        },
+        "resumeCount": 0,
+    }
+    assert all("payload" not in item for item in owner_chain.json()["data"]["checkpoints"])
+    assert "sentinel-private" not in owner_chain.text
+    planner_payload = owner_chain.json()["data"]["steps"][0]["payload"]
+    assert planner_payload["hypothesisAssessments"][0]["status"] == "refuted"
+    assert (
+        planner_payload["hypothesisAssessments"][0]["disposition"]
+        == "causally_inactive"
+    )
     assert denied_chain.status_code == 403
     assert denied_chain.json()["error"]["code"] == "AUTH_FORBIDDEN"
     other_user_id = other["user"]["id"]
@@ -588,7 +683,11 @@ async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_una
 async def test_diagnosis_case_api_lists_only_owner_cases_and_denies_direct_access(
     migrated_database_url: str,
 ) -> None:
-    app = create_app(database_url=migrated_database_url)
+    app = create_app(
+        database_url=migrated_database_url,
+        vector_store=cast(Any, FakeVectorStore([])),
+        rate_limit_service=AllowAllRateLimits(),
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         owner = await _register(client, "case-owner@example.com")
