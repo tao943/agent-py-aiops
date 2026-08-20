@@ -184,11 +184,11 @@ def normalize_plan_source_domains(
 ) -> list[dict[str, object]]: ...
 ```
 
-- [ ] **Step 1: 写 registry/sourceDomain RED 测试**
+- [x] **Step 1: 写 registry/sourceDomain RED 测试**
 
 覆盖：`knowledge_retrieval→knowledge`；只有代码拥有的 `TrustedToolCapability` 才能把 `SearchLog→log` 或已枚举诊断工具→runtime；仅 discover 到但没有可信 descriptor 的用户 MCP 工具返回 `None`；descriptor 的 `read_only` 必须为 `True`；恢复工具永不进入任何 capability；Change 固定 unavailable/reason code；模型提供的非法 `sourceDomain` 被 registry 覆盖。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```powershell
 cd apps/backend
@@ -197,15 +197,15 @@ uv run pytest tests/test_aiops_investigation_router.py -q -p no:cacheprovider
 
 Expected: `super_ai.aiops.investigation` 不存在或接口缺失导致 FAIL。
 
-- [ ] **Step 3: 最小实现 registry 与 normalize**
+- [x] **Step 3: 最小实现 registry 与 normalize**
 
 工具归属必须由显式 `trusted_tool_capabilities` 决定，不能从描述、schema、server 名或“非恢复工具”反推只读属性。`build_investigator_capabilities()` 显式接收 discovered definitions 与 `tool_policies`；不在 trusted map、未 discover、read_only 非真，或 policy 为 `proposal_only`、`external_policy_required`、`execute` 的工具一律 fail closed。`normalize_plan_source_domains()` 复制 step，不修改调用者输入；未知映射保留给 single path，并写 `sourceDomainStatus="unmapped"`，但永不进入 Multi dispatch。
 
-- [ ] **Step 4: 在 Planner 输出后调用 normalize**
+- [x] **Step 4: 在 Planner 输出后调用 normalize**
 
 只修改 plan 的公开结构，不改变现有工具参数、causal intent 或 evidence rules。Knowledge step 的结果在 Task 5 抽取前仍保持现有行为。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_investigation_router.py tests/test_aiops_diagnostics.py -q -p no:cacheprovider
@@ -213,7 +213,7 @@ uv run pytest tests/test_aiops_investigation_router.py tests/test_aiops_diagnost
 
 Expected: 目标测试全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/investigation.py apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/tests/test_aiops_investigation_router.py

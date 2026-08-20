@@ -51,6 +51,11 @@ from super_ai.aiops.decision_validation import (
 )
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
+from super_ai.aiops.investigation import (
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    build_investigator_capabilities,
+    normalize_plan_source_domains,
+)
 from super_ai.aiops.model_budget import (
     ROLE_TIMEOUT_SECONDS,
     ExecutionDeadlines,
@@ -2049,6 +2054,17 @@ class AiopsDiagnosticService:
             created = await create_plan_operation()
             plan = _json_list(created.get("plan"))
             plan_origin = str(created.get("planOrigin") or "generic")
+        investigator_capabilities = build_investigator_capabilities(
+            discovered_tools=discovered_tools,
+            trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+            tool_policies=self._tool_policies,
+            retrieval_available=retrieval_result is not None,
+            cls_available=any(
+                item.name in {"SearchLog", "SearchLogs"}
+                for item in discovered_tools
+            ),
+        )
+        plan = normalize_plan_source_domains(plan, investigator_capabilities)
         events.append(
             _task_status_event(
                 task_id,
