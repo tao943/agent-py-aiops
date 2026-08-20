@@ -15,6 +15,7 @@ from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
     _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
 )
+from super_ai.aiops.investigation import InvestigationRouterPolicy
 from super_ai.aiops.model_budget import ExecutionDeadlines
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -247,6 +248,180 @@ async def test_investigator_branch_cannot_write_shared_diagnostic_state() -> Non
         "hypothesis_assessments",
         "observation_decisions",
     } & set(update)
+
+
+def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
+    service = _service(object())
+
+    assert service._route_after_aggregation(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "investigation_aggregation": {
+                    "completedPacketCount": 1,
+                    "failedPacketCount": 1,
+                }
+            },
+        )
+    ) == "fact_adapter"
+    assert service._route_after_aggregation(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "investigation_aggregation": {
+                    "completedPacketCount": 0,
+                    "failedPacketCount": 2,
+                    "fallbackPermitted": True,
+                }
+            },
+        )
+    ) == "executor"
+    assert service._route_after_aggregation(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "investigation_aggregation": {
+                    "completedPacketCount": 0,
+                    "failedPacketCount": 2,
+                    "fallbackPermitted": False,
+                }
+            },
+        )
+    ) == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_strategy_starts_single_then_escalates_after_stagnation(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-dynamic-escalation",
+            status="running",
+            query="Investigate cross-source symptoms.",
+            input_payload={
+                "workflowVersion": "evidence-driven-v4",
+                "graphVersion": "aiops-diagnostic-v3",
+            },
+        )
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, object()),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, UnusedMcpClient()),
+            cls_region="unused",
+            cls_topic_id="unused",
+            investigation_router_policy=InvestigationRouterPolicy(
+                multi_agent_enabled=True
+            ),
+        )
+        deadlines = ExecutionDeadlines.start()
+        plan: list[dict[str, object]] = [
+            {
+                "id": "initial-1",
+                "tool": "InspectPostgresSessions",
+                "arguments": {},
+                "sourceDomain": "runtime",
+                "sourceDomainStatus": "trusted_registry",
+                "causalIntent": "context",
+                "targetComponent": "gateway",
+            },
+            {
+                "id": "initial-2",
+                "tool": "SearchLog",
+                "arguments": {},
+                "sourceDomain": "log",
+                "sourceDomainStatus": "trusted_registry",
+                "causalIntent": "context",
+                "targetComponent": "gateway",
+            },
+            {
+                "id": "remaining-runtime",
+                "tool": "InspectPostgresSessions",
+                "arguments": {"scope": "remaining"},
+                "sourceDomain": "runtime",
+                "sourceDomainStatus": "trusted_registry",
+                "causalIntent": "mechanism",
+                "targetComponent": "postgres",
+            },
+            {
+                "id": "remaining-log",
+                "tool": "SearchLog",
+                "arguments": {"Query": "remaining"},
+                "sourceDomain": "log",
+                "sourceDomainStatus": "trusted_registry",
+                "causalIntent": "trigger",
+                "targetComponent": "order-service",
+            },
+        ]
+        state = cast(
+            Any,
+            {
+                "workflow_version": "evidence-driven-v4",
+                "graph_version": "aiops-diagnostic-v3",
+                "owner_user_id": task.owner_user_id,
+                "task_id": task.id,
+                "plan": plan,
+                "plan_index": 0,
+                "tool_definitions": (
+                    McpToolDefinition(
+                        "InspectPostgresSessions",
+                        "Inspect sessions.",
+                        {"type": "object"},
+                        "default",
+                    ),
+                    McpToolDefinition(
+                        "SearchLog",
+                        "Search logs.",
+                        {"type": "object"},
+                        "cls",
+                    ),
+                ),
+                "knowledge_completed": True,
+                "sop_hits": [],
+                "evidence_ids": ["evidence-alert"],
+                "hypothesis_assessments": [
+                    {"id": f"cause-{index}", "disposition": "unresolved"}
+                    for index in range(3)
+                ],
+                "alert": {"severity": "warning"},
+                "model_call_count": 0,
+                "started_at": deadlines.started_at.isoformat(),
+                "soft_deadline_at": deadlines.soft_deadline_at.isoformat(),
+                "hard_deadline_at": deadlines.hard_deadline_at.isoformat(),
+                "investigation_strategy_mode": "auto",
+                "investigation_wave": 0,
+            },
+        )
+
+        initial = await service._strategy_router(state)  # pyright: ignore[reportPrivateUsage]
+        escalated = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, {**state, "plan_index": 2})
+        )
+        second_wave = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, {**state, "plan_index": 2, "investigation_wave": 2})
+        )
+    finally:
+        await engine.dispose()
+
+    assert cast(dict[str, object], initial["investigation_route"])["strategy"] == (
+        "single_agent"
+    )
+    assert cast(dict[str, object], escalated["investigation_route"])["strategy"] == (
+        "multi_agent"
+    )
+    assert [
+        item["investigatorType"]
+        for item in cast(list[dict[str, object]], escalated["investigation_dispatches"])
+    ] == ["runtime", "log"]
+    assert cast(dict[str, object], second_wave["investigation_route"])["strategy"] == (
+        "single_agent"
+    )
 
 
 def test_v4_graph_version_selection_is_explicit_and_legacy_safe() -> None:

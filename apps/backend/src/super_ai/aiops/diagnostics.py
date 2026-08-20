@@ -153,6 +153,8 @@ class AiopsDiagnosticState(TypedDict, total=False):
     investigation_dispatch: JsonDict
     investigation_packets: Annotated[list[JsonDict], add]
     aggregated_facts: list[JsonDict]
+    investigation_aggregation: JsonDict
+    investigation_wave: int
     sop_hits: list[JsonDict]
     no_sop_matched: bool
     plan: list[JsonDict]
@@ -1673,6 +1675,8 @@ class AiopsDiagnosticService:
             "investigation_route": {},
             "investigation_dispatches": [],
             "investigation_packets": [],
+            "investigation_aggregation": {},
+            "investigation_wave": 0,
             "plan_index": 0,
             "replan_count": 0,
             "max_replans": 1 if workflow_version == "evidence-driven-v4" else 2,
@@ -1916,7 +1920,15 @@ class AiopsDiagnosticService:
             graph.add_edge("planner", "strategy_router")
             graph.add_conditional_edges("strategy_router", self._route_after_strategy)
             graph.add_edge("investigator_dispatch", "evidence_aggregator")
-            graph.add_edge("evidence_aggregator", "fact_adapter")
+            graph.add_conditional_edges(
+                "evidence_aggregator",
+                self._route_after_aggregation,
+                {
+                    "fact_adapter": "fact_adapter",
+                    "executor": "executor",
+                    "manual_review": "manual_review",
+                },
+            )
         else:
             graph.add_edge(START, "planner")
             graph.add_edge("planner", "executor")
@@ -1926,7 +1938,11 @@ class AiopsDiagnosticService:
             "sufficiency_gate",
             self._route_after_sufficiency,
             {
-                "executor": "executor",
+                "executor": (
+                    "strategy_router"
+                    if include_knowledge_investigator
+                    else "executor"
+                ),
                 "replanner": "replanner",
                 "hypothesis_adjudicator": "hypothesis_adjudicator",
                 "decision": "decision",
@@ -2407,6 +2423,8 @@ class AiopsDiagnosticService:
         self, state: AiopsDiagnosticState
     ) -> dict[str, object]:
         plan = cast(list[JsonDict], state.get("plan") or [])
+        plan_index = int(state.get("plan_index") or 0)
+        routing_plan = plan[plan_index:]
         discovered_tools = tuple(state.get("tool_definitions") or ())
         capabilities = build_investigator_capabilities(
             discovered_tools=discovered_tools,
@@ -2420,12 +2438,12 @@ class AiopsDiagnosticService:
         )
         required_domains = frozenset(
             cast(Any, str(step.get("sourceDomain")))
-            for step in plan
+            for step in routing_plan
             if step.get("sourceDomain") in {"knowledge", "runtime", "log", "change"}
         )
         causal_roles = {
             str(step.get("causalIntent"))
-            for step in plan
+            for step in routing_plan
             if step.get("causalIntent") in {"trigger", "mechanism", "impact"}
         }
         evidence_ids = tuple(sorted(set(state.get("evidence_ids") or [])))
@@ -2447,6 +2465,20 @@ class AiopsDiagnosticService:
                     * 1_000
                 ),
             )
+        soft_deadline = state.get("soft_deadline_at")
+        if soft_deadline:
+            remaining_time_ms = min(
+                remaining_time_ms,
+                max(
+                    0,
+                    int(
+                        (
+                            datetime.fromisoformat(str(soft_deadline)) - _now()
+                        ).total_seconds()
+                        * 1_000
+                    ),
+                ),
+            )
         routing_input = InvestigationRoutingInput(
             required_domains=required_domains,
             unresolved_hypothesis_count=sum(
@@ -2459,7 +2491,7 @@ class AiopsDiagnosticService:
                 len(
                     {
                         str(step.get("targetComponent"))
-                        for step in plan
+                        for step in routing_plan
                         if step.get("targetComponent")
                     }
                 ),
@@ -2476,25 +2508,32 @@ class AiopsDiagnosticService:
                 _json_dict(state.get("evidence_sufficiency")).get("status")
                 == "sufficient"
             ),
-            valid_tool_calls_without_gain=0,
+            valid_tool_calls_without_gain=min(plan_index, 2),
             knowledge_hit=bool(state.get("sop_hits")),
             remaining_time_ms=remaining_time_ms,
             remaining_model_calls=max(0, 8 - int(state.get("model_call_count") or 0)),
             completed_dispatch_keys=frozenset(),
             evidence_snapshot_hash=evidence_snapshot_hash,
-            wave=0,
+            wave=int(state.get("investigation_wave") or 0),
         )
         mode = cast(StrategyMode, state.get("investigation_strategy_mode") or "auto")
+        effective_mode: StrategyMode = (
+            "single"
+            if mode == "auto"
+            and plan_index
+            < self._investigation_router_policy.single_agent_max_initial_steps
+            else mode
+        )
         route = route_investigation(
             routing_input,
             capabilities=capabilities,
             policy=self._investigation_router_policy,
-            mode=mode,
+            mode=effective_mode,
         )
         dispatches = build_investigation_dispatches(
             task_id=str(state["task_id"]),
             owner_user_id=str(state["owner_user_id"]),
-            plan=plan,
+            plan=routing_plan,
             capabilities=capabilities,
             selected_investigators=route.selected_investigators,
             policy_version=route.policy_version,
@@ -2512,6 +2551,8 @@ class AiopsDiagnosticService:
             "rejectedInvestigators": dict(route.rejected_investigators),
             "reasonCodes": list(route.reason_codes),
             "policyVersion": route.policy_version,
+            "mode": mode,
+            "wave": routing_input.wave,
         }
         dispatch_payloads = [_investigation_dispatch_payload(item) for item in dispatches]
         step_payload: JsonDict = {
@@ -2531,6 +2572,11 @@ class AiopsDiagnosticService:
         return {
             "investigation_route": route_payload,
             "investigation_dispatches": dispatch_payloads,
+            "investigation_wave": (
+                routing_input.wave + 1
+                if route.strategy == "multi_agent"
+                else routing_input.wave
+            ),
             "events": [
                 _task_status_event(
                     str(state["task_id"]),
@@ -2643,6 +2689,28 @@ class AiopsDiagnosticService:
     async def _evidence_aggregator(
         self, state: AiopsDiagnosticState
     ) -> dict[str, object]:
+        if state.get("root_cause_decision") is not None or (
+            _json_dict(state.get("evidence_sufficiency")).get("status")
+            == "sufficient"
+        ):
+            return {
+                "aggregated_facts": [],
+                "investigation_aggregation": {
+                    "completedPacketCount": 0,
+                    "failedPacketCount": 0,
+                    "fallbackPermitted": False,
+                    "lateResultIgnored": True,
+                    "fallbackReason": "late_result_ignored",
+                },
+                "events": [
+                    _task_status_event(
+                        str(state["task_id"]),
+                        "running",
+                        "Late Investigator result ignored after decision readiness.",
+                        70,
+                    )
+                ],
+            }
         packets = tuple(
             _evidence_packet_from_payload(item)
             for item in _json_list(state.get("investigation_packets"))
@@ -2713,8 +2781,37 @@ class AiopsDiagnosticService:
                         "timeScope": claim.time_scope,
                     }
                 )
+        completed_packet_count = sum(
+            1
+            for packet in result.accepted_packets
+            if packet.status in {"completed", "inconclusive"} and packet.claims
+        )
+        failed_packet_count = len(packets) - completed_packet_count
+        remaining_plan = int(state.get("plan_index") or 0) < len(
+            cast(list[JsonDict], state.get("plan") or [])
+        )
+        fallback_permitted = (
+            completed_packet_count == 0
+            and remaining_plan
+            and int(state.get("model_call_count") or 0) <= 6
+            and not _execution_deadlines_from_state(state).hard_expired()
+        )
+        aggregation_payload: JsonDict = {
+            "completedPacketCount": completed_packet_count,
+            "failedPacketCount": failed_packet_count,
+            "rejectedDispatches": dict(result.rejected_dispatches),
+            "fallbackPermitted": fallback_permitted,
+            "fallbackReason": (
+                "fallback_to_single_agent"
+                if fallback_permitted
+                else "manual_review_required"
+                if completed_packet_count == 0
+                else None
+            ),
+        }
         return {
             "aggregated_facts": facts,
+            "investigation_aggregation": aggregation_payload,
             "evidence_ids": sorted(
                 {
                     evidence_id
@@ -2731,6 +2828,16 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+
+    def _route_after_aggregation(self, state: AiopsDiagnosticState) -> str:
+        aggregation = _json_dict(state.get("investigation_aggregation"))
+        if aggregation.get("lateResultIgnored") is True:
+            return "fact_adapter"
+        if int(cast(Any, aggregation.get("completedPacketCount") or 0)) > 0:
+            return "fact_adapter"
+        if aggregation.get("fallbackPermitted") is True:
+            return "executor"
+        return "manual_review"
 
     async def _executor(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])

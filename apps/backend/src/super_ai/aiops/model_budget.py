@@ -11,6 +11,7 @@ ModelRole = Literal[
     "replanner",
     "adjudicator",
     "validator",
+    "investigator",
     "recovery_planner",
     "report",
 ]
@@ -20,6 +21,7 @@ ROLE_TIMEOUT_SECONDS: dict[ModelRole, int] = {
     "replanner": 60,
     "adjudicator": 60,
     "validator": 60,
+    "investigator": 45,
     "recovery_planner": 90,
     "report": 90,
 }

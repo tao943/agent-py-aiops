@@ -26,6 +26,7 @@ def test_role_timeouts_are_bounded() -> None:
         "replanner": 60,
         "adjudicator": 60,
         "validator": 60,
+        "investigator": 45,
         "recovery_planner": 90,
         "report": 90,
     }

@@ -636,19 +636,19 @@ git commit -m "feat: fan out investigation sources"
 - Modify: `apps/backend/tests/test_aiops_v4_workflow.py`
 - Modify: `apps/backend/tests/test_aiops_model_budget.py`
 
-- [ ] **Step 1: 写动态路由 RED**
+- [x] **Step 1: 写动态路由 RED**
 
 覆盖初始 single；两个有效工具后 hypothesis/causal coverage 无增益且存在 runtime/log 未执行步骤时升级 multi；已有 trusted pattern、decisionReady、没有新搜索空间、soft deadline 临近或第二 wave 后不再升级。
 
-- [ ] **Step 2: 写失败/取消 RED**
+- [x] **Step 2: 写失败/取消 RED**
 
 一个 Packet timeout、另一个 completed：保留完成 Evidence，timeout 不作为反证；两个都失败且预算足够：`fallback_to_single_agent` 并从剩余 plan 继续；预算不足：manual review；decisionReady 后未启动 dispatch 取消，迟到 Packet 记录 `late_result_ignored` 且不修改 decision/report/artifact score。
 
-- [ ] **Step 3: 写并发预算 RED**
+- [x] **Step 3: 写并发预算 RED**
 
 使用 async barriers 证明 collector 最多4、LLM Investigator 最多2；首版 runtime/log 两个工具可重叠；单 dispatch 内存在数据依赖的步骤保持串行；Multi 启动条件满足 `remaining_time >= max(deadline)+aggregation_reserve` 和 `remaining_model_calls >= optional+mandatory`。扩展 `ModelRole` 为 `Literal[..., "investigator"]`，固定 `ROLE_TIMEOUT_SECONDS["investigator"] = 45`，并断言所有 Investigator 共享现有 hard limit 8、每个 Dispatch 最多保留1次、总体额外调用最多2次；并发 semaphore 不能绕过原子 budget reserve。
 
-- [ ] **Step 4: 运行 RED**
+- [x] **Step 4: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_v4_workflow.py -q -p no:cacheprovider -k "escalat or timeout or partial or fallback or concurrency or late"
@@ -656,11 +656,11 @@ uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_v4_workfl
 
 Expected: 动态升级/降级行为缺失导致 FAIL。
 
-- [ ] **Step 5: 最小实现 wave state、semaphore 和 fallback**
+- [x] **Step 5: 最小实现 wave state、semaphore 和 fallback**
 
 最多2 wave；Collector semaphore=4、LLM semaphore=2；在 `model_budget.py` 增加明确的 `investigator` role 和45秒 timeout，所有可选调用继续走同一个 `ModelCallBudget`，每 Investigator 最多1、每个任务额外最多2；失败原因使用 allowlist。`fallback_to_single_agent` 只能执行尚未完成且合同有效的 plan step。
 
-- [ ] **Step 6: 运行 GREEN**
+- [x] **Step 6: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_v4_workflow.py tests/test_aiops_model_budget.py -q -p no:cacheprovider
@@ -668,7 +668,7 @@ uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_v4_workfl
 
 Expected: 全部 PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/aiops/investigation.py apps/backend/src/super_ai/aiops/investigation_runtime.py apps/backend/src/super_ai/aiops/model_budget.py apps/backend/tests/test_aiops_multi_agent_runtime.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_aiops_model_budget.py

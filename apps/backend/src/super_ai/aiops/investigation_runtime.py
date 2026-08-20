@@ -307,9 +307,13 @@ class InvestigatorExecutor:
         *,
         runtime: DiagnosticToolRuntime,
         packet_store: InvestigationPacketStore,
+        collector_concurrency: int = 4,
     ) -> None:
+        if collector_concurrency <= 0:
+            raise ValueError("Collector concurrency must be positive.")
         self._runtime = runtime
         self._packet_store = packet_store
+        self._collector_semaphore = asyncio.Semaphore(collector_concurrency)
 
     async def execute(self, dispatch: InvestigationDispatch) -> EvidencePacket:
         cached = await self._packet_store.load(
@@ -319,6 +323,19 @@ class InvestigatorExecutor:
         )
         if cached is not None:
             return cached
+        async with self._collector_semaphore:
+            cached = await self._packet_store.load(
+                owner_user_id=dispatch.owner_user_id,
+                task_id=dispatch.task_id,
+                dispatch_key=dispatch.dispatch_key,
+            )
+            if cached is not None:
+                return cached
+            return await self._execute_uncached(dispatch)
+
+    async def _execute_uncached(
+        self, dispatch: InvestigationDispatch
+    ) -> EvidencePacket:
         results: list[tuple[Mapping[str, object], DiagnosticToolExecutionResult]] = []
         terminal_limitation: str | None = None
         for index, step in enumerate(dispatch.steps):

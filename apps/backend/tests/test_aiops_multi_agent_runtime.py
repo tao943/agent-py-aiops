@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, cast
@@ -77,6 +78,26 @@ class TimeoutOnceToolRuntime(RecordingToolRuntime):
         if self.attempts == 1:
             raise TimeoutError("private timeout detail")
         return await super().execute_prepared(request, prepared)
+
+
+class ConcurrencyRecordingRuntime(RecordingToolRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = 0
+        self.maximum_active = 0
+
+    async def execute_prepared(
+        self,
+        request: DiagnosticToolExecutionRequest,
+        prepared: PreparedDiagnosticToolExecution,
+    ) -> DiagnosticToolExecutionResult:
+        self.active += 1
+        self.maximum_active = max(self.maximum_active, self.active)
+        await asyncio.sleep(0.03)
+        try:
+            return await super().execute_prepared(request, prepared)
+        finally:
+            self.active -= 1
 
 
 def _capabilities() -> Mapping[str, InvestigatorCapability]:
@@ -342,6 +363,60 @@ async def test_timeout_packet_is_safe_and_retries_same_dispatch() -> None:
     assert "private timeout detail" not in repr(timed_out)
     assert completed.status == "completed"
     assert runtime.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_collector_concurrency_is_bounded_and_dispatch_steps_are_serial() -> None:
+    capabilities = cast(Any, _capabilities())
+    base = build_investigation_dispatches(
+        task_id="diagnostic-base",
+        owner_user_id="owner-1",
+        plan=_plan(),
+        capabilities=capabilities,
+        selected_investigators=("runtime",),
+        policy_version="investigation-router-v1",
+        evidence_snapshot_hash="1" * 64,
+        existing_evidence_ids=(),
+        deadline_ms=30_000,
+        model_call_budget=0,
+    )[0]
+    runtime = ConcurrencyRecordingRuntime()
+    executor = InvestigatorExecutor(
+        runtime=runtime,
+        packet_store=InMemoryInvestigationPacketStore(),
+    )
+    dispatches = tuple(
+        replace(
+            base,
+            task_id=f"diagnostic-{index}",
+            dispatch_id=f"dispatch-{index}",
+            dispatch_key=f"{index:x}".rjust(64, "0"),
+        )
+        for index in range(6)
+    )
+
+    await asyncio.gather(*(executor.execute(item) for item in dispatches))
+
+    assert 2 <= runtime.maximum_active <= 4
+
+    serial_runtime = ConcurrencyRecordingRuntime()
+    serial_executor = InvestigatorExecutor(
+        runtime=serial_runtime,
+        packet_store=InMemoryInvestigationPacketStore(),
+    )
+    serial_dispatch = replace(
+        base,
+        steps=tuple(
+            {
+                **_plan()[0],
+                "id": f"runtime-{index}",
+                "arguments": {"index": index},
+            }
+            for index in range(3)
+        ),
+    )
+    await serial_executor.execute(serial_dispatch)
+    assert serial_runtime.maximum_active == 1
 
 
 @pytest.mark.asyncio
