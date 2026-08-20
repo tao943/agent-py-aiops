@@ -23,6 +23,8 @@ from super_ai.evaluation.live.cli import (
     write_safe_report,
 )
 from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult
+from super_ai.evaluation.live.domain import LiveFaultObservation
+from super_ai.evaluation.live.failure_diagnostics import LiveFailureDiagnostics
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutScenarioDriver,
@@ -64,6 +66,15 @@ class AvailableEvaluationRepository:
 
     async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
         del envelope, artifact_checksum
+
+
+class CapturingEvaluationRepository(AvailableEvaluationRepository):
+    def __init__(self) -> None:
+        self.finalized_envelope: object | None = None
+
+    async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
+        del artifact_checksum
+        self.finalized_envelope = envelope
 
 
 class RecordingAiopsRuntimeProvider:
@@ -140,6 +151,72 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     assert envelope.status == "failed"
     assert envelope.validity == "VALID_FAIL"
     assert envelope.metrics["cleanupSucceeded"] is True
+
+
+def _failure_diagnostics() -> LiveFailureDiagnostics:
+    diagnostics = LiveFailureDiagnostics.from_observation(
+        LiveFaultObservation(
+            scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+            checks=(
+                LiveCheck("pool_at_capacity", True),
+                LiveCheck("business_probe_timed_out", False),
+            ),
+            safe_facts=(("poolCapacity", 3), ("businessProbeTimedOut", False)),
+        )
+    )
+    assert diagnostics is not None
+    return diagnostics
+
+
+@pytest.mark.asyncio
+async def test_fault_injection_failure_persists_safe_check_diagnostics(tmp_path: Path) -> None:
+    archive = EvaluationArchive(
+        tmp_path / "archive", repository_root=tmp_path / "repository"
+    )
+    repository = CapturingEvaluationRepository()
+    recorder = EvaluationRunRecorder(archive=archive, repository=repository)
+
+    async def execute():
+        error = LiveBenchmarkError(
+            "fault_injection_failed",
+            stage="inject",
+            diagnostics=_failure_diagnostics(),
+        )
+        error.cleanup_succeeded = True
+        raise error
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+        run_id="live-fault-diagnostics",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+    envelope = archive.load("live-fault-diagnostics")
+
+    assert exit_code == 1
+    assert envelope.result_payload == {
+        "failures": ["fault_injection_failed"],
+        "failureStage": "inject",
+        "checkResults": [
+            {"name": "pool_at_capacity", "passed": True, "source": "driver"},
+            {
+                "name": "business_probe_timed_out",
+                "passed": False,
+                "source": "driver",
+            },
+        ],
+        "failedChecks": ["business_probe_timed_out"],
+        "safeFacts": {"poolCapacity": 3, "businessProbeTimedOut": False},
+    }
+    assert payload["result"] == {
+        "evidenceSource": "local",
+        "validity": "VALID_FAIL",
+        "failureCategory": "fault_injection_failed",
+        "failureStage": "inject",
+        "failedChecks": ["business_probe_timed_out"],
+    }
+    assert repository.finalized_envelope == envelope
 
 
 @pytest.mark.asyncio
@@ -557,6 +634,52 @@ def test_live_failure_payload_keeps_only_bounded_error_metadata() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "invalid_failed_checks",
+    [
+        {"message": "sensitive"},
+        [{"message": "sensitive"}],
+        ["duplicate", "duplicate"],
+        ["ground_truth"],
+        ["x" * 81],
+        [f"check_{index}" for index in range(65)],
+    ],
+)
+def test_safe_output_drops_malformed_or_forbidden_failed_checks(
+    invalid_failed_checks: object,
+) -> None:
+    payload = safe_output(
+        command="run",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-run-1",
+        status="failed",
+        result={"failedChecks": invalid_failed_checks},
+    )
+
+    assert "result" in payload
+    assert "failedChecks" not in payload["result"]
+
+
+def test_safe_report_revalidates_failed_check_names_after_tampering(tmp_path: Path) -> None:
+    report = tmp_path / "live-run-1.json"
+    report.write_text(
+        json.dumps(
+            {
+                "command": "run",
+                "scenarioId": "APY-LIVE-PG-LOCK-001",
+                "runId": "live-run-1",
+                "status": "failed",
+                "result": {"failedChecks": [{"message": "sensitive"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = read_safe_report(report)
+
+    assert "failedChecks" not in restored["result"]
+
+
 @pytest.mark.asyncio
 async def test_cleanup_command_resolves_the_scenario_driver_from_registry(
     monkeypatch: pytest.MonkeyPatch,
@@ -690,7 +813,11 @@ def test_report_round_trip_reapplies_output_allowlist(tmp_path: Path) -> None:
         scenario_id="APY-LIVE-PG-LOCK-001",
         run_id="live-run-1",
         status="passed",
-        result={"total": 100, "passed": True},
+        result={
+            "total": 100,
+            "passed": True,
+            "failedChecks": ["business_probe_timed_out"],
+        },
     )
     path = tmp_path / "report.json"
 
@@ -702,5 +829,9 @@ def test_report_round_trip_reapplies_output_allowlist(tmp_path: Path) -> None:
 
     report = read_safe_report(path)
     serialized = json.dumps(report)
-    assert report["result"] == {"total": 100, "passed": True}
+    assert report["result"] == {
+        "total": 100,
+        "passed": True,
+        "failedChecks": ["business_probe_timed_out"],
+    }
     assert "secret" not in serialized

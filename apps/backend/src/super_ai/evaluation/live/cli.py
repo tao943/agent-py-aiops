@@ -35,6 +35,7 @@ from super_ai.evaluation.live.diagnostics import (
 )
 from super_ai.evaluation.live.domain import EvidenceSource
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
+from super_ai.evaluation.live.failure_diagnostics import normalize_public_failed_checks
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutEvidenceMcpClient,
@@ -177,9 +178,13 @@ def safe_output(
         "status": status,
     }
     if result is not None:
-        payload["result"] = {
+        safe_result = {
             key: value for key, value in result.items() if key in _SAFE_RESULT_FIELDS
         }
+        failed_checks = normalize_public_failed_checks(result.get("failedChecks"))
+        if failed_checks is not None:
+            safe_result["failedChecks"] = failed_checks
+        payload["result"] = safe_result
     return payload
 
 
@@ -350,6 +355,7 @@ async def _run_live_once(
             result_payload["failureStage"] = exc.stage
         if exc.authorization_code is not None:
             result_payload["authorizationCode"] = exc.authorization_code
+        result_payload.update(_failure_diagnostic_payload(exc))
         terminal = terminal_envelope(
             running=running,
             status=cast(EvaluationStatus, status),
@@ -458,6 +464,18 @@ def _cleanup_metrics(error: BaseException) -> dict[str, object]:
     return {}
 
 
+def _failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:
+    diagnostics = error.diagnostics
+    return diagnostics.to_result_payload() if diagnostics is not None else {}
+
+
+def _public_failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:
+    diagnostics = error.diagnostics
+    if diagnostics is None:
+        return {}
+    return {"failedChecks": list(diagnostics.failed_checks)}
+
+
 class _LiveScoringEvaluator:
     def __init__(
         self,
@@ -555,6 +573,7 @@ def _live_failure_payload(
         result["failureStage"] = error.stage
     if error.authorization_code is not None:
         result["authorizationCode"] = error.authorization_code
+    result.update(_public_failure_diagnostic_payload(error))
     return (
         safe_output(
             command="run",
