@@ -332,6 +332,25 @@ def build_generic_live_plan(
     ]
 
 
+def merge_live_log_plan_step(
+    plan: Sequence[JsonDict],
+    *,
+    search_step: JsonDict | None,
+    maximum_steps: int = 4,
+) -> list[JsonDict]:
+    """Append one trusted Live log step without dropping existing evidence work."""
+    if maximum_steps <= 0:
+        raise ValueError("Live diagnostic plan limit must be positive.")
+    copied = [dict(step) for step in plan]
+    if search_step is None or any(
+        step.get("tool") in {"SearchLog", "SearchLogs"} for step in copied
+    ):
+        return copied
+    if len(copied) >= maximum_steps:
+        return copied
+    return [*copied, dict(search_step)]
+
+
 def bind_trusted_tool_arguments(
     plan: Sequence[JsonDict],
     trusted: Mapping[str, Mapping[str, object]],
@@ -5429,8 +5448,31 @@ class AiopsDiagnosticService:
             available_tools=available_tools,
             known_hypotheses=known_hypotheses,
         )
-        if not generic_plan and "SearchLog" in available_tools:
-            generic_plan = [self._generic_search_log_step(query)]
+        trusted_search_definition = next(
+            (
+                definition
+                for definition in tool_definitions
+                if definition.name == "SearchLog" and definition.server_name == "cls"
+            ),
+            None,
+        )
+        search_step: JsonDict | None = None
+        if (
+            trusted_search_definition is not None
+            and "SearchLog" in self._trusted_tool_arguments
+        ):
+            accepted_search, _search_contract_errors = normalize_tool_plan_steps(
+                [self._generic_search_log_step(query)],
+                trusted_tool_arguments=self._trusted_tool_arguments,
+                tool_argument_contracts=self._tool_argument_contracts,
+                tool_definitions=(trusted_search_definition,),
+            )
+            if len(accepted_search) == 1:
+                search_step = accepted_search[0]
+        generic_plan = merge_live_log_plan_step(
+            generic_plan,
+            search_step=search_step,
+        )
         generic_plan, _generic_contract_errors = normalize_tool_plan_steps(
             generic_plan,
             trusted_tool_arguments=self._trusted_tool_arguments,
@@ -5482,6 +5524,11 @@ class AiopsDiagnosticService:
             plan = [_diagnostic_plan_step_payload(step) for step in parsed_plan]
         except Exception:
             plan = []
+        if plan:
+            plan = merge_live_log_plan_step(
+                plan,
+                search_step=search_step,
+            )
         plan, _contract_errors = normalize_tool_plan_steps(
             plan,
             trusted_tool_arguments=self._trusted_tool_arguments,

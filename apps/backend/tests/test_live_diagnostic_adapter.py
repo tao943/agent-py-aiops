@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +14,7 @@ from super_ai.aiops.diagnostics import (
     bind_trusted_tool_arguments,
     build_generic_live_plan,
     build_grounded_fallback_decision,
+    merge_live_log_plan_step,
     plan_matches_tool_contracts,
 )
 from super_ai.evaluation import RunArtifact
@@ -165,6 +167,162 @@ def _observation() -> LiveFaultObservation:
         "APY-LIVE-PG-LOCK-001",
         (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
     )
+
+
+def _search_step() -> dict[str, object]:
+    return {"id": "search-cls-logs", "tool": "SearchLog", "arguments": {}}
+
+
+def test_live_log_step_is_merged_into_a_non_empty_runtime_plan() -> None:
+    runtime = [{"id": "runtime-1", "tool": "InspectPostgresSessions"}]
+
+    merged = merge_live_log_plan_step(runtime, search_step=_search_step())
+
+    assert [step["tool"] for step in merged] == [
+        "InspectPostgresSessions",
+        "SearchLog",
+    ]
+    assert runtime == [{"id": "runtime-1", "tool": "InspectPostgresSessions"}]
+
+
+def test_live_log_step_is_not_duplicated_or_added_without_cls() -> None:
+    existing = [_search_step()]
+
+    assert merge_live_log_plan_step(existing, search_step=_search_step()) == existing
+    assert merge_live_log_plan_step(existing, search_step=None) == existing
+
+
+def test_live_log_step_does_not_truncate_a_full_initial_plan() -> None:
+    runtime = [
+        {"id": f"runtime-{index}", "tool": "InspectPostgresSessions"}
+        for index in range(4)
+    ]
+
+    merged = merge_live_log_plan_step(runtime, search_step=_search_step(), maximum_steps=4)
+
+    assert len(merged) == 4
+    assert merged == runtime
+
+
+def test_live_log_step_rejects_an_invalid_plan_bound() -> None:
+    with pytest.raises(ValueError, match="limit must be positive"):
+        merge_live_log_plan_step([], search_step=_search_step(), maximum_steps=0)
+
+
+class _InvalidPlanChatModel:
+    async def ainvoke(self, prompt: object) -> str:
+        del prompt
+        return "not-json"
+
+
+class _InvalidPlanLlmProvider:
+    def create_chat_model(self) -> _InvalidPlanChatModel:
+        return _InvalidPlanChatModel()
+
+
+def _cls_search_definition() -> McpToolDefinition:
+    return McpToolDefinition(
+        "SearchLog",
+        "Search scoped CLS logs.",
+        {
+            "type": "object",
+            "properties": {
+                "Region": {"type": "string"},
+                "TopicId": {"type": "string"},
+                "From": {"type": "integer"},
+                "To": {"type": "integer"},
+                "Query": {"type": "string"},
+                "Limit": {"type": "integer"},
+            },
+            "required": ["Region", "TopicId", "From", "To", "Query", "Limit"],
+            "additionalProperties": False,
+        },
+        "cls",
+    )
+
+
+async def _postgres_cls_service_and_definitions(
+    *, trusted_arguments: Mapping[str, object] | None
+) -> tuple[AiopsDiagnosticService, tuple[McpToolDefinition, ...]]:
+    runtime = tuple(
+        await LivePostgresEvidenceMcpClient(_observation()).discover_tools()
+    )
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, _InvalidPlanLlmProvider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        trusted_tool_arguments=(
+            {"SearchLog": trusted_arguments}
+            if trusted_arguments is not None
+            else None
+        ),
+    )
+    return service, (*runtime, _cls_search_definition())
+
+
+def _trusted_cls_arguments() -> dict[str, object]:
+    return {
+        "Region": "ap-guangzhou",
+        "TopicId": "topic-live",
+        "From": 100,
+        "To": 200,
+        "Query": 'incident_id:"incident-public"',
+        "Limit": 20,
+    }
+
+
+@pytest.mark.asyncio
+async def test_postgres_generic_plan_keeps_runtime_and_adds_scoped_cls_log() -> None:
+    trusted = _trusted_cls_arguments()
+    service, definitions = await _postgres_cls_service_and_definitions(
+        trusted_arguments=trusted
+    )
+
+    plan, origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate the public incident evidence.",
+        alert={"name": "PostgresOrderUpdateLatencyHigh", "severity": "warning"},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=definitions,
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+
+    assert origin == "generic"
+    assert len(plan) <= 4
+    assert any(step["tool"] == "InspectPostgresSessions" for step in plan)
+    log_steps = [step for step in plan if step["tool"] == "SearchLog"]
+    assert len(log_steps) == 1
+    assert log_steps[0]["arguments"] == trusted
+
+
+@pytest.mark.asyncio
+async def test_discovered_cls_tool_without_trusted_scope_is_not_forced_into_plan() -> None:
+    service, definitions = await _postgres_cls_service_and_definitions(
+        trusted_arguments=None
+    )
+
+    plan, origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate public evidence.",
+        alert={"name": "PostgresOrderUpdateLatencyHigh", "severity": "warning"},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=definitions,
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+
+    assert origin == "generic"
+    assert all(step["tool"] != "SearchLog" for step in plan)
 
 
 def test_generic_fallback_uses_all_live_evidence_tools() -> None:
