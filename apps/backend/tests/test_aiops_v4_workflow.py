@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
+from langgraph.types import Send
 
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops import diagnostics as diagnostics_module
@@ -176,6 +177,76 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
     assert "decision_validator" not in nodes
     assert {"validator_router", "llm_validator", "manual_review"} <= nodes
     assert "knowledge_investigator" in nodes
+    assert {"strategy_router", "investigator_dispatch", "evidence_aggregator"} <= nodes
+
+
+def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
+    service = _service(object())
+    dispatches = [
+        {"dispatchId": "dispatch-log", "investigatorType": "log"},
+        {"dispatchId": "dispatch-runtime", "investigatorType": "runtime"},
+    ]
+
+    multi = service._route_after_strategy(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "investigation_route": {"strategy": "multi_agent"},
+                "investigation_dispatches": dispatches,
+                "owner_user_id": "owner-1",
+                "task_id": "diagnostic-1",
+            },
+        )
+    )
+    single = service._route_after_strategy(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, {"investigation_route": {"strategy": "single_agent"}})
+    )
+    fast = service._route_after_strategy(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {"investigation_route": {"strategy": "deterministic_fast_path"}},
+        )
+    )
+
+    assert isinstance(multi, list)
+    assert all(isinstance(item, Send) for item in multi)
+    investigator_types = [
+        cast(Any, item).arg["investigation_dispatch"]["investigatorType"]
+        for item in multi
+    ]
+    assert investigator_types == [
+        "runtime",
+        "log",
+    ]
+    assert single == "executor"
+    assert fast == "sufficiency_gate"
+
+
+@pytest.mark.asyncio
+async def test_investigator_branch_cannot_write_shared_diagnostic_state() -> None:
+    update = await _service(object())._investigator_dispatch(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "owner_user_id": "owner-1",
+                "task_id": "diagnostic-1",
+                "investigation_dispatch": {
+                    "dispatchId": "dispatch-runtime",
+                    "investigatorType": "runtime",
+                    "steps": [],
+                },
+            },
+        )
+    )
+
+    assert set(update) == {"investigation_packets", "events"}
+    packet = cast(list[dict[str, object]], update["investigation_packets"])[0]
+    assert packet["status"] == "failed"
+    assert not {
+        "diagnostic_facts",
+        "hypothesis_assessments",
+        "observation_decisions",
+    } & set(update)
 
 
 def test_v4_graph_version_selection_is_explicit_and_legacy_safe() -> None:

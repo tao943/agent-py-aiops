@@ -21,6 +21,7 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from super_ai.aiops.adjudication import (
     DiagnosticFact,
@@ -49,18 +50,29 @@ from super_ai.aiops.decision_validation import (
     validate_grounded_assessments,
     validate_grounded_candidate,
 )
+from super_ai.aiops.evidence_aggregation import (
+    AggregationContext,
+    aggregate_evidence_packets,
+)
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.investigation import (
     TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    EvidenceClaim,
+    EvidencePacket,
+    InvestigationRouterPolicy,
+    InvestigationRoutingInput,
     StrategyMode,
     build_investigator_capabilities,
     normalize_plan_source_domains,
+    route_investigation,
 )
 from super_ai.aiops.investigation_runtime import (
     DiagnosticToolExecutionRequest,
     DiagnosticToolExecutionResult,
+    InvestigationDispatch,
     PreparedDiagnosticToolExecution,
+    build_investigation_dispatches,
     execute_diagnostic_tool,
 )
 from super_ai.aiops.model_budget import (
@@ -136,6 +148,11 @@ class AiopsDiagnosticState(TypedDict, total=False):
     knowledge_evidence_ids: list[str]
     knowledge_completed: bool
     investigation_strategy_mode: StrategyMode
+    investigation_route: JsonDict
+    investigation_dispatches: list[JsonDict]
+    investigation_dispatch: JsonDict
+    investigation_packets: Annotated[list[JsonDict], add]
+    aggregated_facts: list[JsonDict]
     sop_hits: list[JsonDict]
     no_sop_matched: bool
     plan: list[JsonDict]
@@ -1513,6 +1530,7 @@ class AiopsDiagnosticService:
         tool_argument_contracts: Mapping[str, ToolArgumentContract] | None = None,
         tool_policies: Mapping[str, Literal["proposal_only"]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
+        investigation_router_policy: InvestigationRouterPolicy | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
@@ -1546,6 +1564,9 @@ class AiopsDiagnosticService:
             validated_tool_policies
         )
         self._case_persistor = case_persistor
+        self._investigation_router_policy = (
+            investigation_router_policy or InvestigationRouterPolicy()
+        )
 
     async def stream(
         self,
@@ -1649,6 +1670,9 @@ class AiopsDiagnosticService:
             "knowledge_evidence_ids": [],
             "knowledge_completed": False,
             "investigation_strategy_mode": "auto",
+            "investigation_route": {},
+            "investigation_dispatches": [],
+            "investigation_packets": [],
             "plan_index": 0,
             "replan_count": 0,
             "max_replans": 1 if workflow_version == "evidence-driven-v4" else 2,
@@ -1869,6 +1893,9 @@ class AiopsDiagnosticService:
         graph = StateGraph(AiopsDiagnosticState)
         if include_knowledge_investigator:
             graph.add_node("knowledge_investigator", self._knowledge_investigator)
+            graph.add_node("strategy_router", self._strategy_router)
+            graph.add_node("investigator_dispatch", self._investigator_dispatch)
+            graph.add_node("evidence_aggregator", self._evidence_aggregator)
         graph.add_node("planner", self._planner)
         graph.add_node("executor", self._executor)
         graph.add_node("fact_adapter", self._fact_adapter)
@@ -1886,9 +1913,13 @@ class AiopsDiagnosticService:
         if include_knowledge_investigator:
             graph.add_edge(START, "knowledge_investigator")
             graph.add_edge("knowledge_investigator", "planner")
+            graph.add_edge("planner", "strategy_router")
+            graph.add_conditional_edges("strategy_router", self._route_after_strategy)
+            graph.add_edge("investigator_dispatch", "evidence_aggregator")
+            graph.add_edge("evidence_aggregator", "fact_adapter")
         else:
             graph.add_edge(START, "planner")
-        graph.add_edge("planner", "executor")
+            graph.add_edge("planner", "executor")
         graph.add_edge("executor", "fact_adapter")
         graph.add_edge("fact_adapter", "sufficiency_gate")
         graph.add_conditional_edges(
@@ -2372,6 +2403,335 @@ class AiopsDiagnosticService:
             update["model_call_audits"] = model_runtime.audits
         return update
 
+    async def _strategy_router(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        plan = cast(list[JsonDict], state.get("plan") or [])
+        discovered_tools = tuple(state.get("tool_definitions") or ())
+        capabilities = build_investigator_capabilities(
+            discovered_tools=discovered_tools,
+            trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+            tool_policies=self._tool_policies,
+            retrieval_available=state.get("knowledge_completed") is True,
+            cls_available=any(
+                item.name in {"SearchLog", "SearchLogs"}
+                for item in discovered_tools
+            ),
+        )
+        required_domains = frozenset(
+            cast(Any, str(step.get("sourceDomain")))
+            for step in plan
+            if step.get("sourceDomain") in {"knowledge", "runtime", "log", "change"}
+        )
+        causal_roles = {
+            str(step.get("causalIntent"))
+            for step in plan
+            if step.get("causalIntent") in {"trigger", "mechanism", "impact"}
+        }
+        evidence_ids = tuple(sorted(set(state.get("evidence_ids") or [])))
+        evidence_snapshot_hash = hashlib.sha256(
+            "\x1f".join(evidence_ids).encode("utf-8")
+        ).hexdigest()
+        assessments = cast(
+            list[JsonDict], state.get("hypothesis_assessments") or []
+        )
+        remaining_time_ms = 480_000
+        hard_deadline = state.get("hard_deadline_at")
+        if hard_deadline:
+            remaining_time_ms = max(
+                0,
+                int(
+                    (
+                        datetime.fromisoformat(str(hard_deadline)) - _now()
+                    ).total_seconds()
+                    * 1_000
+                ),
+            )
+        routing_input = InvestigationRoutingInput(
+            required_domains=required_domains,
+            unresolved_hypothesis_count=sum(
+                1
+                for item in assessments
+                if item.get("disposition") in {None, "unresolved"}
+            ),
+            causal_component_count=max(
+                1,
+                len(
+                    {
+                        str(step.get("targetComponent"))
+                        for step in plan
+                        if step.get("targetComponent")
+                    }
+                ),
+            ),
+            missing_causal_roles=frozenset(
+                {"trigger", "mechanism", "impact"} - causal_roles
+            ),
+            high_quality_conflict=any(
+                item.get("hasHighQualityConflict") is True for item in assessments
+            ),
+            severity=str(_json_dict(state.get("alert")).get("severity") or "warning"),
+            trusted_pattern_matched=state.get("root_cause_decision") is not None,
+            decision_ready=(
+                _json_dict(state.get("evidence_sufficiency")).get("status")
+                == "sufficient"
+            ),
+            valid_tool_calls_without_gain=0,
+            knowledge_hit=bool(state.get("sop_hits")),
+            remaining_time_ms=remaining_time_ms,
+            remaining_model_calls=max(0, 8 - int(state.get("model_call_count") or 0)),
+            completed_dispatch_keys=frozenset(),
+            evidence_snapshot_hash=evidence_snapshot_hash,
+            wave=0,
+        )
+        mode = cast(StrategyMode, state.get("investigation_strategy_mode") or "auto")
+        route = route_investigation(
+            routing_input,
+            capabilities=capabilities,
+            policy=self._investigation_router_policy,
+            mode=mode,
+        )
+        dispatches = build_investigation_dispatches(
+            task_id=str(state["task_id"]),
+            owner_user_id=str(state["owner_user_id"]),
+            plan=plan,
+            capabilities=capabilities,
+            selected_investigators=route.selected_investigators,
+            policy_version=route.policy_version,
+            evidence_snapshot_hash=evidence_snapshot_hash,
+            existing_evidence_ids=evidence_ids,
+            deadline_ms=self._investigation_router_policy.investigator_deadline_ms,
+            model_call_budget=0,
+            missing_causal_roles=tuple(routing_input.missing_causal_roles),
+        )
+        route_payload: JsonDict = {
+            "strategy": route.strategy,
+            "score": route.score,
+            "escalationWatch": route.escalation_watch,
+            "selectedInvestigators": list(route.selected_investigators),
+            "rejectedInvestigators": dict(route.rejected_investigators),
+            "reasonCodes": list(route.reason_codes),
+            "policyVersion": route.policy_version,
+        }
+        dispatch_payloads = [_investigation_dispatch_payload(item) for item in dispatches]
+        step_payload: JsonDict = {
+            "workflowVersion": str(state.get("workflow_version") or "evidence-driven-v4"),
+            "graphVersion": str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
+            "route": route_payload,
+            "dispatches": dispatch_payloads,
+        }
+        await self._create_step(
+            owner_user_id=str(state["owner_user_id"]),
+            task_id=str(state["task_id"]),
+            phase="strategy_router",
+            status="completed",
+            payload=step_payload,
+        )
+        await self._save_checkpoint(state, "strategy_router", step_payload)
+        return {
+            "investigation_route": route_payload,
+            "investigation_dispatches": dispatch_payloads,
+            "events": [
+                _task_status_event(
+                    str(state["task_id"]),
+                    "running",
+                    f"Strategy Router selected {route.strategy}.",
+                    38,
+                )
+            ],
+        }
+
+    def _route_after_strategy(
+        self, state: AiopsDiagnosticState
+    ) -> str | list[Send]:
+        strategy = _json_dict(state.get("investigation_route")).get("strategy")
+        if strategy == "deterministic_fast_path":
+            return "sufficiency_gate"
+        if strategy != "multi_agent":
+            return "executor"
+        dispatches = sorted(
+            _json_list(state.get("investigation_dispatches")),
+            key=lambda item: (
+                {"runtime": 0, "log": 1}.get(str(item.get("investigatorType")), 9),
+                str(item.get("dispatchId") or ""),
+            ),
+        )
+        sends: list[Send] = []
+        for dispatch in dispatches:
+            branch_state = dict(state)
+            branch_state["investigation_dispatch"] = dispatch
+            branch_state["investigation_packets"] = []
+            sends.append(Send("investigator_dispatch", branch_state))
+        return sends or "executor"
+
+    async def _investigator_dispatch(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        dispatch = _json_dict(state.get("investigation_dispatch"))
+        steps = _json_list(dispatch.get("steps"))
+        claims: list[EvidenceClaim] = []
+        tool_call_ids: list[str] = []
+        branch_events: list[dict[str, object]] = []
+        failed = False
+        for step in steps:
+            local_state = cast(
+                AiopsDiagnosticState,
+                {
+                    **state,
+                    "plan": [step],
+                    "plan_index": 0,
+                    "executor_attempt_count": 0,
+                    "executed_step_fingerprints": [],
+                },
+            )
+            update = await self._executor(local_state)
+            branch_events.extend(
+                cast(list[dict[str, object]], update.get("events") or [])
+            )
+            evidence_id = str(update.get("current_evidence_id") or "")
+            tool_name = str(step.get("tool") or "unknown")
+            fingerprint = _step_fingerprint(step)
+            if update.get("execution_failed") is True or not evidence_id:
+                failed = True
+                continue
+            tool_call_ids.append(
+                _stable_public_id(
+                    "tool",
+                    str(state["task_id"]),
+                    str(step.get("id") or "step_1"),
+                    tool_name,
+                    fingerprint,
+                )
+            )
+            causal_value = step.get("causalIntent")
+            claims.append(
+                EvidenceClaim(
+                    claim_id=f"{tool_name}.observation",
+                    value=cast(Any, update.get("current_tool_output")),
+                    quality="direct",
+                    causal_role=(
+                        str(causal_value)
+                        if causal_value in {"trigger", "mechanism", "impact"}
+                        else None
+                    ),
+                    supports=(),
+                    refutes=(),
+                    evidence_ids=(evidence_id,),
+                    target_component=str(
+                        step.get("targetComponent") or tool_name
+                    ),
+                    observed_at=_now(),
+                    time_scope="incident_window",
+                )
+            )
+        packet = EvidencePacket(
+            task_id=str(state["task_id"]),
+            owner_user_id=str(state["owner_user_id"]),
+            dispatch_id=str(dispatch.get("dispatchId") or "dispatch_invalid"),
+            investigator_type=cast(Any, dispatch.get("investigatorType")),
+            status=("inconclusive" if claims and failed else "completed" if claims else "failed"),
+            claims=tuple(claims),
+            limitations=(("investigator_execution_failed",) if failed else ()),
+            tool_call_ids=tuple(tool_call_ids),
+            model_calls_used=0,
+        )
+        return {
+            "investigation_packets": [_evidence_packet_payload(packet)],
+            "events": branch_events,
+        }
+
+    async def _evidence_aggregator(
+        self, state: AiopsDiagnosticState
+    ) -> dict[str, object]:
+        packets = tuple(
+            _evidence_packet_from_payload(item)
+            for item in _json_list(state.get("investigation_packets"))
+        )
+        evidence_records = await self._repositories.diagnostics.list_evidence(
+            owner_user_id=str(state["owner_user_id"]),
+            task_id=str(state["task_id"]),
+        )
+        audit_repository = self._repositories.tool_call_audits
+        audits = (
+            await audit_repository.list_for_diagnostic_task(
+                owner_user_id=str(state["owner_user_id"]),
+                diagnostic_task_id=str(state["task_id"]),
+            )
+            if audit_repository is not None
+            else []
+        )
+        dispatches = _json_list(state.get("investigation_dispatches"))
+        allowed_by_type: dict[Any, frozenset[str]] = {
+            "runtime": frozenset(),
+            "log": frozenset(),
+            "knowledge": frozenset({"knowledge_retrieval"}),
+            "change": frozenset(),
+        }
+        investigator_by_dispatch: dict[str, Any] = {}
+        for dispatch in dispatches:
+            investigator = str(dispatch.get("investigatorType") or "")
+            investigator_by_dispatch[str(dispatch.get("dispatchId") or "")] = investigator
+            allowed_by_type[investigator] = frozenset(
+                str(item) for item in cast(list[object], dispatch.get("allowedTools") or [])
+            )
+        result = aggregate_evidence_packets(
+            packets,
+            context=AggregationContext(
+                owner_user_id=str(state["owner_user_id"]),
+                task_id=str(state["task_id"]),
+                investigator_by_dispatch=cast(Any, investigator_by_dispatch),
+                evidence_ids=frozenset(item.id for item in evidence_records),
+                completed_tool_call_ids=frozenset(
+                    item.id for item in audits if item.status == "completed"
+                ),
+                tool_name_by_call_id={item.id: item.tool_name for item in audits},
+                tool_call_id_by_evidence_id={
+                    item.id: str(item.tool_call_id or "") for item in evidence_records
+                },
+                allowed_tools_by_investigator=cast(Any, allowed_by_type),
+                maximum_quality_by_evidence_id={
+                    item.id: (
+                        "reference" if item.kind == "knowledge_reference" else "direct"
+                    )
+                    for item in evidence_records
+                },
+            ),
+        )
+        facts: list[JsonDict] = []
+        for claim in result.claims:
+            for evidence_id in claim.evidence_ids:
+                facts.append(
+                    {
+                        "key": claim.claim_id,
+                        "value": _safe_value(claim.value),
+                        "evidenceId": evidence_id,
+                        "sourceTool": claim.claim_id.split(".", 1)[0],
+                        "quality": claim.quality,
+                        "public": True,
+                        "causalRole": claim.causal_role,
+                        "targetComponent": claim.target_component,
+                        "timeScope": claim.time_scope,
+                    }
+                )
+        return {
+            "aggregated_facts": facts,
+            "evidence_ids": sorted(
+                {
+                    evidence_id
+                    for claim in result.claims
+                    for evidence_id in claim.evidence_ids
+                }
+            ),
+            "events": [
+                _task_status_event(
+                    str(state["task_id"]),
+                    "running",
+                    "Evidence Aggregator validated Investigator packets.",
+                    55,
+                )
+            ],
+        }
+
     async def _executor(self, state: AiopsDiagnosticState) -> dict[str, object]:
         task_id = str(state["task_id"])
         owner_user_id = str(state["owner_user_id"])
@@ -2754,16 +3114,25 @@ class AiopsDiagnosticService:
             )
             if fact.evidence_id in trusted_evidence_ids
         )
-        new_facts: tuple[DiagnosticFact, ...] = ()
+        new_facts = tuple(
+            fact
+            for fact in _diagnostic_facts_from_payload(
+                cast(list[JsonDict], state.get("aggregated_facts") or [])
+            )
+            if fact.evidence_id in trusted_evidence_ids
+        )
         if evidence_id and isinstance(output, Mapping):
-            new_facts = extract_public_facts(
-                (
-                    PublicToolObservation(
-                        tool_name=str(current_step.get("tool") or "unknown"),
-                        evidence_id=evidence_id,
-                        output=cast(Mapping[str, object], output),
-                    ),
-                )
+            new_facts = (
+                *new_facts,
+                *extract_public_facts(
+                    (
+                        PublicToolObservation(
+                            tool_name=str(current_step.get("tool") or "unknown"),
+                            evidence_id=evidence_id,
+                            output=cast(Mapping[str, object], output),
+                        ),
+                    )
+                ),
             )
         all_facts = _deduplicate_diagnostic_facts((*prior_facts, *new_facts))
         assessments = _hypothesis_assessments_from_payload(
@@ -5120,6 +5489,112 @@ class AiopsDiagnosticService:
             checkpoint_payload={**payload, "executionRuntime": runtime_payload},
             metadata={"node": node, "graphVersion": graph_version},
         )
+
+
+def _investigation_dispatch_payload(dispatch: InvestigationDispatch) -> JsonDict:
+    return {
+        "taskId": dispatch.task_id,
+        "ownerUserId": dispatch.owner_user_id,
+        "dispatchId": dispatch.dispatch_id,
+        "dispatchKey": dispatch.dispatch_key,
+        "investigatorType": dispatch.investigator_type,
+        "objective": dispatch.objective,
+        "testsHypotheses": list(dispatch.tests_hypotheses),
+        "missingCausalRoles": list(dispatch.missing_causal_roles),
+        "steps": [dict(step) for step in dispatch.steps],
+        "allowedTools": sorted(dispatch.allowed_tools),
+        "existingEvidenceIds": list(dispatch.existing_evidence_ids),
+        "deadlineMs": dispatch.deadline_ms,
+        "modelCallBudget": dispatch.model_call_budget,
+    }
+
+
+def _evidence_packet_payload(packet: EvidencePacket) -> JsonDict:
+    return {
+        "taskId": packet.task_id,
+        "ownerUserId": packet.owner_user_id,
+        "dispatchId": packet.dispatch_id,
+        "investigatorType": packet.investigator_type,
+        "status": packet.status,
+        "claims": [
+            {
+                "claimId": claim.claim_id,
+                "value": _safe_value(claim.value),
+                "quality": claim.quality,
+                "causalRole": claim.causal_role,
+                "supports": list(claim.supports),
+                "refutes": list(claim.refutes),
+                "evidenceIds": list(claim.evidence_ids),
+                "targetComponent": claim.target_component,
+                "observedAt": (
+                    claim.observed_at.isoformat()
+                    if claim.observed_at is not None
+                    else None
+                ),
+                "timeScope": claim.time_scope,
+            }
+            for claim in packet.claims
+        ],
+        "limitations": list(packet.limitations),
+        "toolCallIds": list(packet.tool_call_ids),
+        "modelCallsUsed": packet.model_calls_used,
+    }
+
+
+def _evidence_packet_from_payload(payload: Mapping[str, object]) -> EvidencePacket:
+    claims: list[EvidenceClaim] = []
+    for raw_claim in _json_list(payload.get("claims")):
+        observed_value = raw_claim.get("observedAt")
+        claims.append(
+            EvidenceClaim(
+                claim_id=str(raw_claim.get("claimId") or ""),
+                value=cast(Any, raw_claim.get("value")),
+                quality=cast(Any, raw_claim.get("quality")),
+                causal_role=cast(str | None, raw_claim.get("causalRole")),
+                supports=tuple(
+                    str(item)
+                    for item in cast(list[object], raw_claim.get("supports") or [])
+                ),
+                refutes=tuple(
+                    str(item)
+                    for item in cast(list[object], raw_claim.get("refutes") or [])
+                ),
+                evidence_ids=tuple(
+                    str(item)
+                    for item in cast(list[object], raw_claim.get("evidenceIds") or [])
+                ),
+                target_component=str(raw_claim.get("targetComponent") or ""),
+                observed_at=(
+                    datetime.fromisoformat(observed_value)
+                    if isinstance(observed_value, str)
+                    else None
+                ),
+                time_scope=cast(Any, raw_claim.get("timeScope")),
+            )
+        )
+    model_calls_value = payload.get("modelCallsUsed")
+    model_calls_used = (
+        model_calls_value
+        if isinstance(model_calls_value, int) and not isinstance(model_calls_value, bool)
+        else 0
+    )
+    return EvidencePacket(
+        task_id=str(payload.get("taskId") or ""),
+        owner_user_id=str(payload.get("ownerUserId") or ""),
+        dispatch_id=str(payload.get("dispatchId") or ""),
+        investigator_type=cast(Any, payload.get("investigatorType")),
+        status=cast(Any, payload.get("status")),
+        claims=tuple(claims),
+        limitations=tuple(
+            str(item)
+            for item in cast(list[object], payload.get("limitations") or [])
+        ),
+        tool_call_ids=tuple(
+            str(item)
+            for item in cast(list[object], payload.get("toolCallIds") or [])
+        ),
+        model_calls_used=model_calls_used,
+    )
 
 
 def _diagnostic_plan_step_payload(step: DiagnosticPlanStep) -> JsonDict:

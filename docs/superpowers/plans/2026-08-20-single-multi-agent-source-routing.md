@@ -586,17 +586,17 @@ async def AiopsDiagnosticService._evidence_aggregator(
 
 State 新增 append-only `investigation_packets` reducer；共享 fact/hypothesis/observation 字段不设并行 reducer。
 
-- [ ] **Step 1: 写图结构 RED**
+- [x] **Step 1: 写图结构 RED**
 
 断言 v3 graph topology（workflow 仍为 `evidence-driven-v4`）包含 `knowledge_investigator`、`strategy_router`、`investigator_dispatch`、`evidence_aggregator`；single 路由进入现有 executor；multi 通过两个 `Send` 启动 runtime/log；两个 Packet 都完成后只运行一次 Aggregator，再进入 Fact Adapter/Sufficiency。
 
 单独覆盖 `deterministic_fast_path`：当动态复评时 `trusted_pattern_matched` 或 `decision_ready` 已由当前任务公开状态证明，route update 持久化 `strategy="deterministic_fast_path"`，图不得再进入 executor 或 investigator dispatch，而是直接进入 `sufficiency_gate`；随后必须正常到达 decision/validator/recovery/policy/report，不能绕过任何验证或恢复权限节点。初始 Planner 后尚无可决事实时不得伪造 fast path。
 
-- [ ] **Step 2: 写单写和顺序无关 RED**
+- [x] **Step 2: 写单写和顺序无关 RED**
 
 人为让 Log 先完成/Runtime 先完成，两次最终 facts、assessments、observations、evidence IDs、decision 必须相同；branch update 若包含共享字段必须被测试拒绝。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_multi_agent_runtime.py -q -p no:cacheprovider -k "strategy or multi_agent or fan or aggregator"
@@ -604,11 +604,11 @@ uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_multi_agent_runti
 
 Expected: 图节点/Send/fast-path 接线缺失导致 FAIL。
 
-- [ ] **Step 4: 最小实现图接线**
+- [x] **Step 4: 最小实现图接线**
 
 从 `langgraph.types import Send` 直接复用动态 fan-out。Strategy Router 持久化 route step；single 返回 `executor`，multi 返回稳定排序的 Send，deterministic fast path 返回 `sufficiency_gate`。每个 branch 只追加 Packet/event；Aggregator 验证 Packet 后复用现有 `extract_public_facts()`、trusted pattern 和 hypothesis reducer，一次性更新共享状态。所有三条路径最终汇入原有 Sufficiency/Decision/Validator/Recovery/Policy/Report 安全链。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_multi_agent_runtime.py tests/test_aiops_evidence_packets.py -q -p no:cacheprovider
@@ -616,7 +616,7 @@ uv run pytest tests/test_aiops_v4_workflow.py tests/test_aiops_multi_agent_runti
 
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/aiops/evidence_aggregation.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_aiops_multi_agent_runtime.py
