@@ -626,6 +626,39 @@ Order Pool contract 回归、精确本地失败路径、Ruff 与 Pyright 均通�
 Docker 或新的付费 canary。因此前一 canary 的具体波动原因仍未知，下一条经批准的唯一 canary 才能用新
 Artifact 给出具体失败检查。
 
+### Order Pool PostgreSQL session scope 修复与唯一 canary（2026-08-20）
+
+失败 Run `order-pool-diagnostics-single-20260820-225508` 的安全诊断确认仅
+`run_scoped_sessions_present=false`：3 个连接已 checkout、pool capacity 为 3、free 为 0、业务探针
+超时、PostgreSQL 可达且无锁等待，但 observer 看到的当前 Run 会话数为 0。根因是原标签
+`agentpy-order-api:<full_run_id>:<full_generation>` 超过 PostgreSQL `application_name` 的 63 字节上限，
+服务端在 generation 前截断，而 observer 仍按完整 Run ID 与 generation 查询。
+
+提交 `386690e` 将仅用于 PostgreSQL session 的标签改为
+`agentpy-order-api:<sha256(run_id)[:16]>:<generation[:16]>`，最长 51 个 ASCII 字节；HTTP、订单、事件、
+CLS、Artifact 与 PostgreSQL 评测历史中的完整 Run ID 不变。order-api 与 backend observer 使用相同算法，
+run pattern 和 generation 精确匹配均有 64 字符 Run ID 合同覆盖。19 项定向单元测试、Ruff、Pyright 与
+重建镜像后的真实 Docker 恢复/幂等清理合同通过；未运行全量 pytest。canary 前置审计同时确认
+30 documents/180 chunks/0 scope mismatch、主模型与独立 Validator readiness 2/2，旧失败 Run 的
+`VALID_FAIL/fault_injection_failed` 状态及 checksum
+`17ddbe924a1ed34ecca638c088962e40763a3f22a46afd1aafa8b1880097e42d` 未改变。
+
+唯一真实 Single canary `order-pool-bounded-single-20260820-231711` 已越过 fault injection 硬门禁；按
+Runner 控制流，这意味着 `pool_at_capacity`、`pool_free_zero`、`business_probe_timed_out`、
+`postgres_reachable`、`no_lock_wait` 和 `run_scoped_sessions_present` 六项均为 true。随后真实诊断任务
+`diagnostic_904360a7dcc74d5ab25f2e3878aca18d` 成功完成，`evidence-driven-v4` 收集 4 条 Evidence、执行
+5 次模型调用，但以 `rootCauseDecision=null`、`terminationReason=no_useful_step` 结束；确定性 Validator
+给出 `invalid/deterministic_gap`，Recovery Plan 为 `no_action`，Policy 为
+`no_grounded_action` 且 `executionPermitted=false`。因此 Live 运行安全终止为
+`VALID_FAIL/recovery_denied`，授权码为 `order_pool_decision_required`，不能据此执行自动恢复。
+
+该 terminal Envelope 已同时保存在 Evaluation Archive 与 PostgreSQL，checksum 为
+`82f86cf339a2fa5f3bd0ffd1776c135dbf53269da954f768e3a9148877b273a4`。失败后独立 Verify 检出残留，
+随后 scoped Cleanup 返回 `verificationPassed=true`、`cleanupSucceeded=true`，最终 audit clean；终态
+Envelope 保持不可变，独立清理结果不会回写并改变上述 checksum。按一次 canary 约束未运行第二次。
+本次结果证明 session scope 修复有效，但尚未证明 Agent 根因决策与自动恢复闭环通过；下一轮应单独分析
+`no_useful_step/deterministic_gap`，不得通过放宽恢复授权或评分门槛绕过。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
