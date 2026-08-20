@@ -574,6 +574,30 @@ Single 与 Multi 的 Runtime/CLS 工具、可信参数和评分器相同；并�
 不能给每个 Investigator 复制额度。尚未执行真实 LLM+CLS 3×3 A/B，因此当前只能证明场景、路由和安全
 闭环成立，不能宣称 Multi-Agent 具有能力增益或适合生产默认启用。
 
+### Order Pool hypothesis-coherent 修复 canary（2026-08-20）
+
+提交 `7076304` 完成了三项安全修复：计划覆盖必须围绕同一公开 hypothesis；Live 工具角色、公开
+hypothesis 能力与 Generic Plan 共同读取单一 capability registry；Order Pool mechanism/impact 只能由
+incident-scoped CLS lifecycle、连接池满载、run-scoped PostgreSQL 会话、数据库可达和业务 acquire
+timeout 的结构化组合事实投影。普通 summary、neutral/error observation 或仅排除竞争候选的 Evidence
+不再被升级为正 Evidence；未修改 Validator、评分、独立 Evidence 门槛或恢复授权。
+
+本地受控模型为 `qwen3.7-plus` 与 `qwen3-vl-rerank`，独立 Validator 和 embedding 保持不变。真实模型
+readiness 2/2、真实 CLS upload/search contract、30 documents/180 chunks RAG scope audit、目标 pytest、
+Ruff 与 Pyright 均通过；未运行全量 pytest。
+
+唯一 Single canary `order-pool-causal-single-canary-20260820-125754` 在 Agent/LLM 诊断前以
+`VALID_FAIL/fault_injection_failed` 终止，`diagnosticTaskId=null`，因此不能用于评价本次因果链修复。
+失败终态同时保存到 PostgreSQL 与 Evaluation Archive，artifact checksum 为
+`496026c2c2bda37555c2211e3dad095dd4c02a8b66a5f6a31876456d23b671a5`；首次 Verify 检测到残留，随后
+显式 Cleanup 成功并持久化 `cleanupSucceeded=true`。旧失败 Run
+`order-pool-q3r-ab-single-01-20260820` 的 checksum、result identity、失败分类与 cleanup 终态保持不变。
+
+后续不自动重跑第二个付费 canary。真实 Docker 合同复查显示 fault injection 可复现通过，但恢复后的
+`unrelated_sessions_preserved` 仍以瞬时 session 数完全相等作为条件，会受并发 observer/health connection
+波动影响。应先单独加固该 Live harness 的稳定身份/集合比较，再经确认运行新的唯一 Single canary；
+在此之前不得开始 3×3 A/B，也不得宣称真实修复已达到 `VALID_PASS`。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
