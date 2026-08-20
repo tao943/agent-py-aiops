@@ -34,10 +34,19 @@ _DIRECT_FACT_KEYS = frozenset(
         "ProbeLiveEvalUpstream.gatewayHealthy",
         "ProbeLiveEvalUpstream.gatewayLatencyMs",
         "SearchLog.records.event",
+        "InspectOrderPoolState.poolAtCapacity",
+        "InspectOrderPoolState.freeConnections",
+        "InspectOrderPoolState.waiterObserved",
+        "InspectOrderDatabaseSessions.databaseReachable",
+        "InspectOrderDatabaseSessions.runScopedSessionsPresent",
+        "InspectOrderDatabaseSessions.lockWaitObserved",
+        "VerifyOrderDatabaseReachability.databaseReachable",
+        "VerifyOrderDatabaseReachability.businessProbeTimedOut",
         "InspectRedis.processStatus",
         "InspectRedis.listening",
         "InspectRedisClientPool.lastError",
         "InspectRedisClientPool.staleConnections",
+        "GetServiceMetrics.redisErrorRatePercent",
     }
 )
 

@@ -11,6 +11,7 @@ from langgraph.types import Send
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops import diagnostics as diagnostics_module
 from super_ai.aiops.adjudication import DiagnosticFact, HypothesisAssessment
+from super_ai.aiops.causal_intents import supported_causal_coverage
 from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
     _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
@@ -1274,6 +1275,194 @@ async def test_v4_adjudicator_projects_citations_back_to_observations(
     assert all(item["assessmentSource"] == "llm_adjudicated" for item in observations)
 
 
+def test_v4_adjudicator_reuses_trusted_order_pool_facts_for_causal_roles() -> None:
+    hypothesis_id = "order_connection_lifecycle_failure"
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect incident-scoped CLS events.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Failed updates check out connections before acquisition times out.",
+                "evidenceIds": ["ev-cls"],
+                "causalRole": "trigger",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Inspect the order connection pool.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The pool is at capacity.",
+                "evidenceIds": ["ev-pool"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Inspect database sessions.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Run-scoped sessions are present without lock waits.",
+                "evidenceIds": ["ev-sessions"],
+                "causalRole": "context",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Verify database and business reachability.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The business probe times out while PostgreSQL is reachable.",
+                "evidenceIds": ["ev-health"],
+                "causalRole": "impact",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id=hypothesis_id,
+                disposition="supported",
+                evidence_ids=("ev-cls",),
+                reason_code="incident_logs_support_connection_lifecycle",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="SearchLog.records.event",
+                value=(
+                    "connection_checkout",
+                    "order_update_failed",
+                    "connection_checkout",
+                    "order_update_failed",
+                    "pool_acquire_timeout",
+                ),
+                evidence_id="ev-cls",
+                source_tool="SearchLog",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.poolAtCapacity",
+                value=True,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.freeConnections",
+                value=0,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.waiterObserved",
+                value=True,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.databaseReachable",
+                value=True,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.runScopedSessionsPresent",
+                value=True,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.lockWaitObserved",
+                value=False,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="VerifyOrderDatabaseReachability.databaseReachable",
+                value=True,
+                evidence_id="ev-health",
+                source_tool="VerifyOrderDatabaseReachability",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="VerifyOrderDatabaseReachability.businessProbeTimedOut",
+                value=True,
+                evidence_id="ev-health",
+                source_tool="VerifyOrderDatabaseReachability",
+                quality="direct",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "trusted_fact_projection"
+    ]
+    assert [item["causalRole"] for item in derived] == ["mechanism", "impact"]
+    assert derived[0]["evidenceIds"] == ["ev-cls", "ev-pool", "ev-sessions"]
+    assert derived[1]["evidenceIds"] == ["ev-cls", "ev-health"]
+    assert all(item["supports"] == [hypothesis_id] for item in derived)
+    coverage = supported_causal_coverage(
+        hypothesis_states=(
+            {
+                "id": hypothesis_id,
+                "status": "supported",
+                "evidenceIds": ["ev-cls"],
+            },
+        ),
+        observation_decisions=projected,
+    )
+    assert coverage.missing_roles == ()
+
+
+def test_v4_adjudicator_does_not_promote_order_pool_summary_without_trusted_facts() -> None:
+    hypothesis_id = "order_connection_lifecycle_failure"
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect a bounded observation.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The pool is probably exhausted and requests time out.",
+                "evidenceIds": ["ev-neutral"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            }
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id=hypothesis_id,
+                disposition="supported",
+                evidence_ids=("ev-cls",),
+                reason_code="incident_logs_support_connection_lifecycle",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[],
+    )
+
+    assert all(
+        item.get("causalRoleOrigin") != "trusted_fact_projection"
+        for item in projected
+    )
+    assert projected[0]["supports"] == []
+
+
 def test_v4_adjudicator_derives_grounded_nginx_port_mismatch_chain() -> None:
     projected = _project_adjudicated_observations(
         observations=[
@@ -2072,7 +2261,7 @@ async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
 
 
 @pytest.mark.asyncio
-async def test_fact_adapter_records_cross_evidence_differential_support(
+async def test_fact_adapter_does_not_promote_competitor_refutation_to_support(
     migrated_database_url: str,
 ) -> None:
     hypotheses: list[JsonDict] = [
@@ -2190,7 +2379,7 @@ async def test_fact_adapter_records_cross_evidence_differential_support(
     )[0]
     assert first_observation["causalRole"] == "trigger"
     observation = cast(list[dict[str, object]], second["observation_decisions"])[0]
-    assert observation["supports"] == ["upstream_process_down"]
+    assert observation["supports"] == []
     assert observation["refutes"] == [
         "dns_resolution_failure",
         "upstream_port_mismatch",
@@ -2305,12 +2494,15 @@ async def test_fact_adapter_deterministically_closes_redis_availability_chain(
             ),
         ]
         observations: list[dict[str, object]] = []
+        evidence_ids: list[str] = []
         for step, (evidence_id, summary, output) in zip(plan, outputs, strict=True):
+            evidence_ids.append(evidence_id)
             update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
                 cast(
                     Any,
                     {
                         **state,
+                        "evidence_ids": list(evidence_ids),
                         "current_plan_step": step,
                         "current_evidence_id": evidence_id,
                         "current_evidence_summary": summary,
@@ -2595,7 +2787,8 @@ async def test_fact_adapter_derives_upstream_deadline_trigger_from_probe(
         "mechanism",
         "trigger",
     ]
-    assert all(item["supports"] == [hypothesis] for item in observations)
+    assert observations[0]["supports"] == []
+    assert observations[1]["supports"] == [hypothesis]
     assert observations[1]["evidenceIds"] == ["ev-probe"]
     assert observations[1]["causalRoleOrigin"] == "coverage_repair"
 

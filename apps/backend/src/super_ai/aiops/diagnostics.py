@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from operator import add
@@ -649,6 +649,28 @@ def _project_adjudicated_observations(
             facts=facts,
         )
     )
+    for observation in _derive_order_pool_lifecycle_observations(
+        assessment=supported[0],
+        facts=facts,
+    ):
+        identity = (
+            observation.get("causalRole"),
+            tuple(cast(list[object], observation.get("evidenceIds") or [])),
+            tuple(cast(list[object], observation.get("supports") or [])),
+            observation.get("causalRoleOrigin"),
+        )
+        if any(
+            (
+                existing.get("causalRole"),
+                tuple(cast(list[object], existing.get("evidenceIds") or [])),
+                tuple(cast(list[object], existing.get("supports") or [])),
+                existing.get("causalRoleOrigin"),
+            )
+            == identity
+            for existing in projected
+        ):
+            continue
+        projected.append(observation)
     projected = _normalize_postgres_lock_observations(
         projected,
         assessment=supported[0],
@@ -714,6 +736,155 @@ def _project_adjudicated_observations(
         projected[index]["causalRoleOrigin"] = "coverage_repair"
         break
     return projected
+
+
+def _derive_order_pool_lifecycle_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Project only the complete public Order Pool lifecycle fact pattern."""
+    hypothesis_id = "order_connection_lifecycle_failure"
+    if (
+        assessment.hypothesis_id != hypothesis_id
+        or assessment.disposition != "supported"
+    ):
+        return []
+    required_capabilities = {
+        "InspectOrderPoolState": "mechanism",
+        "InspectOrderDatabaseSessions": "context",
+        "VerifyOrderDatabaseReachability": "impact",
+    }
+    for tool_name, role in required_capabilities.items():
+        capability = LIVE_TOOL_CAPABILITIES.get(tool_name)
+        if (
+            capability is None
+            or hypothesis_id not in capability.hypotheses
+            or role not in capability.causal_intents
+        ):
+            return []
+    public = tuple(fact for fact in facts if fact.public and fact.quality == "direct")
+
+    def exact_fact(
+        key: str,
+        expected: object,
+        *,
+        evidence_id: str | None = None,
+    ) -> DiagnosticFact | None:
+        matches = [
+            fact
+            for fact in public
+            if fact.key == key
+            and fact.value == expected
+            and (evidence_id is None or fact.evidence_id == evidence_id)
+        ]
+        return sorted(matches, key=lambda item: item.evidence_id)[0] if matches else None
+
+    cls_events = next(
+        (
+            fact
+            for fact in public
+            if fact.key == "SearchLog.records.event"
+            and fact.evidence_id in assessment.evidence_ids
+            and isinstance(fact.value, tuple)
+            and "connection_checkout" in fact.value
+            and "order_update_failed" in fact.value
+            and "pool_acquire_timeout" in fact.value
+            and "connection_checkin" not in fact.value
+        ),
+        None,
+    )
+    pool_full = exact_fact("InspectOrderPoolState.poolAtCapacity", True)
+    pool_evidence_id = pool_full.evidence_id if pool_full is not None else None
+    pool_free = exact_fact(
+        "InspectOrderPoolState.freeConnections",
+        0,
+        evidence_id=pool_evidence_id,
+    )
+    pool_waiter = exact_fact(
+        "InspectOrderPoolState.waiterObserved",
+        True,
+        evidence_id=pool_evidence_id,
+    )
+    sessions = exact_fact(
+        "InspectOrderDatabaseSessions.runScopedSessionsPresent",
+        True,
+    )
+    sessions_evidence_id = sessions.evidence_id if sessions is not None else None
+    sessions_reachable = exact_fact(
+        "InspectOrderDatabaseSessions.databaseReachable",
+        True,
+        evidence_id=sessions_evidence_id,
+    )
+    no_lock_wait = exact_fact(
+        "InspectOrderDatabaseSessions.lockWaitObserved",
+        False,
+        evidence_id=sessions_evidence_id,
+    )
+    probe_timeout = exact_fact(
+        "VerifyOrderDatabaseReachability.businessProbeTimedOut",
+        True,
+    )
+    health_evidence_id = probe_timeout.evidence_id if probe_timeout is not None else None
+    health_reachable = exact_fact(
+        "VerifyOrderDatabaseReachability.databaseReachable",
+        True,
+        evidence_id=health_evidence_id,
+    )
+    required = (
+        cls_events,
+        pool_full,
+        pool_free,
+        pool_waiter,
+        sessions,
+        sessions_reachable,
+        no_lock_wait,
+        probe_timeout,
+        health_reachable,
+    )
+    if any(item is None for item in required):
+        return []
+    assert cls_events is not None
+    assert pool_evidence_id is not None
+    assert sessions_evidence_id is not None
+    assert health_evidence_id is not None
+    if len(
+        {cls_events.evidence_id, pool_evidence_id, sessions_evidence_id, health_evidence_id}
+    ) != 4:
+        return []
+    common: JsonDict = {
+        "supports": [hypothesis_id],
+        "refutes": [],
+        "assessmentSource": "deterministic",
+        "causalRoleOrigin": "trusted_fact_projection",
+    }
+    return [
+        {
+            **common,
+            "purpose": "Establish the connection-pool exhaustion mechanism.",
+            "summary": (
+                "Incident-scoped failed updates check out connections without a matching "
+                "check-in; run-scoped sessions remain present while the pool reaches "
+                "capacity with zero free connections and a waiting request."
+            ),
+            "evidenceIds": [
+                cls_events.evidence_id,
+                pool_evidence_id,
+                sessions_evidence_id,
+            ],
+            "causalRole": "mechanism",
+        },
+        {
+            **common,
+            "purpose": "Establish the order update timeout impact.",
+            "summary": (
+                "The business acquisition probe times out after pool exhaustion while "
+                "PostgreSQL remains reachable."
+            ),
+            "evidenceIds": [cls_events.evidence_id, health_evidence_id],
+            "causalRole": "impact",
+        },
+    ]
 
 
 def _normalize_postgres_lock_observations(
@@ -1252,6 +1423,82 @@ def _derive_redis_maxclients_observations(
         }
     )
     return observations
+
+
+def _derive_redis_availability_observations(
+    *,
+    assessment: HypothesisAssessment,
+    facts: Sequence[DiagnosticFact],
+) -> list[JsonDict]:
+    """Replace cross-candidate propagation with an explicit Redis fact chain."""
+    if (
+        assessment.hypothesis_id != "redis_server_availability"
+        or assessment.disposition != "supported"
+    ):
+        return []
+    public = tuple(fact for fact in facts if fact.public and fact.quality == "direct")
+
+    def matching(
+        key: str,
+        predicate: Callable[[object], bool],
+    ) -> DiagnosticFact | None:
+        matches = [fact for fact in public if fact.key == key and predicate(fact.value)]
+        return sorted(matches, key=lambda item: item.evidence_id)[0] if matches else None
+
+    stopped = matching(
+        "InspectRedis.processStatus",
+        lambda value: isinstance(value, str)
+        and value.casefold() in {"dead", "exited", "stopped"},
+    )
+    not_listening = matching("InspectRedis.listening", lambda value: value is False)
+    refused = matching(
+        "InspectRedisClientPool.lastError",
+        lambda value: isinstance(value, str)
+        and "connection refused" in value.casefold(),
+    )
+    error_rate = matching(
+        "GetServiceMetrics.redisErrorRatePercent",
+        lambda value: isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > 0,
+    )
+    if any(item is None for item in (stopped, not_listening, refused, error_rate)):
+        return []
+    assert stopped is not None
+    assert not_listening is not None
+    assert refused is not None
+    assert error_rate is not None
+    if (
+        stopped.evidence_id != not_listening.evidence_id
+        or stopped.evidence_id not in assessment.evidence_ids
+        or len({stopped.evidence_id, refused.evidence_id, error_rate.evidence_id}) != 3
+    ):
+        return []
+    common: JsonDict = {
+        "supports": [assessment.hypothesis_id],
+        "refutes": [],
+        "assessmentSource": "deterministic",
+        "causalRoleOrigin": "trusted_fact_projection",
+    }
+    return [
+        {
+            **common,
+            "purpose": "Establish why Redis connections are refused.",
+            "summary": (
+                "The Redis process is stopped and not listening, while the client pool "
+                "records connection-refused responses from the configured endpoint."
+            ),
+            "evidenceIds": [stopped.evidence_id, refused.evidence_id],
+            "causalRole": "mechanism",
+        },
+        {
+            **common,
+            "purpose": "Establish the Redis dependency impact.",
+            "summary": "Redis dependency errors increased while the server was stopped.",
+            "evidenceIds": [stopped.evidence_id, error_rate.evidence_id],
+            "causalRole": "impact",
+        },
+    ]
 
 
 def _derive_upstream_deadline_observations(
@@ -3364,34 +3611,6 @@ class AiopsDiagnosticService:
             supported_assessments = [
                 item for item in reduced if item.disposition == "supported"
             ]
-            unresolved_assessments = [
-                item for item in reduced if item.disposition == "unresolved"
-            ]
-            converged_causal_link = False
-            if (
-                not supports
-                and refutes
-                and len(supported_assessments) == 1
-                and not unresolved_assessments
-            ):
-                supports.append(supported_assessments[0].hypothesis_id)
-            if (
-                not supports
-                and not refutes
-                and len(supported_assessments) == 1
-                and not unresolved_assessments
-                and current_step.get("causalIntent") in {"mechanism", "impact"}
-                and supported_assessments[0].hypothesis_id
-                in {
-                    value
-                    for value in cast(
-                        list[object], current_step.get("testsHypotheses") or []
-                    )
-                    if isinstance(value, str)
-                }
-            ):
-                supports.append(supported_assessments[0].hypothesis_id)
-                converged_causal_link = True
             linked_ids = _unique_strings(
                 [
                     linked_id
@@ -3400,13 +3619,6 @@ class AiopsDiagnosticService:
                     for linked_id in item.evidence_ids
                 ]
             ) or [evidence_id]
-            if converged_causal_link:
-                linked_ids = _unique_strings(
-                    [
-                        *linked_ids,
-                        *supported_assessments[0].evidence_ids,
-                    ]
-                )
             rule_causal_roles = {
                 role
                 for item in reduced
@@ -3432,11 +3644,18 @@ class AiopsDiagnosticService:
                     "causalRole": causal_role,
                     "causalRoleOrigin": causal_role_origin,
                     "assessmentSource": "deterministic",
+                    "testsHypotheses": _unique_strings(
+                        [
+                            value
+                            for value in cast(
+                                list[object], current_step.get("testsHypotheses") or []
+                            )
+                            if isinstance(value, str)
+                        ]
+                    ),
                 }
             )
-            if len(supported_assessments) == 1 and (
-                supported_assessments[0].hypothesis_id in supports
-            ):
+            if len(supported_assessments) == 1:
                 observation_payloads.extend(
                     _derive_upstream_deadline_observations(
                         hypothesis_id=supported_assessments[0].hypothesis_id,
@@ -3444,6 +3663,17 @@ class AiopsDiagnosticService:
                         evidence_id=evidence_id,
                     )
                 )
+                if any(
+                    fact.key == "GetServiceMetrics.redisErrorRatePercent"
+                    and fact.evidence_id == evidence_id
+                    for fact in new_facts
+                ):
+                    observation_payloads.extend(
+                        _derive_redis_availability_observations(
+                            assessment=supported_assessments[0],
+                            facts=all_facts,
+                        )
+                    )
         payload: JsonDict = {
             "workflowVersion": "evidence-driven-v4",
             "factCount": len(all_facts),
