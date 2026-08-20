@@ -304,6 +304,7 @@ def create_app() -> FastAPI:
             database=settings.postgres_database,
             min_size=0,
             max_size=settings.pool_size,
+            server_settings={"application_name": "agentpy-order-api:idle"},
         )
         pool = AsyncpgPoolAdapter(raw_pool)
         runtime = OrderApiRuntime(pool=pool, generation=uuid4().hex)

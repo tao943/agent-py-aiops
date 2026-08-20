@@ -122,10 +122,10 @@ class FakeOrderApi:
 class FakePostgresObserver:
     reachable = True
     lock_wait = False
-    unrelated_sessions = 2
 
     def __init__(self, api: FakeOrderApi) -> None:
         self.api = api
+        self.unrelated_session_ids = {"stable-a", "stable-b"}
 
     async def database_reachable(self) -> bool:
         return self.reachable
@@ -145,8 +145,8 @@ class FakePostgresObserver:
     async def test_order_count(self, run_id: str) -> int:
         return int(run_id in self.api.orders)
 
-    async def unrelated_session_count(self) -> int:
-        return self.unrelated_sessions
+    async def unrelated_sessions(self) -> frozenset[str]:
+        return frozenset(self.unrelated_session_ids)
 
 
 class FakeRestarter:
@@ -236,6 +236,48 @@ async def test_recovery_restarts_only_owned_isolated_instance_once() -> None:
     assert second.executed is False
     assert restarter.calls == ["live-eval-order-api"]
     assert (await driver.verify(identity)).passed
+
+
+@pytest.mark.asyncio
+async def test_recovery_tolerates_new_unrelated_observer_session() -> None:
+    driver, api, postgres = _driver()
+    recovery = OrderPoolRecoveryService(driver, FakeRestarter(api))
+    identity = validate_run_id("run-observer-churn")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    postgres.unrelated_session_ids.add("transient-health-check")
+    await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+
+    assert (await driver.verify(identity)).check_passed(
+        "unrelated_sessions_preserved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_detects_lost_baseline_unrelated_session() -> None:
+    driver, api, postgres = _driver()
+    recovery = OrderPoolRecoveryService(driver, FakeRestarter(api))
+    identity = validate_run_id("run-unrelated-session-lost")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    postgres.unrelated_session_ids.remove("stable-a")
+    await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+
+    assert not (await driver.verify(identity)).check_passed(
+        "unrelated_sessions_preserved"
+    )
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,12 @@ ROOT = Path(__file__).resolve().parents[3]
 ORDER_API_PATH = ROOT / "infra" / "live-eval" / "order_api.py"
 
 
+def test_order_api_idle_pool_connections_have_owned_application_name() -> None:
+    source = ORDER_API_PATH.read_text(encoding="utf-8")
+
+    assert 'server_settings={"application_name": "agentpy-order-api:idle"}' in source
+
+
 def _load_order_api() -> ModuleType:
     spec = importlib.util.spec_from_file_location("live_eval_order_api", ORDER_API_PATH)
     if spec is None or spec.loader is None:

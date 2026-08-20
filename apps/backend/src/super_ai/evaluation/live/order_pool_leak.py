@@ -99,7 +99,7 @@ class OrderPoolPostgresBoundary(Protocol):
 
     async def test_order_count(self, run_id: str) -> int: ...
 
-    async def unrelated_session_count(self) -> int: ...
+    async def unrelated_sessions(self) -> frozenset[str]: ...
 
 
 class ComposeRestartBoundary(Protocol):
@@ -227,13 +227,26 @@ class PostgresOrderPoolObserver:
             )
         )
 
-    async def unrelated_session_count(self) -> int:
-        return _count(
-            await self._fetch_value(
-                "SELECT count(*) FROM pg_stat_activity "
+    async def unrelated_sessions(self) -> frozenset[str]:
+        connection = await self._config.connect(application_name="order-pool-observer")
+        try:
+            rows = await connection.fetch(
+                "SELECT pid::text || ':' || backend_start::text AS session_identity "
+                "FROM pg_stat_activity "
                 "WHERE datname = 'agent_py_live_eval' "
-                "AND application_name NOT LIKE 'agentpy-order-api:%'"
+                "AND backend_type = 'client backend' "
+                "AND application_name NOT LIKE 'agentpy-order-api:%' "
+                "AND application_name <> 'order-pool-observer'"
             )
+        finally:
+            await connection.close()
+        typed_rows = cast(Sequence[Mapping[str, object]], rows)
+        return frozenset(
+            _required_text(
+                row.get("session_identity"),
+                "order_pool_session_identity_invalid",
+            )
+            for row in typed_rows
         )
 
     async def _fetch_value(
@@ -311,7 +324,7 @@ class OrderPoolLiveRunAudit:
 class _OrderPoolRun:
     fault_token: str
     original_generation: str
-    unrelated_sessions_before: int
+    unrelated_sessions_before: frozenset[str]
     recovery_started: bool = False
     recovery_completed: bool = False
 
@@ -351,7 +364,7 @@ class OrderPoolLeakScenarioDriver:
         self._runs[identity.run_id] = _OrderPoolRun(
             fault_token=fault_token,
             original_generation=generation,
-            unrelated_sessions_before=await self._postgres.unrelated_session_count(),
+            unrelated_sessions_before=await self._postgres.unrelated_sessions(),
         )
 
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
@@ -421,7 +434,7 @@ class OrderPoolLeakScenarioDriver:
         )
         await self._api.start_run(identity, run.fault_token)
         probe_succeeded = await self._api.probe(identity)
-        unrelated_after = await self._postgres.unrelated_session_count()
+        unrelated_after = await self._postgres.unrelated_sessions()
         return LiveVerification(
             (
                 LiveCheck("old_generation_released", old_sessions == 0),
@@ -430,7 +443,7 @@ class OrderPoolLeakScenarioDriver:
                 LiveCheck("postgres_healthy", await self._postgres.database_reachable()),
                 LiveCheck(
                     "unrelated_sessions_preserved",
-                    unrelated_after == run.unrelated_sessions_before,
+                    run.unrelated_sessions_before.issubset(unrelated_after),
                 ),
                 LiveCheck("scoped_recovery_recorded", run.recovery_completed),
             )
