@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, TypeAlias, cast
 
 from super_ai.mcp_client import McpToolDefinition
 
@@ -15,6 +17,16 @@ InvestigationStrategy = Literal[
 ]
 StrategyMode = Literal["auto", "single", "multi"]
 SourceDomain = Literal["runtime", "log"]
+PacketStatus = Literal["completed", "inconclusive", "failed", "timeout"]
+EvidenceQuality = Literal["direct", "context", "reference"]
+TimeScope = Literal["incident_window", "current", "historical"]
+JsonScalar: TypeAlias = None | bool | int | float | str
+JsonValue: TypeAlias = (
+    JsonScalar
+    | tuple["JsonValue", ...]
+    | list["JsonValue"]
+    | Mapping[str, "JsonValue"]
+)
 
 _INVESTIGATOR_ORDER: tuple[InvestigatorType, ...] = (
     "knowledge",
@@ -31,6 +43,142 @@ _PRIVATE_ROUTING_TOKENS = (
     "scenarioid",
     "runid",
 )
+_PRIVATE_PACKET_TOKENS = (
+    "credential",
+    "groundtruth",
+    "modelrawresponse",
+    "oracle",
+    "primarycause",
+    "privatereasoning",
+    "prompt",
+    "recoveryaction",
+    "scorerules",
+    "secret",
+)
+_CAUSAL_ROLES = frozenset({"trigger", "mechanism", "impact"})
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceClaim:
+    claim_id: str
+    value: JsonValue
+    quality: EvidenceQuality
+    causal_role: str | None
+    supports: tuple[str, ...]
+    refutes: tuple[str, ...]
+    evidence_ids: tuple[str, ...]
+    target_component: str
+    observed_at: datetime | None
+    time_scope: TimeScope
+
+    def __post_init__(self) -> None:
+        if not self.claim_id.strip() or not self.target_component.strip():
+            raise ValueError("Evidence claim identity and target component are required.")
+        if self.quality not in {"direct", "context", "reference"}:
+            raise ValueError("Evidence claim has an invalid quality.")
+        if self.causal_role is not None and self.causal_role not in _CAUSAL_ROLES:
+            raise ValueError("Evidence claim has an invalid causal role.")
+        if self.time_scope not in {"incident_window", "current", "historical"}:
+            raise ValueError("Evidence claim has an invalid time scope.")
+        if self.quality == "direct" and self.observed_at is None:
+            raise ValueError("Direct evidence requires an observation time.")
+        if not self.evidence_ids or any(not item.strip() for item in self.evidence_ids):
+            raise ValueError("Evidence claim requires persisted Evidence IDs.")
+        if any(not item.strip() for item in (*self.supports, *self.refutes)):
+            raise ValueError("Evidence claim hypothesis IDs cannot be empty.")
+        if set(self.supports) & set(self.refutes):
+            raise ValueError("Evidence claim cannot support and refute one hypothesis.")
+        _reject_private_packet_text(
+            (self.claim_id, self.target_component, *self.supports, *self.refutes)
+        )
+        frozen_value = _freeze_public_json(self.value)
+        object.__setattr__(self, "value", frozen_value)
+        object.__setattr__(self, "supports", tuple(dict.fromkeys(self.supports)))
+        object.__setattr__(self, "refutes", tuple(dict.fromkeys(self.refutes)))
+        object.__setattr__(
+            self,
+            "evidence_ids",
+            tuple(sorted(set(self.evidence_ids))),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EvidencePacket:
+    task_id: str
+    owner_user_id: str
+    dispatch_id: str
+    investigator_type: InvestigatorType
+    status: PacketStatus
+    claims: tuple[EvidenceClaim, ...]
+    limitations: tuple[str, ...]
+    tool_call_ids: tuple[str, ...]
+    model_calls_used: int
+
+    def __post_init__(self) -> None:
+        if any(
+            not item.strip()
+            for item in (self.task_id, self.owner_user_id, self.dispatch_id)
+        ):
+            raise ValueError("Evidence packet identity fields are required.")
+        if self.investigator_type not in _INVESTIGATOR_ORDER:
+            raise ValueError("Evidence packet has an invalid Investigator type.")
+        if self.status not in {"completed", "inconclusive", "failed", "timeout"}:
+            raise ValueError("Evidence packet has an invalid status.")
+        if self.model_calls_used < 0:
+            raise ValueError("Evidence packet model calls cannot be negative.")
+        if self.status in {"failed", "timeout"} and self.claims:
+            raise ValueError("Failed or timeout packets cannot contain claims.")
+        if any(not item.strip() for item in (*self.limitations, *self.tool_call_ids)):
+            raise ValueError("Evidence packet strings cannot be empty.")
+        _reject_private_packet_text(
+            (
+                self.task_id,
+                self.owner_user_id,
+                self.dispatch_id,
+                *self.limitations,
+                *self.tool_call_ids,
+            )
+        )
+        object.__setattr__(
+            self,
+            "tool_call_ids",
+            tuple(sorted(set(self.tool_call_ids))),
+        )
+
+
+def _reject_private_packet_text(values: Sequence[str]) -> None:
+    for value in values:
+        normalized = "".join(character for character in value.casefold() if character.isalnum())
+        if any(token in normalized for token in _PRIVATE_PACKET_TOKENS):
+            if "recoveryaction" in normalized:
+                raise ValueError("Evidence packet cannot claim a recovery action.")
+            raise ValueError("Evidence packet contains private data.")
+
+
+def _freeze_public_json(value: JsonValue) -> JsonValue:
+    raw_value = cast(object, value)
+    if raw_value is None or isinstance(raw_value, (bool, int, str)):
+        return raw_value
+    if isinstance(raw_value, float):
+        if not math.isfinite(raw_value):
+            raise ValueError("Evidence claim JSON numbers must be finite.")
+        return raw_value
+    if isinstance(raw_value, Mapping):
+        raw_mapping = cast(Mapping[object, object], raw_value)
+        frozen: dict[str, JsonValue] = {}
+        for key in raw_mapping:
+            if not isinstance(key, str):
+                raise ValueError("Evidence claim JSON keys must be strings.")
+        for key, item in sorted(cast(Mapping[str, object], raw_mapping).items()):
+            _reject_private_packet_text((key,))
+            frozen[key] = _freeze_public_json(cast(JsonValue, item))
+        return cast(JsonValue, MappingProxyType(frozen))
+    if isinstance(raw_value, (list, tuple)):
+        return tuple(
+            _freeze_public_json(cast(JsonValue, item))
+            for item in cast(Sequence[object], raw_value)
+        )
+    raise ValueError("Evidence claim value must be JSON-compatible.")
 
 
 @dataclass(frozen=True, slots=True)

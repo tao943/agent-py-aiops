@@ -366,15 +366,15 @@ def aggregate_evidence_packets(
 ) -> AggregationResult: ...
 ```
 
-- [ ] **Step 1: 写 schema、安全和去重 RED**
+- [x] **Step 1: 写 schema、安全和去重 RED**
 
 覆盖跨 owner/task、未知 Evidence ID、未完成 audit、非白名单工具、reference 伪装 direct、缺少 time scope、恢复动作字段、secret/private reasoning/prompt/model raw response 字段、非法 causal role。失败或 timeout 空 claims 合法，但不能生成 refutes。
 
-- [ ] **Step 2: 写顺序无关与冲突 RED**
+- [x] **Step 2: 写顺序无关与冲突 RED**
 
 不同协程到达顺序必须输出相同 `(investigator_type, dispatch_id, claim fingerprint)` 排序；同 Evidence 多次引用只计一次；claim/value/source/component/timeScope/evidence hash 相同去重；同组件和同时间范围的相反值形成 conflict；incident abnormal/current healthy 不形成 conflict。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_evidence_packets.py -q -p no:cacheprovider
@@ -382,11 +382,11 @@ uv run pytest tests/test_aiops_evidence_packets.py -q -p no:cacheprovider
 
 Expected: packet/Aggregator 模块接口缺失导致 FAIL。
 
-- [ ] **Step 4: 最小实现 dataclass 边界和 Aggregator**
+- [x] **Step 4: 最小实现 dataclass 边界和 Aggregator**
 
 Aggregator 只做结构校验、所有权验证、稳定排序、去重和冲突标记，不调用 LLM、不自行改变 hypothesis disposition。claim fingerprint 精确使用：`claim_id + canonical_value + investigator_type + target_component + time_scope + sorted evidence_ids hash`。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_evidence_packets.py -q -p no:cacheprovider
@@ -394,7 +394,7 @@ uv run pytest tests/test_aiops_evidence_packets.py -q -p no:cacheprovider
 
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/investigation.py apps/backend/src/super_ai/aiops/evidence_aggregation.py apps/backend/tests/test_aiops_evidence_packets.py
