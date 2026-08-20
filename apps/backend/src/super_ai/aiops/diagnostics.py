@@ -1562,6 +1562,7 @@ class AiopsDiagnosticService:
         tool_policies: Mapping[str, Literal["proposal_only"]] | None = None,
         case_persistor: DiagnosisCasePersistor | None = None,
         investigation_router_policy: InvestigationRouterPolicy | None = None,
+        require_trusted_log_scope: bool = False,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
@@ -1572,6 +1573,7 @@ class AiopsDiagnosticService:
             raise ValueError("An MCP client or provider is required.")
         self._cls_region = cls_region
         self._cls_topic_id = cls_topic_id
+        self._require_trusted_log_scope = require_trusted_log_scope
         self._trusted_tool_arguments = {
             name: dict(arguments)
             for name, arguments in (trusted_tool_arguments or {}).items()
@@ -5448,27 +5450,30 @@ class AiopsDiagnosticService:
             available_tools=available_tools,
             known_hypotheses=known_hypotheses,
         )
-        trusted_search_definition = next(
-            (
-                definition
-                for definition in tool_definitions
-                if definition.name == "SearchLog" and definition.server_name == "cls"
-            ),
-            None,
-        )
         search_step: JsonDict | None = None
-        if (
-            trusted_search_definition is not None
-            and "SearchLog" in self._trusted_tool_arguments
-        ):
-            accepted_search, _search_contract_errors = normalize_tool_plan_steps(
-                [self._generic_search_log_step(query)],
-                trusted_tool_arguments=self._trusted_tool_arguments,
-                tool_argument_contracts=self._tool_argument_contracts,
-                tool_definitions=(trusted_search_definition,),
+        if self._require_trusted_log_scope:
+            trusted_search_definition = next(
+                (
+                    definition
+                    for definition in tool_definitions
+                    if definition.name == "SearchLog" and definition.server_name == "cls"
+                ),
+                None,
             )
-            if len(accepted_search) == 1:
-                search_step = accepted_search[0]
+            if (
+                trusted_search_definition is not None
+                and "SearchLog" in self._trusted_tool_arguments
+            ):
+                accepted_search, _search_contract_errors = normalize_tool_plan_steps(
+                    [self._generic_search_log_step(query)],
+                    trusted_tool_arguments=self._trusted_tool_arguments,
+                    tool_argument_contracts=self._tool_argument_contracts,
+                    tool_definitions=(trusted_search_definition,),
+                )
+                if len(accepted_search) == 1:
+                    search_step = accepted_search[0]
+        elif not generic_plan and "SearchLog" in available_tools:
+            generic_plan = [self._generic_search_log_step(query)]
         generic_plan = merge_live_log_plan_step(
             generic_plan,
             search_step=search_step,

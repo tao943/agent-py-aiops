@@ -387,6 +387,7 @@ class ApplicationLiveDiagnosticAdapter:
             investigation_router_policy=benchmark_investigation_router_policy(
                 self._investigation_strategy
             ),
+            require_trusted_log_scope=True,
         )
         async for _ in service.stream(
             task=task,

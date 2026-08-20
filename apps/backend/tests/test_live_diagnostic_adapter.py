@@ -270,6 +270,7 @@ async def _postgres_cls_service_and_definitions(
             if trusted_arguments is not None
             else None
         ),
+        require_trusted_log_scope=True,
     )
     return service, (*runtime, _cls_search_definition())
 
@@ -334,6 +335,30 @@ async def test_discovered_cls_tool_without_trusted_scope_is_not_forced_into_plan
 
     assert origin == "generic"
     assert all(step["tool"] != "SearchLog" for step in plan)
+
+
+@pytest.mark.asyncio
+async def test_generic_diagnostic_preserves_unscoped_search_log_fallback() -> None:
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, _InvalidPlanLlmProvider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-a",
+    )
+
+    plan, origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate ordinary service logs.",
+        alert={"severity": "warning"},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=(McpToolDefinition("SearchLog", "Search logs.", {}),),
+        known_hypotheses=(),
+    )
+
+    assert origin == "generic"
+    assert [step["tool"] for step in plan] == ["SearchLog"]
 
 
 def _route_public_postgres_plan(
