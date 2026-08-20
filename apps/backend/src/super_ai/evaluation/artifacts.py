@@ -47,6 +47,10 @@ class InvestigationBenchmarkMetrics:
     duplicate_evidence_basis_points: int
     fallback_reason: str | None
     security_hard_gate_passed: bool
+    total_score: int
+    run_id: str = ""
+    scenario_id: str = ""
+    campaign_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +260,14 @@ def _investigation_audit_from_steps(
     if not router_steps:
         return None
     router_payload = router_steps[-1].payload
+    for candidate_step in reversed(router_steps):
+        candidate_route = candidate_step.payload.get("route")
+        if isinstance(candidate_route, Mapping) and (
+            cast(Mapping[str, object], candidate_route).get("strategy")
+            == "multi_agent"
+        ):
+            router_payload = candidate_step.payload
+            break
     route = router_payload.get("route")
     if not isinstance(route, Mapping):
         return None
@@ -265,7 +277,18 @@ def _investigation_audit_from_steps(
     policy_version = safe_route.get("policyVersion")
     reasons = safe_route.get("reasonCodes")
     investigators = safe_route.get("selectedInvestigators")
-    dispatches = router_payload.get("dispatches")
+    dispatch_ids: set[str] = set()
+    for step in router_steps:
+        raw_dispatches = step.payload.get("dispatches")
+        if not isinstance(raw_dispatches, list):
+            return None
+        for raw_dispatch in cast(list[object], raw_dispatches):
+            if not isinstance(raw_dispatch, Mapping):
+                return None
+            dispatch_id = cast(Mapping[str, object], raw_dispatch).get("dispatchId")
+            if not isinstance(dispatch_id, str) or not dispatch_id:
+                return None
+            dispatch_ids.add(dispatch_id)
     if (
         strategy not in {"deterministic_fast_path", "single_agent", "multi_agent"}
         or not isinstance(score, int)
@@ -282,7 +305,6 @@ def _investigation_audit_from_steps(
             item in {"knowledge", "runtime", "log", "change"}
             for item in cast(list[object], investigators)
         )
-        or not isinstance(dispatches, list)
     ):
         return None
     aggregator_steps = [step for step in steps if step.phase == "evidence_aggregator"]
@@ -309,7 +331,7 @@ def _investigation_audit_from_steps(
         reason_codes=tuple(cast(list[str], reasons)),
         policy_version=policy_version,
         selected_investigators=tuple(cast(list[str], investigators)),
-        dispatch_count=len(cast(list[object], dispatches)),
+        dispatch_count=len(dispatch_ids),
         packet_statuses=packet_statuses,
         fallback_reason=fallback_reason,
     )

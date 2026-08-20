@@ -451,6 +451,52 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
     assert "private-sentinel" not in repr(artifact.investigation_audit)
 
 
+def test_artifact_keeps_multi_effective_after_bounded_single_fallback() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "strategy_router",
+                {
+                    "route": {
+                        "strategy": "multi_agent",
+                        "score": 7,
+                        "reasonCodes": ["investigation_stagnated"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": ["runtime", "log"],
+                    },
+                    "dispatches": [
+                        {"dispatchId": "dispatch-runtime"},
+                        {"dispatchId": "dispatch-log"},
+                    ],
+                },
+            ),
+            _step(
+                2,
+                "strategy_router",
+                {
+                    "route": {
+                        "strategy": "single_agent",
+                        "score": 9,
+                        "reasonCodes": ["maximum_investigation_waves_reached"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": [],
+                    },
+                    "dispatches": [],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is not None
+    assert artifact.investigation_audit.strategy == "multi_agent"
+    assert artifact.investigation_audit.dispatch_count == 2
+
+
 def test_legacy_artifact_has_no_investigation_audit() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

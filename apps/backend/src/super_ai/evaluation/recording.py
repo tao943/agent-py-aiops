@@ -124,6 +124,16 @@ def investigation_metrics_from_persisted_result(
         security_hard_gate_passed=_required_bool(
             metrics, "securityHardGatePassed"
         ),
+        total_score=_required_bounded_int(metrics, "total", maximum=100),
+        run_id=run.run_id,
+        scenario_id=run.scenario_id,
+        campaign_id=(
+            campaign
+            if isinstance(
+                campaign := metadata.get("acceptanceCampaignId"), str
+            )
+            else None
+        ),
     )
 
 

@@ -19,6 +19,7 @@ from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import (
     LivePostgresEvidenceMcpClient,
     append_live_outcome,
+    benchmark_investigation_router_policy,
     build_live_diagnostic_input,
     build_live_evidence_client,
     proposal_tool_policies_for_scenario,
@@ -48,6 +49,12 @@ def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
 
     assert payload["benchmarkMode"] == "live"
     assert payload["investigationStrategyMode"] == "multi"
+
+
+def test_only_forced_multi_enables_benchmark_multi_agent_policy() -> None:
+    assert benchmark_investigation_router_policy("multi").multi_agent_enabled is True
+    assert benchmark_investigation_router_policy("single").multi_agent_enabled is False
+    assert benchmark_investigation_router_policy("auto").multi_agent_enabled is False
 
 
 def test_only_nginx_live_scenario_enables_the_proposal_policy() -> None:

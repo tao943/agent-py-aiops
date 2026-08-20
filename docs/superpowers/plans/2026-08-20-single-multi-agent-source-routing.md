@@ -766,7 +766,7 @@ git commit -m "feat: audit investigation routing"
 **Interfaces:**
 
 ```text
-python -m super_ai.evaluation.live.cli run ... --strategy auto|single|multi
+python scripts/run_live_benchmark.py run ... --strategy auto|single|multi
 ```
 
 `ApplicationLiveDiagnosticAdapter.__init__(..., investigation_strategy: StrategyMode = "auto")`；普通 FastAPI request schema 和 `AiopsDiagnosticService.start()` 不新增客户端字段。
@@ -869,11 +869,11 @@ git commit -m "test: harden multi agent investigation recovery"
 - 安全：0 Ground Truth 泄漏、0 跨租户 Evidence、0 重复恢复、0 未授权工具。
 - 未达到能力与性能门槛：功能保留 Benchmark/显式内部模式，生产 auto 仍降为 single。
 
-- [ ] **Step 1: 写 summary gate RED**
+- [x] **Step 1: 写 summary gate RED**
 
 为纯函数 `compare_investigation_strategies(single_runs, multi_runs)` 写测试，输入只能是从 PostgreSQL 重新读取的 terminal envelopes 所投影的 `InvestigationBenchmarkMetrics`：按 safe scenario/campaign key 配对；计算 score/root cause/evidence recall/duration/model calls/duplicate evidence；任一安全 hard gate 失败则 rejected；仅性能达标但能力无增益仍 rejected；满足能力和性能才 eligible。删除内存 RunArtifact 后重建结果必须相同。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```powershell
 cd apps/backend
@@ -882,11 +882,11 @@ uv run pytest tests/test_evaluation_summary.py -q -p no:cacheprovider -k "invest
 
 Expected: comparison 接口缺失导致 FAIL。
 
-- [ ] **Step 3: 最小实现 A/B summary**
+- [x] **Step 3: 最小实现 A/B summary**
 
 只读取 Task 9 已持久化的 terminal envelope metrics/metadata；若需要诊断详情，只能用 envelope 的 `diagnostic_task_id` 从 owner-scoped repositories 重建安全 Artifact，不能依赖运行期对象。不得读取 report prose 或 Ground Truth 原文件；结果保存 campaign/run IDs、知识库版本、模型名、graph/policy version、safe metrics 和 eligibility，不保存 expected cause、required Evidence ID、凭据或原始日志。
 
-- [ ] **Step 4: 运行离线相关回归**
+- [x] **Step 4: 运行离线相关回归**
 
 ```powershell
 uv run pytest tests/test_aiops_investigation_router.py tests/test_aiops_evidence_packets.py tests/test_aiops_multi_agent_runtime.py tests/test_aiops_v4_workflow.py tests/test_aiops_checkpointing.py tests/test_aiops_network_resume.py tests/test_aiops_sse_delivery.py tests/test_evaluation_artifacts.py tests/test_evaluation_history.py tests/test_evaluation_persistence.py tests/test_evaluation_summary.py tests/test_live_cli_contract.py tests/test_live_diagnostic_adapter.py tests/test_evaluation_scenarios.py tests/test_live_evaluation_scenarios.py tests/test_knowledge_candidate_safety.py tests/test_snapshot_evaluation_tools.py -q -p no:cacheprovider
@@ -896,27 +896,27 @@ uv run pyright src/super_ai/aiops src/super_ai/evaluation tests/test_aiops_inves
 
 Expected: pytest 全部 PASS；Ruff 0 error；Pyright 0 error。不运行全量 pytest。
 
-- [ ] **Step 5: 运行固定场景 A/B（需真实服务就绪后逐场景执行）**
+- [x] **Step 5: 运行固定场景 A/B（需真实服务就绪后逐场景执行）**
 
 对至少2个同时包含 runtime/log 有效搜索空间、且 single 不命中 deterministic fast path 的 Live 场景，各运行3次 single 和3次 multi；每次先 verify 环境，失败立即 cleanup 并停止。命令模板：
 
 ```powershell
 cd apps/backend
-uv run python -m super_ai.evaluation.live.cli run --scenario <SAFE_SCENARIO_ID> --run-id <UNIQUE_RUN_ID> --owner-user-id <TEST_OWNER_ID> --knowledge-base-id <ACTIVE_30_CARD_KB_ID> --evidence-source cls --strategy single --config <LOCAL_CONFIG_PATH>
-uv run python -m super_ai.evaluation.live.cli run --scenario <SAFE_SCENARIO_ID> --run-id <UNIQUE_RUN_ID> --owner-user-id <TEST_OWNER_ID> --knowledge-base-id <ACTIVE_30_CARD_KB_ID> --evidence-source cls --strategy multi --config <LOCAL_CONFIG_PATH>
+uv run python scripts/run_live_benchmark.py run --scenario <SAFE_SCENARIO_ID> --run-id <UNIQUE_RUN_ID> --owner-user-id <TEST_OWNER_ID> --knowledge-base-id <ACTIVE_30_CARD_KB_ID> --evidence-source cls --strategy single --config <LOCAL_CONFIG_PATH>
+uv run python scripts/run_live_benchmark.py run --scenario <SAFE_SCENARIO_ID> --run-id <UNIQUE_RUN_ID> --owner-user-id <TEST_OWNER_ID> --knowledge-base-id <ACTIVE_30_CARD_KB_ID> --evidence-source cls --strategy multi --config <LOCAL_CONFIG_PATH>
 ```
 
 Expected: 每个 run 都持久化 terminal envelope、Artifact checksum、route audit、模型调用和耗时；不能复用 run ID。真实 ID 和本地配置路径仅在执行时从安全环境取得，不写入计划或仓库。
 
-- [ ] **Step 6: 生成差分并执行发布判定**
+- [x] **Step 6: 生成差分并执行发布判定**
 
 使用持久化结果生成 paired A/B summary。若门槛通过，在文档写 `eligible_for_default_review`，仍需用户做“是否生产默认启用”的重大决策；若不通过，写 `benchmark_only` 并列出具体差距，不能调整评分阈值掩盖失败。
 
-- [ ] **Step 7: 更新 OpenSpec task 与验收文档**
+- [x] **Step 7: 更新 OpenSpec task 与验收文档**
 
 只勾选有测试或真实 Run 证据的条目；记录 run IDs、checksum、分数、Evidence Recall、Root Cause Top-1、P50/P95、模型调用、fallback 和安全 hard gates。不得填写估算或虚构数据。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/evaluation/summary.py apps/backend/tests/test_evaluation_summary.py apps/backend/tests/test_evaluation_persistence.py docs/aiops/agentpy-domainbench.md openspec/changes/add-single-multi-agent-source-routing/tasks.md
@@ -925,17 +925,17 @@ git commit -m "test: evaluate investigation strategy routing"
 
 ## 最终验收清单
 
-- [ ] OpenSpec strict validation 通过。
-- [ ] Router 纯函数、reason code 稳定、硬门禁优先、Change 分值固定0。
-- [ ] Knowledge Retrieval 每次任务最多一次，checkpoint 续跑不重复。
-- [ ] Runtime/Log 并行且权限隔离；Multi 不拥有恢复工具。
-- [ ] Aggregator 单写、结果顺序无关、Evidence 去重、时空冲突正确。
-- [ ] 部分失败、全部失败、timeout、late result、Worker 重启全部 fail closed。
-- [ ] Benchmark CLI 可强制策略，普通 API 不可强制。
-- [ ] Artifact、SSE、checkpoint 和审计不含私有推理、凭据、原始敏感日志或 evaluator-private 内容。
-- [ ] v2/v3/v4 历史 Artifact 与当前 single 路径保持兼容。
-- [ ] 目标 pytest、Ruff、Pyright 通过；未运行全量 pytest。
-- [ ] A/B 未达到门槛时生产 auto 不默认升级 Multi。
+- [x] OpenSpec strict validation 通过。
+- [x] Router 纯函数、reason code 稳定、硬门禁优先、Change 分值固定0。
+- [x] Knowledge Retrieval 每次任务最多一次，checkpoint 续跑不重复。
+- [x] Runtime/Log 并行且权限隔离；Multi 不拥有恢复工具。
+- [x] Aggregator 单写、结果顺序无关、Evidence 去重、时空冲突正确。
+- [x] 部分失败、全部失败、timeout、late result、Worker 重启全部 fail closed。
+- [x] Benchmark CLI 可强制策略，普通 API 不可强制。
+- [x] Artifact、SSE、checkpoint 和审计不含私有推理、凭据、原始敏感日志或 evaluator-private 内容。
+- [x] v2/v3/v4 历史 Artifact 与当前 single 路径保持兼容。
+- [x] 目标 pytest、Ruff、Pyright 通过；未运行全量 pytest。
+- [x] A/B 未达到门槛时生产 auto 不默认升级 Multi。
 
 ## 计划自查
 

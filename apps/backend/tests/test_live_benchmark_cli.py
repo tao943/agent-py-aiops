@@ -351,6 +351,7 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
                 duplicate_evidence_basis_points=0,
                 fallback_reason=None,
                 security_hard_gate_passed=True,
+                total_score=100,
             ),
         )
 

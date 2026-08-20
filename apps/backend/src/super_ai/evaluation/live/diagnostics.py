@@ -10,7 +10,7 @@ from uuid import uuid4
 from langchain_core.tools import StructuredTool
 
 from super_ai.aiops import AiopsDiagnosticService
-from super_ai.aiops.investigation import StrategyMode
+from super_ai.aiops.investigation import InvestigationRouterPolicy, StrategyMode
 from super_ai.evaluation.artifacts import (
     LiveEvidenceAudit,
     LiveRecoveryAudit,
@@ -58,6 +58,13 @@ def build_live_diagnostic_input(
         if workflow_version == "evidence-driven-v4":
             payload["graphVersion"] = "aiops-diagnostic-v3"
     return payload
+
+
+def benchmark_investigation_router_policy(
+    strategy: StrategyMode,
+) -> InvestigationRouterPolicy:
+    """Enable Multi only for an explicit internal Benchmark request."""
+    return InvestigationRouterPolicy(multi_agent_enabled=strategy == "multi")
 
 
 def proposal_tool_policies_for_scenario(
@@ -377,6 +384,9 @@ class ApplicationLiveDiagnosticAdapter:
                 else None
             ),
             tool_policies=proposal_tool_policies_for_scenario(scenario),
+            investigation_router_policy=benchmark_investigation_router_policy(
+                self._investigation_strategy
+            ),
         )
         async for _ in service.stream(
             task=task,

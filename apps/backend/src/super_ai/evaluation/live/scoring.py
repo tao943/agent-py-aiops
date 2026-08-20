@@ -127,6 +127,7 @@ def score_live_run(
         root_cause_top1_correct=root_cause == 20,
         evidence_recall_basis_points=required_evidence * 500,
         security_hard_gate_passed=hard_gate is None,
+        total_score=total,
     )
     return LiveEvaluationResult(
         fault_confirmation,
@@ -154,6 +155,7 @@ def _investigation_metrics(
     root_cause_top1_correct: bool,
     evidence_recall_basis_points: int,
     security_hard_gate_passed: bool,
+    total_score: int,
 ) -> InvestigationBenchmarkMetrics | None:
     audit = artifact.investigation_audit
     if audit is None:
@@ -174,6 +176,7 @@ def _investigation_metrics(
         duplicate_evidence_basis_points=duplicate_basis_points,
         fallback_reason=audit.fallback_reason,
         security_hard_gate_passed=security_hard_gate_passed,
+        total_score=total_score,
     )
 
 
