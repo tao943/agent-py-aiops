@@ -57,6 +57,12 @@ from super_ai.aiops.investigation import (
     build_investigator_capabilities,
     normalize_plan_source_domains,
 )
+from super_ai.aiops.investigation_runtime import (
+    DiagnosticToolExecutionRequest,
+    DiagnosticToolExecutionResult,
+    PreparedDiagnosticToolExecution,
+    execute_diagnostic_tool,
+)
 from super_ai.aiops.model_budget import (
     ROLE_TIMEOUT_SECONDS,
     ExecutionDeadlines,
@@ -2524,42 +2530,84 @@ class AiopsDiagnosticService:
                 raise ValueError("Diagnostic plan did not specify a tool.")
             return {"output": _safe_value(raw_output)}
 
-        try:
-            if (
-                state.get("workflow_version") == "evidence-driven-v4"
-                and self._repositories.aiops_runtime is not None
-            ):
-                execution_repository = (
-                    self._repositories.aiops_runtime.execution_repository(
-                        owner_user_id=owner_user_id,
-                        task_id=task_id,
-                        graph_version=str(
-                            state.get("graph_version")
-                            or AIOPS_LEGACY_GRAPH_VERSION
-                        ),
+        service = self
+        cache_state = {"hit": False}
+
+        class _SingleAgentToolRuntime:
+            async def execute_prepared(
+                self,
+                request: DiagnosticToolExecutionRequest,
+                prepared: PreparedDiagnosticToolExecution,
+            ) -> DiagnosticToolExecutionResult:
+                del self, prepared
+                if (
+                    state.get("workflow_version") == "evidence-driven-v4"
+                    and service._repositories.aiops_runtime is not None
+                ):
+                    execution_repository = (
+                        service._repositories.aiops_runtime.execution_repository(
+                            owner_user_id=request.owner_user_id,
+                            task_id=request.task_id,
+                            graph_version=request.graph_version,
+                        )
                     )
-                )
-                coordinated = await ExecutionCoordinator(
-                    execution_repository,
-                    worker_id=f"diagnostic-service-{id(self)}",
-                ).run_once(
-                    ExecutionIdentity(
-                        task_id=task_id,
-                        graph_version=str(
-                            state.get("graph_version")
-                            or AIOPS_LEGACY_GRAPH_VERSION
+                    coordinated = await ExecutionCoordinator(
+                        execution_repository,
+                        worker_id=f"diagnostic-service-{id(service)}",
+                    ).run_once(
+                        ExecutionIdentity(
+                            task_id=request.task_id,
+                            graph_version=request.graph_version,
+                            node_name=f"tool:{tool_name}",
+                            logical_iteration=request.logical_iteration,
+                            input_payload={
+                                "tool": tool_name,
+                                "arguments": arguments,
+                            },
+                            execution_kind="tool",
                         ),
-                        node_name=f"tool:{tool_name}",
-                        logical_iteration=plan_index,
-                        input_payload={"tool": tool_name, "arguments": arguments},
-                        execution_kind="tool",
-                    ),
-                    invoke_tool,
+                        invoke_tool,
+                    )
+                    runtime_output = coordinated.output.get("output")
+                    cache_state["hit"] = coordinated.cache_hit
+                else:
+                    runtime_output = (await invoke_tool())["output"]
+                return DiagnosticToolExecutionResult(
+                    status="completed",
+                    evidence_id=evidence_id,
+                    tool_call_id=audit_id,
+                    safe_output=runtime_output,
+                    safe_summary=_tool_result_summary(tool_name, runtime_output),
+                    events=(),
                 )
-                output = coordinated.output.get("output")
-                tool_cache_hit = coordinated.cache_hit
-            else:
-                output = (await invoke_tool())["output"]
+
+        evidence_id = _stable_public_id(
+            "evidence", task_id, plan_step_id, tool_name, fingerprint
+        )
+        allowed_tools = frozenset(
+            {
+                definition.name
+                for definition in tuple(state.get("tool_definitions") or ())
+                if definition.name not in self._tool_policies
+            }
+            | {"knowledge_retrieval"}
+        )
+        try:
+            shared_result = await execute_diagnostic_tool(
+                DiagnosticToolExecutionRequest(
+                    owner_user_id=owner_user_id,
+                    task_id=task_id,
+                    graph_version=str(
+                        state.get("graph_version") or AIOPS_LEGACY_GRAPH_VERSION
+                    ),
+                    plan_step=step,
+                    logical_iteration=plan_index,
+                    allowed_tools=allowed_tools,
+                ),
+                runtime=_SingleAgentToolRuntime(),
+            )
+            output = shared_result.safe_output
+            tool_cache_hit = cache_state["hit"]
         except Exception as exc:
             safe_error = _safe_error(exc)
             evidence: JsonDict = {

@@ -517,17 +517,17 @@ async def execute_diagnostic_tool(
 ) -> DiagnosticToolExecutionResult: ...
 ```
 
-- [ ] **Step 1: 写共享工具原语、Dispatch 与幂等 RED**
+- [x] **Step 1: 写共享工具原语、Dispatch 与幂等 RED**
 
 先用相同 step 分别经过 single `_executor()` 和 `InvestigatorExecutor`，断言两者调用同一个 `execute_diagnostic_tool()`，产生相同 canonical arguments fingerprint、stable tool/evidence ID、Tool Audit、safe output、checkpoint execution identity 和异常分类，禁止复制两套执行逻辑。
 
 再覆盖稳定 dispatch key：`task_id + policy_version + investigator_type + objective_hash + evidence_snapshot_hash`；相同 key 完成后直接复用 Packet；失败/timeout 重试 attempt 增加但逻辑 key 不变；工具继续复用共享原语的 canonical arguments fingerprint；不同 owner/task 不复用。
 
-- [ ] **Step 2: 写权限和执行 RED**
+- [x] **Step 2: 写权限和执行 RED**
 
 Runtime 不能调用 SearchLog/knowledge/recovery；Log 只能调用启用的 SearchLog/日志工具；Planner step 即使伪造 allowedTools 也被 registry 拒绝。每个 Dispatch 最多 runtime 3步、log 2 query、可选 LLM 1次；第一版默认模型调用0。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py -q -p no:cacheprovider
@@ -535,11 +535,11 @@ uv run pytest tests/test_aiops_multi_agent_runtime.py -q -p no:cacheprovider
 
 Expected: runtime 模块和 Dispatch 接口缺失导致 FAIL。
 
-- [ ] **Step 4: 先抽取共享单工具执行原语，再实现 Dispatch 执行器**
+- [x] **Step 4: 先抽取共享单工具执行原语，再实现 Dispatch 执行器**
 
 从现有 `AiopsDiagnosticService._executor()` 抽取 `execute_diagnostic_tool()`，由 `DiagnosticToolRuntime` 显式携带 repositories、MCP client、retrieval tool、ExecutionCoordinator 和安全回调。现有 `_executor()` 改为薄状态适配器；InvestigatorExecutor 调用同一原语，按 dispatch 内依赖顺序执行。Packet 只引用已持久化 Evidence 和 completed audit。异常映射为 allowlisted safe error code，禁止保存原始异常/日志。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_execution_coordinator.py tests/test_aiops_network_resume.py -q -p no:cacheprovider
@@ -547,7 +547,7 @@ uv run pytest tests/test_aiops_multi_agent_runtime.py tests/test_aiops_execution
 
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/investigation_runtime.py apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/tests/test_aiops_multi_agent_runtime.py
