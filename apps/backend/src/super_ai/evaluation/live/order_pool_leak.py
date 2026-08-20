@@ -269,6 +269,16 @@ class ComposeServiceRestarter:
         _, _ = await process.communicate()
         if process.returncode != 0:
             raise RuntimeError("order_pool_restart_failed")
+        for _ in range(60):
+            try:
+                async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
+                    response = await client.get(f"{self._config.base_url}/health")
+                if response.status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0.25)
+        raise RuntimeError("order_pool_restart_readiness_timeout")
 
 
 @dataclass(frozen=True, slots=True)
