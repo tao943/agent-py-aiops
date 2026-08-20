@@ -427,6 +427,7 @@ def _validate_container(value: JsonDict, allowed: frozenset[str], label: str) ->
     if unknown:
         raise ValueError(f"Evaluation {label} field is not allowed: {sorted(unknown)[0]}")
 
+
 def _require_aware_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Evaluation timestamps require timezone information.")

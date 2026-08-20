@@ -76,12 +76,18 @@ def validate_serialized_failure_diagnostics(payload: Mapping[str, object]) -> No
         raise ValueError("Live failure diagnostic fields must be present together.")
 
     raw_checks = payload["checkResults"]
-    if not isinstance(raw_checks, list) or not 1 <= len(raw_checks) <= _MAX_ITEMS:
+    if not isinstance(raw_checks, list):
+        raise ValueError("Live failure diagnostic check results are invalid.")
+    typed_checks = cast(list[object], raw_checks)
+    if not 1 <= len(typed_checks) <= _MAX_ITEMS:
         raise ValueError("Live failure diagnostic check results are invalid.")
     check_names: set[str] = set()
     failed_names: list[str] = []
-    for raw_check in cast(list[object], raw_checks):
-        if not isinstance(raw_check, Mapping) or set(raw_check) != {
+    for raw_check in typed_checks:
+        if not isinstance(raw_check, Mapping):
+            raise ValueError("Live failure diagnostic check result is invalid.")
+        typed_check = cast(Mapping[object, object], raw_check)
+        if set(typed_check) != {
             "name",
             "passed",
             "source",
@@ -107,19 +113,25 @@ def validate_serialized_failure_diagnostics(payload: Mapping[str, object]) -> No
         raise ValueError("Live failure diagnostic failed checks are inconsistent.")
 
     raw_facts = payload["safeFacts"]
-    if not isinstance(raw_facts, Mapping) or len(raw_facts) > _MAX_ITEMS:
+    if not isinstance(raw_facts, Mapping):
         raise ValueError("Live failure diagnostic safe facts are invalid.")
-    for name, value in cast(Mapping[object, object], raw_facts).items():
+    typed_facts = cast(Mapping[object, object], raw_facts)
+    if len(typed_facts) > _MAX_ITEMS:
+        raise ValueError("Live failure diagnostic safe facts are invalid.")
+    for name, value in typed_facts.items():
         _validate_identifier(name)
         _validate_scalar(value)
 
 
 def normalize_public_failed_checks(value: object) -> list[str] | None:
     """Return a bounded public failed-name list, or omit an invalid value."""
-    if not isinstance(value, list) or not 1 <= len(value) <= _MAX_ITEMS:
+    if not isinstance(value, list):
+        return None
+    typed_values = cast(list[object], value)
+    if not 1 <= len(typed_values) <= _MAX_ITEMS:
         return None
     normalized: list[str] = []
-    for item in cast(list[object], value):
+    for item in typed_values:
         try:
             _validate_identifier(item)
         except ValueError:

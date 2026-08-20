@@ -22,8 +22,7 @@ from super_ai.evaluation.live.cli import (
     safe_output,
     write_safe_report,
 )
-from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult
-from super_ai.evaluation.live.domain import LiveFaultObservation
+from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult, LiveFaultObservation
 from super_ai.evaluation.live.failure_diagnostics import LiveFailureDiagnostics
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
@@ -656,8 +655,9 @@ def test_safe_output_drops_malformed_or_forbidden_failed_checks(
         result={"failedChecks": invalid_failed_checks},
     )
 
-    assert "result" in payload
-    assert "failedChecks" not in payload["result"]
+    result = payload.get("result")
+    assert isinstance(result, dict)
+    assert "failedChecks" not in result
 
 
 def test_safe_report_revalidates_failed_check_names_after_tampering(tmp_path: Path) -> None:
@@ -677,7 +677,9 @@ def test_safe_report_revalidates_failed_check_names_after_tampering(tmp_path: Pa
 
     restored = read_safe_report(report)
 
-    assert "failedChecks" not in restored["result"]
+    result = restored.get("result")
+    assert isinstance(result, dict)
+    assert "failedChecks" not in result
 
 
 @pytest.mark.asyncio
