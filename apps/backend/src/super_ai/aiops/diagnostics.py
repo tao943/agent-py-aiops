@@ -36,6 +36,7 @@ from super_ai.aiops.adjudication import (
 )
 from super_ai.aiops.cases import DiagnosisCasePersistor
 from super_ai.aiops.causal_intents import (
+    LIVE_TOOL_CAPABILITIES,
     allowed_causal_intents,
     next_causal_refinement_index,
     repair_plan_causal_coverage,
@@ -286,84 +287,71 @@ def build_generic_live_plan(
     """Build a safe evidence-gathering fallback from public Live contracts."""
     available = set(available_tools)
     known = set(known_hypotheses)
-    definitions: tuple[
-        tuple[str, str, JsonDict, tuple[str, ...], str], ...
-    ] = (
-        (
-            "VerifyServiceHealth",
-            "Check database reachability and service health.",
-            {"target": "postgres_cluster", "check_connection_pool": True},
-            ("postgres_connectivity_failure",),
-            "impact",
-        ),
-        (
-            "InspectPostgresSessions",
-            "Inspect session states and wait events.",
-            {
-                "state_filter": ["active", "idle in transaction"],
-                "include_wait_events": True,
-            },
-            ("postgres_slow_query_without_lock", "postgres_lock_blocking"),
-            "mechanism",
-        ),
-        (
-            "InspectPostgresLockGraph",
-            "Inspect current blocking chains and deadlock signals.",
-            {"detect_deadlocks": True, "analyze_blocking_chains": True},
-            ("postgres_lock_blocking",),
-            "trigger",
-        ),
-        (
-            "InspectOrderPoolState",
-            "Inspect sanitized order-api pool capacity and waiter state.",
-            {},
-            (
-                "order_connection_lifecycle_failure",
-                "order_traffic_capacity_exceeded",
-                "order_slow_statement",
-                "order_database_lock_wait",
-            ),
-            "mechanism",
-        ),
-        (
-            "InspectOrderDatabaseSessions",
-            "Inspect scoped database sessions and rule out lock waits.",
-            {},
-            (
-                "order_connection_lifecycle_failure",
-                "order_database_unreachable",
-                "order_slow_statement",
-                "order_database_lock_wait",
-            ),
-            "context",
-        ),
-        (
-            "VerifyOrderDatabaseReachability",
-            "Separate database reachability from the business acquisition timeout.",
-            {},
-            (
-                "order_connection_lifecycle_failure",
-                "order_database_unreachable",
-            ),
-            "impact",
-        ),
-    )
     return [
         {
             "id": f"live-evidence-{index}",
             "tool": tool,
-            "arguments": dict(arguments),
-            "purpose": purpose,
-            "testsHypotheses": [item for item in hypotheses if item in known],
-            "causalIntent": causal_intent,
+            "arguments": {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in capability.generic_arguments
+            },
+            "purpose": capability.generic_purpose,
+            "testsHypotheses": [
+                item for item in capability.hypotheses if item in known
+            ],
+            "causalIntent": capability.generic_causal_intent,
             "causalIntentOrigin": "generic",
             "evidenceRules": [],
         }
-        for index, (tool, purpose, arguments, hypotheses, causal_intent) in enumerate(
-            definitions, start=1
+        for index, (tool, capability) in enumerate(
+            LIVE_TOOL_CAPABILITIES.items(), start=1
         )
         if tool in available
     ]
+
+
+def merge_trusted_live_hypothesis_bindings(
+    plan: Sequence[JsonDict],
+    *,
+    known_hypotheses: Sequence[str],
+) -> list[JsonDict]:
+    """Repair public hypothesis bindings without extending unknown tool scope."""
+    known = {
+        item.strip()
+        for item in known_hypotheses
+        if item.strip()
+    }
+    repaired: list[JsonDict] = []
+    for source in plan:
+        step = dict(source)
+        raw_bindings = step.get("testsHypotheses")
+        model_bindings: list[str] = []
+        if isinstance(raw_bindings, Sequence) and not isinstance(
+            raw_bindings, (str, bytes)
+        ):
+            for item in raw_bindings:
+                if (
+                    isinstance(item, str)
+                    and item.strip() in known
+                    and item.strip() not in model_bindings
+                ):
+                    model_bindings.append(item.strip())
+        merged = list(model_bindings)
+        tool_name = step.get("tool")
+        capability = (
+            LIVE_TOOL_CAPABILITIES.get(tool_name)
+            if isinstance(tool_name, str)
+            else None
+        )
+        if capability is not None:
+            for hypothesis_id in capability.hypotheses:
+                if hypothesis_id in known and hypothesis_id not in merged:
+                    merged.append(hypothesis_id)
+        step["testsHypotheses"] = merged
+        if merged != model_bindings:
+            step["testsHypothesesOrigin"] = "trusted_capability_repair"
+        repaired.append(step)
+    return repaired
 
 
 def merge_live_log_plan_step(
@@ -4158,6 +4146,10 @@ class AiopsDiagnosticService:
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
         )
+        parsed_steps = merge_trusted_live_hypothesis_bindings(
+            parsed_steps,
+            known_hypotheses=tuple(sorted(known_hypotheses)),
+        )
         parsed_coverage = repair_plan_causal_coverage(parsed_steps)
         parsed_steps = list(parsed_coverage.steps)
         executed = set(state.get("executed_step_fingerprints") or [])
@@ -5573,6 +5565,10 @@ class AiopsDiagnosticService:
             trusted_tool_arguments=self._trusted_tool_arguments,
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
+        )
+        plan = merge_trusted_live_hypothesis_bindings(
+            plan,
+            known_hypotheses=known_hypotheses,
         )
         plan = list(repair_plan_causal_coverage(plan).steps)
         if not plan:

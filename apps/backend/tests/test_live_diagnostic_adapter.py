@@ -15,6 +15,7 @@ from super_ai.aiops.diagnostics import (
     build_generic_live_plan,
     build_grounded_fallback_decision,
     merge_live_log_plan_step,
+    merge_trusted_live_hypothesis_bindings,
     plan_matches_tool_contracts,
 )
 from super_ai.aiops.investigation import (
@@ -45,6 +46,7 @@ from super_ai.evaluation.live.domain import (
 from super_ai.evaluation.live.postgres_deadlock import PostgresDeadlockEvidenceMcpClient
 from super_ai.evaluation.live.scenarios import load_live_scenario
 from super_ai.mcp_client import McpClientError, McpToolDefinition
+from super_ai.memory.repositories import JsonDict
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
@@ -497,6 +499,116 @@ def test_generic_order_pool_plan_uses_runtime_tools_without_embedding_the_answer
         "impact",
     ]
     assert "exception_path_connection_not_released" not in str(plan)
+
+
+def test_trusted_live_bindings_repair_only_registered_public_capabilities() -> None:
+    plan: list[JsonDict] = [
+        {
+            "id": "pool",
+            "tool": "InspectOrderPoolState",
+            "arguments": {},
+            "purpose": "Inspect pool state.",
+            "testsHypotheses": [
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+            ],
+            "causalIntent": "context",
+            "causalIntentOrigin": "model",
+        },
+        {
+            "id": "sessions",
+            "tool": "InspectOrderDatabaseSessions",
+            "arguments": {},
+            "purpose": "Inspect sessions.",
+            "testsHypotheses": [
+                "order_slow_statement",
+                "order_database_lock_wait",
+                "unknown",
+                ["order_connection_lifecycle_failure"],
+            ],
+            "causalIntent": "mechanism",
+            "causalIntentOrigin": "model",
+        },
+        {
+            "id": "health",
+            "tool": "VerifyOrderDatabaseReachability",
+            "arguments": {},
+            "purpose": "Verify reachability.",
+            "testsHypotheses": [
+                "order_database_unreachable",
+                "order_database_unreachable",
+                "",
+            ],
+            "causalIntent": "impact",
+            "causalIntentOrigin": "model",
+        },
+    ]
+
+    repaired = merge_trusted_live_hypothesis_bindings(
+        plan,
+        known_hypotheses=(
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_slow_statement",
+            "order_database_lock_wait",
+            "order_database_unreachable",
+        ),
+    )
+
+    assert repaired[0]["testsHypotheses"] == [
+        "order_connection_lifecycle_failure",
+        "order_traffic_capacity_exceeded",
+        "order_slow_statement",
+        "order_database_lock_wait",
+    ]
+    assert repaired[1]["testsHypotheses"] == [
+        "order_slow_statement",
+        "order_database_lock_wait",
+        "order_connection_lifecycle_failure",
+        "order_database_unreachable",
+    ]
+    assert repaired[2]["testsHypotheses"] == [
+        "order_database_unreachable",
+        "order_connection_lifecycle_failure",
+    ]
+    assert all(
+        step["testsHypothesesOrigin"] == "trusted_capability_repair"
+        for step in repaired
+    )
+    assert (
+        merge_trusted_live_hypothesis_bindings(
+            repaired,
+            known_hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+                "order_slow_statement",
+                "order_database_lock_wait",
+                "order_database_unreachable",
+            ),
+        )
+        == repaired
+    )
+
+
+def test_unregistered_tool_cannot_gain_trusted_hypothesis_bindings() -> None:
+    repaired = merge_trusted_live_hypothesis_bindings(
+        (
+            {
+                "id": "future",
+                "tool": "InspectFutureSubsystem",
+                "arguments": {},
+                "purpose": "Inspect a future subsystem.",
+                "testsHypotheses": ["known", "unknown", {"oracle": "known"}],
+                "causalIntent": "context",
+                "causalIntentOrigin": "model",
+            },
+        ),
+        known_hypotheses=("known", "omitted"),
+    )
+
+    assert repaired[0]["testsHypotheses"] == ["known"]
+    assert repaired[0]["causalIntentOrigin"] == "model"
+    assert "testsHypothesesOrigin" not in repaired[0]
 
 
 def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:

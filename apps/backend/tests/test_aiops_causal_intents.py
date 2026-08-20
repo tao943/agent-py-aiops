@@ -2,6 +2,7 @@ import inspect
 
 from super_ai.aiops import causal_intents
 from super_ai.aiops.causal_intents import (
+    LIVE_TOOL_CAPABILITIES,
     allowed_causal_intents,
     next_causal_refinement_index,
     repair_plan_causal_coverage,
@@ -66,6 +67,12 @@ def test_tool_capabilities_describe_public_observation_semantics() -> None:
     )
     assert allowed_causal_intents("RestartTestService") == frozenset()
     assert allowed_causal_intents("InspectFutureSubsystem") == frozenset({"context"})
+
+
+def test_live_tool_registry_is_the_role_capability_source() -> None:
+    for tool_name, capability in LIVE_TOOL_CAPABILITIES.items():
+        assert allowed_causal_intents(tool_name) == capability.causal_intents
+        assert capability.generic_causal_intent in capability.causal_intents
 
 
 def test_tool_capability_registry_is_answer_isolated() -> None:

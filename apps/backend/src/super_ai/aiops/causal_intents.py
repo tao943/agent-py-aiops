@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
+from types import MappingProxyType
 from typing import Literal, cast
 
 from super_ai.memory.repositories import JsonDict
@@ -77,6 +78,92 @@ _NON_DIAGNOSTIC_PREFIXES = (
 
 
 @dataclass(frozen=True, slots=True)
+class LiveToolCapability:
+    """Public diagnostic scope and generic fallback metadata for a Live tool."""
+
+    causal_intents: frozenset[CausalIntent]
+    hypotheses: tuple[str, ...]
+    generic_purpose: str
+    generic_arguments: tuple[tuple[str, object], ...]
+    generic_causal_intent: CausalIntent
+
+
+LIVE_TOOL_CAPABILITIES: Mapping[str, LiveToolCapability] = MappingProxyType(
+    {
+        "VerifyServiceHealth": LiveToolCapability(
+            causal_intents=frozenset({"context", "impact"}),
+            hypotheses=("postgres_connectivity_failure",),
+            generic_purpose="Check database reachability and service health.",
+            generic_arguments=(
+                ("target", "postgres_cluster"),
+                ("check_connection_pool", True),
+            ),
+            generic_causal_intent="impact",
+        ),
+        "InspectPostgresSessions": LiveToolCapability(
+            causal_intents=frozenset({"mechanism", "impact"}),
+            hypotheses=(
+                "postgres_slow_query_without_lock",
+                "postgres_lock_blocking",
+            ),
+            generic_purpose="Inspect session states and wait events.",
+            generic_arguments=(
+                ("state_filter", ("active", "idle in transaction")),
+                ("include_wait_events", True),
+            ),
+            generic_causal_intent="mechanism",
+        ),
+        "InspectPostgresLockGraph": LiveToolCapability(
+            causal_intents=frozenset({"trigger", "mechanism"}),
+            hypotheses=("postgres_lock_blocking",),
+            generic_purpose="Inspect current blocking chains and deadlock signals.",
+            generic_arguments=(
+                ("detect_deadlocks", True),
+                ("analyze_blocking_chains", True),
+            ),
+            generic_causal_intent="trigger",
+        ),
+        "InspectOrderPoolState": LiveToolCapability(
+            causal_intents=frozenset({"context", "mechanism"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            generic_purpose="Inspect sanitized order-api pool capacity and waiter state.",
+            generic_arguments=(),
+            generic_causal_intent="mechanism",
+        ),
+        "InspectOrderDatabaseSessions": LiveToolCapability(
+            causal_intents=frozenset({"context", "mechanism"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            generic_purpose="Inspect scoped database sessions and rule out lock waits.",
+            generic_arguments=(),
+            generic_causal_intent="context",
+        ),
+        "VerifyOrderDatabaseReachability": LiveToolCapability(
+            causal_intents=frozenset({"context", "impact"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+            ),
+            generic_purpose=(
+                "Separate database reachability from the business acquisition timeout."
+            ),
+            generic_arguments=(),
+            generic_causal_intent="impact",
+        ),
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanCausalCoverage:
     steps: tuple[JsonDict, ...]
     complete: bool
@@ -104,6 +191,9 @@ class CausalCoverage:
 
 def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
     """Return the public observation roles a diagnostic tool can establish."""
+    live_capability = LIVE_TOOL_CAPABILITIES.get(tool_name)
+    if live_capability is not None:
+        return live_capability.causal_intents
     if tool_name in _TRIGGER_OR_MECHANISM:
         return frozenset({"trigger", "mechanism"})
     if tool_name in _IMPACT:
