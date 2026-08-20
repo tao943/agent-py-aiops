@@ -16,6 +16,22 @@ InvestigationStrategy = Literal[
 StrategyMode = Literal["auto", "single", "multi"]
 SourceDomain = Literal["runtime", "log"]
 
+_INVESTIGATOR_ORDER: tuple[InvestigatorType, ...] = (
+    "knowledge",
+    "runtime",
+    "log",
+    "change",
+)
+_PARALLEL_INVESTIGATOR_ORDER: tuple[InvestigatorType, ...] = ("runtime", "log")
+_PRIVATE_ROUTING_TOKENS = (
+    "ground_truth",
+    "oracle",
+    "primary_cause",
+    "scorerules",
+    "scenarioid",
+    "runid",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class InvestigatorCapability:
@@ -54,6 +70,98 @@ class TrustedToolCapability:
             not name.strip() for name in self.allowed_server_names
         ):
             raise ValueError("A trusted tool capability requires trusted server names.")
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationRouterPolicy:
+    version: str = "investigation-router-v1"
+    escalation_watch_threshold: int = 4
+    multi_agent_threshold: int = 6
+    single_agent_max_initial_steps: int = 2
+    maximum_investigation_waves: int = 2
+    aggregation_reserve_ms: int = 5_000
+    investigator_deadline_ms: int = 30_000
+    mandatory_model_call_reserve: int = 2
+    maximum_optional_model_calls_per_investigator: int = 1
+    multi_agent_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise ValueError("Investigation router policy requires a version.")
+        if not 0 <= self.escalation_watch_threshold < self.multi_agent_threshold:
+            raise ValueError("Investigation router thresholds are invalid.")
+        positive = (
+            self.single_agent_max_initial_steps,
+            self.maximum_investigation_waves,
+            self.aggregation_reserve_ms,
+            self.investigator_deadline_ms,
+            self.mandatory_model_call_reserve,
+            self.maximum_optional_model_calls_per_investigator,
+        )
+        if any(value <= 0 for value in positive):
+            raise ValueError("Investigation router policy values must be positive.")
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationRoutingInput:
+    required_domains: frozenset[InvestigatorType]
+    unresolved_hypothesis_count: int
+    causal_component_count: int
+    missing_causal_roles: frozenset[str]
+    high_quality_conflict: bool
+    severity: str
+    trusted_pattern_matched: bool
+    decision_ready: bool
+    valid_tool_calls_without_gain: int
+    knowledge_hit: bool
+    remaining_time_ms: int
+    remaining_model_calls: int
+    completed_dispatch_keys: frozenset[str]
+    evidence_snapshot_hash: str
+    wave: int
+
+    def __post_init__(self) -> None:
+        if not self.required_domains <= set(_INVESTIGATOR_ORDER):
+            raise ValueError("Investigation routing input has an invalid required domain.")
+        if not self.missing_causal_roles <= {"trigger", "mechanism", "impact"}:
+            raise ValueError("Investigation routing input has an invalid causal role.")
+        counts = (
+            self.unresolved_hypothesis_count,
+            self.causal_component_count,
+            self.valid_tool_calls_without_gain,
+            self.remaining_time_ms,
+            self.remaining_model_calls,
+            self.wave,
+        )
+        if any(value < 0 for value in counts):
+            raise ValueError("Investigation routing counts cannot be negative.")
+        if (
+            len(self.evidence_snapshot_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.evidence_snapshot_hash)
+        ):
+            raise ValueError("Investigation routing requires a hexadecimal snapshot hash.")
+        public_strings = (
+            self.severity,
+            self.evidence_snapshot_hash,
+            *sorted(self.completed_dispatch_keys),
+        )
+        if any(
+            token in value.casefold()
+            for value in public_strings
+            for token in _PRIVATE_ROUTING_TOKENS
+        ):
+            raise ValueError("Investigation routing input contains evaluator-private data.")
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationRoute:
+    strategy: InvestigationStrategy
+    score: int
+    escalation_watch: bool
+    selected_investigators: tuple[InvestigatorType, ...]
+    rejected_investigators: Mapping[InvestigatorType, str]
+    reason_codes: tuple[str, ...]
+    policy_version: str
 
 
 _RUNTIME_SERVER_NAMES = frozenset(
@@ -225,6 +333,194 @@ def normalize_plan_source_domains(
             step["sourceDomainStatus"] = "trusted_registry"
         normalized.append(step)
     return normalized
+
+
+def route_investigation(
+    routing_input: InvestigationRoutingInput,
+    *,
+    capabilities: Mapping[InvestigatorType, InvestigatorCapability],
+    policy: InvestigationRouterPolicy,
+    mode: StrategyMode = "auto",
+) -> InvestigationRoute:
+    """Choose one auditable strategy from bounded public routing features."""
+    if mode not in {"auto", "single", "multi"}:
+        raise ValueError("Unknown investigation strategy mode.")
+    score, score_reasons = _routing_score(routing_input)
+    rejected = _base_rejected_investigators(capabilities)
+
+    if routing_input.trusted_pattern_matched or routing_input.decision_ready:
+        reason = (
+            "trusted_pattern_matched"
+            if routing_input.trusted_pattern_matched
+            else "decision_ready"
+        )
+        for domain in _PARALLEL_INVESTIGATOR_ORDER:
+            rejected[domain] = "deterministic_fast_path"
+        return _route(
+            "deterministic_fast_path",
+            score=score,
+            escalation_watch=False,
+            selected=(),
+            rejected=rejected,
+            reasons=(*score_reasons, reason),
+            policy=policy,
+        )
+
+    candidates: list[InvestigatorType] = []
+    gate_reasons: list[str] = []
+    completed_domain_seen = False
+    unavailable_domain_seen = False
+    for domain in _PARALLEL_INVESTIGATOR_ORDER:
+        capability = capabilities.get(domain)
+        if domain not in routing_input.required_domains:
+            rejected[domain] = "not_required"
+            continue
+        completion_key = f"{domain}:{routing_input.evidence_snapshot_hash}"
+        if completion_key in routing_input.completed_dispatch_keys:
+            rejected[domain] = "already_completed"
+            completed_domain_seen = True
+            continue
+        if capability is None or not capability.available:
+            rejected[domain] = (
+                capability.reason_code
+                if capability is not None and capability.reason_code is not None
+                else "source_unavailable"
+            )
+            unavailable_domain_seen = True
+            continue
+        candidates.append(domain)
+
+    if not policy.multi_agent_enabled:
+        gate_reasons.append("multi_agent_disabled")
+    if routing_input.wave >= policy.maximum_investigation_waves:
+        gate_reasons.append("maximum_investigation_waves_reached")
+    minimum_time_ms = policy.investigator_deadline_ms + policy.aggregation_reserve_ms
+    if routing_input.remaining_time_ms < minimum_time_ms:
+        gate_reasons.append("insufficient_time_budget")
+    required_model_calls = policy.mandatory_model_call_reserve + (
+        len(candidates) * policy.maximum_optional_model_calls_per_investigator
+    )
+    if routing_input.remaining_model_calls < required_model_calls:
+        gate_reasons.append("insufficient_model_budget")
+    if completed_domain_seen:
+        gate_reasons.append("dispatch_snapshot_already_completed")
+    if unavailable_domain_seen:
+        gate_reasons.append("capability_unavailable")
+    if len(candidates) < 2:
+        gate_reasons.append("insufficient_parallel_sources")
+
+    should_attempt_multi = mode == "multi" or (
+        mode == "auto" and score >= policy.multi_agent_threshold
+    )
+    if mode == "single":
+        gate_reasons.append("forced_single_strategy")
+        should_attempt_multi = False
+    elif mode == "auto" and score < policy.multi_agent_threshold:
+        gate_reasons.append("below_multi_agent_threshold")
+
+    if should_attempt_multi and not gate_reasons:
+        return _route(
+            "multi_agent",
+            score=score,
+            escalation_watch=False,
+            selected=tuple(candidates),
+            rejected=rejected,
+            reasons=score_reasons,
+            policy=policy,
+        )
+
+    for domain in candidates:
+        rejected[domain] = "single_agent_selected"
+    escalation_watch = (
+        mode == "auto"
+        and policy.escalation_watch_threshold
+        <= score
+        < policy.multi_agent_threshold
+        and not gate_reasons[:-1]
+    )
+    reasons: tuple[str, ...] = (*score_reasons, *gate_reasons)
+    if escalation_watch:
+        reasons = (*reasons, "escalation_watch")
+    return _route(
+        "single_agent",
+        score=score,
+        escalation_watch=escalation_watch,
+        selected=(),
+        rejected=rejected,
+        reasons=reasons,
+        policy=policy,
+    )
+
+
+def _routing_score(
+    routing_input: InvestigationRoutingInput,
+) -> tuple[int, tuple[str, ...]]:
+    score = 0
+    reasons: list[str] = []
+    domain_count = len(routing_input.required_domains)
+    if domain_count >= 3:
+        score += 3
+        reasons.append("three_evidence_domains_required")
+    elif domain_count == 2:
+        score += 1
+        reasons.append("two_evidence_domains_required")
+    if routing_input.causal_component_count >= 2:
+        score += 2
+        reasons.append("cross_component_investigation")
+    if routing_input.unresolved_hypothesis_count >= 3:
+        score += 1
+        reasons.append("root_cause_ambiguity")
+    if routing_input.high_quality_conflict:
+        score += 3
+        reasons.append("high_quality_evidence_conflict")
+    if routing_input.severity.casefold() in {"p0", "p1", "critical"}:
+        score += 2
+        reasons.append("high_severity_incident")
+    if len(routing_input.missing_causal_roles) >= 2:
+        score += 2
+        reasons.append("multiple_causal_roles_missing")
+    if routing_input.valid_tool_calls_without_gain >= 2:
+        score += 3
+        reasons.append("investigation_stagnated")
+    if not routing_input.knowledge_hit:
+        score += 1
+        reasons.append("knowledge_match_absent")
+    return score, tuple(reasons)
+
+
+def _base_rejected_investigators(
+    capabilities: Mapping[InvestigatorType, InvestigatorCapability],
+) -> dict[InvestigatorType, str]:
+    change = capabilities.get("change")
+    return {
+        "knowledge": "already_completed",
+        "change": (
+            change.reason_code
+            if change is not None and change.reason_code is not None
+            else "deployment_change_source_not_configured"
+        ),
+    }
+
+
+def _route(
+    strategy: InvestigationStrategy,
+    *,
+    score: int,
+    escalation_watch: bool,
+    selected: tuple[InvestigatorType, ...],
+    rejected: Mapping[InvestigatorType, str],
+    reasons: tuple[str, ...],
+    policy: InvestigationRouterPolicy,
+) -> InvestigationRoute:
+    return InvestigationRoute(
+        strategy=strategy,
+        score=score,
+        escalation_watch=escalation_watch,
+        selected_investigators=selected,
+        rejected_investigators=MappingProxyType(dict(rejected)),
+        reason_codes=tuple(dict.fromkeys(reasons)),
+        policy_version=policy.version,
+    )
 
 
 def _capability(

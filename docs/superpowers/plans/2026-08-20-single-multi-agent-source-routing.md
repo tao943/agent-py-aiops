@@ -276,17 +276,17 @@ def route_investigation(
 ) -> InvestigationRoute: ...
 ```
 
-- [ ] **Step 1: 写 Router RED**
+- [x] **Step 1: 写 Router RED**
 
 覆盖 0..3 single、4..5 watch、>=6 multi；required domain 2类 +1、3类 +3（互斥）；跨组件 +2、3个 unresolved +1、冲突 +3、P0/P1/critical +2、缺2类 causal role +2、两工具无增益 +3、无知识 +1；recent change 始终 0。
 
 再覆盖硬门禁优先：trusted pattern、decision ready、少于两个未完成可并行 domain、deadline 不足、模型预算不足、wave>=2、能力不可用、相同 dispatch snapshot 已完成、multi disabled。`mode="multi"` 也不能绕过安全/预算硬门禁，只能绕过分数阈值。
 
-- [ ] **Step 2: 写答案隔离 RED**
+- [x] **Step 2: 写答案隔离 RED**
 
 使用递归 shaped input 包含 `scenarioId`、`runId`、`ground_truth`、`oracle`、`primary_cause`、`scoreRules`，断言构造 `InvestigationRoutingInput` 时拒绝未知 evaluator-private 字段；对相同允许字段生成完全一致 route/reason code。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_investigation_router.py -q -p no:cacheprovider
@@ -294,11 +294,11 @@ uv run pytest tests/test_aiops_investigation_router.py -q -p no:cacheprovider
 
 Expected: route 类型和函数缺失导致 FAIL。
 
-- [ ] **Step 4: 最小实现打分、硬门禁和稳定 reason 顺序**
+- [x] **Step 4: 最小实现打分、硬门禁和稳定 reason 顺序**
 
 Router 不调用 LLM、不读取全局文件或环境变量。reason code 按固定枚举顺序输出；selected investigators 固定 `runtime, log` 顺序；Knowledge 已完成不进入 fan-out；Change 总是 rejected。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_investigation_router.py -q -p no:cacheprovider
@@ -306,7 +306,7 @@ uv run pytest tests/test_aiops_investigation_router.py -q -p no:cacheprovider
 
 Expected: 全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add apps/backend/src/super_ai/aiops/investigation.py apps/backend/tests/test_aiops_investigation_router.py
