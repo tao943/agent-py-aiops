@@ -24,7 +24,8 @@ agentpy-order-api:<run_hash_16>:<generation_prefix_16>
 
 其中 `run_hash_16 = SHA-256(run_id).hexdigest()[:16]`，与现有 `LiveRunIdentity.run_token` 算法一致；
 `generation_prefix_16 = generation[:16]`。包含首个分隔符的固定前缀为 18 字节，再加两个 16 字节
-token 和中间分隔符，合计 51 字节，不超过 PostgreSQL 63 字节限制。
+token 和中间分隔符，生产 UUID generation 时合计 51 字节；较短的测试 generation 会生成更短标签，
+所有有效输入均不超过 PostgreSQL 63 字节限制。
 
 order-api 独立 Docker 服务根据完整 Run ID 计算 session scope；backend observer 使用相同纯函数构造
 run-scoped LIKE 与 generation 精确查询。完整 Run ID 继续用于 HTTP 路径、订单记录、事件、CLS 与

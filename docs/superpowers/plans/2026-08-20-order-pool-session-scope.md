@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The session label is exactly `agentpy-order-api:<run_hash_16>:<generation_prefix_16>` and at most 51 ASCII bytes for valid inputs.
+- The session label is `agentpy-order-api:<run_hash_16>:<generation_prefix_up_to_16>` and at most 51 ASCII bytes for valid inputs; production UUID generations produce exactly 51 bytes.
 - Full Run IDs remain unchanged in HTTP paths, order rows, events, CLS, PostgreSQL evaluation history, and Evaluation Artifacts.
 - `agentpy-order-api:idle` and unrelated-session exclusion semantics remain unchanged.
 - Do not modify control-token authorization, recovery authorization, cleanup, scoring, Agent Workflow, RAG, CLS, or Artifact contracts.
@@ -38,7 +38,7 @@
 
 **Interfaces:**
 - Consumes: validated ASCII `run_id: str` and order-api `generation: str`.
-- Produces in both runtime modules: `_session_application_name(run_id: str, generation: str) -> str`; backend also produces `_session_run_pattern(run_id: str) -> str` for run-scoped LIKE queries.
+- Produces in both runtime modules: `_session_application_name(run_id: str, generation: str) -> str` bounded to at most 51 ASCII bytes; backend also produces `_session_run_pattern(run_id: str) -> str` for run-scoped LIKE queries.
 
 - [ ] **Step 1: Write RED order-api length and separation tests**
 
@@ -160,14 +160,14 @@ git commit -m "fix: bound order pool session scope"
 - Consumes: the bounded session scope implementation and existing real ignored project configuration.
 - Produces: a rebuilt healthy order-api image, one persisted unique Single canary terminal result, cleanup evidence, and a documented outcome.
 
-- [ ] **Step 1: Re-run the complete bounded regression**
+- [ ] **Step 1: Re-run the complete bounded unit regression**
 
 ```powershell
 cd apps/backend
-uv run pytest tests/test_live_order_api_service.py tests/test_live_order_pool_contracts.py tests/test_live_order_pool_docker.py::test_real_order_pool_leak_recovery_and_idempotent_cleanup -q -p no:cacheprovider -m live_docker
+uv run pytest tests/test_live_order_api_service.py tests/test_live_order_pool_contracts.py -o addopts='' -q -p no:cacheprovider
 ```
 
-Expected before the Docker test: rebuild is required; do not accept a pass from a stale container image.
+Expected: all bounded-format unit and observer contract tests pass without marker filtering. This step does not run the Docker contract because the container still uses the previous image.
 
 - [ ] **Step 2: Rebuild only order-api and run the real Docker contract**
 
