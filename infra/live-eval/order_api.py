@@ -184,7 +184,8 @@ class OrderApiRuntime:
             raise OrderApiAccessError("fault_token_invalid")
         connection = await self._pool.acquire(timeout=1.0)
         await connection.execute(
-            "SELECT set_config('application_name', $1, false)", _app_name(run_id)
+            "SELECT set_config('application_name', $1, false)",
+            _app_name(run_id, self._generation),
         )
         self._record(run_id, request_id, "connection_checkout", "info")
         await connection.execute(_UPDATE_ORDER, run_id)
@@ -232,6 +233,10 @@ class OrderApiRuntime:
     @property
     def generation(self) -> str:
         return self._generation
+
+    @property
+    def active_run_id(self) -> str | None:
+        return self._active_run_id
 
     async def clear_run(self, run_id: str) -> None:
         if self._active_run_id is None:
@@ -321,7 +326,11 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, object]:
         runtime: OrderApiRuntime = app.state.runtime
-        return {"status": "ok", "generation": runtime.generation}
+        return {
+            "status": "ok",
+            "generation": runtime.generation,
+            "activeRunId": runtime.active_run_id,
+        }
 
     @app.post("/internal/runs/start")
     async def start_run(
@@ -390,5 +399,5 @@ def _validate_identifier(value: str, error: str) -> None:
         raise OrderApiAccessError(error)
 
 
-def _app_name(run_id: str) -> str:
-    return f"agentpy-order-api-{run_id}"
+def _app_name(run_id: str, generation: str) -> str:
+    return f"agentpy-order-api:{run_id}:{generation}"
