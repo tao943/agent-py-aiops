@@ -38,6 +38,7 @@ class InvestigationAudit:
 @dataclass(frozen=True, slots=True)
 class InvestigationBenchmarkMetrics:
     strategy: str
+    effective_strategy: str
     policy_version: str
     root_cause_top1_correct: bool
     evidence_recall_basis_points: int

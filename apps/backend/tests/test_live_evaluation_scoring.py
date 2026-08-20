@@ -10,6 +10,7 @@ from super_ai.aiops import HypothesisState, ObservationDecision, RootCauseDecisi
 from super_ai.evaluation import ArtifactEvidence, ArtifactToolCall, RunArtifact
 from super_ai.evaluation.artifacts import (
     ArtifactHypothesisAssessment,
+    InvestigationAudit,
     LiveEvidenceAudit,
     LiveRecoveryAudit,
 )
@@ -590,3 +591,39 @@ def test_live_v4_accepts_causally_inactive_rule_out_with_evidence() -> None:
 
     assert result.differential_diagnosis == 15
     assert result.hard_gate is None
+
+
+def test_live_evaluator_projects_safe_investigation_metrics() -> None:
+    artifact = replace(
+        passing_artifact(),
+        investigation_audit=InvestigationAudit(
+            strategy="multi_agent",
+            score=7,
+            reason_codes=("investigation_stagnated",),
+            policy_version="investigation-router-v1",
+            selected_investigators=("runtime", "log"),
+            dispatch_count=2,
+            packet_statuses=("completed", "completed"),
+            fallback_reason=None,
+        ),
+        model_call_count=3,
+    )
+
+    result = score_live_run(
+        artifact,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        investigation_strategy="multi",
+    )
+
+    assert result.investigation_metrics is not None
+    assert result.investigation_metrics.strategy == "multi"
+    assert result.investigation_metrics.effective_strategy == "multi_agent"
+    assert result.investigation_metrics.root_cause_top1_correct is True
+    assert result.investigation_metrics.evidence_recall_basis_points == 10000
+    assert result.investigation_metrics.duration_ms == 100
+    assert result.investigation_metrics.model_call_count == 3
+    assert result.investigation_metrics.duplicate_evidence_basis_points == 0
+    assert result.investigation_metrics.security_hard_gate_passed is True

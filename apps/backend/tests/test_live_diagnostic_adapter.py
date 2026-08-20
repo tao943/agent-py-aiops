@@ -37,6 +37,19 @@ from super_ai.mcp_client import McpClientError, McpToolDefinition
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
 
+def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
+    scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+
+    payload = build_live_diagnostic_input(
+        scenario,
+        workflow_version="evidence-driven-v4",
+        investigation_strategy="multi",
+    )
+
+    assert payload["benchmarkMode"] == "live"
+    assert payload["investigationStrategyMode"] == "multi"
+
+
 def test_only_nginx_live_scenario_enables_the_proposal_policy() -> None:
     nginx = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-NGINX-TIMEOUT-001")
     postgres = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")

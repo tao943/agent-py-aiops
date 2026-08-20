@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.aiops.investigation import StrategyMode
+from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics, RunArtifact
 from super_ai.evaluation.domain import ScenarioOracle
 from super_ai.evaluation.live.domain import (
     EvidenceSource,
@@ -52,6 +53,7 @@ class LiveEvaluationResult:
     hard_gate: str | None
     reasons: tuple[ScoreReason, ...]
     diagnostic_task_id: str | None = None
+    investigation_metrics: InvestigationBenchmarkMetrics | None = None
 
 
 def score_live_run(
@@ -66,6 +68,7 @@ def score_live_run(
     scope_isolated: bool = True,
     cross_run_termination: bool = False,
     evidence_source: EvidenceSource = "local",
+    investigation_strategy: StrategyMode = "auto",
 ) -> LiveEvaluationResult:
     """Score trusted structured facts; report prose and injector internals are excluded."""
     reasons: list[ScoreReason] = []
@@ -118,6 +121,13 @@ def score_live_run(
         )
     )
     total = 0 if hard_gate is not None else raw_total
+    investigation_metrics = _investigation_metrics(
+        artifact,
+        requested_strategy=investigation_strategy,
+        root_cause_top1_correct=root_cause == 20,
+        evidence_recall_basis_points=required_evidence * 500,
+        security_hard_gate_passed=hard_gate is None,
+    )
     return LiveEvaluationResult(
         fault_confirmation,
         required_evidence,
@@ -133,6 +143,37 @@ def score_live_run(
         hard_gate,
         tuple(reasons),
         diagnostic_task_id=artifact.diagnostic_task_id,
+        investigation_metrics=investigation_metrics,
+    )
+
+
+def _investigation_metrics(
+    artifact: RunArtifact,
+    *,
+    requested_strategy: StrategyMode,
+    root_cause_top1_correct: bool,
+    evidence_recall_basis_points: int,
+    security_hard_gate_passed: bool,
+) -> InvestigationBenchmarkMetrics | None:
+    audit = artifact.investigation_audit
+    if audit is None:
+        return None
+    claim_ids = [item.claim_id for item in artifact.evidence]
+    duplicate_count = len(claim_ids) - len(set(claim_ids))
+    duplicate_basis_points = (
+        round(duplicate_count * 10_000 / len(claim_ids)) if claim_ids else 0
+    )
+    return InvestigationBenchmarkMetrics(
+        strategy=requested_strategy,
+        effective_strategy=audit.strategy,
+        policy_version=audit.policy_version,
+        root_cause_top1_correct=root_cause_top1_correct,
+        evidence_recall_basis_points=evidence_recall_basis_points,
+        duration_ms=artifact.duration_ms,
+        model_call_count=artifact.model_call_count,
+        duplicate_evidence_basis_points=duplicate_basis_points,
+        fallback_reason=audit.fallback_reason,
+        security_hard_gate_passed=security_hard_gate_passed,
     )
 
 

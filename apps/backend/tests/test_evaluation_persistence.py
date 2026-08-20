@@ -129,7 +129,7 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
         metadata={
             "gitSha": "abc123",
             "workflowVersion": "evidence-driven-v4",
-            "investigationStrategy": "multi_agent",
+            "investigationStrategy": "multi",
             "investigationPolicyVersion": "investigation-router-v1",
         },
         created_at=started_at,
@@ -149,6 +149,7 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
             "duplicateEvidenceBasisPoints": 0,
             "fallbackReason": "fallback_to_single_agent",
             "securityHardGatePassed": True,
+            "effectiveInvestigationStrategy": "multi_agent",
         },
         result_payload={"failures": [], "hardGate": None},
         diagnostic_task_id="diagnostic-investigation-reload",
@@ -174,7 +175,8 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
 
     assert loaded is not None
     metrics = investigation_metrics_from_persisted_result(*loaded)
-    assert metrics.strategy == "multi_agent"
+    assert metrics.strategy == "multi"
+    assert metrics.effective_strategy == "multi_agent"
     assert metrics.policy_version == "investigation-router-v1"
     assert metrics.root_cause_top1_correct is True
     assert metrics.evidence_recall_basis_points == 10000

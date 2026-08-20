@@ -102,6 +102,7 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "modelCallCount",
             "duplicateEvidenceBasisPoints",
             "fallbackReason",
+            "effectiveInvestigationStrategy",
             "securityHardGatePassed",
         }
     ),
@@ -132,6 +133,7 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "modelCallCount",
             "duplicateEvidenceBasisPoints",
             "fallbackReason",
+            "effectiveInvestigationStrategy",
             "securityHardGatePassed",
         }
     ),

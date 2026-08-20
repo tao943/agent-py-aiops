@@ -1515,6 +1515,16 @@ def _normalize_grounded_decision(
     return normalized
 
 
+def _benchmark_strategy_mode(input_payload: Mapping[str, object]) -> StrategyMode:
+    """Accept strategy overrides only from an internal benchmark task contract."""
+    if input_payload.get("benchmarkMode") not in {"snapshot", "live"}:
+        return "auto"
+    requested = input_payload.get("investigationStrategyMode")
+    if requested in {"auto", "single", "multi"}:
+        return cast(StrategyMode, requested)
+    return "auto"
+
+
 class AiopsDiagnosticService:
     """Run a bounded Plan-Execute-Replan workflow for one owned task."""
 
@@ -1672,7 +1682,9 @@ class AiopsDiagnosticService:
             "knowledge_context": {},
             "knowledge_evidence_ids": [],
             "knowledge_completed": False,
-            "investigation_strategy_mode": "auto",
+            "investigation_strategy_mode": _benchmark_strategy_mode(
+                task.input_payload
+            ),
             "investigation_route": {},
             "investigation_dispatches": [],
             "investigation_packets": [],

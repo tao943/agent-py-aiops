@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics
 from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
@@ -339,6 +340,18 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
             hard_gate=None,
             reasons=(),
             diagnostic_task_id="diagnostic-live-1",
+            investigation_metrics=InvestigationBenchmarkMetrics(
+                strategy="multi",
+                effective_strategy="multi_agent",
+                policy_version="investigation-router-v1",
+                root_cause_top1_correct=True,
+                evidence_recall_basis_points=10000,
+                duration_ms=1200,
+                model_call_count=3,
+                duplicate_evidence_basis_points=0,
+                fallback_reason=None,
+                security_hard_gate_passed=True,
+            ),
         )
 
     await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
@@ -347,10 +360,14 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
         evidence_source="local",
         execute=execute,
         recorder=recorder,
+        investigation_strategy="multi",
     )
 
     envelope = archive.load("live-success-task-link")
     assert envelope.diagnostic_task_id == "diagnostic-live-1"
+    assert envelope.metadata["investigationStrategy"] == "multi"
+    assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
+    assert envelope.metrics["rootCauseTop1Correct"] is True
 
 
 def test_cli_rejects_missing_identity() -> None:

@@ -10,6 +10,7 @@ from uuid import uuid4
 from langchain_core.tools import StructuredTool
 
 from super_ai.aiops import AiopsDiagnosticService
+from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.artifacts import (
     LiveEvidenceAudit,
     LiveRecoveryAudit,
@@ -38,6 +39,7 @@ def build_live_diagnostic_input(
     scenario: LiveScenario,
     *,
     workflow_version: str | None = None,
+    investigation_strategy: StrategyMode = "auto",
 ) -> JsonDict:
     """Build Agent input solely from the public scenario contract."""
     payload: JsonDict = {
@@ -48,6 +50,7 @@ def build_live_diagnostic_input(
         ],
         "benchmarkScenarioId": scenario.id,
         "benchmarkMode": "live",
+        "investigationStrategyMode": investigation_strategy,
         "decisionVocabulary": _decision_vocabulary(scenario),
     }
     if workflow_version is not None:
@@ -317,6 +320,7 @@ class ApplicationLiveDiagnosticAdapter:
         accessible_knowledge_base_ids: Sequence[str] = (),
         owner_user_id: str | None = None,
         workflow_version: str | None = None,
+        investigation_strategy: StrategyMode = "auto",
         cls_mcp_client: LiveMcpClient | None = None,
         component_evidence_factory: Callable[
             [LiveFaultObservation], LiveMcpClient
@@ -328,6 +332,7 @@ class ApplicationLiveDiagnosticAdapter:
         self._knowledge_base_ids = tuple(accessible_knowledge_base_ids)
         self._owner_user_id = owner_user_id
         self._workflow_version = workflow_version
+        self._investigation_strategy: StrategyMode = investigation_strategy
         self._cls_mcp_client = cls_mcp_client
         self._component_evidence_factory = component_evidence_factory
 
@@ -349,6 +354,7 @@ class ApplicationLiveDiagnosticAdapter:
             input_payload=build_live_diagnostic_input(
                 scenario,
                 workflow_version=self._workflow_version,
+                investigation_strategy=self._investigation_strategy,
             ),
             result_payload={},
         )

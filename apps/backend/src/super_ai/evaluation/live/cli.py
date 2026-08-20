@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 from super_ai.aiops.execution import ExecutionCoordinator
+from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.history import (
     EvaluationStatus,
@@ -142,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
                 choices=("local", "cls"),
                 default="local",
             )
+            command.add_argument(
+                "--strategy",
+                choices=("auto", "single", "multi"),
+                default="auto",
+            )
     return parser
 
 
@@ -222,6 +228,7 @@ async def _run_live_command(
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
             workflow_version="evidence-driven-v4",
+            investigation_strategy=cast(StrategyMode, arguments.strategy),
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )
@@ -243,7 +250,10 @@ async def _run_live_command(
             evidence_preparer=evidence_preparer,
             diagnostic=diagnostic,
             recovery=components.recovery,
-            evaluator=_LiveScoringEvaluator(evidence_source),
+            evaluator=_LiveScoringEvaluator(
+                evidence_source,
+                investigation_strategy=cast(StrategyMode, arguments.strategy),
+            ),
             recovery_coordinator_factory=recovery_coordinator_factory,
         )
         return await runner.run(
@@ -259,6 +269,7 @@ async def _run_live_command(
             execute=execute,
             recorder=recorder,
             campaign_id=cast(str | None, arguments.campaign_id),
+            investigation_strategy=cast(StrategyMode, arguments.strategy),
         )
     finally:
         await engine.dispose()
@@ -274,11 +285,14 @@ async def _run_live_once(
     execute: Callable[[], Awaitable[LiveEvaluationResult]],
     recorder: EvaluationRunRecorder,
     campaign_id: str | None = None,
+    investigation_strategy: StrategyMode = "auto",
 ) -> tuple[dict[str, object], int]:
     timestamp = datetime.now(timezone.utc)
     metadata: dict[str, object] = {
         "workflowVersion": "live-v1",
         "evidenceSource": evidence_source,
+        "investigationStrategy": investigation_strategy,
+        "investigationPolicyVersion": "investigation-router-v1",
     }
     if campaign_id is not None:
         metadata["acceptanceCampaignId"] = campaign_id
@@ -367,17 +381,42 @@ async def _run_live_once(
 
     live_result = _live_result_payload(result, evidence_source=evidence_source)
     status = "passed" if result.passed else "failed"
+    metrics: dict[str, object] = {
+        "total": result.total,
+        "rawTotal": result.raw_total,
+        "verificationPassed": result.recovery_verification == 15,
+        "cleanupSucceeded": True,
+    }
+    investigation_metrics = result.investigation_metrics
+    if investigation_metrics is not None:
+        if investigation_metrics.strategy != investigation_strategy:
+            raise ValueError("Investigation metric strategy does not match the run request.")
+        metrics.update(
+            {
+                "rootCauseTop1Correct": investigation_metrics.root_cause_top1_correct,
+                "evidenceRecallBasisPoints": (
+                    investigation_metrics.evidence_recall_basis_points
+                ),
+                "durationMs": investigation_metrics.duration_ms,
+                "modelCallCount": investigation_metrics.model_call_count,
+                "duplicateEvidenceBasisPoints": (
+                    investigation_metrics.duplicate_evidence_basis_points
+                ),
+                "fallbackReason": investigation_metrics.fallback_reason,
+                "effectiveInvestigationStrategy": (
+                    investigation_metrics.effective_strategy
+                ),
+                "securityHardGatePassed": (
+                    investigation_metrics.security_hard_gate_passed
+                ),
+            }
+        )
     terminal = terminal_envelope(
         running=running,
         status=cast(EvaluationStatus, status),
         validity="VALID_PASS" if result.passed else "VALID_FAIL",
         passed=result.passed,
-        metrics={
-            "total": result.total,
-            "rawTotal": result.raw_total,
-            "verificationPassed": result.recovery_verification == 15,
-            "cleanupSucceeded": True,
-        },
+        metrics=metrics,
         result_payload={
             "failures": list(result.failures),
             "hardGate": result.hard_gate,
@@ -408,8 +447,14 @@ def _cleanup_metrics(error: BaseException) -> dict[str, object]:
 
 
 class _LiveScoringEvaluator:
-    def __init__(self, evidence_source: EvidenceSource) -> None:
+    def __init__(
+        self,
+        evidence_source: EvidenceSource,
+        *,
+        investigation_strategy: StrategyMode = "auto",
+    ) -> None:
         self._evidence_source: EvidenceSource = evidence_source
+        self._investigation_strategy: StrategyMode = investigation_strategy
 
     def evaluate(self, **values: object) -> LiveEvaluationResult:
         from super_ai.evaluation.artifacts import RunArtifact
@@ -442,6 +487,7 @@ class _LiveScoringEvaluator:
             recovery=recovery,
             verification=verification,
             evidence_source=self._evidence_source,
+            investigation_strategy=self._investigation_strategy,
         )
 
 

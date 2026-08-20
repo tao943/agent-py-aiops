@@ -16,6 +16,9 @@ from super_ai.evaluation.persistence import EvaluationDatabaseUnavailable
 from super_ai.memory.repositories import EvaluationResultRecord, EvaluationRunRecord
 
 _INVESTIGATION_STRATEGIES = frozenset(
+    {"auto", "single", "multi"}
+)
+_EFFECTIVE_INVESTIGATION_STRATEGIES = frozenset(
     {"deterministic_fast_path", "single_agent", "multi_agent"}
 )
 _INVESTIGATION_FALLBACK_REASONS = frozenset(
@@ -102,6 +105,11 @@ def investigation_metrics_from_persisted_result(
         raise ValueError("Investigation fallback reason is invalid.")
     return InvestigationBenchmarkMetrics(
         strategy=strategy,
+        effective_strategy=_required_choice(
+            metrics,
+            "effectiveInvestigationStrategy",
+            _EFFECTIVE_INVESTIGATION_STRATEGIES,
+        ),
         policy_version=policy_version,
         root_cause_top1_correct=_required_bool(metrics, "rootCauseTop1Correct"),
         evidence_recall_basis_points=_required_bounded_int(

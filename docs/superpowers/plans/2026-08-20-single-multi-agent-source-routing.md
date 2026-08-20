@@ -771,11 +771,11 @@ python -m super_ai.evaluation.live.cli run ... --strategy auto|single|multi
 
 `ApplicationLiveDiagnosticAdapter.__init__(..., investigation_strategy: StrategyMode = "auto")`；普通 FastAPI request schema 和 `AiopsDiagnosticService.start()` 不新增客户端字段。
 
-- [ ] **Step 1: 写 CLI/API 隔离 RED**
+- [x] **Step 1: 写 CLI/API 隔离 RED**
 
 断言 run parser 接受三值，缺省 auto，非法值退出2；verify/cleanup/report 不接受 strategy；adapter 将值传给内部 service state；FastAPI 诊断 request 即使包含 `strategy="multi"` 也不能覆盖服务策略（按当前 unknown-field 行为拒绝或忽略，但必须测试固定一种行为）。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_live_cli_contract.py tests/test_live_diagnostic_adapter.py tests/test_aiops_diagnostics.py -q -p no:cacheprovider -k "strategy"
@@ -783,11 +783,11 @@ uv run pytest tests/test_live_cli_contract.py tests/test_live_diagnostic_adapter
 
 Expected: CLI 参数/adapter 接口缺失导致 FAIL。
 
-- [ ] **Step 3: 最小实现 CLI 注入**
+- [x] **Step 3: 最小实现 CLI 注入**
 
 只在 `_run_live_command()` 创建 adapter 时传值；safe output 和持久化 evaluation envelope 记录 strategy，但不记录私有配置。普通 API 固定 auto，并受服务端 `multi_agent_enabled` 开关约束。
 
-- [ ] **Step 4: 运行 GREEN**
+- [x] **Step 4: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_live_cli_contract.py tests/test_live_diagnostic_adapter.py tests/test_aiops_diagnostics.py -q -p no:cacheprovider -k "strategy"
