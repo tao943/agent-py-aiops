@@ -598,6 +598,20 @@ Ruff 与 Pyright 均通过；未运行全量 pytest。
 波动影响。应先单独加固该 Live harness 的稳定身份/集合比较，再经确认运行新的唯一 Single canary；
 在此之前不得开始 3×3 A/B，也不得宣称真实修复已达到 `VALID_PASS`。
 
+提交 `d0e90a5` 将 order-api 空闲池连接标记为 `agentpy-order-api:idle`，observer 排除所有
+`agentpy-order-api:%` 会话，并以 `pid + backend_start` 稳定身份和 baseline 子集语义验证真正的无关会话；
+瞬时新增 observer 会话不再造成误判，baseline 无关会话丢失仍会失败。16 项目标测试、Ruff、Pyright 和
+真实 Docker 恢复合同均通过，未运行全量 pytest。
+
+随后唯一 Single canary `order-pool-causal-single-canary-20260820-220146` 仍在 Agent/LLM 前以
+`VALID_FAIL/fault_injection_failed` 终止，`diagnosticTaskId=null`。三次 fault 请求及 probe/state 请求均到达
+order-api，但当前失败 Artifact 未持久化六项注入检查的逐项安全结果，因而不能据此确定是哪一项检查发生
+波动，也不能评价因果链修复。独立 Verify 先发现残留，显式 Cleanup 后通过并持久化
+`cleanupSucceeded=true`；PostgreSQL Artifact checksum 为
+`26d167ea22c5c656e3693e0999c4cccf50e4bbda3f9cee164afeaf116031314e`。此前两个失败 Run 的 checksum、
+result identity、失败分类与 cleanup 终态保持不变。下一步应先为注入失败持久化允许列表内的 check 名称、
+布尔结果和安全事实，再凭证据修复具体波动；在此之前不再运行付费 canary 或 3×3 A/B。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
