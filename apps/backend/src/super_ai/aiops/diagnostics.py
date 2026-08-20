@@ -1566,6 +1566,7 @@ class AiopsDiagnosticService:
             validated_tool_policies
         )
         self._case_persistor = case_persistor
+        self._step_sequence_lock = asyncio.Lock()
         self._investigation_router_policy = (
             investigation_router_policy or InvestigationRouterPolicy()
         )
@@ -2809,6 +2810,28 @@ class AiopsDiagnosticService:
                 else None
             ),
         }
+        audit_payload: JsonDict = {
+            "workflowVersion": str(
+                state.get("workflow_version") or "evidence-driven-v4"
+            ),
+            "graphVersion": str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
+            "packetStatuses": [
+                packet.status
+                for packet in sorted(
+                    packets,
+                    key=lambda item: (item.investigator_type, item.dispatch_id),
+                )
+            ],
+            **aggregation_payload,
+        }
+        await self._create_step(
+            owner_user_id=str(state["owner_user_id"]),
+            task_id=str(state["task_id"]),
+            phase="evidence_aggregator",
+            status="completed",
+            payload=audit_payload,
+        )
+        await self._save_checkpoint(state, "evidence_aggregator", audit_payload)
         return {
             "aggregated_facts": facts,
             "investigation_aggregation": aggregation_payload,
@@ -5486,29 +5509,30 @@ class AiopsDiagnosticService:
         status: str,
         payload: JsonDict,
     ) -> DiagnosticStepRecord:
-        existing_steps = await self._repositories.diagnostics.list_steps(
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-        )
-        return await self._repositories.diagnostics.create_step(
-            owner_user_id=owner_user_id,
-            step_id=_stable_public_id(
-                "diagnostic_step",
-                task_id,
-                phase,
-                json.dumps(
-                    _safe_value(payload),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
+        async with self._step_sequence_lock:
+            existing_steps = await self._repositories.diagnostics.list_steps(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+            )
+            return await self._repositories.diagnostics.create_step(
+                owner_user_id=owner_user_id,
+                step_id=_stable_public_id(
+                    "diagnostic_step",
+                    task_id,
+                    phase,
+                    json.dumps(
+                        _safe_value(payload),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
                 ),
-            ),
-            task_id=task_id,
-            sequence=len(existing_steps) + 1,
-            phase=phase,
-            status=status,
-            payload=payload,
-        )
+                task_id=task_id,
+                sequence=len(existing_steps) + 1,
+                phase=phase,
+                status=status,
+                payload=payload,
+            )
 
     async def _create_audit(
         self,

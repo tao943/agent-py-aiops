@@ -8,6 +8,7 @@ from sqlalchemy.exc import StatementError
 
 from super_ai.evaluation.history import artifact_checksum, running_envelope, terminal_envelope
 from super_ai.evaluation.persistence import EvaluationRepository
+from super_ai.evaluation.recording import investigation_metrics_from_persisted_result
 from super_ai.evaluation.scoring import EvaluationResult, ScoreReason
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import (
@@ -109,6 +110,79 @@ async def test_generic_retrieval_envelope_round_trips(
     assert finalized[1].metrics["recallAt1"] == 0.79
     assert finalized[1].result_payload == terminal.result_payload
     assert loaded == finalized
+
+
+@pytest.mark.asyncio
+async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    repository = EvaluationRepository(session_factory)
+    diagnostics = SQLAlchemyDiagnosticMemoryRepository(session_factory)
+    started_at = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+    running = running_envelope(
+        run_id="live-investigation-reload",
+        evaluation_kind="live",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        suite_version="v1",
+        metadata={
+            "gitSha": "abc123",
+            "workflowVersion": "evidence-driven-v4",
+            "investigationStrategy": "multi_agent",
+            "investigationPolicyVersion": "investigation-router-v1",
+        },
+        created_at=started_at,
+        started_at=started_at,
+    )
+    terminal = terminal_envelope(
+        running=running,
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={
+            "total": 100,
+            "rootCauseTop1Correct": True,
+            "evidenceRecallBasisPoints": 10000,
+            "durationMs": 1250,
+            "modelCallCount": 3,
+            "duplicateEvidenceBasisPoints": 0,
+            "fallbackReason": "fallback_to_single_agent",
+            "securityHardGatePassed": True,
+        },
+        result_payload={"failures": [], "hardGate": None},
+        diagnostic_task_id="diagnostic-investigation-reload",
+        failure_category=None,
+        completed_at=started_at,
+    )
+    try:
+        await diagnostics.create_task(
+            owner_user_id="eval-owner",
+            task_id="diagnostic-investigation-reload",
+            status="completed",
+            query="benchmark",
+            input_payload={"benchmarkMode": "live"},
+        )
+        await repository.start_envelope(running)
+        await repository.finalize_envelope(
+            terminal,
+            artifact_checksum=artifact_checksum(terminal),
+        )
+        loaded = await repository.get_run_with_result(running.run_id)
+    finally:
+        await engine.dispose()
+
+    assert loaded is not None
+    metrics = investigation_metrics_from_persisted_result(*loaded)
+    assert metrics.strategy == "multi_agent"
+    assert metrics.policy_version == "investigation-router-v1"
+    assert metrics.root_cause_top1_correct is True
+    assert metrics.evidence_recall_basis_points == 10000
+    assert metrics.duration_ms == 1250
+    assert metrics.model_call_count == 3
+    assert metrics.duplicate_evidence_basis_points == 0
+    assert metrics.fallback_reason == "fallback_to_single_agent"
+    assert metrics.security_hard_gate_passed is True
 
 
 @pytest.mark.asyncio

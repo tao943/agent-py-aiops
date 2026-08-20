@@ -24,6 +24,31 @@ def _empty_json_dict() -> JsonDict:
 
 
 @dataclass(frozen=True, slots=True)
+class InvestigationAudit:
+    strategy: str
+    score: int
+    reason_codes: tuple[str, ...]
+    policy_version: str
+    selected_investigators: tuple[str, ...]
+    dispatch_count: int
+    packet_statuses: tuple[str, ...]
+    fallback_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationBenchmarkMetrics:
+    strategy: str
+    policy_version: str
+    root_cause_top1_correct: bool
+    evidence_recall_basis_points: int
+    duration_ms: int
+    model_call_count: int
+    duplicate_evidence_basis_points: int
+    fallback_reason: str | None
+    security_hard_gate_passed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactEvidence:
     record_id: str
     claim_id: str
@@ -133,6 +158,7 @@ class RunArtifact:
     model_call_audits: tuple[ModelCallAudit, ...] = ()
     validator_routing: ValidatorRoutingAudit | None = None
     resume_count: int = 0
+    investigation_audit: InvestigationAudit | None = None
 
 
 def build_run_artifact(
@@ -195,6 +221,7 @@ def build_run_artifact(
         model_call_audits=model_call_audits,
         validator_routing=_validator_routing_from_steps(ordered_steps),
         resume_count=sum(1 for step in ordered_steps if step.phase == "execution_resume"),
+        investigation_audit=_investigation_audit_from_steps(ordered_steps),
     )
 
 
@@ -219,6 +246,72 @@ def _graph_version(
     if versions:
         return versions[-1]
     return "aiops-diagnostic-v2" if workflow_version == "evidence-driven-v4" else None
+
+
+def _investigation_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> InvestigationAudit | None:
+    router_steps = [step for step in steps if step.phase == "strategy_router"]
+    if not router_steps:
+        return None
+    router_payload = router_steps[-1].payload
+    route = router_payload.get("route")
+    if not isinstance(route, Mapping):
+        return None
+    safe_route = cast(Mapping[str, object], route)
+    strategy = safe_route.get("strategy")
+    score = safe_route.get("score")
+    policy_version = safe_route.get("policyVersion")
+    reasons = safe_route.get("reasonCodes")
+    investigators = safe_route.get("selectedInvestigators")
+    dispatches = router_payload.get("dispatches")
+    if (
+        strategy not in {"deterministic_fast_path", "single_agent", "multi_agent"}
+        or not isinstance(score, int)
+        or isinstance(score, bool)
+        or not 0 <= score <= 20
+        or not isinstance(policy_version, str)
+        or not policy_version
+        or not isinstance(reasons, list)
+        or not all(
+            isinstance(item, str) for item in cast(list[object], reasons)
+        )
+        or not isinstance(investigators, list)
+        or not all(
+            item in {"knowledge", "runtime", "log", "change"}
+            for item in cast(list[object], investigators)
+        )
+        or not isinstance(dispatches, list)
+    ):
+        return None
+    aggregator_steps = [step for step in steps if step.phase == "evidence_aggregator"]
+    packet_statuses: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+    if aggregator_steps:
+        aggregation_payload = aggregator_steps[-1].payload
+        raw_statuses = aggregation_payload.get("packetStatuses")
+        if isinstance(raw_statuses, list) and all(
+            item in {"completed", "inconclusive", "failed", "timeout"}
+            for item in cast(list[object], raw_statuses)
+        ):
+            packet_statuses = tuple(cast(list[str], raw_statuses))
+        raw_fallback = aggregation_payload.get("fallbackReason")
+        if raw_fallback in {
+            "fallback_to_single_agent",
+            "manual_review_required",
+            "late_result_ignored",
+        }:
+            fallback_reason = cast(str, raw_fallback)
+    return InvestigationAudit(
+        strategy=cast(str, strategy),
+        score=score,
+        reason_codes=tuple(cast(list[str], reasons)),
+        policy_version=policy_version,
+        selected_investigators=tuple(cast(list[str], investigators)),
+        dispatch_count=len(cast(list[object], dispatches)),
+        packet_statuses=packet_statuses,
+        fallback_reason=fallback_reason,
+    )
 
 
 def _hypothesis_assessments_from_steps(

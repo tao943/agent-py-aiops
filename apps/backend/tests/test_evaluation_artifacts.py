@@ -395,6 +395,74 @@ def test_new_v4_artifact_projects_persisted_v3_graph_version() -> None:
     assert artifact.graph_version == "aiops-diagnostic-v3"
 
 
+def test_artifact_projects_safe_investigation_routing_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "strategy_router",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "route": {
+                        "strategy": "multi_agent",
+                        "score": 7,
+                        "reasonCodes": ["investigation_stagnated"],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": ["runtime", "log"],
+                    },
+                    "dispatches": [
+                        {"dispatchId": "dispatch-runtime"},
+                        {"dispatchId": "dispatch-log"},
+                    ],
+                    "prompt": "private-sentinel",
+                },
+            ),
+            _step(
+                2,
+                "evidence_aggregator",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "packetStatuses": ["completed", "timeout"],
+                    "fallbackReason": None,
+                    "rawOutput": "private-sentinel",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is not None
+    assert artifact.investigation_audit.strategy == "multi_agent"
+    assert artifact.investigation_audit.score == 7
+    assert artifact.investigation_audit.selected_investigators == (
+        "runtime",
+        "log",
+    )
+    assert artifact.investigation_audit.dispatch_count == 2
+    assert artifact.investigation_audit.packet_statuses == (
+        "completed",
+        "timeout",
+    )
+    assert "private-sentinel" not in repr(artifact.investigation_audit)
+
+
+def test_legacy_artifact_has_no_investigation_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (_step(1, "planner", {"workflowVersion": "evidence-driven-v4"}),),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is None
+
+
 def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),

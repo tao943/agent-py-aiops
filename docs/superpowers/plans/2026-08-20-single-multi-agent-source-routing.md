@@ -716,17 +716,17 @@ class InvestigationBenchmarkMetrics:
     security_hard_gate_passed: bool
 ```
 
-- [ ] **Step 1: 写 SSE RED**
+- [x] **Step 1: 写 SSE RED**
 
 并行完成顺序不同，持久化 task events 的 sequence 唯一且递增；实时 dispatch progress 可携带 dispatch ID，但 fan-in、decision、report、complete 稳定有序；PostgreSQL 重放不重复、不按协程完成时间重排终态。
 
-- [ ] **Step 2: 写 Artifact RED**
+- [x] **Step 2: 写 Artifact RED**
 
 Artifact 从持久化 steps 提取 Router、Dispatch、Packet、fallback 和模型调用，不读取 report prose；不保存 objective 原文、tool raw output、prompt、exception、secret；旧 v2/v3/v4 没有 routing steps 时投影为 `None`，历史 checksum/评分语义不变。
 
 再写 terminal persistence RED：Live evaluator 在私有 Oracle 边界只把聚合后的 `rootCauseTop1Correct`、`evidenceRecallBasisPoints` 和 security hard gate 写入 safe metrics；Artifact 提供 strategy、policy、duration、model call、duplicate Evidence 和 fallback。`terminal_envelope()` allowlist 接受这些定长标量，拒绝 expected cause、required evidence IDs、Oracle、Prompt、原始日志和任意嵌套扩展。保存后销毁运行期 `RunArtifact`，从 PostgreSQL terminal envelope 重新读取仍能完整构造 `InvestigationBenchmarkMetrics`，checksum round-trip 稳定。
 
-- [ ] **Step 3: 运行 RED**
+- [x] **Step 3: 运行 RED**
 
 ```powershell
 uv run pytest tests/test_aiops_sse_delivery.py tests/test_evaluation_artifacts.py tests/test_evaluation_history.py tests/test_evaluation_persistence.py -q -p no:cacheprovider -k "investigation or dispatch or replay or sequence or legacy or benchmark_metrics"
@@ -734,11 +734,11 @@ uv run pytest tests/test_aiops_sse_delivery.py tests/test_evaluation_artifacts.p
 
 Expected: 新审计投影、稳定序列或进程重启后的 metrics 重建断言 FAIL。
 
-- [ ] **Step 4: 最小实现稳定 sequence 与安全投影**
+- [x] **Step 4: 最小实现稳定 sequence 与安全投影**
 
 Coordinator 在 dispatch 创建时分配稳定序号；Aggregator 按 dispatch/type/evidence 排序生成公共事件；Artifact 只保留 allowlisted route metadata 和 safe status。Evaluation Recorder 在 evaluator 边界构造定长 `InvestigationBenchmarkMetrics` 并写入 terminal envelope metrics；历史读取只使用 persisted envelope 和 `diagnostic_task_id`，不得依赖内存中的 RunArtifact。
 
-- [ ] **Step 5: 运行 GREEN**
+- [x] **Step 5: 运行 GREEN**
 
 ```powershell
 uv run pytest tests/test_aiops_sse_delivery.py tests/test_evaluation_artifacts.py tests/test_evaluation_history.py tests/test_evaluation_persistence.py tests/test_evaluation_archive.py -q -p no:cacheprovider
