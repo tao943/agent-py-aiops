@@ -612,6 +612,20 @@ order-api，但当前失败 Artifact 未持久化六项注入检查的逐项安�
 result identity、失败分类与 cleanup 终态保持不变。下一步应先为注入失败持久化允许列表内的 check 名称、
 布尔结果和安全事实，再凭证据修复具体波动；在此之前不再运行付费 canary 或 3×3 A/B。
 
+提交 `8ce6c43`、`753c9e3` 与 `c51dca3` 完成上述可观测性链路。未确认的
+`LiveFaultObservation` 现在通过类型化、不可变的安全诊断携带有序 `checkResults`、由 false 检查严格
+投影的 `failedChecks` 和 driver 显式声明的标量 `safeFacts`；完整结构进入同一个 v1 terminal Envelope，
+由 Archive-first recorder 同步到 Evaluation Archive 与 PostgreSQL JSONB。CLI 与本地 report 只公开经过
+重新规范化的失败检查名称，不公开完整事实。
+
+Runner 构造、Artifact 反序列化和 report 读取共同使用一套数量、唯一性、标识符、有限数值、标量类型与
+禁用答案/凭据字段校验；三项诊断字段必须同时存在，`failedChecks` 必须与 false 检查的原顺序完全一致。
+inject 在返回 Observation 前直接异常时不伪造诊断；恶意、嵌套、重复、超长、非有限或结构不一致的内容
+被省略或拒绝，同时保留原失败分类和 cleanup 语义。目标 Runner/CLI/history/archive/recording/persistence/
+Order Pool contract 回归、精确本地失败路径、Ruff 与 Pyright 均通过；未运行全量 pytest、真实 LLM、CLS、
+Docker 或新的付费 canary。因此前一 canary 的具体波动原因仍未知，下一条经批准的唯一 canary 才能用新
+Artifact 给出具体失败检查。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
