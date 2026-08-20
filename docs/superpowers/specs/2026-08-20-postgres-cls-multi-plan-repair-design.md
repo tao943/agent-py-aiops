@@ -69,11 +69,13 @@ Strategy Router -> Runtime + Log -> Multi-Agent
 
 ## 4. 安全与失败处理
 
-- 是否补充日志步骤仅由公开执行上下文决定：证据源是 CLS、工具发现包含 `SearchLog`、存在受信绑定参数。
+- 是否补充日志步骤仅由公开执行上下文决定：发现的 `SearchLog` 来自精确 `cls` server、存在受信
+  incident/run/time 参数绑定，并且绑定结果通过实际工具 JSON Schema。
 - 日志 Step 的参数必须继续通过现有 MCP JSON Schema 和 trusted argument binding 校验。
 - 已存在 `SearchLog` 或 `SearchLogs` 步骤时不追加。
 - CLS 不可用、使用 local evidence 或缺少可信 scope 时保持 Runtime-only，Router 应继续安全降级为 Single。
 - 来自 `docker-live-postgres` 以外未知 server 的同名 Runtime 工具仍必须被拒绝。
+- 已有计划达到四步上限时保持原计划并安全降级，不为加入 Log 而静默删除 Runtime 步骤。
 - 任何计划合同错误仍走现有 normalization/fallback，不通过降低安全门禁换取 Multi。
 
 ## 5. 测试设计
