@@ -121,6 +121,19 @@ def _decision_vocabulary(scenario: LiveScenario) -> JsonDict:
             "nginx_route_mismatch": ("nginx", "route_mismatch"),
             "nginx_gateway_pressure": ("nginx", "gateway_resource_pressure"),
         },
+        "order_pool_leak": {
+            "order_connection_lifecycle_failure": (
+                "order-api",
+                "exception_path_connection_not_released",
+            ),
+            "order_traffic_capacity_exceeded": (
+                "order-api",
+                "legitimate_concurrency_exceeds_pool_capacity",
+            ),
+            "order_database_unreachable": ("postgresql", "connectivity_failure"),
+            "order_slow_statement": ("postgresql", "slow_query_without_lock"),
+            "order_database_lock_wait": ("postgresql", "row_lock_blocking"),
+        },
     }
     labels = labels_by_driver.get(scenario.driver)
     if labels is None or set(labels) != {item.id for item in scenario.hypotheses}:
@@ -136,6 +149,8 @@ def _decision_vocabulary(scenario: LiveScenario) -> JsonDict:
         component_aliases["redis"] = "live-eval-redis"
     if scenario.driver == "nginx_timeout":
         component_aliases["upstream"] = "live-eval-upstream"
+    if scenario.driver == "order_pool_leak":
+        component_aliases["order service"] = "order-api"
     mechanism_aliases = {
         alias: mechanism
         for hypothesis, (_, mechanism) in labels.items()

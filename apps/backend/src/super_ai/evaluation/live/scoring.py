@@ -29,6 +29,9 @@ _CITATION_SOURCES: dict[str, frozenset[str]] = {
     "APY-LIVE-NGINX-TIMEOUT-001": frozenset(
         {"InspectNginxRequestTimeline", "SearchLog"}
     ),
+    "APY-LIVE-ORDER-POOL-LEAK-001": frozenset(
+        {"InspectOrderPoolState", "SearchLog"}
+    ),
 }
 
 
