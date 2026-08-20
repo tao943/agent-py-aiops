@@ -200,6 +200,7 @@ def build_investigation_dispatches(
         raise ValueError("Evidence snapshot hash must be a SHA-256 digest.")
     selected = set(selected_investigators)
     dispatches: list[InvestigationDispatch] = []
+    remaining_model_call_budget = max(model_call_budget, 0)
     for investigator_type in _DISPATCH_ORDER:
         if investigator_type not in selected:
             continue
@@ -240,6 +241,8 @@ def build_investigation_dispatches(
                 )
             ).encode("utf-8")
         ).hexdigest()
+        dispatch_model_call_budget = min(remaining_model_call_budget, 1)
+        remaining_model_call_budget -= dispatch_model_call_budget
         dispatches.append(
             InvestigationDispatch(
                 task_id=task_id,
@@ -262,7 +265,7 @@ def build_investigation_dispatches(
                 allowed_tools=allowed_tools,
                 existing_evidence_ids=tuple(sorted(set(existing_evidence_ids))),
                 deadline_ms=deadline_ms,
-                model_call_budget=min(max(model_call_budget, 0), 1),
+                model_call_budget=dispatch_model_call_budget,
             )
         )
     return tuple(dispatches)

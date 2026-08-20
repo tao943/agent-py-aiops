@@ -313,6 +313,40 @@ def build_generic_live_plan(
             ("postgres_lock_blocking",),
             "trigger",
         ),
+        (
+            "InspectOrderPoolState",
+            "Inspect sanitized order-api pool capacity and waiter state.",
+            {},
+            (
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            "mechanism",
+        ),
+        (
+            "InspectOrderDatabaseSessions",
+            "Inspect scoped database sessions and rule out lock waits.",
+            {},
+            (
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            "context",
+        ),
+        (
+            "VerifyOrderDatabaseReachability",
+            "Separate database reachability from the business acquisition timeout.",
+            {},
+            (
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+            ),
+            "impact",
+        ),
     )
     return [
         {

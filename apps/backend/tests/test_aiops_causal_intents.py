@@ -124,7 +124,7 @@ def test_plan_coverage_uses_metrics_for_impact_without_overwriting_other_roles()
     ]
 
 
-def test_log_only_plan_cannot_be_repaired_into_a_trigger() -> None:
+def test_log_lifecycle_plan_can_supply_one_trigger_when_runtime_supplies_other_roles() -> None:
     result = repair_plan_causal_coverage(
         (
             _step("logs-1", "SearchLog", "mechanism"),
@@ -133,9 +133,9 @@ def test_log_only_plan_cannot_be_repaired_into_a_trigger() -> None:
         )
     )
 
-    assert "trigger" not in allowed_causal_intents("SearchLog")
-    assert result.complete is False
-    assert result.missing_roles == ("trigger",)
+    assert "trigger" in allowed_causal_intents("SearchLog")
+    assert result.complete is True
+    assert result.missing_roles == ()
 
 
 def test_plan_coverage_reports_ambiguous_trigger_when_it_cannot_repair() -> None:

@@ -48,6 +48,8 @@ _CONTEXT_OR_MECHANISM = frozenset(
         "InspectGatewayRequestTimeline",
         "InspectHostLimits",
         "InspectNginx",
+        "InspectOrderDatabaseSessions",
+        "InspectOrderPoolState",
         "InspectRedisClientPool",
         "InspectRedisServer",
         "InspectTrafficAndDependencyHealth",
@@ -59,7 +61,9 @@ _CONTEXT_OR_MECHANISM = frozenset(
 )
 _CONTEXT_OR_MECHANISM_OR_IMPACT = frozenset({"GetServiceMetrics"})
 _TRIGGER_OR_CONTEXT_OR_MECHANISM = frozenset({"InspectPostgres", "InspectRedis"})
-_CONTEXT_OR_IMPACT = frozenset({"VerifyServiceHealth"})
+_CONTEXT_OR_IMPACT = frozenset(
+    {"VerifyOrderDatabaseReachability", "VerifyServiceHealth"}
+)
 _LOG_EVIDENCE = frozenset({"SearchLog", "SearchLogs"})
 _NON_DIAGNOSTIC_PREFIXES = (
     "Apply",
@@ -116,7 +120,7 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
     if tool_name in _CONTEXT_OR_IMPACT:
         return frozenset({"context", "impact"})
     if tool_name in _LOG_EVIDENCE:
-        return frozenset({"context", "mechanism", "impact"})
+        return frozenset({"trigger", "context", "mechanism", "impact"})
     if tool_name.startswith(_NON_DIAGNOSTIC_PREFIXES):
         return frozenset()
     return frozenset({"context"})

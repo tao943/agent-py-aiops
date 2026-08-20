@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from super_ai.aiops import RootCauseDecision
+from super_ai.aiops.investigation import (
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    build_investigator_capabilities,
+)
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.domain import LiveRunIdentity
 from super_ai.evaluation.live.order_pool_leak import (
@@ -15,7 +19,7 @@ from super_ai.evaluation.live.order_pool_leak import (
     OrderPoolRuntimeEvidenceMcpClient,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
-from super_ai.mcp_client import McpClientError
+from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 
 class FakeOrderApi:
@@ -271,6 +275,34 @@ async def test_runtime_evidence_is_read_only_partial_and_answer_isolated() -> No
     assert "primary_cause" not in serialized
     with pytest.raises(McpClientError):
         await client.call_tool("InspectOrderPoolState", {"run_id": "other"})
+
+
+@pytest.mark.asyncio
+async def test_order_pool_runtime_and_cls_are_two_trusted_investigator_sources() -> None:
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    runtime_tools = await OrderPoolRuntimeEvidenceMcpClient(observation).discover_tools()
+    search_log = McpToolDefinition(
+        "SearchLog",
+        "Search one trusted run-scoped CLS window.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        "cls",
+    )
+    capabilities = build_investigator_capabilities(
+        discovered_tools=(*runtime_tools, search_log),
+        trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+        tool_policies={},
+        retrieval_available=False,
+        cls_available=True,
+    )
+    assert capabilities["runtime"].allowed_tools == {
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    assert capabilities["log"].allowed_tools == {"SearchLog"}
 
 
 @pytest.mark.asyncio

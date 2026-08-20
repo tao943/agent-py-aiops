@@ -471,6 +471,34 @@ def test_generic_fallback_uses_all_live_evidence_tools() -> None:
     ]
 
 
+def test_generic_order_pool_plan_uses_runtime_tools_without_embedding_the_answer() -> None:
+    plan = build_generic_live_plan(
+        available_tools=(
+            "InspectOrderPoolState",
+            "InspectOrderDatabaseSessions",
+            "VerifyOrderDatabaseReachability",
+        ),
+        known_hypotheses=(
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_database_unreachable",
+            "order_slow_statement",
+            "order_database_lock_wait",
+        ),
+    )
+    assert [step["tool"] for step in plan] == [
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    ]
+    assert [step["causalIntent"] for step in plan] == [
+        "mechanism",
+        "context",
+        "impact",
+    ]
+    assert "exception_path_connection_not_released" not in str(plan)
+
+
 def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:
     model_plan: list[dict[str, object]] = [
         {

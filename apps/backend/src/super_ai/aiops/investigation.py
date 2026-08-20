@@ -318,6 +318,7 @@ _RUNTIME_SERVER_NAMES = frozenset(
         "docker-live-postgres",
         "live-eval-local",
         "nginx-timeout-live",
+        "order-pool-live",
         "postgres-deadlock-live",
         "redis-maxclients-live",
         "snapshot",
@@ -361,6 +362,8 @@ _RUNTIME_TOOL_NAMES = (
     "InspectHttpAttempts",
     "InspectNginx",
     "InspectNginxRequestTimeline",
+    "InspectOrderDatabaseSessions",
+    "InspectOrderPoolState",
     "InspectPostgres",
     "InspectPostgresDeadlockAudit",
     "InspectPostgresErrors",
@@ -382,6 +385,7 @@ _RUNTIME_TOOL_NAMES = (
     "QueryTrace",
     "ReadNginxTimeoutSummary",
     "VerifyServiceHealth",
+    "VerifyOrderDatabaseReachability",
 )
 
 TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES: Mapping[str, TrustedToolCapability] = (
