@@ -6,9 +6,9 @@ from typing import Any, cast
 import pytest
 
 from super_ai.aiops.investigation import (
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     InvestigationRouterPolicy,
     InvestigationRoutingInput,
-    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     TrustedToolCapability,
     build_investigator_capabilities,
     normalize_plan_source_domains,

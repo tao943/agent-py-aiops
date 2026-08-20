@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +16,15 @@ from super_ai.aiops.diagnostics import (
     build_grounded_fallback_decision,
     merge_live_log_plan_step,
     plan_matches_tool_contracts,
+)
+from super_ai.aiops.investigation import (
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    InvestigationRoute,
+    InvestigationRouterPolicy,
+    InvestigationRoutingInput,
+    build_investigator_capabilities,
+    normalize_plan_source_domains,
+    route_investigation,
 )
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import (
@@ -174,7 +183,9 @@ def _search_step() -> dict[str, object]:
 
 
 def test_live_log_step_is_merged_into_a_non_empty_runtime_plan() -> None:
-    runtime = [{"id": "runtime-1", "tool": "InspectPostgresSessions"}]
+    runtime: list[dict[str, object]] = [
+        {"id": "runtime-1", "tool": "InspectPostgresSessions"}
+    ]
 
     merged = merge_live_log_plan_step(runtime, search_step=_search_step())
 
@@ -193,7 +204,7 @@ def test_live_log_step_is_not_duplicated_or_added_without_cls() -> None:
 
 
 def test_live_log_step_does_not_truncate_a_full_initial_plan() -> None:
-    runtime = [
+    runtime: list[dict[str, object]] = [
         {"id": f"runtime-{index}", "tool": "InspectPostgresSessions"}
         for index in range(4)
     ]
@@ -323,6 +334,84 @@ async def test_discovered_cls_tool_without_trusted_scope_is_not_forced_into_plan
 
     assert origin == "generic"
     assert all(step["tool"] != "SearchLog" for step in plan)
+
+
+def _route_public_postgres_plan(
+    plan: Sequence[Mapping[str, object]],
+    definitions: tuple[McpToolDefinition, ...],
+) -> InvestigationRoute:
+    capabilities = build_investigator_capabilities(
+        discovered_tools=definitions,
+        trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+        tool_policies={},
+        retrieval_available=True,
+        cls_available=True,
+    )
+    normalized = normalize_plan_source_domains(plan, capabilities)
+    required_domains = frozenset(
+        cast(Any, step["sourceDomain"])
+        for step in normalized
+        if step.get("sourceDomain") in {"runtime", "log"}
+    )
+    return route_investigation(
+        InvestigationRoutingInput(
+            required_domains=cast(Any, required_domains),
+            unresolved_hypothesis_count=3,
+            causal_component_count=1,
+            missing_causal_roles=frozenset({"trigger", "mechanism"}),
+            high_quality_conflict=False,
+            severity="warning",
+            trusted_pattern_matched=False,
+            decision_ready=False,
+            valid_tool_calls_without_gain=0,
+            knowledge_hit=True,
+            remaining_time_ms=90_000,
+            remaining_model_calls=8,
+            completed_dispatch_keys=frozenset(),
+            evidence_snapshot_hash="a" * 64,
+            wave=0,
+        ),
+        capabilities=capabilities,
+        policy=InvestigationRouterPolicy(multi_agent_enabled=True),
+        mode="multi",
+    )
+
+
+async def _planned_public_postgres_route(*, trusted: bool) -> InvestigationRoute:
+    service, definitions = await _postgres_cls_service_and_definitions(
+        trusted_arguments=_trusted_cls_arguments() if trusted else None
+    )
+    plan, _origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate public incident evidence.",
+        alert={"name": "PostgresOrderUpdateLatencyHigh", "severity": "warning"},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=definitions,
+        known_hypotheses=(
+            "postgres_lock_blocking",
+            "postgres_slow_query_without_lock",
+            "postgres_connectivity_failure",
+        ),
+    )
+    return _route_public_postgres_plan(plan, definitions)
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_cls_public_plan_can_select_effective_multi() -> None:
+    route = await _planned_public_postgres_route(trusted=True)
+
+    assert route.strategy == "multi_agent"
+    assert route.selected_investigators == ("runtime", "log")
+    assert "insufficient_parallel_sources" not in route.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_without_trusted_cls_scope_stays_single() -> None:
+    route = await _planned_public_postgres_route(trusted=False)
+
+    assert route.strategy == "single_agent"
+    assert route.selected_investigators == ()
+    assert "insufficient_parallel_sources" in route.reason_codes
 
 
 def test_generic_fallback_uses_all_live_evidence_tools() -> None:

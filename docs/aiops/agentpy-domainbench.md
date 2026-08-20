@@ -557,6 +557,13 @@ cleanup 和独立验证通过。
 
 ## 当前阶段边界
 
+### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
+
+公开 PostgreSQL Lock hypotheses、项目内 `docker-live-postgres` Runtime 工具和受作用域约束的
+CLS `SearchLog` 可形成 `runtime + log` 两个可信 Dispatch；Benchmark forced Multi 的离线路由结果为
+`multi_agent`。该测试不调用 Oracle、真实 LLM 或 CLS，只证明路由可用性；真实能力增益与生产默认启用
+仍需完整 A/B 门禁。
+
 Snapshot 已扩展到十个，Retrieval 标签已扩展到 64 条。Live 已包含 PostgreSQL 行锁、
 PostgreSQL deadlock、Redis maxclients 与 Nginx timeout 四个隔离场景；driver、证据工具、
 清理和执行恢复/人工审批边界已经实现并通过顺序 Docker 验证。64-query 真实 Retrieval
