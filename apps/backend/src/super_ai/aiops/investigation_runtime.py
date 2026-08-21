@@ -629,6 +629,7 @@ class SpecialistExecutor:
                         assignment,
                         evidence_ids=tuple(evidence_ids),
                         completed_steps=tuple(completed_steps),
+                        fact_candidates=tuple(tool_claims),
                     ),
                     correction_prompt=(
                         "Return only the required Evidence Analysis schema using "
@@ -874,11 +875,26 @@ class SpecialistExecutor:
         *,
         evidence_ids: tuple[str, ...],
         completed_steps: tuple[str, ...],
+        fact_candidates: tuple[EvidenceClaim, ...],
     ) -> str:
         payload = {
             "hypotheses": list(assignment.hypotheses_to_test),
             "ownedEvidenceIds": list(evidence_ids),
             "completedSteps": list(completed_steps),
+            "safeEvidence": [
+                {
+                    "claimId": claim.claim_id,
+                    "value": _json_value_for_prompt(claim.value),
+                    "quality": claim.quality,
+                    "causalRole": claim.causal_role,
+                    "supports": list(claim.supports),
+                    "refutes": list(claim.refutes),
+                    "evidenceIds": list(claim.evidence_ids),
+                    "targetComponent": claim.target_component,
+                    "timeScope": claim.time_scope,
+                }
+                for claim in fact_candidates
+            ],
         }
         return "Analyze only these public Specialist evidence summaries:\n" + json.dumps(
             payload, ensure_ascii=False, sort_keys=True
@@ -997,6 +1013,17 @@ def _canonical_arguments(value: object) -> JsonDict:
 def _plain_json_mapping(value: Mapping[str, object]) -> JsonDict:
     """Copy a frozen public mapping into canonical JSON-compatible data."""
     return _canonical_arguments(value)
+
+
+def _json_value_for_prompt(value: JsonValue) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_value_for_prompt(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_json_value_for_prompt(item) for item in value]
+    return value
 
 
 def _string_sequence(value: object) -> tuple[str, ...]:

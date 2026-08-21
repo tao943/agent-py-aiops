@@ -208,10 +208,12 @@ class SpecialistRoleModel:
         *,
         altered_log_scope: bool = False,
         require_schema_prompt: bool = False,
+        require_evidence_prompt: bool = False,
     ) -> None:
         self.runtime = runtime
         self.altered_log_scope = altered_log_scope
         self.require_schema_prompt = require_schema_prompt
+        self.require_evidence_prompt = require_evidence_prompt
         self.prompts: list[str] = []
         self.schema: type[BaseModel] | None = None
         self.structured_output_methods: list[object] = []
@@ -262,6 +264,10 @@ class SpecialistRoleModel:
                 {"steps": steps}
             )
         else:
+            if self.require_evidence_prompt:
+                assert '"safeEvidence"' in str(input)
+                assert '"healthy": true' in str(input)
+                assert "evidence_" in str(input)
             evidence_ids = [item.evidence_id for item in self.runtime.prepared]
             parsed = SpecialistEvidenceAnalysisOutput.model_validate(
                 {
@@ -354,7 +360,11 @@ async def test_specialist_runs_two_model_roles_and_serial_tools() -> None:
     now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
     runtime = RecordingRuntime()
     coordinator = InMemoryCoordinator()
-    model = SpecialistRoleModel(runtime, require_schema_prompt=True)
+    model = SpecialistRoleModel(
+        runtime,
+        require_schema_prompt=True,
+        require_evidence_prompt=True,
+    )
     executor = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, model),
