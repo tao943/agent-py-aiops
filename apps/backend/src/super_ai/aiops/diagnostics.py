@@ -3358,19 +3358,52 @@ class AiopsDiagnosticService:
         facts: list[JsonDict] = []
         for claim in aggregated.normalized_facts:
             for evidence_id in claim.evidence_ids:
-                facts.append(
-                    {
-                        "key": claim.claim_id,
-                        "value": _safe_value(claim.value),
-                        "evidenceId": evidence_id,
-                        "sourceTool": claim.claim_id.split(".", 1)[0],
-                        "quality": claim.quality,
-                        "public": True,
-                        "causalRole": claim.causal_role,
-                        "targetComponent": claim.target_component,
-                        "timeScope": claim.time_scope,
-                    }
+                source_tool = claim.claim_id.split(".", 1)[0]
+                extracted = (
+                    extract_public_facts(
+                        (
+                            PublicToolObservation(
+                                tool_name=source_tool,
+                                evidence_id=evidence_id,
+                                output=cast(Mapping[str, object], claim.value),
+                            ),
+                        )
+                    )
+                    if isinstance(claim.value, Mapping)
+                    else ()
                 )
+                if extracted:
+                    facts.extend(
+                        _diagnostic_fact_payload(
+                            DiagnosticFact(
+                                key=fact.key,
+                                value=fact.value,
+                                evidence_id=fact.evidence_id,
+                                source_tool=fact.source_tool,
+                                quality=(
+                                    "direct"
+                                    if claim.quality == "direct"
+                                    else "context"
+                                ),
+                            )
+                        )
+                        for fact in extracted
+                    )
+                else:
+                    facts.append(
+                        {
+                            "key": claim.claim_id,
+                            "value": _safe_value(claim.value),
+                            "evidenceId": evidence_id,
+                            "sourceTool": source_tool,
+                            "quality": (
+                                "direct"
+                                if claim.quality == "direct"
+                                else "context"
+                            ),
+                            "public": True,
+                        }
+                    )
         completed_count = sum(
             1
             for result in results

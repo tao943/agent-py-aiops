@@ -825,6 +825,10 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
     assert aggregation["fallbackPermitted"] is False
     assert update["model_call_count"] == 3
     assert update["evidence_ids"] == [evidence.id]
+    aggregated_facts = cast(list[dict[str, object]], update["aggregated_facts"])
+    assert [item["key"] for item in aggregated_facts] == [
+        "InspectOrderPoolState.poolAtCapacity"
+    ]
     assert service._route_after_aggregation(cast(Any, update)) == "fact_adapter"  # pyright: ignore[reportPrivateUsage]
     persisted_text = json.dumps(
         {
