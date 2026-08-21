@@ -776,6 +776,20 @@ Validator 第一次结构化调用耗时 23973 ms，请求成功但 Schema 解�
 `executionPermitted=false`。该行为已通过 60/65 秒冻结时钟边界、Artifact allowlist、Ruff、Pyright
 和 focused OpenSpec 离线验证；尚未用新的真实 Run 宣称供应商 Validator 已恢复稳定。
 
+随后真实 Run `v4-validator-contract-canary-20260821-1787319745759` 使用 CLS、forced Multi、
+主模型 `qwen3.7-plus` 和独立 Validator `qwen3.8-max` 完成 `100/100 VALID_PASS`。运行耗时
+360432 ms，总模型调用数 7，Root Cause Top-1 正确、Evidence Recall 100%、4 个独立来源组、
+无重复 Evidence，恢复验证和安全硬门禁通过。Validator Router 因 `execution_requested` 开启；
+Validator 首次结构化调用在 28560 ms 内返回 `llm_semantic/valid`，
+`semanticValidationAttempts=1`，没有 parse、timeout 或 retry 错误。Policy Gate 仍返回
+`external_policy_required` 与 `executionPermitted=false`，证明语义核验成功没有绕过恢复授权。
+
+该不可变 Envelope 的 SHA-256 为
+`103bb05c322ea03252f8606243f3471a85c248d3ca6aa551f2a2710a9a113211`，诊断任务为
+`diagnostic_b1affce557654ef98049451adac1018b`。终态后再次独立执行 Verify 与幂等 Cleanup，均返回
+clean，最终 `verificationPassed=true`、`cleanupSucceeded=true`。本次结果证明精确输出合同在该真实
+canary 上首次成功，不代表所有供应商响应或未来场景均不会触发 deadline-aware 安全降级。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
