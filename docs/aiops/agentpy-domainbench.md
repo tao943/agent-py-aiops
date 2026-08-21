@@ -746,6 +746,28 @@ Multi 复验。
 Benchmark forced mode，生产自动 Multi 继续禁用。修复供应商结构化 Local Plan 请求兼容性后，
 仍需新的、单独批准的 A/B campaign；本轮结果不能作为默认启用依据。
 
+### V4 Structured LLM Validator 真实 Multi canary（2026-08-21）
+
+真实 Run `v4-structured-validator-multi-20260821203446` 使用 CLS、forced Multi、主模型
+`qwen3.7-plus`、独立 Validator `qwen3.8-max`，两者均按配置使用 `json_mode`。运行达到
+`100/100 VALID_PASS`，Root Cause Top-1 正确、Evidence Recall 100%、4 个独立来源组、无重复
+Evidence，恢复验证、安全硬门禁和 cleanup 全部通过；诊断耗时 360417 ms，总模型调用数为 8。
+Runtime Specialist 收集 3 条 Evidence、调用 3 个工具，Log Specialist 收集 1 条 Evidence、调用
+1 个 CLS 工具；两个角色虽因各自局部模型边界记录为 inconclusive，聚合后的确定性证据仍完整支持根因。
+
+Validator Router 仅因 `execution_requested` 选择语义门，证明低风险 proposal-only 路由未被改为强制调用。
+Validator 第一次结构化调用耗时 23973 ms，请求成功但 Schema 解析失败；格式纠正后的第二次调用受全局
+剩余硬截止限制，28293 ms 后以 `timeout/model_invoke` 结束。持久化 Step 与 Checkpoint 均记录
+`validationOrigin=llm_failed`、`semanticValidationAttempts=2`、`validationModel=qwen3.8-max`、
+`validationErrorCode=timeout`，Policy Gate 保持 `executionPermitted=false`。Live Benchmark harness 按隔离
+场景合同完成恢复验证不代表生产 Agent 获得自动执行权限。
+
+该不可变 terminal Envelope 位于外部 Evaluation Archive，SHA-256 为
+`225479eefefcc693a0d12784332f3561e16ac5855e228b94212ad50247015cac`，诊断任务为
+`diagnostic_9fa11787dd7d457d995c3359dfd673d1`。终态后再次独立执行 Verify 与幂等 Cleanup，分别返回
+`verificationPassed=true` 和 `cleanupSucceeded=true`。随后离线回归补充了“第一次解析错误 + 最终调用错误”
+的有界错误历史保留；历史真实 Envelope 不回写，未来 Run 将同时保留两阶段安全错误码。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

@@ -457,7 +457,8 @@ new immutable run ID:
 ```powershell
 $validatorRunId = "v4-structured-validator-multi-" + (Get-Date -Format "yyyyMMddHHmmss")
 $validatorCampaignId = "v4-structured-validator-20260821"
-uv run python scripts/run_live_benchmark.py run --scenario APY-LIVE-ORDER-POOL-LEAK-001 --run-id $validatorRunId --owner-user-id user_c88807ff36b74a038b9e1ea31a389cfc --knowledge-base-id kb_user_c88807ff36b74a038b9e1ea31a389cfc --evidence-source cls --strategy multi --campaign-id $validatorCampaignId --config ../../config/user.project.json
+$validatorConfig = (Resolve-Path '..\..\..\..\config\project.json').Path
+uv run python scripts/run_live_benchmark.py run --scenario APY-LIVE-ORDER-POOL-LEAK-001 --run-id $validatorRunId --owner-user-id user_c88807ff36b74a038b9e1ea31a389cfc --knowledge-base-id kb_user_c88807ff36b74a038b9e1ea31a389cfc --evidence-source cls --strategy multi --campaign-id $validatorCampaignId --config $validatorConfig
 ```
 
 Expected: terminal result is persisted and cleanup succeeds. Inspect bounded
