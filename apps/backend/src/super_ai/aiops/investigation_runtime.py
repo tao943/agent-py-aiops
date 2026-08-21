@@ -704,13 +704,16 @@ class SpecialistExecutor:
         prompt: str,
         correction_prompt: str,
     ) -> tuple[_RoleOutput | None, str | None]:
-        prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        effective_prompt = self._structured_role_prompt(prompt, schema=schema)
+        prompt_fingerprint = hashlib.sha256(
+            effective_prompt.encode("utf-8")
+        ).hexdigest()
 
         async def operation() -> JsonDict:
             outcome = await invoke_bounded_structured_role(
                 model=self._model,
                 schema=schema,
-                prompt=prompt,
+                prompt=effective_prompt,
                 correction_prompt=correction_prompt,
                 role=role_name,
                 structured_output_method=self._structured_output_method,
@@ -751,6 +754,25 @@ class SpecialistExecutor:
             return schema.model_validate(value), None
         except ValueError:
             return None, "specialist_checkpoint_invalid"
+
+    def _structured_role_prompt(
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel],
+    ) -> str:
+        if self._structured_output_method != "json_mode":
+            return prompt
+        contract = json.dumps(
+            schema.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return (
+            f"{prompt}\n\nReturn only one valid JSON object matching this JSON Schema:\n"
+            f"{contract}"
+        )
 
     @staticmethod
     def _validate_assignment(
