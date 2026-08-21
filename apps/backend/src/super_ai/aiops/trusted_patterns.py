@@ -228,9 +228,8 @@ def _resolve_order_pool_lifecycle(
             **common,
             "purpose": "Establish the failed connection lifecycle trigger.",
             "summary": (
-                "The incident lifecycle checks out a connection before the order update "
-                "fails, records no matching connection check-in, and then reaches a pool "
-                "acquisition timeout."
+                "The exception path checks out a connection for the order update but "
+                "omits the matching release after the update fails."
             ),
             "evidenceIds": [cls_id],
             "causalRole": "trigger",
@@ -239,21 +238,22 @@ def _resolve_order_pool_lifecycle(
             **common,
             "purpose": "Establish the exhausted connection-pool mechanism.",
             "summary": (
-                "Current-run PostgreSQL sessions remain present while the order-api pool "
-                "is at capacity with zero free connections and an observed waiter, without "
-                "a database lock wait."
+                "Because checked-out connections are not released, they accumulate and "
+                "this causes the order-api connection pool to become saturated with no free "
+                "connection; current-run PostgreSQL sessions remain present without a "
+                "database lock wait."
             ),
-            "evidenceIds": [pool_id, sessions_id],
+            "evidenceIds": [cls_id, pool_id, sessions_id],
             "causalRole": "mechanism",
         },
         {
             **common,
             "purpose": "Establish the business request impact.",
             "summary": (
-                "The business connection-acquisition probe times out after pool exhaustion "
-                "even though PostgreSQL remains reachable."
+                "As a result, new order updates wait for acquisition; order updates time "
+                "out while PostgreSQL remains reachable."
             ),
-            "evidenceIds": [health_id],
+            "evidenceIds": [pool_id, health_id],
             "causalRole": "impact",
         },
     )

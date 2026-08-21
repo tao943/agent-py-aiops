@@ -26,6 +26,13 @@ _NGINX_SCENARIO = (
     / "live"
     / "APY-LIVE-NGINX-TIMEOUT-001"
 )
+_ORDER_POOL_SCENARIO = (
+    Path(__file__).resolve().parents[3]
+    / "benchmarks"
+    / "agentpy"
+    / "live"
+    / "APY-LIVE-ORDER-POOL-LEAK-001"
+)
 
 _HYPOTHESES = (
     "nginx_gateway_pressure",
@@ -284,6 +291,34 @@ def test_order_pool_pattern_closes_lifecycle_and_rules_out_database_causes() -> 
     assert result.matched_pattern_ids == (
         "order_connection_checkout_without_checkin",
     )
+
+
+def test_order_pool_pattern_projection_satisfies_live_semantic_contract() -> None:
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=_order_pool_provenance(),
+    )
+    by_role = {
+        str(item["causalRole"]): str(item["summary"])
+        for item in result.observations
+    }
+    decision = RootCauseDecision(
+        "order-api",
+        "exception_path_connection_not_released",
+        by_role["trigger"],
+        (by_role["trigger"], by_role["mechanism"], by_role["impact"]),
+        tuple(sorted(_order_pool_evidence_ids())),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(_ORDER_POOL_SCENARIO),
+    )
+
+    assert score.total == 20
 
 
 def test_order_pool_pattern_ignores_completed_checkout_before_leaking_checkout() -> None:

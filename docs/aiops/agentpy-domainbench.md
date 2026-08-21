@@ -679,6 +679,23 @@ Recovery Policy 安全拒绝执行（`no_grounded_action`、`executionPermitted=
 trusted/fact/adjudication/live contract 定向测试、生产图定向测试、Ruff 与 Pyright 均通过。按一次
 canary 约束尚未执行修复后的第二次真实 Run，也未开始 Specialist Multi-Agent 实现。
 
+修复后的真实 Single Run `order-pool-specialist-single-gate-fixed-20260821` 已成功形成
+`deterministic_grounded` 根因决策，并由 deterministic Validator 判定 valid。决策 component 为
+`order-api`、mechanism 为 `exception_path_connection_not_released`，引用 4 组独立工具 Evidence；恢复、
+独立验证和 cleanup 均成功，安全硬门禁通过，Evidence Recall 为 100%，运行耗时 195161 ms。
+
+该 Run 的原始总分为 90，终态仍为 `VALID_FAIL`，失败项是
+`primary_trigger_unsupported`、`causal_chain_incomplete` 和 `primary_root_cause_wrong`。根因是 trusted
+pattern 的确定性投影只陈述了观察到的事件和池状态，没有显式表达“exception path”、未释放连接导致池耗尽、
+以及新订单等待连接后超时的因果关系；component、mechanism、证据、恢复和安全策略均正确。terminal
+Envelope checksum 为 `1f7cd23049a073439a23cc87a52e085021962d13e7443b99dc6913c4465aa132`，
+其诊断任务为 `diagnostic_7a850951612e4ecdb62ed54432c39119`，不可覆盖。
+
+新增 production trusted-pattern semantic contract 后，旧投影稳定复现 10/20；随后仅将已有证据明确投影为
+trigger/mechanism/impact，并为 mechanism 与 impact 补齐相应 Evidence 引用，合同达到 20/20。Ground Truth、
+评分器、同义词表、总分阈值、恢复授权和安全门禁均未修改。此修复目前只有离线验证，尚未执行新的真实
+Single Run，也未开始 Specialist Multi-Agent 实现。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
