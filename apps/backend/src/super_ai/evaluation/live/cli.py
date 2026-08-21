@@ -427,6 +427,34 @@ async def _run_live_once(
                 "securityHardGatePassed": (
                     investigation_metrics.security_hard_gate_passed
                 ),
+                "toolCallCount": investigation_metrics.tool_call_count,
+                "specialistRoleStatuses": dict(
+                    investigation_metrics.role_statuses
+                ),
+                "specialistRoleDurationMs": dict(
+                    investigation_metrics.role_duration_ms
+                ),
+                "specialistRoleModelCallCounts": dict(
+                    investigation_metrics.role_model_call_counts
+                ),
+                "specialistRoleToolCallCounts": dict(
+                    investigation_metrics.role_tool_call_counts
+                ),
+                "specialistRoleEvidenceCounts": dict(
+                    investigation_metrics.role_evidence_counts
+                ),
+                "sourceGroupCount": investigation_metrics.source_group_count,
+                "duplicateEvidenceCount": (
+                    investigation_metrics.duplicate_evidence_count
+                ),
+                "conflictCount": investigation_metrics.conflict_count,
+                "missingDomains": list(investigation_metrics.missing_domains),
+                "aggregationChecksum": (
+                    investigation_metrics.aggregation_checksum
+                ),
+                "terminalFailureCategory": (
+                    investigation_metrics.terminal_failure_category
+                ),
             }
         )
     terminal = terminal_envelope(

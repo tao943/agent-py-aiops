@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics
 from super_ai.evaluation.history import (
@@ -19,10 +21,25 @@ _INVESTIGATION_STRATEGIES = frozenset(
     {"auto", "single", "multi"}
 )
 _EFFECTIVE_INVESTIGATION_STRATEGIES = frozenset(
-    {"deterministic_fast_path", "single_agent", "multi_agent"}
+    {
+        "deterministic_fast_path",
+        "single_agent",
+        "multi_agent",
+        "multi_agent_unavailable",
+    }
 )
 _INVESTIGATION_FALLBACK_REASONS = frozenset(
-    {"fallback_to_single_agent", "manual_review_required", "late_result_ignored"}
+    {
+        "fallback_to_single_agent",
+        "manual_review_required",
+        "late_result_ignored",
+        "partial_specialist_result",
+        "multi_investigation_failed",
+    }
+)
+_SPECIALIST_ROLES = frozenset({"runtime", "log", "change", "knowledge"})
+_SPECIALIST_STATUSES = frozenset(
+    {"completed", "inconclusive", "failed", "timeout", "cancelled", "missing"}
 )
 
 
@@ -125,6 +142,38 @@ def investigation_metrics_from_persisted_result(
             metrics, "securityHardGatePassed"
         ),
         total_score=_required_bounded_int(metrics, "total", maximum=100),
+        tool_call_count=_required_bounded_int(
+            metrics, "toolCallCount", maximum=64
+        ),
+        role_statuses=_required_role_statuses(metrics, "specialistRoleStatuses"),
+        role_duration_ms=_required_role_counts(
+            metrics, "specialistRoleDurationMs", maximum=360_000
+        ),
+        role_model_call_counts=_required_role_counts(
+            metrics, "specialistRoleModelCallCounts", maximum=2
+        ),
+        role_tool_call_counts=_required_role_counts(
+            metrics, "specialistRoleToolCallCounts", maximum=16
+        ),
+        role_evidence_counts=_required_role_counts(
+            metrics, "specialistRoleEvidenceCounts", maximum=16
+        ),
+        source_group_count=_required_bounded_int(
+            metrics, "sourceGroupCount", maximum=64
+        ),
+        duplicate_evidence_count=_required_bounded_int(
+            metrics, "duplicateEvidenceCount", maximum=64
+        ),
+        conflict_count=_required_bounded_int(
+            metrics, "conflictCount", maximum=64
+        ),
+        missing_domains=_required_missing_domains(metrics),
+        aggregation_checksum=_optional_checksum(metrics, "aggregationChecksum"),
+        terminal_failure_category=_optional_choice(
+            metrics,
+            "terminalFailureCategory",
+            frozenset({"multi_investigation_failed"}),
+        ),
         run_id=run.run_id,
         scenario_id=run.scenario_id,
         campaign_id=(
@@ -135,6 +184,86 @@ def investigation_metrics_from_persisted_result(
             else None
         ),
     )
+
+
+def _required_role_statuses(
+    values: dict[str, object], key: str
+) -> tuple[tuple[str, str], ...]:
+    raw = values.get(key)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    safe = cast(Mapping[object, object], raw)
+    if len(safe) > 4:
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    statuses: list[tuple[str, str]] = []
+    for role, status in sorted(safe.items(), key=lambda item: str(item[0])):
+        if (
+            not isinstance(role, str)
+            or role not in _SPECIALIST_ROLES
+            or not isinstance(status, str)
+            or status not in _SPECIALIST_STATUSES
+        ):
+            raise ValueError(f"Investigation metric {key} is invalid.")
+        statuses.append((role, status))
+    return tuple(statuses)
+
+
+def _required_role_counts(
+    values: dict[str, object], key: str, *, maximum: int
+) -> tuple[tuple[str, int], ...]:
+    raw = values.get(key)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    safe = cast(Mapping[object, object], raw)
+    if len(safe) > 4:
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    counts: list[tuple[str, int]] = []
+    for role, count in sorted(safe.items(), key=lambda item: str(item[0])):
+        if (
+            not isinstance(role, str)
+            or role not in _SPECIALIST_ROLES
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or not 0 <= count <= maximum
+        ):
+            raise ValueError(f"Investigation metric {key} is invalid.")
+        counts.append((role, count))
+    return tuple(counts)
+
+
+def _required_missing_domains(values: dict[str, object]) -> tuple[str, ...]:
+    raw = values.get("missingDomains")
+    if not isinstance(raw, list):
+        raise ValueError("Investigation metric missingDomains is invalid.")
+    safe = cast(list[object], raw)
+    if len(safe) > 4:
+        raise ValueError("Investigation metric missingDomains is invalid.")
+    if any(
+        not isinstance(item, str) or item not in _SPECIALIST_ROLES
+        for item in safe
+    ):
+        raise ValueError("Investigation metric missingDomains is invalid.")
+    return tuple(sorted({cast(str, item) for item in safe}))
+
+
+def _optional_checksum(values: dict[str, object], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    return value
+
+
+def _optional_choice(
+    values: dict[str, object], key: str, allowed: frozenset[str]
+) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    return value
 
 
 def _required_text(values: dict[str, object], key: str) -> str:

@@ -24,6 +24,16 @@ def _empty_json_dict() -> JsonDict:
 
 
 @dataclass(frozen=True, slots=True)
+class SpecialistRoleAudit:
+    role: str
+    status: str
+    duration_ms: int
+    model_call_count: int
+    tool_call_count: int
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class InvestigationAudit:
     strategy: str
     score: int
@@ -33,6 +43,16 @@ class InvestigationAudit:
     dispatch_count: int
     packet_statuses: tuple[str, ...]
     fallback_reason: str | None
+    requested_strategy: str | None = None
+    effective_strategy: str | None = None
+    release_mode: str | None = None
+    roles: tuple[SpecialistRoleAudit, ...] = ()
+    source_group_count: int = 0
+    duplicate_evidence_count: int = 0
+    conflict_count: int = 0
+    missing_domains: tuple[str, ...] = ()
+    aggregation_checksum: str | None = None
+    terminal_failure_category: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +68,18 @@ class InvestigationBenchmarkMetrics:
     fallback_reason: str | None
     security_hard_gate_passed: bool
     total_score: int
+    tool_call_count: int = 0
+    role_statuses: tuple[tuple[str, str], ...] = ()
+    role_duration_ms: tuple[tuple[str, int], ...] = ()
+    role_model_call_counts: tuple[tuple[str, int], ...] = ()
+    role_tool_call_counts: tuple[tuple[str, int], ...] = ()
+    role_evidence_counts: tuple[tuple[str, int], ...] = ()
+    source_group_count: int = 0
+    duplicate_evidence_count: int = 0
+    conflict_count: int = 0
+    missing_domains: tuple[str, ...] = ()
+    aggregation_checksum: str | None = None
+    terminal_failure_category: str | None = None
     run_id: str = ""
     scenario_id: str = ""
     campaign_id: str | None = None
@@ -273,6 +305,24 @@ def _investigation_audit_from_steps(
         return None
     safe_route = cast(Mapping[str, object], route)
     strategy = safe_route.get("strategy")
+    requested_strategy = _allowlisted_text(
+        safe_route.get("requestedStrategy"), frozenset({"auto", "single", "multi"})
+    )
+    effective_strategy = _allowlisted_text(
+        safe_route.get("effectiveStrategy"),
+        frozenset(
+            {
+                "deterministic_fast_path",
+                "single_agent",
+                "multi_agent",
+                "multi_agent_unavailable",
+            }
+        ),
+    )
+    release_mode = _allowlisted_text(
+        safe_route.get("releaseMode"),
+        frozenset({"forced_benchmark", "shadow", "single"}),
+    )
     score = safe_route.get("score")
     policy_version = safe_route.get("policyVersion")
     reasons = safe_route.get("reasonCodes")
@@ -290,7 +340,13 @@ def _investigation_audit_from_steps(
                 return None
             dispatch_ids.add(dispatch_id)
     if (
-        strategy not in {"deterministic_fast_path", "single_agent", "multi_agent"}
+        strategy
+        not in {
+            "deterministic_fast_path",
+            "single_agent",
+            "multi_agent",
+            "multi_agent_unavailable",
+        }
         or not isinstance(score, int)
         or isinstance(score, bool)
         or not 0 <= score <= 20
@@ -310,6 +366,13 @@ def _investigation_audit_from_steps(
     aggregator_steps = [step for step in steps if step.phase == "evidence_aggregator"]
     packet_statuses: tuple[str, ...] = ()
     fallback_reason: str | None = None
+    roles: tuple[SpecialistRoleAudit, ...] = ()
+    source_group_count = 0
+    duplicate_evidence_count = 0
+    conflict_count = 0
+    missing_domains: tuple[str, ...] = ()
+    aggregation_checksum: str | None = None
+    terminal_failure_category: str | None = None
     if aggregator_steps:
         aggregation_payload = aggregator_steps[-1].payload
         raw_statuses = aggregation_payload.get("packetStatuses")
@@ -323,8 +386,39 @@ def _investigation_audit_from_steps(
             "fallback_to_single_agent",
             "manual_review_required",
             "late_result_ignored",
+            "partial_specialist_result",
+            "multi_investigation_failed",
         }:
             fallback_reason = cast(str, raw_fallback)
+        roles, duplicate_evidence_count = _specialist_roles_from_payload(
+            aggregation_payload.get("roles"),
+            statuses=aggregation_payload.get("specialistStatuses"),
+        )
+        source_group_count = _bounded_int(
+            aggregation_payload.get("sourceGroupCount"), maximum=64
+        )
+        conflict_count = _bounded_int(
+            aggregation_payload.get("conflictCount"), maximum=64
+        )
+        raw_missing = aggregation_payload.get("missingDomains")
+        if isinstance(raw_missing, list):
+            missing_domains = tuple(
+                sorted(
+                    {
+                        item
+                        for item in cast(list[object], raw_missing)[:8]
+                        if isinstance(item, str)
+                        and item in {"runtime", "log", "change", "knowledge"}
+                    }
+                )
+            )
+        raw_checksum = aggregation_payload.get("aggregationChecksum")
+        if isinstance(raw_checksum, str) and re.fullmatch(r"[0-9a-f]{64}", raw_checksum):
+            aggregation_checksum = raw_checksum
+        terminal_failure_category = _allowlisted_text(
+            aggregation_payload.get("terminalFailureCategory"),
+            frozenset({"multi_investigation_failed"}),
+        )
     return InvestigationAudit(
         strategy=cast(str, strategy),
         score=score,
@@ -334,7 +428,102 @@ def _investigation_audit_from_steps(
         dispatch_count=len(dispatch_ids),
         packet_statuses=packet_statuses,
         fallback_reason=fallback_reason,
+        requested_strategy=requested_strategy,
+        effective_strategy=effective_strategy or cast(str, strategy),
+        release_mode=release_mode,
+        roles=roles,
+        source_group_count=source_group_count,
+        duplicate_evidence_count=duplicate_evidence_count,
+        conflict_count=conflict_count,
+        missing_domains=missing_domains,
+        aggregation_checksum=aggregation_checksum,
+        terminal_failure_category=terminal_failure_category,
     )
+
+
+_SPECIALIST_ROLES = frozenset({"runtime", "log", "change", "knowledge"})
+_SPECIALIST_STATUSES = frozenset(
+    {"completed", "inconclusive", "failed", "timeout", "cancelled", "missing"}
+)
+_SAFE_EVIDENCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _specialist_roles_from_payload(
+    value: object,
+    *,
+    statuses: object,
+) -> tuple[tuple[SpecialistRoleAudit, ...], int]:
+    roles: dict[str, SpecialistRoleAudit] = {}
+    if isinstance(statuses, Mapping):
+        for raw_role, raw_status in cast(Mapping[object, object], statuses).items():
+            if (
+                isinstance(raw_role, str)
+                and raw_role in _SPECIALIST_ROLES
+                and isinstance(raw_status, str)
+                and raw_status in _SPECIALIST_STATUSES
+            ):
+                role = raw_role
+                roles[role] = SpecialistRoleAudit(
+                    role=role,
+                    status=raw_status,
+                    duration_ms=0,
+                    model_call_count=0,
+                    tool_call_count=0,
+                    evidence_ids=(),
+                )
+    if not isinstance(value, list):
+        return tuple(roles[role] for role in sorted(roles)), 0
+    all_evidence_ids: list[str] = []
+    for raw in cast(list[object], value)[:8]:
+        if not isinstance(raw, Mapping):
+            continue
+        item = cast(Mapping[str, object], raw)
+        role = item.get("role")
+        status = item.get("terminalStatus")
+        duration_ms = item.get("durationMs")
+        model_call_count = item.get("modelCallCount")
+        raw_evidence_ids = item.get("evidenceIds")
+        if (
+            not isinstance(role, str)
+            or role not in _SPECIALIST_ROLES
+            or not isinstance(status, str)
+            or status not in _SPECIALIST_STATUSES
+            or not _valid_bounded_int(duration_ms, maximum=360_000)
+            or not _valid_bounded_int(model_call_count, maximum=2)
+            or not isinstance(raw_evidence_ids, list)
+            or (role in roles and roles[role].status != status)
+        ):
+            continue
+        evidence_ids = [
+            evidence_id
+            for evidence_id in cast(list[object], raw_evidence_ids)[:16]
+            if isinstance(evidence_id, str)
+            and _SAFE_EVIDENCE_ID.fullmatch(evidence_id) is not None
+        ]
+        all_evidence_ids.extend(evidence_ids)
+        unique_evidence_ids = tuple(sorted(set(evidence_ids)))
+        roles[role] = SpecialistRoleAudit(
+            role=role,
+            status=status,
+            duration_ms=cast(int, duration_ms),
+            model_call_count=cast(int, model_call_count),
+            tool_call_count=len(unique_evidence_ids),
+            evidence_ids=unique_evidence_ids,
+        )
+    duplicate_count = len(all_evidence_ids) - len(set(all_evidence_ids))
+    return tuple(roles[role] for role in sorted(roles)), duplicate_count
+
+
+def _valid_bounded_int(value: object, *, maximum: int) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= maximum
+    )
+
+
+def _bounded_int(value: object, *, maximum: int) -> int:
+    return cast(int, value) if _valid_bounded_int(value, maximum=maximum) else 0
 
 
 def _hypothesis_assessments_from_steps(

@@ -441,6 +441,18 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
                 fallback_reason=None,
                 security_hard_gate_passed=True,
                 total_score=100,
+                tool_call_count=4,
+                role_statuses=(("log", "completed"), ("runtime", "completed")),
+                role_duration_ms=(("log", 800), ("runtime", 1100)),
+                role_model_call_counts=(("log", 2), ("runtime", 2)),
+                role_tool_call_counts=(("log", 1), ("runtime", 3)),
+                role_evidence_counts=(("log", 1), ("runtime", 3)),
+                source_group_count=4,
+                duplicate_evidence_count=0,
+                conflict_count=1,
+                missing_domains=(),
+                aggregation_checksum="a" * 64,
+                terminal_failure_category=None,
             ),
         )
 
@@ -458,6 +470,33 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
     assert envelope.metadata["investigationStrategy"] == "multi"
     assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
     assert envelope.metrics["rootCauseTop1Correct"] is True
+    assert envelope.metrics["specialistRoleStatuses"] == {
+        "log": "completed",
+        "runtime": "completed",
+    }
+    assert envelope.metrics["specialistRoleDurationMs"] == {
+        "log": 800,
+        "runtime": 1100,
+    }
+    assert envelope.metrics["specialistRoleModelCallCounts"] == {
+        "log": 2,
+        "runtime": 2,
+    }
+    assert envelope.metrics["specialistRoleToolCallCounts"] == {
+        "log": 1,
+        "runtime": 3,
+    }
+    assert envelope.metrics["specialistRoleEvidenceCounts"] == {
+        "log": 1,
+        "runtime": 3,
+    }
+    assert envelope.metrics["toolCallCount"] == 4
+    assert envelope.metrics["sourceGroupCount"] == 4
+    assert envelope.metrics["duplicateEvidenceCount"] == 0
+    assert envelope.metrics["conflictCount"] == 1
+    assert envelope.metrics["missingDomains"] == []
+    assert envelope.metrics["aggregationChecksum"] == "a" * 64
+    assert envelope.metrics["terminalFailureCategory"] is None
 
 
 def test_cli_rejects_missing_identity() -> None:

@@ -150,6 +150,18 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
             "fallbackReason": "fallback_to_single_agent",
             "securityHardGatePassed": True,
             "effectiveInvestigationStrategy": "multi_agent",
+            "toolCallCount": 4,
+            "specialistRoleStatuses": {"log": "completed", "runtime": "completed"},
+            "specialistRoleDurationMs": {"log": 800, "runtime": 1100},
+            "specialistRoleModelCallCounts": {"log": 2, "runtime": 2},
+            "specialistRoleToolCallCounts": {"log": 1, "runtime": 3},
+            "specialistRoleEvidenceCounts": {"log": 1, "runtime": 3},
+            "sourceGroupCount": 4,
+            "duplicateEvidenceCount": 0,
+            "conflictCount": 1,
+            "missingDomains": [],
+            "aggregationChecksum": "a" * 64,
+            "terminalFailureCategory": None,
         },
         result_payload={"failures": [], "hardGate": None},
         diagnostic_task_id="diagnostic-investigation-reload",
@@ -185,6 +197,18 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
     assert metrics.duplicate_evidence_basis_points == 0
     assert metrics.fallback_reason == "fallback_to_single_agent"
     assert metrics.security_hard_gate_passed is True
+    assert metrics.tool_call_count == 4
+    assert metrics.role_statuses == (("log", "completed"), ("runtime", "completed"))
+    assert metrics.role_duration_ms == (("log", 800), ("runtime", 1100))
+    assert metrics.role_model_call_counts == (("log", 2), ("runtime", 2))
+    assert metrics.role_tool_call_counts == (("log", 1), ("runtime", 3))
+    assert metrics.role_evidence_counts == (("log", 1), ("runtime", 3))
+    assert metrics.source_group_count == 4
+    assert metrics.duplicate_evidence_count == 0
+    assert metrics.conflict_count == 1
+    assert metrics.missing_domains == ()
+    assert metrics.aggregation_checksum == "a" * 64
+    assert metrics.terminal_failure_category is None
 
 
 @pytest.mark.asyncio
