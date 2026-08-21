@@ -852,14 +852,20 @@ class SpecialistExecutor:
             "incident": _plain_json_mapping(context.public_incident_input),
             "hypotheses": list(assignment.hypotheses_to_test),
             "causalRoles": list(assignment.required_causal_roles),
+            "maximumSteps": assignment.maximum_tool_steps,
             "allowedTools": sorted(assignment.allowed_tools),
             "trustedArguments": {
                 tool: _plain_json_mapping(arguments)
                 for tool, arguments in assignment.trusted_arguments_by_tool.items()
             },
         }
-        return "Create a bounded public Specialist Local Plan:\n" + json.dumps(
-            payload, ensure_ascii=False, sort_keys=True
+        return (
+            "Create a bounded public Specialist Local Plan. "
+            "Return no more than maximumSteps. Use only listed hypotheses, "
+            "causalRoles, and allowedTools. proposed_arguments must exactly equal "
+            "the trustedArguments object for that tool; do not add, remove, or "
+            "modify any argument.\n"
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
 
     @staticmethod

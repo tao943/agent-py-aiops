@@ -398,6 +398,20 @@ async def test_log_specialist_rejects_scope_changes_before_tool_call() -> None:
     assert result.model_call_count == 1
 
 
+def test_local_plan_prompt_states_code_owned_scope_constraints() -> None:
+    now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+
+    prompt = SpecialistExecutor._local_plan_prompt(  # pyright: ignore[reportPrivateUsage]
+        _context(now),
+        replace(_assignment(now, role="log"), maximum_tool_steps=1),
+    )
+
+    assert '"maximumSteps": 1' in prompt
+    assert '"causalRoles": ["trigger", "mechanism", "impact"]' in prompt
+    assert "proposed_arguments must exactly equal" in prompt
+    assert "do not add, remove, or modify any argument" in prompt
+
+
 @pytest.mark.asyncio
 async def test_soft_deadline_prevents_new_local_plan() -> None:
     now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
