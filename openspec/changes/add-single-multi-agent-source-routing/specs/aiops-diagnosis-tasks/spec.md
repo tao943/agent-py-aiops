@@ -18,9 +18,14 @@ It MUST NOT read scenario identity, run identity, Oracle, Ground Truth, score ru
 - **AND** it SHALL continue through Sufficiency, Decision, Validator, Recovery, Policy, and Report
 
 #### Scenario: Multiple independent public sources are required
-- **WHEN** the score is at least 6 and at least two unfinished trusted source Dispatches pass all time and budget gates
+- **WHEN** the score is at least 5 and at least two unfinished trusted source Dispatches pass all time and budget gates
 - **THEN** Workflow MAY select `multi_agent`
 - **AND** selected Investigator types SHALL have a stable order
+
+#### Scenario: Auto routing reaches the Multi threshold during shadow release
+- **WHEN** service-owned `auto` reaches the Multi threshold and all hard gates pass
+- **THEN** Workflow SHALL persist the suggested Multi route and matched score features
+- **AND** it SHALL execute Single until automatic Multi receives separate approval
 
 ### Requirement: Parallel investigators have isolated capabilities
 
@@ -36,6 +41,17 @@ schema-valid EvidencePacket without mutating shared Fact, Hypothesis, or Observa
 - **WHEN** a plan step names a recovery, proposal-only, external-policy, or otherwise writable tool
 - **THEN** the capability registry MUST reject the step
 - **AND** the tool MUST NOT be dispatched
+
+#### Scenario: A Specialist performs bounded local reasoning
+- **WHEN** Runtime or Log is dispatched as a Specialist
+- **THEN** it SHALL receive isolated local state and an immutable parent assignment
+- **AND** it SHALL use at most one Local Planning call, three tool steps, and one Evidence Analysis call
+- **AND** it MUST NOT read another Specialist's local plan, raw observations, or private reasoning
+
+#### Scenario: A Log Specialist proposes wider query arguments
+- **WHEN** its Local Plan changes any prepared CLS scope argument
+- **THEN** the runtime MUST reject the proposal before the tool call
+- **AND** only the code-owned exact argument binding MAY reach the CLS MCP server
 
 ### Requirement: Multi-agent tools require explicit read-only trust
 
@@ -65,6 +81,11 @@ deduplication, and stable ordering before one Aggregator writes shared diagnosti
 - **WHEN** multiple claims cite the same current-task Evidence
 - **THEN** Aggregator MUST NOT count it as independent duplicate evidence
 
+#### Scenario: Different Evidence IDs share one source fingerprint
+- **WHEN** claims cite different Evidence IDs produced by the same underlying scoped source query
+- **THEN** Aggregator SHALL retain auditable IDs but count one independent source group
+- **AND** repeated source groups MUST add zero independent-evidence credit
+
 #### Scenario: Incident state differs from current health
 - **WHEN** one direct claim describes an incident-window failure and another describes current health
 - **THEN** Aggregator MUST preserve both time scopes
@@ -86,9 +107,15 @@ and all-failed paths MUST NOT be interpreted as negative evidence.
 - **AND** timeout SHALL be recorded as a limitation rather than a refuting claim
 
 #### Scenario: Every Investigator fails
-- **WHEN** all selected Dispatches fail and safe Single steps remain within budget
-- **THEN** Workflow SHALL record `fallback_to_single_agent`
-- **AND** it SHALL execute only unfinished contract-valid steps
+- **WHEN** all selected Dispatches fail during a Benchmark-forced Multi run
+- **THEN** Workflow SHALL record `multi_investigation_failed`
+- **AND** it MUST NOT execute Single to replace the terminal Multi result
+
+#### Scenario: Parallel branches consume one model budget
+- **WHEN** Runtime and Log role calls execute concurrently
+- **THEN** the parent SHALL reserve their maximum optional budget before dispatch
+- **AND** fan-in SHALL settle only unique persisted successful logical role calls
+- **AND** replay or partial failure MUST NOT double-charge the run budget
 
 #### Scenario: A result arrives after decision readiness
 - **WHEN** an already-issued Dispatch completes after the task has become decision-ready

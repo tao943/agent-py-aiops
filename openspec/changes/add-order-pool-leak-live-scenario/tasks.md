@@ -25,3 +25,14 @@
 - [x] 4.2 Pass targeted pytest, Ruff, Pyright, Compose config, and strict OpenSpec validation.
 - [x] 4.3 Record implementation evidence without claiming Multi capability gain.
 - [ ] 4.4 After separate user approval, run and persist the real 3×3 Single/Multi LLM+CLS comparison.
+
+## 5. Specialist diagnostic closure
+
+- [ ] 5.1 Add the fail-closed Order Pool trusted compound pattern and provenance-negative tests.
+- [ ] 5.2 Persist and verify one grounded real Single canary before Multi implementation.
+- [ ] 5.3 Add immutable Specialist contracts, exact source bindings, and answer-isolation tests.
+- [ ] 5.4 Add bounded Local Planning, tool execution, Evidence Analysis, and replay-safe model budgets.
+- [ ] 5.5 Add deterministic source-group aggregation, conflict handling, and PostgreSQL replay tests.
+- [ ] 5.6 Wire isolated Runtime/Log Specialist branches into the existing LangGraph central safety chain.
+- [ ] 5.7 Add threshold-5 forced/shadow routing and fixed-schema Specialist evaluation metrics.
+- [ ] 5.8 Pass offline acceptance and persist the approved real 3×3 Single/Multi comparison.
