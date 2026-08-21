@@ -122,6 +122,42 @@ bounded `candidate_missing` classification and a manual-review recovery plan.
   budget and appear in audit records.
 - Earlier evaluation artifacts are immutable and will not be rewritten.
 
+### 5. Exact output contract and deadline-aware correction
+
+The Validator prompt must describe the complete accepted JSON shape rather
+than only naming its fields. It includes one compact example whose values are
+synthetic and contain no incident evidence:
+
+```json
+{
+  "status": "valid",
+  "evidenceIds": ["evidence-id"],
+  "unsupportedFields": [],
+  "missingEvidence": [],
+  "summary": "All candidate fields are supported by the cited evidence."
+}
+```
+
+The prompt states that `status` is exactly `valid` or `invalid`, the three
+collection fields are JSON arrays, `unsupportedFields` may contain only
+`component`, `mechanism`, `trigger`, or `causalChain`, `summary` is a non-empty
+string, and no additional fields are allowed. This improves steering but does
+not replace Pydantic validation or evidence-ID allowlisting.
+
+After the first structured parse failure, the shared helper asks an optional
+retry guard whether a complete correction attempt can still start. The V4
+adapter answers from the persisted hard deadline and the existing 60-second
+Validator role timeout. If fewer than 60 seconds remain, the helper does not
+invoke the provider or reserve another model-call unit. It returns the
+allowlisted code `retry_skipped_insufficient_deadline`, preserves the first
+parse code, and fails closed to manual review.
+
+This increment does not extend the six-minute global hard deadline, shorten
+Specialist evidence collection, or make the LLM Validator mandatory for
+deterministic low-risk paths. A separate scheduling change may reserve time
+across graph stages only if later measurements show that valid first attempts
+still routinely reach the Validator too late.
+
 ## Test strategy
 
 1. Add a focused V4 workflow test proving the configured Validator
@@ -141,6 +177,12 @@ bounded `candidate_missing` classification and a manual-review recovery plan.
 7. Run one new real Multi canary for `APY-LIVE-ORDER-POOL-LEAK-001`, persist it
    under a unique run ID, perform explicit cleanup, and verify either a valid
    semantic decision or a precise safe failure classification.
+8. Add a focused test proving a first parse failure with less than 60 seconds
+   remaining skips the correction call, preserves the parse code, records
+   `retry_skipped_insufficient_deadline`, and consumes no second budget unit.
+9. Add a focused prompt-contract test proving the V4 Validator prompt contains
+   the complete field set, enum choices, empty-array behavior, and no-extra-field
+   instruction without embedding real Evidence or ground truth.
 
 ## Acceptance criteria
 
@@ -155,4 +197,7 @@ bounded `candidate_missing` classification and a manual-review recovery plan.
 - Low-risk deterministic paths still skip the LLM Validator entirely.
 - No raw model output, exception text, secret, private reasoning, or ground
   truth is persisted.
+- A correction retry starts only when at least one complete 60-second Validator
+  invocation window remains; otherwise the safe skip classification is
+  persisted and execution remains denied.
 - No new dependency or external service is introduced.

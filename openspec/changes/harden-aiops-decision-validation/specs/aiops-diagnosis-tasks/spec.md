@@ -90,6 +90,18 @@ Workflow SHALL 将 structured parse 失败分类为允许列表中的 `invalid_j
 - **THEN** 最终 validation error category MUST 为空
 - **AND** 审计 MUST 保留第一次的安全 parse code
 
+#### Scenario: Format correction has insufficient deadline
+- **WHEN** Validator 第一次响应无法通过 JSON 或 Schema 校验且剩余 hard deadline 少于一个完整 Validator role timeout
+- **THEN** Workflow MUST NOT 发起第二次模型调用或消耗第二次模型预算
+- **AND** Workflow MUST 保存首次安全 parse code 和 `retry_skipped_insufficient_deadline`
+- **AND** Recovery Policy MUST 保持 `executionPermitted=false` 并进入人工审核
+
+#### Scenario: Validator receives an exact public output contract
+- **WHEN** Workflow 构造 LLM Validator 请求
+- **THEN** Prompt MUST 明确五个字段、字段类型、`valid/invalid` 枚举、空数组语义和禁止额外字段
+- **AND** Pydantic Schema 与 Evidence ID allowlist MUST 继续作为最终接受条件
+- **AND** Prompt MUST NOT 包含 Ground Truth、Oracle、凭据或原始 CLS 日志
+
 #### Scenario: Parse failure is exhausted
 - **WHEN** 两次 Validator 响应均无法通过 JSON 或 Schema 校验
 - **THEN** Workflow MUST 保存 `retry_exhausted` 和 `structured_parse`
