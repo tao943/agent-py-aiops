@@ -15,6 +15,7 @@ from typing import cast
 from super_ai.aiops.execution import ExecutionCoordinator
 from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.artifacts import InvestigationAudit
 from super_ai.evaluation.history import (
     EvaluationStatus,
     running_envelope,
@@ -356,14 +357,18 @@ async def _run_live_once(
         if exc.authorization_code is not None:
             result_payload["authorizationCode"] = exc.authorization_code
         result_payload.update(_failure_diagnostic_payload(exc))
+        failure_metrics = _cleanup_metrics(exc)
+        failure_metrics.update(
+            _investigation_process_metrics(exc.investigation_audit)
+        )
         terminal = terminal_envelope(
             running=running,
             status=cast(EvaluationStatus, status),
             validity=validity,
             passed=False if status == "failed" else None,
-            metrics=_cleanup_metrics(exc),
+            metrics=failure_metrics,
             result_payload=result_payload,
-            diagnostic_task_id=None,
+            diagnostic_task_id=exc.diagnostic_task_id,
             failure_category=exc.category,
             completed_at=datetime.now(timezone.utc),
         )
@@ -490,6 +495,45 @@ def _cleanup_metrics(error: BaseException) -> dict[str, object]:
     if isinstance(cleanup_succeeded, bool):
         return {"cleanupSucceeded": cleanup_succeeded}
     return {}
+
+
+def _investigation_process_metrics(
+    audit: InvestigationAudit | None,
+) -> dict[str, object]:
+    """Project answer-isolated investigation process metrics for failed runs."""
+    if audit is None:
+        return {}
+    roles = audit.roles
+    return {
+        "durationMs": sum(role.duration_ms for role in roles),
+        "modelCallCount": sum(role.model_call_count for role in roles),
+        "fallbackReason": audit.fallback_reason,
+        "effectiveInvestigationStrategy": (
+            audit.effective_strategy or audit.strategy
+        ),
+        "toolCallCount": sum(role.tool_call_count for role in roles),
+        "specialistRoleStatuses": {
+            role.role: role.status for role in roles
+        },
+        "specialistRoleDurationMs": {
+            role.role: role.duration_ms for role in roles
+        },
+        "specialistRoleModelCallCounts": {
+            role.role: role.model_call_count for role in roles
+        },
+        "specialistRoleToolCallCounts": {
+            role.role: role.tool_call_count for role in roles
+        },
+        "specialistRoleEvidenceCounts": {
+            role.role: len(role.evidence_ids) for role in roles
+        },
+        "sourceGroupCount": audit.source_group_count,
+        "duplicateEvidenceCount": audit.duplicate_evidence_count,
+        "conflictCount": audit.conflict_count,
+        "missingDomains": list(audit.missing_domains),
+        "aggregationChecksum": audit.aggregation_checksum,
+        "terminalFailureCategory": audit.terminal_failure_category,
+    }
 
 
 def _failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:

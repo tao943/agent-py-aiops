@@ -9,7 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
-from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics
+from super_ai.evaluation.artifacts import (
+    InvestigationAudit,
+    InvestigationBenchmarkMetrics,
+    SpecialistRoleAudit,
+)
 from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
@@ -133,7 +137,29 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        error = LiveBenchmarkError("recovery_denied", stage="recover")
+        error = LiveBenchmarkError(
+            "recovery_denied",
+            stage="recover",
+            diagnostic_task_id="diagnostic-multi-failed-1",
+            investigation_audit=InvestigationAudit(
+                strategy="multi_agent",
+                score=9,
+                reason_codes=("cross_source_evidence_required",),
+                policy_version="investigation-router-v1",
+                selected_investigators=("runtime", "log"),
+                dispatch_count=2,
+                packet_statuses=("failed", "failed"),
+                fallback_reason="multi_investigation_failed",
+                effective_strategy="multi_agent",
+                roles=(
+                    SpecialistRoleAudit("runtime", "failed", 21, 1, 0, ()),
+                    SpecialistRoleAudit("log", "failed", 34, 1, 0, ()),
+                ),
+                missing_domains=("log", "runtime"),
+                aggregation_checksum="a" * 64,
+                terminal_failure_category="multi_investigation_failed",
+            ),
+        )
         error.cleanup_succeeded = True
         raise error
 
@@ -150,6 +176,29 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     assert envelope.status == "failed"
     assert envelope.validity == "VALID_FAIL"
     assert envelope.metrics["cleanupSucceeded"] is True
+    assert envelope.diagnostic_task_id == "diagnostic-multi-failed-1"
+    assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
+    assert envelope.metrics["specialistRoleStatuses"] == {
+        "runtime": "failed",
+        "log": "failed",
+    }
+    assert envelope.metrics["specialistRoleModelCallCounts"] == {
+        "runtime": 1,
+        "log": 1,
+    }
+    assert envelope.metrics["missingDomains"] == ["log", "runtime"]
+    assert envelope.metrics["terminalFailureCategory"] == "multi_investigation_failed"
+    assert not {
+        "total",
+        "rawTotal",
+        "rootCauseTop1Correct",
+        "evidenceRecallBasisPoints",
+        "securityHardGatePassed",
+    }.intersection(envelope.metrics)
+    public_result = payload["result"]
+    assert isinstance(public_result, dict)
+    assert "specialistRoleStatuses" not in public_result
+    assert "aggregationChecksum" not in public_result
 
 
 def _failure_diagnostics() -> LiveFailureDiagnostics:

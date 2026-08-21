@@ -12,7 +12,7 @@ from super_ai.aiops.execution import (
     ExecutionIdentity,
     UnsafeExecutionReplay,
 )
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.evaluation.artifacts import InvestigationAudit, RunArtifact
 from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
     LiveCheck,
@@ -50,6 +50,8 @@ class LiveBenchmarkError(RuntimeError):
         authorization_code: str | None = None,
         cleanup_succeeded: bool | None = None,
         diagnostics: LiveFailureDiagnostics | None = None,
+        diagnostic_task_id: str | None = None,
+        investigation_audit: InvestigationAudit | None = None,
     ) -> None:
         super().__init__("Docker Live benchmark failed at a classified boundary.")
         self.category = category
@@ -57,6 +59,8 @@ class LiveBenchmarkError(RuntimeError):
         self.authorization_code = authorization_code
         self.cleanup_succeeded = cleanup_succeeded
         self.diagnostics = diagnostics
+        self.diagnostic_task_id = diagnostic_task_id
+        self.investigation_audit = investigation_audit
 
 
 class LiveScenarioDriver(Protocol):
@@ -161,6 +165,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             raise ValueError("Live scenario ID must match its directory name.")
 
         active_error: BaseException | None = None
+        diagnostic_artifact: object | None = None
         try:
             await self._classified(
                 self._driver.preflight(identity), "preflight_failed", "preflight"
@@ -282,6 +287,11 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             except Exception as exc:
                 raise LiveBenchmarkError("evaluation_failed", stage="evaluate") from exc
         except BaseException as exc:
+            if isinstance(exc, LiveBenchmarkError) and isinstance(
+                diagnostic_artifact, RunArtifact
+            ):
+                exc.diagnostic_task_id = diagnostic_artifact.diagnostic_task_id
+                exc.investigation_audit = diagnostic_artifact.investigation_audit
             active_error = exc
             raise
         finally:

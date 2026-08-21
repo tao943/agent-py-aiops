@@ -444,13 +444,15 @@ async def test_specialist_branch_runs_model_tool_and_persists_evidence(
         def __init__(self) -> None:
             self.schema: type[object] | None = None
             self.calls = 0
+            self.structured_output_methods: list[object] = []
 
         def with_structured_output(
             self,
             schema: type[object],
-            **_kwargs: object,
+            **kwargs: object,
         ) -> SpecialistModel:
             self.schema = schema
+            self.structured_output_methods.append(kwargs.get("method"))
             return self
 
         async def ainvoke(self, _input: object) -> object:
@@ -481,6 +483,8 @@ async def test_specialist_branch_runs_model_tool_and_persists_evidence(
             return {"parsed": parsed, "parsing_error": None}
 
     class SpecialistProvider:
+        structured_output_method = "json_mode"
+
         def __init__(self, model: SpecialistModel) -> None:
             self.model = model
 
@@ -596,6 +600,7 @@ async def test_specialist_branch_runs_model_tool_and_persists_evidence(
     assert result["modelCallCount"] == 2
     assert len(cast(list[object], result["evidenceIds"])) == 1
     assert model.calls == 2
+    assert model.structured_output_methods == ["json_mode", "json_mode"]
     assert len(evidence) == 1
     event_text = json.dumps(update["events"], ensure_ascii=False).casefold()
     assert "inspectorderpoolstate" in event_text

@@ -8,7 +8,11 @@ from typing import cast
 import pytest
 
 from super_ai.aiops.execution import UnsafeExecutionReplay
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.evaluation.artifacts import (
+    InvestigationAudit,
+    RunArtifact,
+    SpecialistRoleAudit,
+)
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveCleanupResult,
@@ -121,6 +125,24 @@ class ArtifactDiagnostic(RecordingDiagnostic):
             duration_ms=1,
             safety_events=(),
             diagnostic_task_id="diagnostic-live-1",
+            investigation_audit=InvestigationAudit(
+                strategy="multi_agent",
+                score=9,
+                reason_codes=("cross_source_evidence_required",),
+                policy_version="investigation-router-v1",
+                selected_investigators=("runtime", "log"),
+                dispatch_count=2,
+                packet_statuses=("failed", "failed"),
+                fallback_reason="multi_investigation_failed",
+                effective_strategy="multi_agent",
+                roles=(
+                    SpecialistRoleAudit("runtime", "failed", 21, 1, 0, ()),
+                    SpecialistRoleAudit("log", "failed", 34, 1, 0, ()),
+                ),
+                missing_domains=("log", "runtime"),
+                aggregation_checksum="a" * 64,
+                terminal_failure_category="multi_investigation_failed",
+            ),
         )
 
 
@@ -502,6 +524,13 @@ async def test_uncertain_recovery_is_denied_without_replaying_side_effect() -> N
     assert captured.value.stage == "recover"
     assert captured.value.authorization_code == "uncertain_previous_attempt"
     assert captured.value.cleanup_succeeded is True
+    assert captured.value.diagnostic_task_id == "diagnostic-live-1"
+    assert captured.value.investigation_audit is not None
+    assert captured.value.investigation_audit.effective_strategy == "multi_agent"
+    assert [
+        (role.role, role.status)
+        for role in captured.value.investigation_audit.roles
+    ] == [("runtime", "failed"), ("log", "failed")]
     assert coordinator_task_ids == ["diagnostic-live-1"]
     assert "recover" not in driver.events
     assert driver.events[-1] == "cleanup"

@@ -3138,6 +3138,9 @@ class AiopsDiagnosticService:
         executor = SpecialistExecutor(
             runtime=_SpecialistToolRuntime(),
             model=model,
+            structured_output_method=_provider_structured_output_method(
+                self._llm_provider
+            ),
             execution_coordinator=ExecutionCoordinator(
                 execution_repository,
                 worker_id=f"specialist-{assignment.role}-{id(self)}",

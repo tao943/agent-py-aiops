@@ -212,13 +212,15 @@ class SpecialistRoleModel:
         self.altered_log_scope = altered_log_scope
         self.prompts: list[str] = []
         self.schema: type[BaseModel] | None = None
+        self.structured_output_methods: list[object] = []
 
     def with_structured_output(
         self,
         schema: type[BaseModel],
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> SpecialistRoleModel:
         self.schema = schema
+        self.structured_output_methods.append(kwargs.get("method"))
         return self
 
     async def ainvoke(self, input: object) -> object:
@@ -351,6 +353,7 @@ async def test_specialist_runs_two_model_roles_and_serial_tools() -> None:
     executor = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, coordinator),
         now=lambda: now,
     )
@@ -366,6 +369,7 @@ async def test_specialist_runs_two_model_roles_and_serial_tools() -> None:
     assert runtime.maximum_active == 1
     assert len(result.evidence_ids) == 2
     assert coordinator.operations == 2
+    assert model.structured_output_methods == ["json_mode", "json_mode"]
 
 
 @pytest.mark.asyncio
@@ -376,6 +380,7 @@ async def test_log_specialist_rejects_scope_changes_before_tool_call() -> None:
     executor = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, InMemoryCoordinator()),
         now=lambda: now,
     )
@@ -396,6 +401,7 @@ async def test_soft_deadline_prevents_new_local_plan() -> None:
     executor = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, InMemoryCoordinator()),
         now=lambda: now + timedelta(minutes=2, seconds=1),
     )
@@ -416,6 +422,7 @@ async def test_completed_model_roles_are_reused_after_worker_restart() -> None:
     first = SpecialistExecutor(
         runtime=first_runtime,
         model=cast(Any, first_model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, coordinator),
         now=lambda: now,
     )
@@ -426,6 +433,7 @@ async def test_completed_model_roles_are_reused_after_worker_restart() -> None:
     second = SpecialistExecutor(
         runtime=second_runtime,
         model=cast(Any, second_model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, coordinator),
         now=lambda: now,
     )
@@ -437,6 +445,37 @@ async def test_completed_model_roles_are_reused_after_worker_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_output_method_is_part_of_checkpoint_identity() -> None:
+    now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+    coordinator = InMemoryCoordinator()
+    first_runtime = RecordingRuntime()
+    first_model = SpecialistRoleModel(first_runtime)
+    first = SpecialistExecutor(
+        runtime=first_runtime,
+        model=cast(Any, first_model),
+        structured_output_method="function_calling",
+        execution_coordinator=cast(Any, coordinator),
+        now=lambda: now,
+    )
+    await first.execute(_context(now), _assignment(now))
+
+    second_runtime = RecordingRuntime()
+    second_model = SpecialistRoleModel(second_runtime)
+    second = SpecialistExecutor(
+        runtime=second_runtime,
+        model=cast(Any, second_model),
+        structured_output_method="json_mode",
+        execution_coordinator=cast(Any, coordinator),
+        now=lambda: now,
+    )
+    result = await second.execute(_context(now), _assignment(now))
+
+    assert result.terminal_status == "completed"
+    assert second_model.structured_output_methods == ["json_mode", "json_mode"]
+    assert coordinator.operations == 4
+
+
+@pytest.mark.asyncio
 async def test_worker_restart_reuses_plan_and_resumes_before_analysis() -> None:
     now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
     coordinator = InMemoryCoordinator()
@@ -445,6 +484,7 @@ async def test_worker_restart_reuses_plan_and_resumes_before_analysis() -> None:
     first = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, first_model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, coordinator),
         now=lambda: now,
     )
@@ -457,6 +497,7 @@ async def test_worker_restart_reuses_plan_and_resumes_before_analysis() -> None:
     second = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, second_model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, coordinator),
         now=lambda: now,
     )
@@ -493,6 +534,7 @@ async def test_hard_deadline_cancels_an_inflight_local_plan() -> None:
     executor = SpecialistExecutor(
         runtime=RecordingRuntime(),
         model=cast(Any, model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, InMemoryCoordinator()),
     )
 
@@ -515,6 +557,7 @@ async def test_assignment_model_budget_prevents_evidence_analysis() -> None:
     executor = SpecialistExecutor(
         runtime=runtime,
         model=cast(Any, model),
+        structured_output_method="json_mode",
         execution_coordinator=cast(Any, InMemoryCoordinator()),
         now=lambda: now,
     )

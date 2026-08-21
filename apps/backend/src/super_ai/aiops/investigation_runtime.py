@@ -31,6 +31,7 @@ from super_ai.aiops.specialists import (
     SpecialistResult,
 )
 from super_ai.llm import ChatModel
+from super_ai.llm.config import StructuredOutputMethod
 from super_ai.mcp.tool_arguments import tool_step_fingerprint
 from super_ai.memory.repositories import JsonDict
 
@@ -445,11 +446,15 @@ class SpecialistExecutor:
         *,
         runtime: DiagnosticToolRuntime,
         model: ChatModel,
+        structured_output_method: StructuredOutputMethod,
         execution_coordinator: ExecutionCoordinator,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
+        self._structured_output_method: StructuredOutputMethod = (
+            structured_output_method
+        )
         self._execution_coordinator = execution_coordinator
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -708,6 +713,7 @@ class SpecialistExecutor:
                 prompt=prompt,
                 correction_prompt=correction_prompt,
                 role=role_name,
+                structured_output_method=self._structured_output_method,
             )
             return {
                 "status": "completed" if outcome.value is not None else "failed",
@@ -731,6 +737,7 @@ class SpecialistExecutor:
                     "role": assignment.role,
                     "roleName": role_name,
                     "promptFingerprint": prompt_fingerprint,
+                    "structuredOutputMethod": self._structured_output_method,
                 },
             ),
             operation,
