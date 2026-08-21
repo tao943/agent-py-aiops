@@ -768,6 +768,14 @@ Validator 第一次结构化调用耗时 23973 ms，请求成功但 Schema 解�
 `verificationPassed=true` 和 `cleanupSucceeded=true`。随后离线回归补充了“第一次解析错误 + 最终调用错误”
 的有界错误历史保留；历史真实 Envelope 不回写，未来 Run 将同时保留两阶段安全错误码。
 
+针对该 canary 暴露的格式纠正问题，V4 Validator 现复用一份严格公开输出合同：固定五字段、
+`valid/invalid` 枚举、数组和空数组语义、禁止额外字段，并附不含真实 Evidence 的合成 JSON 示例。
+第一次 structured parse 失败后，只有 hard deadline 至少还剩 60 秒 Validator role timeout 加
+5 秒调度余量时才允许一次纠正重试；否则不调用供应商、不消耗第二次模型预算，保存首次 parse code
+和 `retry_skipped_insufficient_deadline`，继续保持 `manual_review` 与
+`executionPermitted=false`。该行为已通过 60/65 秒冻结时钟边界、Artifact allowlist、Ruff、Pyright
+和 focused OpenSpec 离线验证；尚未用新的真实 Run 宣称供应商 Validator 已恢复稳定。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

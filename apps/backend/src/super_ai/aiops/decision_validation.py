@@ -55,6 +55,7 @@ ValidationErrorCode = Literal[
     "structured_output_unsupported",
     "model_call_budget_exhausted",
     "hard_deadline_exceeded",
+    "retry_skipped_insufficient_deadline",
     "unknown",
 ]
 ValidationErrorPhase = Literal[
@@ -186,6 +187,19 @@ class _RootCauseValidationSchema(BaseModel):
     summary: str = Field(min_length=1)
 
 
+ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT = (
+    "Return exactly one JSON object with these five fields and no others. "
+    "status is a string and must be valid or invalid. evidenceIds is an array of "
+    "persisted Evidence ID strings. unsupportedFields is an array containing only "
+    "component, mechanism, trigger, or causalChain. missingEvidence is an array of "
+    "strings. summary is a non-empty string. Use empty arrays when there are no "
+    "unsupported fields or missing evidence. No additional fields are allowed. "
+    'Valid example: {"status": "valid", "evidenceIds": ["evidence-id"], '
+    '"unsupportedFields": [], "missingEvidence": [], "summary": "All candidate '
+    'fields are supported by the cited evidence."}'
+)
+
+
 class _AsyncInvoker(Protocol):
     async def ainvoke(self, input: object) -> object:
         """Invoke a structured or raw chat model."""
@@ -193,6 +207,7 @@ class _AsyncInvoker(Protocol):
 
 
 StructuredValidationInvoke = Callable[[_AsyncInvoker, object], Awaitable[object]]
+StructuredValidationRetryGuard = Callable[[], bool]
 
 
 async def _invoke_direct(invoker: _AsyncInvoker, input: object) -> object:
@@ -201,8 +216,7 @@ async def _invoke_direct(invoker: _AsyncInvoker, input: object) -> object:
 
 _CORRECTION_SUFFIX = (
     "\n\nThe previous response did not match the required validation schema. "
-    "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
-    "and summary. Schema errors: invalid_json_or_schema."
+    f"{ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT} Schema errors: invalid_json_or_schema."
 )
 _DECISION_CORRECTION_SUFFIX = (
     "\n\nThe previous response did not match the required root-cause decision schema. "
@@ -365,6 +379,7 @@ async def invoke_structured_root_cause_validation(
     available_evidence_ids: Set[str],
     structured_output_method: StructuredOutputMethod = "function_calling",
     invoke: StructuredValidationInvoke | None = None,
+    allow_format_retry: StructuredValidationRetryGuard | None = None,
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
     try:
@@ -399,6 +414,8 @@ async def invoke_structured_root_cause_validation(
         except _StructuredParseFailure as exc:
             _append_parse_codes(parse_codes, exc.codes)
             if attempt == 1:
+                if allow_format_retry is not None and not allow_format_retry():
+                    return _format_retry_skipped_outcome(parse_codes)
                 current_prompt = prompt + _CORRECTION_SUFFIX
                 continue
             return StructuredValidationOutcome(
@@ -412,6 +429,8 @@ async def invoke_structured_root_cause_validation(
         except (TypeError, ValueError):
             _append_parse_codes(parse_codes, ("invalid_json_or_schema",))
             if attempt == 1:
+                if allow_format_retry is not None and not allow_format_retry():
+                    return _format_retry_skipped_outcome(parse_codes)
                 current_prompt = prompt + _CORRECTION_SUFFIX
                 continue
             return StructuredValidationOutcome(
@@ -429,6 +448,21 @@ async def invoke_structured_root_cause_validation(
             error_codes=tuple(parse_codes),
         )
     raise AssertionError("The bounded validation loop must return within two attempts.")
+
+
+def _format_retry_skipped_outcome(
+    parse_codes: Sequence[str],
+) -> StructuredValidationOutcome:
+    error_code: ValidationErrorCode = "retry_skipped_insufficient_deadline"
+    return StructuredValidationOutcome(
+        decision=None,
+        error_category="retry_exhausted",
+        attempts=1,
+        error_codes=tuple(dict.fromkeys([*parse_codes, error_code]))[:6],
+        error_code=error_code,
+        error_phase="structured_parse",
+        retryable=False,
+    )
 
 
 async def invoke_structured_root_cause_decision(

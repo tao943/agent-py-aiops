@@ -718,6 +718,7 @@ _VALIDATION_ERROR_CODES = frozenset(
         "provider_4xx",
         "provider_5xx",
         "structured_output_unsupported",
+        "retry_skipped_insufficient_deadline",
         "unknown",
         "invalid_json",
         "structured_envelope_mismatch",

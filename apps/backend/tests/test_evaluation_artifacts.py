@@ -218,7 +218,10 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
                     "validationOrigin": "deterministic_grounded_fallback",
                     "validationModel": "qwen3.8-max",
                     "validationErrorCategory": "retry_exhausted",
-                    "validationErrorCodes": ["invalid_json", "missing_required_field"],
+                    "validationErrorCodes": [
+                        "invalid_json",
+                        "retry_skipped_insufficient_deadline",
+                    ],
                     "validationErrorPhase": "structured_parse",
                     "validationAttempts": 2,
                     "rawResponse": "sentinel-secret-response",
@@ -236,7 +239,7 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
     assert artifact.validation_audit.error_category == "retry_exhausted"
     assert artifact.validation_audit.error_codes == (
         "invalid_json",
-        "missing_required_field",
+        "retry_skipped_insufficient_deadline",
     )
     assert artifact.validation_audit.error_phase == "structured_parse"
     assert artifact.validation_audit.attempts == 2

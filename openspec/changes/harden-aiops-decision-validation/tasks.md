@@ -39,6 +39,6 @@
 
 ## 7. Validator 输出合同与 deadline 感知纠错
 
-- [ ] 7.1 以失败测试覆盖完整输出合同、60 秒不足与 65 秒允许格式纠错的边界
-- [ ] 7.2 实现精确 Prompt、retry guard 与 `retry_skipped_insufficient_deadline` 安全分类
-- [ ] 7.3 运行 Validator/V4 专项 pytest、触及文件 Ruff/Pyright 和 focused OpenSpec 验证
+- [x] 7.1 以失败测试覆盖完整输出合同、60 秒不足与 65 秒允许格式纠错的边界
+- [x] 7.2 实现精确 Prompt、retry guard 与 `retry_skipped_insufficient_deadline` 安全分类
+- [x] 7.3 运行 Validator/V4 专项 pytest、触及文件 Ruff/Pyright 和 focused OpenSpec 验证

@@ -4025,6 +4025,13 @@ async def test_v4_semantic_validator_uses_configured_json_mode(
     assert validation["validationModel"] == "validator-test-model"
     assert update["model_call_count"] == 3
     assert len(cast(list[object], update["model_call_audits"])) == 1
+    prompt = cast(str, model.prompts[0])
+    assert '"status": "valid"' in prompt
+    assert '"evidenceIds": ["evidence-id"]' in prompt
+    assert '"unsupportedFields": []' in prompt
+    assert '"missingEvidence": []' in prompt
+    assert "valid or invalid" in prompt
+    assert "No additional fields" in prompt
     assert "recovery_plan" not in update
     assert policy is None
 
@@ -4067,6 +4074,87 @@ async def test_v4_semantic_validator_retries_format_once_and_redacts_raw_data(
         ensure_ascii=False,
     )
     assert sentinel not in persisted
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_skips_retry_without_scheduling_margin(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(diagnostics_module, "_now", lambda: now)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(seconds=1),
+        soft_deadline_at=now + timedelta(seconds=30),
+        hard_deadline_at=now + timedelta(seconds=60),
+    )
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(parsing_error=ValueError()),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-insufficient-retry-deadline",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationAttempts"] == 1
+    assert validation["validationErrorCategory"] == "retry_exhausted"
+    assert validation["validationErrorCode"] == "retry_skipped_insufficient_deadline"
+    assert validation["validationErrorCodes"] == [
+        "structured_envelope_mismatch",
+        "retry_skipped_insufficient_deadline",
+    ]
+    assert validation["validationErrorPhase"] == "structured_parse"
+    assert validation["validationRetryable"] is False
+    assert update["model_call_count"] == 3
+    assert len(cast(list[object], update["model_call_audits"])) == 1
+    assert len(model.prompts) == 1
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_retries_with_complete_window_and_margin(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(diagnostics_module, "_now", lambda: now)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(seconds=1),
+        soft_deadline_at=now + timedelta(seconds=30),
+        hard_deadline_at=now + timedelta(seconds=65),
+    )
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(parsing_error=ValueError()),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-complete-retry-window",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 2
+    assert update["model_call_count"] == 4
+    assert len(cast(list[object], update["model_call_audits"])) == 2
+    assert len(model.prompts) == 2
+    assert policy is None
 
 
 @pytest.mark.asyncio

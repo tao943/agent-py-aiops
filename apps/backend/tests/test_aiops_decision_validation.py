@@ -479,6 +479,37 @@ async def test_structured_validator_uses_callback_for_format_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_validator_skips_format_retry_when_deadline_is_insufficient() -> None:
+    model = StructuredCapableChatModel(
+        [
+            {"raw": object(), "parsed": None, "parsing_error": ValueError()},
+            {"raw": object(), "parsed": _validation_schema(), "parsing_error": None},
+        ],
+        expected_method="json_mode",
+    )
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="Validate public evidence.",
+        available_evidence_ids={"ev-1", "ev-2"},
+        structured_output_method="json_mode",
+        allow_format_retry=lambda: False,
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "retry_exhausted"
+    assert outcome.error_code == "retry_skipped_insufficient_deadline"
+    assert outcome.error_codes == (
+        "structured_envelope_mismatch",
+        "retry_skipped_insufficient_deadline",
+    )
+    assert outcome.error_phase == "structured_parse"
+    assert outcome.retryable is False
+    assert outcome.attempts == 1
+    assert model.structured.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_structured_validator_preserves_safe_callback_failure() -> None:
     model = StructuredCapableChatModel(
         [{"raw": object(), "parsed": _validation_schema(), "parsing_error": None}],

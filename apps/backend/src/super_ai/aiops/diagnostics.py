@@ -45,6 +45,7 @@ from super_ai.aiops.causal_intents import (
 )
 from super_ai.aiops.checkpointing import PostgresDiagnosticCheckpointSaver
 from super_ai.aiops.decision_validation import (
+    ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT,
     SafeModelFailure,
     SafeModelInvocationFailure,
     StructuredValidationOutcome,
@@ -5216,8 +5217,8 @@ class AiopsDiagnosticService:
         validation_model = _validator_model_name(self._llm_provider)
         if candidate is not None:
             prompt = (
-                "Return JSON only with status, evidenceIds, unsupportedFields, "
-                "missingEvidence, and summary. Semantically validate only the public candidate "
+                f"{ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT} "
+                "Semantically validate only the public candidate "
                 "against public structured observations and cited Evidence IDs. Do not include "
                 "private reasoning. Candidate: "
                 f"{json.dumps(state.get('root_cause_decision'), ensure_ascii=False)}. "
@@ -5232,6 +5233,12 @@ class AiopsDiagnosticService:
                     prompt=current_prompt,
                 )
 
+            def allow_format_retry() -> bool:
+                remaining = (
+                    model_runtime.deadlines.hard_deadline_at - _now()
+                ).total_seconds()
+                return remaining >= float(ROLE_TIMEOUT_SECONDS["validator"] + 5)
+
             outcome = await invoke_structured_root_cause_validation(
                 model=_validator_chat_model(self._llm_provider),
                 prompt=prompt,
@@ -5240,6 +5247,7 @@ class AiopsDiagnosticService:
                     self._llm_provider
                 ),
                 invoke=invoke_validator,
+                allow_format_retry=allow_format_retry,
             )
             validation = outcome.decision
         semantic_valid = validation is not None and validation.status == "valid"
