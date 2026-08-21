@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, TypeVar, cast
 
+from pydantic import BaseModel
+
+from super_ai.aiops.decision_validation import invoke_bounded_structured_role
+from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.investigation import (
     EvidenceClaim,
     EvidencePacket,
@@ -17,6 +21,16 @@ from super_ai.aiops.investigation import (
     InvestigatorType,
     JsonValue,
 )
+from super_ai.aiops.specialists import (
+    PublicAssessmentSignal,
+    SharedRunContext,
+    SpecialistAssignment,
+    SpecialistEvidenceAnalysisOutput,
+    SpecialistLocalPlanOutput,
+    SpecialistPlanStep,
+    SpecialistResult,
+)
+from super_ai.llm import ChatModel
 from super_ai.mcp.tool_arguments import tool_step_fingerprint
 from super_ai.memory.repositories import JsonDict
 
@@ -420,6 +434,475 @@ class InvestigatorExecutor:
         )
 
 
+_RoleOutput = TypeVar("_RoleOutput", bound=BaseModel)
+
+
+class SpecialistExecutor:
+    """Run one source-scoped Specialist with two bounded model roles."""
+
+    def __init__(
+        self,
+        *,
+        runtime: DiagnosticToolRuntime,
+        model: ChatModel,
+        execution_coordinator: ExecutionCoordinator,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._model = model
+        self._execution_coordinator = execution_coordinator
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    async def execute(
+        self,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> SpecialistResult:
+        started_at = self._now()
+        self._validate_assignment(context, assignment)
+        if self._hard_expired(context, assignment):
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="timeout",
+                unresolved_questions=("specialist_hard_deadline_expired",),
+            )
+        if self._soft_expired(context, assignment):
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="timeout",
+                unresolved_questions=("specialist_soft_deadline_expired",),
+            )
+
+        try:
+            local_plan, plan_error = await asyncio.wait_for(
+                self._run_role(
+                    context=context,
+                    assignment=assignment,
+                    role_name="local_plan",
+                    logical_iteration=0,
+                    schema=SpecialistLocalPlanOutput,
+                    prompt=self._local_plan_prompt(context, assignment),
+                    correction_prompt=(
+                        "Return only the required Local Plan schema with at most three steps."
+                    ),
+                ),
+                timeout=self._remaining_hard_seconds(context, assignment),
+            )
+        except TimeoutError:
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="timeout",
+                unresolved_questions=("specialist_hard_deadline_expired",),
+                model_call_count=1,
+            )
+        if local_plan is None:
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="failed",
+                unresolved_questions=(plan_error or "specialist_local_plan_failed",),
+                model_call_count=1,
+            )
+
+        try:
+            steps = self._validate_plan(context, assignment, local_plan)
+        except ValueError:
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="failed",
+                unresolved_questions=("specialist_plan_scope_rejected",),
+                model_call_count=1,
+            )
+
+        evidence_ids: list[str] = []
+        completed_steps: list[str] = []
+        tool_claims: list[EvidenceClaim] = []
+        unresolved: list[str] = []
+        for index, step in enumerate(steps):
+            if self._hard_expired(context, assignment):
+                unresolved.append("specialist_hard_deadline_expired")
+                break
+            if self._soft_expired(context, assignment):
+                unresolved.append("specialist_soft_deadline_expired")
+                break
+            plan_step = {
+                "id": step.step_id,
+                "tool": step.tool_name,
+                "arguments": _plain_json_mapping(
+                    assignment.trusted_arguments_by_tool[step.tool_name]
+                ),
+                "testsHypotheses": list(step.tested_hypotheses),
+                "causalIntent": step.causal_intent,
+            }
+            try:
+                tool_result = await asyncio.wait_for(
+                    execute_diagnostic_tool(
+                        DiagnosticToolExecutionRequest(
+                            owner_user_id=context.owner_user_id,
+                            task_id=context.task_id,
+                            graph_version=context.graph_version,
+                            plan_step=plan_step,
+                            logical_iteration=index,
+                            allowed_tools=assignment.allowed_tools,
+                        ),
+                        runtime=self._runtime,
+                    ),
+                    timeout=self._remaining_hard_seconds(context, assignment),
+                )
+            except TimeoutError:
+                unresolved.append("specialist_tool_timeout")
+                break
+            except Exception:
+                unresolved.append("specialist_tool_failed")
+                break
+            if tool_result.status != "completed":
+                unresolved.append("specialist_tool_failed")
+                break
+            evidence_ids.append(tool_result.evidence_id)
+            completed_steps.append(step.step_id)
+            tool_claims.append(_claim_from_result(assignment.role, plan_step, tool_result))
+
+        if self._hard_expired(context, assignment):
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="timeout",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=1,
+            )
+        if self._soft_expired(context, assignment):
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="inconclusive" if evidence_ids else "timeout",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=1,
+            )
+
+        if not evidence_ids and unresolved:
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="failed",
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=1,
+            )
+
+        if min(assignment.model_call_budget, context.global_model_budget) < 2:
+            unresolved.append("specialist_model_budget_exhausted")
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="inconclusive",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=1,
+            )
+
+        try:
+            analysis, analysis_error = await asyncio.wait_for(
+                self._run_role(
+                    context=context,
+                    assignment=assignment,
+                    role_name="evidence_analysis",
+                    logical_iteration=1,
+                    schema=SpecialistEvidenceAnalysisOutput,
+                    prompt=self._analysis_prompt(
+                        assignment,
+                        evidence_ids=tuple(evidence_ids),
+                        completed_steps=tuple(completed_steps),
+                    ),
+                    correction_prompt=(
+                        "Return only the required Evidence Analysis schema using "
+                        "owned Evidence IDs."
+                    ),
+                ),
+                timeout=self._remaining_hard_seconds(context, assignment),
+            )
+        except TimeoutError:
+            unresolved.append("specialist_hard_deadline_expired")
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="inconclusive" if evidence_ids else "timeout",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=2,
+            )
+        if analysis is None:
+            unresolved.append(analysis_error or "specialist_evidence_analysis_failed")
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="inconclusive" if evidence_ids else "failed",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=2,
+            )
+        try:
+            facts, assessments = self._validate_analysis(
+                assignment,
+                analysis,
+                evidence_ids=frozenset(evidence_ids),
+            )
+        except ValueError:
+            unresolved.append("specialist_analysis_scope_rejected")
+            return self._result(
+                assignment=assignment,
+                started_at=started_at,
+                terminal_status="inconclusive" if evidence_ids else "failed",
+                evidence_ids=tuple(evidence_ids),
+                fact_candidates=tuple(tool_claims),
+                unresolved_questions=tuple(unresolved),
+                completed_steps=tuple(completed_steps),
+                model_call_count=2,
+            )
+        unresolved.extend(analysis.unresolved_questions)
+        terminal_status = "completed" if not unresolved else "inconclusive"
+        return self._result(
+            assignment=assignment,
+            started_at=started_at,
+            terminal_status=terminal_status,
+            evidence_ids=tuple(evidence_ids),
+            fact_candidates=facts or tuple(tool_claims),
+            proposed_assessments=assessments,
+            unresolved_questions=tuple(unresolved),
+            completed_steps=tuple(completed_steps),
+            model_call_count=2,
+        )
+
+    async def _run_role(
+        self,
+        *,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+        role_name: str,
+        logical_iteration: int,
+        schema: type[_RoleOutput],
+        prompt: str,
+        correction_prompt: str,
+    ) -> tuple[_RoleOutput | None, str | None]:
+        prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+        async def operation() -> JsonDict:
+            outcome = await invoke_bounded_structured_role(
+                model=self._model,
+                schema=schema,
+                prompt=prompt,
+                correction_prompt=correction_prompt,
+                role=role_name,
+            )
+            return {
+                "status": "completed" if outcome.value is not None else "failed",
+                "value": (
+                    outcome.value.model_dump(mode="json")
+                    if outcome.value is not None
+                    else None
+                ),
+                "attempts": outcome.attempts,
+                "errorCategory": outcome.error_category,
+                "errorCode": outcome.error_code,
+            }
+
+        execution = await self._execution_coordinator.run_once(
+            ExecutionIdentity(
+                task_id=context.task_id,
+                graph_version=context.graph_version,
+                node_name=f"specialist_{assignment.role}_{role_name}",
+                logical_iteration=logical_iteration,
+                input_payload={
+                    "role": assignment.role,
+                    "roleName": role_name,
+                    "promptFingerprint": prompt_fingerprint,
+                },
+            ),
+            operation,
+        )
+        payload = execution.output
+        value = payload.get("value")
+        if payload.get("status") != "completed" or value is None:
+            error = payload.get("errorCategory")
+            return None, str(error) if isinstance(error, str) else None
+        try:
+            return schema.model_validate(value), None
+        except ValueError:
+            return None, "specialist_checkpoint_invalid"
+
+    @staticmethod
+    def _validate_assignment(
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> None:
+        if assignment.allowed_tools != context.allowed_tools_by_specialist[assignment.role]:
+            raise ValueError("Specialist assignment tools do not match shared context.")
+        if assignment.trusted_arguments_by_tool != context.trusted_arguments_by_specialist[
+            assignment.role
+        ]:
+            raise ValueError("Specialist assignment bindings do not match shared context.")
+        if not set(assignment.hypotheses_to_test).issubset(context.public_hypotheses):
+            raise ValueError("Specialist assignment contains an unknown hypothesis.")
+
+    @staticmethod
+    def _validate_plan(
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+        output: SpecialistLocalPlanOutput,
+    ) -> tuple[SpecialistPlanStep, ...]:
+        if len(output.steps) > assignment.maximum_tool_steps:
+            raise ValueError("Specialist plan exceeds its tool-step budget.")
+        steps = tuple(item.to_contract() for item in output.steps)
+        assigned_hypotheses = set(assignment.hypotheses_to_test)
+        assigned_roles = set(assignment.required_causal_roles)
+        for step in steps:
+            if step.tool_name not in assignment.allowed_tools:
+                raise ValueError("Specialist plan contains an unauthorized tool.")
+            if not set(step.tested_hypotheses).issubset(assigned_hypotheses):
+                raise ValueError("Specialist plan contains an unknown hypothesis.")
+            if step.causal_intent not in assigned_roles:
+                raise ValueError("Specialist plan contains an unassigned causal role.")
+            trusted = assignment.trusted_arguments_by_tool[step.tool_name]
+            if _plain_json_mapping(step.proposed_arguments) != _plain_json_mapping(trusted):
+                raise ValueError("Specialist plan altered code-owned tool arguments.")
+            context_trusted = context.trusted_arguments_by_specialist[assignment.role][
+                step.tool_name
+            ]
+            if _plain_json_mapping(trusted) != _plain_json_mapping(context_trusted):
+                raise ValueError("Specialist plan binding differs from shared context.")
+        return steps
+
+    @staticmethod
+    def _validate_analysis(
+        assignment: SpecialistAssignment,
+        output: SpecialistEvidenceAnalysisOutput,
+        *,
+        evidence_ids: frozenset[str],
+    ) -> tuple[tuple[EvidenceClaim, ...], tuple[PublicAssessmentSignal, ...]]:
+        assigned_hypotheses = set(assignment.hypotheses_to_test)
+        if not set(output.tested_hypotheses).issubset(assigned_hypotheses):
+            raise ValueError("Specialist analysis contains an unknown hypothesis.")
+        facts = tuple(item.to_contract() for item in output.fact_candidates)
+        assessments = tuple(item.to_contract() for item in output.proposed_assessments)
+        for fact in facts:
+            if not set(fact.evidence_ids).issubset(evidence_ids):
+                raise ValueError("Specialist analysis references foreign Evidence.")
+            if not set(fact.supports).issubset(assigned_hypotheses):
+                raise ValueError("Specialist fact supports an unknown hypothesis.")
+            if not set(fact.refutes).issubset(assigned_hypotheses):
+                raise ValueError("Specialist fact refutes an unknown hypothesis.")
+        for assessment in assessments:
+            if assessment.hypothesis_id not in assigned_hypotheses:
+                raise ValueError("Specialist assessment contains an unknown hypothesis.")
+            if not set(assessment.evidence_ids).issubset(evidence_ids):
+                raise ValueError("Specialist assessment references foreign Evidence.")
+        return facts, assessments
+
+    @staticmethod
+    def _local_plan_prompt(
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> str:
+        payload = {
+            "objective": assignment.objective,
+            "incident": _plain_json_mapping(context.public_incident_input),
+            "hypotheses": list(assignment.hypotheses_to_test),
+            "causalRoles": list(assignment.required_causal_roles),
+            "allowedTools": sorted(assignment.allowed_tools),
+            "trustedArguments": {
+                tool: _plain_json_mapping(arguments)
+                for tool, arguments in assignment.trusted_arguments_by_tool.items()
+            },
+        }
+        return "Create a bounded public Specialist Local Plan:\n" + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True
+        )
+
+    @staticmethod
+    def _analysis_prompt(
+        assignment: SpecialistAssignment,
+        *,
+        evidence_ids: tuple[str, ...],
+        completed_steps: tuple[str, ...],
+    ) -> str:
+        payload = {
+            "hypotheses": list(assignment.hypotheses_to_test),
+            "ownedEvidenceIds": list(evidence_ids),
+            "completedSteps": list(completed_steps),
+        }
+        return "Analyze only these public Specialist evidence summaries:\n" + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True
+        )
+
+    def _soft_expired(
+        self,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> bool:
+        now = self._now()
+        return now >= min(context.global_soft_deadline_at, assignment.soft_deadline_at)
+
+    def _hard_expired(
+        self,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> bool:
+        now = self._now()
+        return now >= min(context.global_hard_deadline_at, assignment.hard_deadline_at)
+
+    def _remaining_hard_seconds(
+        self,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> float:
+        deadline = min(context.global_hard_deadline_at, assignment.hard_deadline_at)
+        return max(0.001, (deadline - self._now()).total_seconds())
+
+    def _result(
+        self,
+        *,
+        assignment: SpecialistAssignment,
+        started_at: datetime,
+        terminal_status: Literal[
+            "completed", "inconclusive", "failed", "timeout", "cancelled"
+        ],
+        evidence_ids: tuple[str, ...] = (),
+        fact_candidates: tuple[EvidenceClaim, ...] = (),
+        proposed_assessments: tuple[PublicAssessmentSignal, ...] = (),
+        unresolved_questions: tuple[str, ...] = (),
+        completed_steps: tuple[str, ...] = (),
+        model_call_count: int = 0,
+    ) -> SpecialistResult:
+        duration = max(0, int((self._now() - started_at).total_seconds() * 1000))
+        return SpecialistResult.create(
+            role=assignment.role,
+            terminal_status=terminal_status,
+            tested_hypotheses=assignment.hypotheses_to_test,
+            evidence_ids=evidence_ids,
+            fact_candidates=fact_candidates,
+            proposed_assessments=proposed_assessments,
+            unresolved_questions=unresolved_questions,
+            completed_steps=completed_steps,
+            model_call_count=model_call_count,
+            duration_ms=duration,
+        )
+
+
 def _claim_from_result(
     investigator_type: DispatchInvestigatorType,
     step: Mapping[str, object],
@@ -474,6 +957,11 @@ def _canonical_arguments(value: object) -> JsonDict:
     if not isinstance(parsed, dict):
         raise ValueError("Diagnostic tool arguments must be an object.")
     return cast(JsonDict, parsed)
+
+
+def _plain_json_mapping(value: Mapping[str, object]) -> JsonDict:
+    """Copy a frozen public mapping into canonical JSON-compatible data."""
+    return _canonical_arguments(value)
 
 
 def _string_sequence(value: object) -> tuple[str, ...]:

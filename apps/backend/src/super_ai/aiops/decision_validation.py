@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 import openai
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -127,6 +128,33 @@ class StructuredDecisionOutcome:
     http_status_class: ValidationHttpStatusClass | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BoundedStructuredRoleAudit:
+    """Secret-safe metadata for one structured role attempt."""
+
+    role: str
+    attempt: int
+    duration_ms: int
+    error_category: str | None
+
+
+_StructuredRoleModel = TypeVar("_StructuredRoleModel", bound=BaseModel)
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedStructuredRoleOutcome(Generic[_StructuredRoleModel]):
+    """Typed role output without prompts, raw responses, or exception text."""
+
+    value: _StructuredRoleModel | None
+    error_category: DecisionValidationErrorCategory | None
+    attempts: int
+    audits: tuple[BoundedStructuredRoleAudit, ...]
+    error_code: ValidationErrorCode | None = None
+    error_phase: ValidationErrorPhase | None = None
+    retryable: bool | None = None
+    http_status_class: ValidationHttpStatusClass | None = None
+
+
 class _RootCauseDecisionSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -190,6 +218,127 @@ def can_replan_deterministic_gap(
         tool in available_tools and tool not in executed_tools
         for tool in recommended_tools
     )
+
+
+async def invoke_bounded_structured_role(
+    *,
+    model: ChatModel,
+    schema: type[_StructuredRoleModel],
+    prompt: str,
+    correction_prompt: str,
+    role: str,
+    maximum_attempts: int = 2,
+    structured_output_method: StructuredOutputMethod = "function_calling",
+) -> BoundedStructuredRoleOutcome[_StructuredRoleModel]:
+    """Invoke one bounded model role with at most one format-only correction."""
+    if maximum_attempts not in {1, 2}:
+        raise ValueError("Bounded structured roles allow one or two attempts.")
+    try:
+        structured = _structured_invoker(
+            model,
+            schema,
+            method=structured_output_method,
+        )
+    except Exception as exc:
+        failure = classify_model_failure(exc, phase="structured_invoker_setup")
+        return BoundedStructuredRoleOutcome(
+            value=None,
+            error_category="model_call_failed",
+            attempts=0,
+            audits=(),
+            error_code=failure.code,
+            error_phase=failure.phase,
+            retryable=failure.retryable,
+            http_status_class=failure.http_status_class,
+        )
+
+    invoker: _AsyncInvoker = structured or model
+    audits: list[BoundedStructuredRoleAudit] = []
+    current_prompt = prompt
+    for attempt in range(1, maximum_attempts + 1):
+        started = time.perf_counter()
+        try:
+            response = await invoker.ainvoke(current_prompt)
+        except Exception as exc:
+            failure = classify_model_failure(exc, phase="model_invoke")
+            audits.append(
+                BoundedStructuredRoleAudit(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    error_category="model_call_failed",
+                )
+            )
+            return BoundedStructuredRoleOutcome(
+                value=None,
+                error_category="model_call_failed",
+                attempts=attempt,
+                audits=tuple(audits),
+                error_code=failure.code,
+                error_phase=failure.phase,
+                retryable=failure.retryable,
+                http_status_class=failure.http_status_class,
+            )
+        try:
+            value = _bounded_role_value_from_response(
+                response,
+                schema=schema,
+                structured=structured is not None,
+            )
+        except (TypeError, ValueError, ValidationError):
+            audits.append(
+                BoundedStructuredRoleAudit(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    error_category="invalid_model_output",
+                )
+            )
+            if attempt < maximum_attempts:
+                current_prompt = f"{prompt}\n\n{correction_prompt}"
+                continue
+            return BoundedStructuredRoleOutcome(
+                value=None,
+                error_category="retry_exhausted",
+                attempts=attempt,
+                audits=tuple(audits),
+                error_phase="structured_parse",
+                retryable=False,
+            )
+        audits.append(
+            BoundedStructuredRoleAudit(
+                role=role,
+                attempt=attempt,
+                duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                error_category=None,
+            )
+        )
+        return BoundedStructuredRoleOutcome(
+            value=value,
+            error_category=None,
+            attempts=attempt,
+            audits=tuple(audits),
+        )
+    raise AssertionError("The bounded structured role loop must return.")
+
+
+def _bounded_role_value_from_response(
+    response: object,
+    *,
+    schema: type[_StructuredRoleModel],
+    structured: bool,
+) -> _StructuredRoleModel:
+    if structured:
+        if not isinstance(response, Mapping):
+            raise ValueError("Structured role response must be an envelope.")
+        envelope = cast(Mapping[object, object], response)
+        if envelope.get("parsing_error") is not None or "parsed" not in envelope:
+            raise ValueError("Structured role envelope is invalid.")
+        parsed = envelope.get("parsed")
+        if isinstance(parsed, schema):
+            return parsed
+        return schema.model_validate(parsed)
+    return schema.model_validate_json(_model_text(response))
 
 
 async def invoke_structured_root_cause_validation(
