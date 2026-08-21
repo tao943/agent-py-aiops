@@ -9,6 +9,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -20,6 +21,14 @@ from super_ai.events.relay import RedisJobEventRelay
 from super_ai.events.subscriber import JobEventSubscriber
 from super_ai.memory.repositories import BackgroundJobEventRecord
 from super_ai.redis_runtime.config import RedisRuntimeSettings
+
+
+def _project_config_path() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "config" / "project.json"
+        if candidate.is_file():
+            return candidate
+    raise AssertionError("Repository project config is unavailable.")
 
 
 def _event(
@@ -231,7 +240,10 @@ async def _register(client: httpx.AsyncClient, email: str) -> dict[str, object]:
 async def test_aiops_sse_uses_greater_valid_resume_cursor_and_includes_sequence_ids(
     migrated_database_url: str,
 ) -> None:
-    app = create_app(database_url=migrated_database_url)
+    app = create_app(
+        database_url=migrated_database_url,
+        project_config_path=_project_config_path(),
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         account = await _register(client, "sse-owner@example.com")
@@ -295,7 +307,10 @@ async def test_aiops_sse_uses_greater_valid_resume_cursor_and_includes_sequence_
 async def test_aiops_sse_does_not_synthesize_error_when_cursor_covers_stored_error(
     migrated_database_url: str,
 ) -> None:
-    app = create_app(database_url=migrated_database_url)
+    app = create_app(
+        database_url=migrated_database_url,
+        project_config_path=_project_config_path(),
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         account = await _register(client, "sse-stored-error@example.com")
@@ -354,7 +369,10 @@ async def test_aiops_sse_does_not_synthesize_error_when_cursor_covers_stored_err
 async def test_aiops_sse_synthetic_failed_error_has_a_stable_unreplayed_id(
     migrated_database_url: str,
 ) -> None:
-    app = create_app(database_url=migrated_database_url)
+    app = create_app(
+        database_url=migrated_database_url,
+        project_config_path=_project_config_path(),
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         account = await _register(client, "sse-synthetic-error@example.com")

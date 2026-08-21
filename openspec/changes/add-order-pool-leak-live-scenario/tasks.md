@@ -33,6 +33,6 @@
 - [x] 5.3 Add immutable Specialist contracts, exact source bindings, and answer-isolation tests.
 - [x] 5.4 Add bounded Local Planning, tool execution, Evidence Analysis, and replay-safe model budgets.
 - [x] 5.5 Add deterministic source-group aggregation, conflict handling, and PostgreSQL replay tests.
-- [ ] 5.6 Wire isolated Runtime/Log Specialist branches into the existing LangGraph central safety chain.
+- [x] 5.6 Wire isolated Runtime/Log Specialist branches into the existing LangGraph central safety chain.
 - [ ] 5.7 Add threshold-5 forced/shadow routing and fixed-schema Specialist evaluation metrics.
 - [ ] 5.8 Pass offline acceptance and persist the approved real 3×3 Single/Multi comparison.

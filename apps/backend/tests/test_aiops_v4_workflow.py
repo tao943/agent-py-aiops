@@ -16,8 +16,15 @@ from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
     _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
 )
-from super_ai.aiops.investigation import InvestigationRouterPolicy
+from super_ai.aiops.investigation import EvidenceClaim, InvestigationRouterPolicy
 from super_ai.aiops.model_budget import ExecutionDeadlines
+from super_ai.aiops.specialists import (
+    SharedRunContext,
+    SpecialistAssignment,
+    SpecialistEvidenceAnalysisOutput,
+    SpecialistLocalPlanOutput,
+    SpecialistResult,
+)
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import JsonDict
@@ -265,10 +272,50 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
 
 def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
     service = _service(object())
-    dispatches = [
-        {"dispatchId": "dispatch-log", "investigatorType": "log"},
-        {"dispatchId": "dispatch-runtime", "investigatorType": "runtime"},
+    dispatches: list[dict[str, object]] = [
+        {
+            "dispatchId": "dispatch-log",
+            "investigatorType": "log",
+            "objective": "Inspect public log evidence.",
+            "testsHypotheses": ["pool_lifecycle_failure"],
+            "missingCausalRoles": ["trigger"],
+            "allowedTools": ["SearchLog"],
+            "steps": [
+                {
+                    "id": "log-1",
+                    "tool": "SearchLog",
+                    "arguments": {
+                        "Region": "ap-guangzhou",
+                        "TopicId": "topic-safe",
+                        "From": 10,
+                        "To": 20,
+                        "Query": 'incident_id:"safe"',
+                        "Limit": 20,
+                    },
+                    "testsHypotheses": ["pool_lifecycle_failure"],
+                    "causalIntent": "trigger",
+                }
+            ],
+        },
+        {
+            "dispatchId": "dispatch-runtime",
+            "investigatorType": "runtime",
+            "objective": "Inspect public runtime evidence.",
+            "testsHypotheses": ["pool_lifecycle_failure"],
+            "missingCausalRoles": ["mechanism"],
+            "allowedTools": ["InspectOrderPoolState"],
+            "steps": [
+                {
+                    "id": "runtime-1",
+                    "tool": "InspectOrderPoolState",
+                    "arguments": {},
+                    "testsHypotheses": ["pool_lifecycle_failure"],
+                    "causalIntent": "mechanism",
+                }
+            ],
+        },
     ]
+    now = datetime.now(timezone.utc)
 
     multi = service._route_after_strategy(  # pyright: ignore[reportPrivateUsage]
         cast(
@@ -278,6 +325,15 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
                 "investigation_dispatches": dispatches,
                 "owner_user_id": "owner-1",
                 "task_id": "diagnostic-1",
+                "graph_version": "evidence-driven-v4",
+                "alert": {"service": "order-api"},
+                "public_hypotheses": [{"id": "pool_lifecycle_failure"}],
+                "decision_vocabulary": {"components": ["order-api"]},
+                "soft_deadline_at": (now + timedelta(minutes=4)).isoformat(),
+                "hard_deadline_at": (now + timedelta(minutes=6)).isoformat(),
+                "model_call_count": 2,
+                "multi_model_reservation_base": 2,
+                "multi_model_reserved": 4,
             },
         )
     )
@@ -294,42 +350,261 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
     assert isinstance(multi, list)
     assert all(isinstance(item, Send) for item in multi)
     investigator_types = [
-        cast(Any, item).arg["investigation_dispatch"]["investigatorType"]
-        for item in multi
+        cast(Any, item).arg["specialist_assignment"].role for item in multi
     ]
     assert investigator_types == [
         "runtime",
         "log",
     ]
+    for item in cast(list[Any], multi):
+        branch = item.arg
+        assert isinstance(branch["shared_run_context"], SharedRunContext)
+        assert isinstance(branch["specialist_assignment"], SpecialistAssignment)
+        assert branch["specialist_results"] == []
+        assert not {
+            "investigation_dispatches",
+            "investigation_packets",
+            "model_call_count",
+        } & set(branch)
     assert single == "executor"
     assert fast == "sufficiency_gate"
 
 
 @pytest.mark.asyncio
 async def test_investigator_branch_cannot_write_shared_diagnostic_state() -> None:
+    now = datetime.now(timezone.utc)
+    context = SharedRunContext(
+        owner_user_id="owner-1",
+        task_id="diagnostic-1",
+        graph_version="evidence-driven-v4",
+        public_incident_input={"service": "order-api"},
+        public_hypotheses=("pool_lifecycle_failure",),
+        decision_vocabulary={"components": ("order-api",)},
+        allowed_tools_by_specialist={
+            "runtime": frozenset({"InspectOrderPoolState"}),
+            "log": frozenset({"SearchLog"}),
+        },
+        trusted_arguments_by_specialist={
+            "runtime": {"InspectOrderPoolState": {}},
+            "log": {
+                "SearchLog": {
+                    "Region": "ap-guangzhou",
+                    "TopicId": "topic-safe",
+                    "From": 10,
+                    "To": 20,
+                    "Query": 'incident_id:"safe"',
+                    "Limit": 20,
+                }
+            },
+        },
+        global_soft_deadline_at=now - timedelta(minutes=1),
+        global_hard_deadline_at=now + timedelta(minutes=1),
+        global_model_budget=4,
+    )
+    assignment = SpecialistAssignment(
+        role="runtime",
+        objective="Inspect public runtime evidence.",
+        hypotheses_to_test=("pool_lifecycle_failure",),
+        required_causal_roles=("mechanism",),
+        allowed_tools=frozenset({"InspectOrderPoolState"}),
+        trusted_arguments_by_tool={"InspectOrderPoolState": {}},
+        maximum_tool_steps=1,
+        model_call_budget=2,
+        soft_deadline_at=now - timedelta(minutes=1),
+        hard_deadline_at=now + timedelta(minutes=1),
+    )
     update = await _service(object())._investigator_dispatch(  # pyright: ignore[reportPrivateUsage]
         cast(
             Any,
             {
                 "owner_user_id": "owner-1",
                 "task_id": "diagnostic-1",
-                "investigation_dispatch": {
-                    "dispatchId": "dispatch-runtime",
-                    "investigatorType": "runtime",
-                    "steps": [],
-                },
+                "shared_run_context": context,
+                "specialist_assignment": assignment,
             },
         )
     )
 
-    assert set(update) == {"investigation_packets", "events"}
-    packet = cast(list[dict[str, object]], update["investigation_packets"])[0]
-    assert packet["status"] == "failed"
+    assert set(update) == {"specialist_results", "events"}
+    result = cast(list[dict[str, object]], update["specialist_results"])[0]
+    assert result["terminalStatus"] == "timeout"
     assert not {
         "diagnostic_facts",
         "hypothesis_assessments",
         "observation_decisions",
+        "model_call_count",
     } & set(update)
+
+
+@pytest.mark.asyncio
+async def test_specialist_branch_runs_model_tool_and_persists_evidence(
+    migrated_database_url: str,
+) -> None:
+    class SpecialistModel:
+        def __init__(self) -> None:
+            self.schema: type[object] | None = None
+            self.calls = 0
+
+        def with_structured_output(
+            self,
+            schema: type[object],
+            **_kwargs: object,
+        ) -> SpecialistModel:
+            self.schema = schema
+            return self
+
+        async def ainvoke(self, _input: object) -> object:
+            self.calls += 1
+            if self.schema is SpecialistLocalPlanOutput:
+                parsed = SpecialistLocalPlanOutput.model_validate(
+                    {
+                        "steps": [
+                            {
+                                "step_id": "runtime-1",
+                                "tool_name": "InspectOrderPoolState",
+                                "tested_hypotheses": ["pool_lifecycle_failure"],
+                                "causal_intent": "mechanism",
+                                "proposed_arguments": {},
+                            }
+                        ]
+                    }
+                )
+            else:
+                parsed = SpecialistEvidenceAnalysisOutput.model_validate(
+                    {
+                        "tested_hypotheses": ["pool_lifecycle_failure"],
+                        "fact_candidates": [],
+                        "proposed_assessments": [],
+                        "unresolved_questions": [],
+                    }
+                )
+            return {"parsed": parsed, "parsing_error": None}
+
+    class SpecialistProvider:
+        def __init__(self, model: SpecialistModel) -> None:
+            self.model = model
+
+        def create_chat_model(self) -> SpecialistModel:
+            return self.model
+
+    class SpecialistMcpClient:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict[str, object],
+        ) -> dict[str, object]:
+            assert name == "InspectOrderPoolState"
+            assert arguments == {}
+            return {"poolAtCapacity": True, "freeConnections": 0}
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="specialist-branch-user",
+            task_id="v4-specialist-branch",
+            status="running",
+            query="Inspect public runtime evidence.",
+            input_payload={},
+        )
+        model = SpecialistModel()
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, SpecialistProvider(model)),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, SpecialistMcpClient()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+        now = datetime.now(timezone.utc)
+        context = SharedRunContext(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+            graph_version="aiops-diagnostic-v3",
+            public_incident_input={"service": "order-api"},
+            public_hypotheses=("pool_lifecycle_failure",),
+            decision_vocabulary={"components": ("order-api",)},
+            allowed_tools_by_specialist={
+                "runtime": frozenset({"InspectOrderPoolState"}),
+                "log": frozenset({"SearchLog"}),
+            },
+            trusted_arguments_by_specialist={
+                "runtime": {"InspectOrderPoolState": {}},
+                "log": {
+                    "SearchLog": {
+                        "Region": "ap-guangzhou",
+                        "TopicId": "topic-safe",
+                        "From": 10,
+                        "To": 20,
+                        "Query": 'incident_id:"safe"',
+                        "Limit": 20,
+                    }
+                },
+            },
+            global_soft_deadline_at=now + timedelta(minutes=4),
+            global_hard_deadline_at=now + timedelta(minutes=6),
+            global_model_budget=4,
+        )
+        assignment = SpecialistAssignment(
+            role="runtime",
+            objective="Inspect public runtime evidence.",
+            hypotheses_to_test=("pool_lifecycle_failure",),
+            required_causal_roles=("mechanism",),
+            allowed_tools=frozenset({"InspectOrderPoolState"}),
+            trusted_arguments_by_tool={"InspectOrderPoolState": {}},
+            maximum_tool_steps=1,
+            model_call_budget=2,
+            soft_deadline_at=now + timedelta(minutes=2),
+            hard_deadline_at=now + timedelta(minutes=3),
+        )
+
+        update = await service._investigator_dispatch(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "graph_version": "aiops-diagnostic-v3",
+                    "query": task.query,
+                    "accessible_knowledge_base_ids": (),
+                    "started_at": now.isoformat(),
+                    "shared_run_context": context,
+                    "specialist_assignment": assignment,
+                    "specialist_tool_definitions": (
+                        McpToolDefinition(
+                            "InspectOrderPoolState",
+                            "Inspect public pool state.",
+                            {"type": "object", "additionalProperties": False},
+                            "default",
+                        ),
+                    ),
+                },
+            )
+        )
+        evidence = await repositories.diagnostics.list_evidence(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    result = cast(list[dict[str, object]], update["specialist_results"])[0]
+    assert result["terminalStatus"] == "completed"
+    assert result["modelCallCount"] == 2
+    assert len(cast(list[object], result["evidenceIds"])) == 1
+    assert model.calls == 2
+    assert len(evidence) == 1
+    event_text = json.dumps(update["events"], ensure_ascii=False).casefold()
+    assert "inspectorderpoolstate" in event_text
+    assert "evidence" in event_text
+    assert "modelcallcount" in event_text
+    assert not any(
+        forbidden in event_text
+        for forbidden in ("rawresponse", "privatereasoning", "credential")
+    )
 
 
 def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
@@ -357,7 +632,204 @@ def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
                 }
             },
         )
-    ) == "executor"
+    ) == "manual_review"
+
+    assert service._route_after_deterministic_validation_v4(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "next_route": "recovery_planner",
+                "investigation_aggregation": {"missingDomains": ["log"]},
+            },
+        )
+    ) == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_specialist_aggregation_releases_budget_and_preserves_partial_evidence(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="specialist-fanin-user",
+            task_id="v4-specialist-fanin",
+            status="running",
+            query="Investigate public pool evidence.",
+            input_payload={},
+        )
+        assert repositories.tool_call_audits is not None
+        audit = await repositories.tool_call_audits.create_for_diagnostic_task(
+            owner_user_id=task.owner_user_id,
+            audit_id="tool-specialist-runtime",
+            diagnostic_task_id=task.id,
+            tool_name="InspectOrderPoolState",
+            arguments={},
+        )
+        completed_audit = await repositories.tool_call_audits.finalize(
+            owner_user_id=task.owner_user_id,
+            audit_id=audit.id,
+            status="completed",
+            result_summary="Safe public observation.",
+        )
+        assert completed_audit is not None
+        audit = completed_audit
+        evidence = await repositories.diagnostics.create_evidence(
+            owner_user_id=task.owner_user_id,
+            evidence_id="evidence-specialist-runtime",
+            task_id=task.id,
+            step_id=None,
+            tool_call_id=audit.id,
+            kind="tool_observation",
+            source="InspectOrderPoolState",
+            summary="Safe public observation.",
+            payload={"sourceFingerprint": "runtime-pool-source"},
+        )
+        claim = EvidenceClaim(
+            claim_id="InspectOrderPoolState.observation",
+            value={"poolAtCapacity": True},
+            quality="direct",
+            causal_role="mechanism",
+            supports=("pool_lifecycle_failure",),
+            refutes=(),
+            evidence_ids=(evidence.id,),
+            target_component="order-api",
+            observed_at=datetime.now(timezone.utc),
+            time_scope="incident_window",
+        )
+        runtime_result = SpecialistResult.create(
+            role="runtime",
+            terminal_status="completed",
+            tested_hypotheses=("pool_lifecycle_failure",),
+            evidence_ids=(evidence.id,),
+            fact_candidates=(claim,),
+            proposed_assessments=(),
+            unresolved_questions=(),
+            completed_steps=("runtime-1",),
+            model_call_count=2,
+            duration_ms=20,
+        )
+        log_result = SpecialistResult.create(
+            role="log",
+            terminal_status="timeout",
+            tested_hypotheses=("pool_lifecycle_failure",),
+            evidence_ids=(),
+            fact_candidates=(),
+            proposed_assessments=(),
+            unresolved_questions=("specialist_soft_deadline_expired",),
+            completed_steps=(),
+            model_call_count=0,
+            duration_ms=10,
+        )
+        now = datetime.now(timezone.utc)
+        dispatches: list[dict[str, object]] = [
+            {
+                "dispatchId": "dispatch-runtime",
+                "investigatorType": "runtime",
+                "objective": "Inspect public runtime evidence.",
+                "testsHypotheses": ["pool_lifecycle_failure"],
+                "missingCausalRoles": ["mechanism"],
+                "allowedTools": ["InspectOrderPoolState"],
+                "steps": [
+                    {
+                        "id": "runtime-1",
+                        "tool": "InspectOrderPoolState",
+                        "arguments": {},
+                        "testsHypotheses": ["pool_lifecycle_failure"],
+                        "causalIntent": "mechanism",
+                    }
+                ],
+            },
+            {
+                "dispatchId": "dispatch-log",
+                "investigatorType": "log",
+                "objective": "Inspect public log evidence.",
+                "testsHypotheses": ["pool_lifecycle_failure"],
+                "missingCausalRoles": ["trigger"],
+                "allowedTools": ["SearchLog"],
+                "steps": [
+                    {
+                        "id": "log-1",
+                        "tool": "SearchLog",
+                        "arguments": {
+                            "Region": "ap-guangzhou",
+                            "TopicId": "topic-safe",
+                            "From": 10,
+                            "To": 20,
+                            "Query": 'incident_id:"safe"',
+                            "Limit": 20,
+                        },
+                        "testsHypotheses": ["pool_lifecycle_failure"],
+                        "causalIntent": "trigger",
+                    }
+                ],
+            },
+        ]
+        service = _service(repositories)
+        state = cast(
+            Any,
+            {
+                "workflow_version": "evidence-driven-v4",
+                "graph_version": "aiops-diagnostic-v3",
+                "owner_user_id": task.owner_user_id,
+                "task_id": task.id,
+                "alert": {"service": "order-api"},
+                "public_hypotheses": [{"id": "pool_lifecycle_failure"}],
+                "decision_vocabulary": {"components": ["order-api"]},
+                "investigation_dispatches": dispatches,
+                "specialist_results": [
+                    diagnostics_module._specialist_result_payload(runtime_result),  # pyright: ignore[reportPrivateUsage]
+                    diagnostics_module._specialist_result_payload(log_result),  # pyright: ignore[reportPrivateUsage]
+                ],
+                "multi_model_reservation_base": 1,
+                "multi_model_reserved": 4,
+                "model_call_count": 5,
+                "started_at": now.isoformat(),
+                "soft_deadline_at": (now + timedelta(minutes=4)).isoformat(),
+                "hard_deadline_at": (now + timedelta(minutes=6)).isoformat(),
+                "plan_index": 0,
+                "replan_count": 0,
+                "max_replans": 1,
+            },
+        )
+
+        update = await service._evidence_aggregator(state)  # pyright: ignore[reportPrivateUsage]
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        checkpoints = await repositories.diagnostics.list_checkpoints(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    aggregation = cast(dict[str, object], update["investigation_aggregation"])
+    assert aggregation["completedPacketCount"] == 1
+    assert aggregation["failedPacketCount"] == 1
+    assert aggregation["missingDomains"] == ["log"]
+    assert aggregation["fallbackPermitted"] is False
+    assert update["model_call_count"] == 3
+    assert update["evidence_ids"] == [evidence.id]
+    assert service._route_after_aggregation(cast(Any, update)) == "fact_adapter"  # pyright: ignore[reportPrivateUsage]
+    persisted_text = json.dumps(
+        {
+            "steps": [item.payload for item in steps],
+            "checkpoints": [item.checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    ).casefold()
+    assert "runtime" in persisted_text
+    assert "evidence-specialist-runtime" in persisted_text
+    assert "modelcallcount" in persisted_text
+    assert not any(
+        forbidden in persisted_text
+        for forbidden in ("rawresponse", "privatereasoning", "credential")
+    )
     assert service._route_after_aggregation(  # pyright: ignore[reportPrivateUsage]
         cast(
             Any,
@@ -485,6 +957,17 @@ async def test_strategy_starts_single_then_escalates_after_stagnation(
         escalated = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
             cast(Any, {**state, "plan_index": 2})
         )
+        exhausted = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    **state,
+                    "plan_index": 2,
+                    "model_call_count": 6,
+                    "investigation_strategy_mode": "multi",
+                },
+            )
+        )
         second_wave = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
             cast(Any, {**state, "plan_index": 2, "investigation_wave": 2})
         )
@@ -501,6 +984,14 @@ async def test_strategy_starts_single_then_escalates_after_stagnation(
         item["investigatorType"]
         for item in cast(list[dict[str, object]], escalated["investigation_dispatches"])
     ] == ["runtime", "log"]
+    assert escalated["multi_model_reservation_base"] == 0
+    assert escalated["multi_model_reserved"] == 4
+    assert escalated["model_call_count"] == 4
+    assert cast(dict[str, object], exhausted["investigation_route"])["strategy"] == (
+        "multi_agent_unavailable"
+    )
+    assert exhausted["investigation_dispatches"] == []
+    assert service._route_after_strategy(cast(Any, exhausted)) == "manual_review"  # pyright: ignore[reportPrivateUsage]
     assert cast(dict[str, object], second_wave["investigation_route"])["strategy"] == (
         "single_agent"
     )

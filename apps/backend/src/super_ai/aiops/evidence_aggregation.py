@@ -24,6 +24,7 @@ from super_ai.aiops.specialists import (
     SpecialistRole,
 )
 from super_ai.memory.repositories import (
+    AgentToolCallAuditRecord,
     DiagnosticEvidenceRecord,
     ToolCallAuditRecord,
 )
@@ -101,7 +102,9 @@ class SpecialistAggregationContext:
     graph_version: str
     assignments: Mapping[SpecialistRole, SpecialistAssignment]
     evidence_by_id: Mapping[str, DiagnosticEvidenceRecord]
-    completed_tool_audit_by_id: Mapping[str, ToolCallAuditRecord]
+    completed_tool_audit_by_id: Mapping[
+        str, ToolCallAuditRecord | AgentToolCallAuditRecord
+    ]
 
     def __post_init__(self) -> None:
         if not self.owner_user_id.strip() or not self.task_id.strip():
@@ -319,7 +322,7 @@ def _specialist_evidence_is_valid(
         return False
     if (
         audit.owner_user_id != context.owner_user_id
-        or audit.task_id != context.task_id
+        or _tool_audit_task_id(audit) != context.task_id
         or audit.status != "completed"
         or audit.completed_at is None
     ):
@@ -328,6 +331,14 @@ def _specialist_evidence_is_valid(
         return False
     capability_role = context.assignments.get(role)
     return capability_role is assignment
+
+
+def _tool_audit_task_id(
+    audit: ToolCallAuditRecord | AgentToolCallAuditRecord,
+) -> str | None:
+    if isinstance(audit, ToolCallAuditRecord):
+        return audit.task_id
+    return audit.diagnostic_task_id
 
 
 def _specialist_claim_fingerprint(role: SpecialistRole, claim: EvidenceClaim) -> str:

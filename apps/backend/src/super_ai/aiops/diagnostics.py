@@ -54,7 +54,9 @@ from super_ai.aiops.decision_validation import (
 )
 from super_ai.aiops.evidence_aggregation import (
     AggregationContext,
+    SpecialistAggregationContext,
     aggregate_evidence_packets,
+    aggregate_specialist_results,
 )
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
@@ -64,6 +66,7 @@ from super_ai.aiops.investigation import (
     EvidencePacket,
     InvestigationRouterPolicy,
     InvestigationRoutingInput,
+    JsonValue,
     StrategyMode,
     build_investigator_capabilities,
     normalize_plan_source_domains,
@@ -74,6 +77,7 @@ from super_ai.aiops.investigation_runtime import (
     DiagnosticToolExecutionResult,
     InvestigationDispatch,
     PreparedDiagnosticToolExecution,
+    SpecialistExecutor,
     build_investigation_dispatches,
     execute_diagnostic_tool,
 )
@@ -101,6 +105,12 @@ from super_ai.aiops.reasoning import (
     parse_recovery_plan,
     parse_root_cause_validation,
     project_hypothesis_assessment,
+)
+from super_ai.aiops.specialists import (
+    PublicAssessmentSignal,
+    SharedRunContext,
+    SpecialistAssignment,
+    SpecialistResult,
 )
 from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
 from super_ai.aiops.validator_routing import (
@@ -154,6 +164,12 @@ class AiopsDiagnosticState(TypedDict, total=False):
     investigation_dispatches: list[JsonDict]
     investigation_dispatch: JsonDict
     investigation_packets: Annotated[list[JsonDict], add]
+    shared_run_context: SharedRunContext
+    specialist_assignment: SpecialistAssignment
+    specialist_results: Annotated[list[JsonDict], add]
+    specialist_tool_definitions: tuple[McpToolDefinition, ...]
+    multi_model_reservation_base: int
+    multi_model_reserved: int
     aggregated_facts: list[JsonDict]
     investigation_aggregation: JsonDict
     investigation_wave: int
@@ -1979,8 +1995,11 @@ class AiopsDiagnosticService:
             "investigation_route": {},
             "investigation_dispatches": [],
             "investigation_packets": [],
+            "specialist_results": [],
             "investigation_aggregation": {},
             "investigation_wave": 0,
+            "multi_model_reservation_base": 0,
+            "multi_model_reserved": 0,
             "plan_index": 0,
             "replan_count": 0,
             "max_replans": 1 if workflow_version == "evidence-driven-v4" else 2,
@@ -2834,12 +2853,25 @@ class AiopsDiagnosticService:
             policy=self._investigation_router_policy,
             mode=effective_mode,
         )
+        parent_model_count = int(state.get("model_call_count") or 0)
+        reserve_required = route.strategy == "multi_agent" or mode == "multi"
+        reservation_available = routing_input.remaining_model_calls >= 4
+        effective_strategy = (
+            "multi_agent_unavailable"
+            if reserve_required
+            and (not reservation_available or route.strategy != "multi_agent")
+            else route.strategy
+        )
         dispatches = build_investigation_dispatches(
             task_id=str(state["task_id"]),
             owner_user_id=str(state["owner_user_id"]),
             plan=routing_plan,
             capabilities=capabilities,
-            selected_investigators=route.selected_investigators,
+            selected_investigators=(
+                ()
+                if effective_strategy == "multi_agent_unavailable"
+                else route.selected_investigators
+            ),
             policy_version=route.policy_version,
             evidence_snapshot_hash=evidence_snapshot_hash,
             existing_evidence_ids=evidence_ids,
@@ -2848,12 +2880,19 @@ class AiopsDiagnosticService:
             missing_causal_roles=tuple(routing_input.missing_causal_roles),
         )
         route_payload: JsonDict = {
-            "strategy": route.strategy,
+            "strategy": effective_strategy,
             "score": route.score,
             "escalationWatch": route.escalation_watch,
             "selectedInvestigators": list(route.selected_investigators),
             "rejectedInvestigators": dict(route.rejected_investigators),
-            "reasonCodes": list(route.reason_codes),
+            "reasonCodes": [
+                *route.reason_codes,
+                *(
+                    ("multi_model_reservation_unavailable",)
+                    if effective_strategy == "multi_agent_unavailable"
+                    else ()
+                ),
+            ],
             "policyVersion": route.policy_version,
             "mode": mode,
             "wave": routing_input.wave,
@@ -2865,6 +2904,8 @@ class AiopsDiagnosticService:
             "route": route_payload,
             "dispatches": dispatch_payloads,
         }
+        if effective_strategy == "multi_agent":
+            step_payload["modelCallCount"] = parent_model_count + 4
         await self._create_step(
             owner_user_id=str(state["owner_user_id"]),
             task_id=str(state["task_id"]),
@@ -2873,12 +2914,12 @@ class AiopsDiagnosticService:
             payload=step_payload,
         )
         await self._save_checkpoint(state, "strategy_router", step_payload)
-        return {
+        update: dict[str, object] = {
             "investigation_route": route_payload,
             "investigation_dispatches": dispatch_payloads,
             "investigation_wave": (
                 routing_input.wave + 1
-                if route.strategy == "multi_agent"
+                if effective_strategy == "multi_agent"
                 else routing_input.wave
             ),
             "events": [
@@ -2890,6 +2931,15 @@ class AiopsDiagnosticService:
                 )
             ],
         }
+        if effective_strategy == "multi_agent":
+            update.update(
+                {
+                    "multi_model_reservation_base": parent_model_count,
+                    "multi_model_reserved": 4,
+                    "model_call_count": parent_model_count + 4,
+                }
+            )
+        return update
 
     def _route_after_strategy(
         self, state: AiopsDiagnosticState
@@ -2897,6 +2947,8 @@ class AiopsDiagnosticService:
         strategy = _json_dict(state.get("investigation_route")).get("strategy")
         if strategy == "deterministic_fast_path":
             return "sufficiency_gate"
+        if strategy == "multi_agent_unavailable":
+            return "manual_review"
         if strategy != "multi_agent":
             return "executor"
         dispatches = sorted(
@@ -2906,89 +2958,165 @@ class AiopsDiagnosticService:
                 str(item.get("dispatchId") or ""),
             ),
         )
+        try:
+            shared_context, assignments = _specialist_inputs_from_dispatches(
+                state,
+                dispatches,
+            )
+        except ValueError:
+            return "manual_review"
+        tool_definitions = tuple(state.get("tool_definitions") or ())
         sends: list[Send] = []
-        for dispatch in dispatches:
-            branch_state = dict(state)
-            branch_state["investigation_dispatch"] = dispatch
-            branch_state["investigation_packets"] = []
+        for assignment in assignments:
+            branch_state: AiopsDiagnosticState = {
+                "owner_user_id": shared_context.owner_user_id,
+                "task_id": shared_context.task_id,
+                "workflow_version": str(
+                    state.get("workflow_version") or "evidence-driven-v4"
+                ),
+                "graph_version": shared_context.graph_version,
+                "query": str(state.get("query") or "Investigate public evidence."),
+                "accessible_knowledge_base_ids": tuple(
+                    state.get("accessible_knowledge_base_ids") or ()
+                ),
+                "started_at": str(state.get("started_at") or ""),
+                "soft_deadline_at": shared_context.global_soft_deadline_at.isoformat(),
+                "hard_deadline_at": shared_context.global_hard_deadline_at.isoformat(),
+                "shared_run_context": shared_context,
+                "specialist_assignment": assignment,
+                "specialist_results": [],
+                "specialist_tool_definitions": tuple(
+                    item for item in tool_definitions if item.name in assignment.allowed_tools
+                ),
+            }
             sends.append(Send("investigator_dispatch", branch_state))
         return sends or "executor"
 
     async def _investigator_dispatch(
         self, state: AiopsDiagnosticState
     ) -> dict[str, object]:
-        dispatch = _json_dict(state.get("investigation_dispatch"))
-        steps = _json_list(dispatch.get("steps"))
-        claims: list[EvidenceClaim] = []
-        tool_call_ids: list[str] = []
-        branch_events: list[dict[str, object]] = []
-        failed = False
-        for step in steps:
-            local_state = cast(
-                AiopsDiagnosticState,
-                {
-                    **state,
-                    "plan": [step],
-                    "plan_index": 0,
-                    "executor_attempt_count": 0,
-                    "executed_step_fingerprints": [],
-                },
+        context = state.get("shared_run_context")
+        assignment = state.get("specialist_assignment")
+        if not isinstance(context, SharedRunContext) or not isinstance(
+            assignment, SpecialistAssignment
+        ):
+            raise ValueError("Specialist branch input is invalid.")
+        if _now() >= min(context.global_soft_deadline_at, assignment.soft_deadline_at):
+            result = SpecialistResult.create(
+                role=assignment.role,
+                terminal_status="timeout",
+                tested_hypotheses=assignment.hypotheses_to_test,
+                evidence_ids=(),
+                fact_candidates=(),
+                proposed_assessments=(),
+                unresolved_questions=("specialist_soft_deadline_expired",),
+                completed_steps=(),
+                model_call_count=0,
+                duration_ms=0,
             )
-            update = await self._executor(local_state)
-            branch_events.extend(
-                cast(list[dict[str, object]], update.get("events") or [])
-            )
-            evidence_id = str(update.get("current_evidence_id") or "")
-            tool_name = str(step.get("tool") or "unknown")
-            fingerprint = _step_fingerprint(step)
-            if update.get("execution_failed") is True or not evidence_id:
-                failed = True
-                continue
-            tool_call_ids.append(
-                _stable_public_id(
-                    "tool",
-                    str(state["task_id"]),
-                    str(step.get("id") or "step_1"),
-                    tool_name,
-                    fingerprint,
-                )
-            )
-            causal_value = step.get("causalIntent")
-            claims.append(
-                EvidenceClaim(
-                    claim_id=f"{tool_name}.observation",
-                    value=cast(Any, update.get("current_tool_output")),
-                    quality="direct",
-                    causal_role=(
-                        str(causal_value)
-                        if causal_value in {"trigger", "mechanism", "impact"}
-                        else None
-                    ),
-                    supports=(),
-                    refutes=(),
-                    evidence_ids=(evidence_id,),
-                    target_component=str(
-                        step.get("targetComponent") or tool_name
-                    ),
-                    observed_at=_now(),
-                    time_scope="incident_window",
-                )
-            )
-        packet = EvidencePacket(
-            task_id=str(state["task_id"]),
-            owner_user_id=str(state["owner_user_id"]),
-            dispatch_id=str(dispatch.get("dispatchId") or "dispatch_invalid"),
-            investigator_type=cast(Any, dispatch.get("investigatorType")),
-            status=("inconclusive" if claims and failed else "completed" if claims else "failed"),
-            claims=tuple(claims),
-            limitations=(("investigator_execution_failed",) if failed else ()),
-            tool_call_ids=tuple(tool_call_ids),
-            model_calls_used=0,
-        )
+            return {
+                "specialist_results": [_specialist_result_payload(result)],
+                "events": [_specialist_event(result, assignment)],
+            }
+        result = await self._execute_specialist(state, context, assignment)
         return {
-            "investigation_packets": [_evidence_packet_payload(packet)],
-            "events": branch_events,
+            "specialist_results": [_specialist_result_payload(result)],
+            "events": [_specialist_event(result, assignment)],
         }
+
+    async def _execute_specialist(
+        self,
+        state: AiopsDiagnosticState,
+        context: SharedRunContext,
+        assignment: SpecialistAssignment,
+    ) -> SpecialistResult:
+        runtime_provider = self._repositories.aiops_runtime
+        if runtime_provider is None:
+            return _failed_specialist_result(
+                assignment,
+                "specialist_runtime_unavailable",
+            )
+        try:
+            model = self._llm_provider.create_chat_model()
+        except Exception:
+            return _failed_specialist_result(
+                assignment,
+                "specialist_model_unavailable",
+            )
+        execution_repository = runtime_provider.execution_repository(
+            owner_user_id=context.owner_user_id,
+            task_id=context.task_id,
+            graph_version=context.graph_version,
+        )
+        service = self
+
+        class _SpecialistToolRuntime:
+            async def execute_prepared(
+                self,
+                request: DiagnosticToolExecutionRequest,
+                prepared: PreparedDiagnosticToolExecution,
+            ) -> DiagnosticToolExecutionResult:
+                del self
+                local_state = cast(
+                    AiopsDiagnosticState,
+                    {
+                        "owner_user_id": context.owner_user_id,
+                        "task_id": context.task_id,
+                        "workflow_version": "evidence-driven-v4",
+                        "graph_version": context.graph_version,
+                        "query": str(
+                            state.get("query") or "Investigate public evidence."
+                        ),
+                        "accessible_knowledge_base_ids": tuple(
+                            state.get("accessible_knowledge_base_ids") or ()
+                        ),
+                        "tool_definitions": tuple(
+                            state.get("specialist_tool_definitions") or ()
+                        ),
+                        "started_at": str(state.get("started_at") or _now().isoformat()),
+                        "soft_deadline_at": context.global_soft_deadline_at.isoformat(),
+                        "hard_deadline_at": context.global_hard_deadline_at.isoformat(),
+                        "plan": [dict(request.plan_step)],
+                        "plan_index": 0,
+                        "executor_attempt_count": 0,
+                        "max_total_steps": 1,
+                        "executed_step_fingerprints": [],
+                        "model_call_count": 0,
+                        "replan_count": 0,
+                        "max_replans": 0,
+                    },
+                )
+                update = await service._executor(local_state)
+                evidence_id = str(update.get("current_evidence_id") or "")
+                status: Literal["completed", "failed"] = (
+                    "completed"
+                    if evidence_id == prepared.evidence_id
+                    and update.get("execution_failed") is not True
+                    else "failed"
+                )
+                return DiagnosticToolExecutionResult(
+                    status=status,
+                    evidence_id=prepared.evidence_id,
+                    tool_call_id=prepared.tool_call_id,
+                    safe_output=_safe_value(update.get("current_tool_output")),
+                    safe_summary=str(
+                        update.get("current_evidence_summary")
+                        or "Specialist diagnostic tool did not complete."
+                    ),
+                    events=tuple(
+                        cast(list[dict[str, object]], update.get("events") or [])
+                    ),
+                )
+
+        executor = SpecialistExecutor(
+            runtime=_SpecialistToolRuntime(),
+            model=model,
+            execution_coordinator=ExecutionCoordinator(
+                execution_repository,
+                worker_id=f"specialist-{assignment.role}-{id(self)}",
+            ),
+        )
+        return await executor.execute(context, assignment)
 
     async def _evidence_aggregator(
         self, state: AiopsDiagnosticState
@@ -3015,6 +3143,12 @@ class AiopsDiagnosticService:
                     )
                 ],
             }
+        specialist_payloads = _json_list(state.get("specialist_results"))
+        if specialist_payloads:
+            return await self._aggregate_specialist_results(
+                state,
+                specialist_payloads,
+            )
         packets = tuple(
             _evidence_packet_from_payload(item)
             for item in _json_list(state.get("investigation_packets"))
@@ -3155,14 +3289,144 @@ class AiopsDiagnosticService:
             ],
         }
 
+    async def _aggregate_specialist_results(
+        self,
+        state: AiopsDiagnosticState,
+        payloads: Sequence[Mapping[str, object]],
+    ) -> dict[str, object]:
+        results = tuple(_specialist_result_from_payload(item) for item in payloads)
+        dispatches = sorted(
+            _json_list(state.get("investigation_dispatches")),
+            key=lambda item: str(item.get("investigatorType") or ""),
+        )
+        _, assignments = _specialist_inputs_from_dispatches(state, dispatches)
+        assignment_by_role = {item.role: item for item in assignments}
+        evidence_records = await self._repositories.diagnostics.list_evidence(
+            owner_user_id=str(state["owner_user_id"]),
+            task_id=str(state["task_id"]),
+        )
+        audit_repository = self._repositories.tool_call_audits
+        audits = (
+            await audit_repository.list_for_diagnostic_task(
+                owner_user_id=str(state["owner_user_id"]),
+                diagnostic_task_id=str(state["task_id"]),
+            )
+            if audit_repository is not None
+            else []
+        )
+        aggregated = aggregate_specialist_results(
+            results,
+            context=SpecialistAggregationContext(
+                owner_user_id=str(state["owner_user_id"]),
+                task_id=str(state["task_id"]),
+                graph_version=str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
+                assignments=cast(Any, assignment_by_role),
+                evidence_by_id={item.id: item for item in evidence_records},
+                completed_tool_audit_by_id={item.id: item for item in audits},
+            ),
+        )
+        facts: list[JsonDict] = []
+        for claim in aggregated.normalized_facts:
+            for evidence_id in claim.evidence_ids:
+                facts.append(
+                    {
+                        "key": claim.claim_id,
+                        "value": _safe_value(claim.value),
+                        "evidenceId": evidence_id,
+                        "sourceTool": claim.claim_id.split(".", 1)[0],
+                        "quality": claim.quality,
+                        "public": True,
+                        "causalRole": claim.causal_role,
+                        "targetComponent": claim.target_component,
+                        "timeScope": claim.time_scope,
+                    }
+                )
+        completed_count = sum(
+            1
+            for result in results
+            if result.terminal_status in {"completed", "inconclusive"}
+            and result.evidence_ids
+        )
+        failed_count = len(results) - completed_count
+        base_model_count = int(state.get("multi_model_reservation_base") or 0)
+        used_specialist_calls = sum(
+            result.model_call_count for result in {item.role: item for item in results}.values()
+        )
+        settled_model_count = min(8, base_model_count + used_specialist_calls)
+        aggregation_payload: JsonDict = {
+            "completedPacketCount": completed_count,
+            "failedPacketCount": failed_count,
+            "specialistStatuses": dict(aggregated.specialist_statuses),
+            "missingDomains": list(aggregated.missing_domains),
+            "conflictCount": len(aggregated.conflicts),
+            "sourceGroupCount": len(aggregated.source_groups),
+            "budgetUsage": dict(aggregated.budget_usage),
+            "aggregationChecksum": aggregated.aggregation_checksum,
+            "fallbackPermitted": False,
+            "fallbackReason": (
+                aggregated.terminal_failure_category
+                or ("partial_specialist_result" if failed_count else None)
+            ),
+            "terminalFailureCategory": aggregated.terminal_failure_category,
+        }
+        audit_payload: JsonDict = {
+            **aggregation_payload,
+            "roles": [
+                {
+                    "role": result.role,
+                    "terminalStatus": result.terminal_status,
+                    "evidenceIds": list(result.evidence_ids),
+                    "modelCallCount": result.model_call_count,
+                    "durationMs": result.duration_ms,
+                }
+                for result in sorted(results, key=lambda item: item.role)
+            ],
+            "modelCallCount": settled_model_count,
+        }
+        await self._create_step(
+            owner_user_id=str(state["owner_user_id"]),
+            task_id=str(state["task_id"]),
+            phase="evidence_aggregator",
+            status=("failed" if completed_count == 0 else "completed"),
+            payload=audit_payload,
+        )
+        await self._save_checkpoint(state, "evidence_aggregator", audit_payload)
+        return {
+            "aggregated_facts": facts,
+            "investigation_aggregation": aggregation_payload,
+            "evidence_ids": list(aggregated.evidence),
+            "model_call_count": settled_model_count,
+            "events": [
+                _task_status_event(
+                    str(state["task_id"]),
+                    "running",
+                    "Evidence Aggregator validated bounded Specialist results.",
+                    55,
+                ),
+                _sse_event(
+                    "aiops.specialist_aggregation",
+                    {
+                        "aggregation": {
+                            "specialistStatuses": dict(
+                                aggregated.specialist_statuses
+                            ),
+                            "missingDomains": list(aggregated.missing_domains),
+                            "conflictCount": len(aggregated.conflicts),
+                            "sourceGroupCount": len(aggregated.source_groups),
+                            "modelCallCount": settled_model_count,
+                            "aggregationChecksum": aggregated.aggregation_checksum,
+                        }
+                    },
+                ),
+            ],
+        }
+
     def _route_after_aggregation(self, state: AiopsDiagnosticState) -> str:
         aggregation = _json_dict(state.get("investigation_aggregation"))
         if aggregation.get("lateResultIgnored") is True:
             return "fact_adapter"
         if int(cast(Any, aggregation.get("completedPacketCount") or 0)) > 0:
             return "fact_adapter"
-        if aggregation.get("fallbackPermitted") is True:
-            return "executor"
         return "manual_review"
 
     async def _executor(self, state: AiopsDiagnosticState) -> dict[str, object]:
@@ -5746,7 +6010,14 @@ class AiopsDiagnosticService:
     def _route_after_deterministic_validation_v4(
         self, state: AiopsDiagnosticState
     ) -> str:
-        return str(state.get("next_route") or "manual_review")
+        next_route = str(state.get("next_route") or "manual_review")
+        missing_domains = _json_dict(
+            state.get("investigation_aggregation")
+        ).get("missingDomains")
+        if next_route == "recovery_planner" and isinstance(missing_domains, list):
+            if missing_domains:
+                return "manual_review"
+        return next_route
 
     def _route_after_validator_router_v4(self, state: AiopsDiagnosticState) -> str:
         return str(state.get("next_route") or "policy_gate")
@@ -6007,6 +6278,254 @@ class AiopsDiagnosticService:
         )
 
 
+def _specialist_inputs_from_dispatches(
+    state: AiopsDiagnosticState,
+    dispatches: Sequence[Mapping[str, object]],
+) -> tuple[SharedRunContext, tuple[SpecialistAssignment, ...]]:
+    by_role = {
+        str(dispatch.get("investigatorType") or ""): dispatch
+        for dispatch in dispatches
+    }
+    if set(by_role) != {"runtime", "log"}:
+        raise ValueError("Multi Specialist routing requires Runtime and Log roles.")
+    soft_deadline = datetime.fromisoformat(str(state.get("soft_deadline_at") or ""))
+    hard_deadline = datetime.fromisoformat(str(state.get("hard_deadline_at") or ""))
+    assignments: list[SpecialistAssignment] = []
+    allowed_by_role: dict[Any, frozenset[str]] = {}
+    bindings_by_role: dict[Any, Mapping[str, Mapping[str, JsonValue]]] = {}
+    for role in ("runtime", "log"):
+        dispatch = by_role[role]
+        allowed_tools = frozenset(
+            str(item) for item in cast(list[object], dispatch.get("allowedTools") or [])
+        )
+        steps = _json_list(dispatch.get("steps"))
+        bindings: dict[str, Mapping[str, JsonValue]] = {}
+        causal_roles: list[Any] = []
+        for step in steps:
+            tool = str(step.get("tool") or "")
+            if tool in allowed_tools:
+                arguments = cast(
+                    Mapping[str, JsonValue],
+                    _json_dict(step.get("arguments")),
+                )
+                existing = bindings.get(tool)
+                if existing is not None and dict(existing) != dict(arguments):
+                    raise ValueError("Specialist tool has conflicting trusted bindings.")
+                bindings[tool] = arguments
+            causal_role = step.get("causalIntent")
+            if causal_role in {"trigger", "mechanism", "impact"}:
+                causal_roles.append(causal_role)
+        if set(bindings) != set(allowed_tools):
+            raise ValueError("Specialist assignment is missing trusted tool bindings.")
+        missing_roles = [
+            item
+            for item in cast(list[object], dispatch.get("missingCausalRoles") or [])
+            if item in {"trigger", "mechanism", "impact"}
+        ]
+        required_roles = tuple(dict.fromkeys([*missing_roles, *causal_roles]))
+        if not required_roles:
+            required_roles = ("trigger", "mechanism", "impact")
+        assignment = SpecialistAssignment(
+            role=cast(Any, role),
+            objective=str(
+                dispatch.get("objective")
+                or f"Investigate public {role} evidence."
+            ),
+            hypotheses_to_test=tuple(
+                str(item)
+                for item in cast(
+                    list[object], dispatch.get("testsHypotheses") or []
+                )
+                if str(item)
+            ),
+            required_causal_roles=cast(Any, required_roles),
+            allowed_tools=allowed_tools,
+            trusted_arguments_by_tool=bindings,
+            maximum_tool_steps=min(3, max(1, len(steps))),
+            model_call_budget=2,
+            soft_deadline_at=soft_deadline,
+            hard_deadline_at=hard_deadline,
+        )
+        assignments.append(assignment)
+        allowed_by_role[role] = allowed_tools
+        bindings_by_role[role] = bindings
+    hypotheses = tuple(
+        str(item.get("id"))
+        for item in _json_list(state.get("public_hypotheses"))
+        if item.get("id")
+    )
+    context = SharedRunContext(
+        owner_user_id=str(state["owner_user_id"]),
+        task_id=str(state["task_id"]),
+        graph_version=str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
+        public_incident_input=cast(
+            Mapping[str, JsonValue],
+            _json_dict(state.get("alert")),
+        ),
+        public_hypotheses=hypotheses,
+        decision_vocabulary=cast(
+            Mapping[str, JsonValue],
+            _json_dict(state.get("decision_vocabulary")),
+        ),
+        allowed_tools_by_specialist=cast(Any, allowed_by_role),
+        trusted_arguments_by_specialist=cast(Any, bindings_by_role),
+        global_soft_deadline_at=soft_deadline,
+        global_hard_deadline_at=hard_deadline,
+        global_model_budget=max(1, int(state.get("multi_model_reserved") or 4)),
+    )
+    return context, tuple(assignments)
+
+
+def _specialist_result_payload(result: SpecialistResult) -> JsonDict:
+    return {
+        "role": result.role,
+        "terminalStatus": result.terminal_status,
+        "testedHypotheses": list(result.tested_hypotheses),
+        "evidenceIds": list(result.evidence_ids),
+        "factCandidates": [
+            {
+                "claimId": claim.claim_id,
+                "value": _safe_value(claim.value),
+                "quality": claim.quality,
+                "causalRole": claim.causal_role,
+                "supports": list(claim.supports),
+                "refutes": list(claim.refutes),
+                "evidenceIds": list(claim.evidence_ids),
+                "targetComponent": claim.target_component,
+                "observedAt": claim.observed_at.isoformat() if claim.observed_at else None,
+                "timeScope": claim.time_scope,
+            }
+            for claim in result.fact_candidates
+        ],
+        "proposedAssessments": [
+            {
+                "hypothesisId": signal.hypothesis_id,
+                "disposition": signal.disposition,
+                "evidenceIds": list(signal.evidence_ids),
+                "summary": signal.summary,
+            }
+            for signal in result.proposed_assessments
+        ],
+        "unresolvedQuestions": list(result.unresolved_questions),
+        "completedSteps": list(result.completed_steps),
+        "modelCallCount": result.model_call_count,
+        "durationMs": result.duration_ms,
+        "resultChecksum": result.result_checksum,
+    }
+
+
+def _specialist_result_from_payload(
+    payload: Mapping[str, object],
+) -> SpecialistResult:
+    facts: list[EvidenceClaim] = []
+    for item in _json_list(payload.get("factCandidates")):
+        observed_at = item.get("observedAt")
+        facts.append(
+            EvidenceClaim(
+                claim_id=str(item.get("claimId") or ""),
+                value=cast(JsonValue, item.get("value")),
+                quality=cast(Any, item.get("quality")),
+                causal_role=cast(Any, item.get("causalRole")),
+                supports=tuple(
+                    str(value)
+                    for value in cast(list[object], item.get("supports") or [])
+                ),
+                refutes=tuple(
+                    str(value)
+                    for value in cast(list[object], item.get("refutes") or [])
+                ),
+                evidence_ids=tuple(
+                    str(value)
+                    for value in cast(list[object], item.get("evidenceIds") or [])
+                ),
+                target_component=str(item.get("targetComponent") or ""),
+                observed_at=(
+                    datetime.fromisoformat(str(observed_at))
+                    if observed_at is not None
+                    else None
+                ),
+                time_scope=cast(Any, item.get("timeScope")),
+            )
+        )
+    signals = tuple(
+        PublicAssessmentSignal(
+            hypothesis_id=str(item.get("hypothesisId") or ""),
+            disposition=cast(Any, item.get("disposition")),
+            evidence_ids=tuple(
+                str(value)
+                for value in cast(list[object], item.get("evidenceIds") or [])
+            ),
+            summary=str(item.get("summary") or ""),
+        )
+        for item in _json_list(payload.get("proposedAssessments"))
+    )
+    return SpecialistResult(
+        role=cast(Any, payload.get("role")),
+        terminal_status=cast(Any, payload.get("terminalStatus")),
+        tested_hypotheses=tuple(
+            str(value)
+            for value in cast(list[object], payload.get("testedHypotheses") or [])
+        ),
+        evidence_ids=tuple(
+            str(value)
+            for value in cast(list[object], payload.get("evidenceIds") or [])
+        ),
+        fact_candidates=tuple(facts),
+        proposed_assessments=signals,
+        unresolved_questions=tuple(
+            str(value)
+            for value in cast(
+                list[object], payload.get("unresolvedQuestions") or []
+            )
+        ),
+        completed_steps=tuple(
+            str(value)
+            for value in cast(list[object], payload.get("completedSteps") or [])
+        ),
+        model_call_count=int(cast(Any, payload.get("modelCallCount") or 0)),
+        duration_ms=int(cast(Any, payload.get("durationMs") or 0)),
+        result_checksum=str(payload.get("resultChecksum") or ""),
+    )
+
+
+def _failed_specialist_result(
+    assignment: SpecialistAssignment,
+    error_code: str,
+) -> SpecialistResult:
+    return SpecialistResult.create(
+        role=assignment.role,
+        terminal_status="failed",
+        tested_hypotheses=assignment.hypotheses_to_test,
+        evidence_ids=(),
+        fact_candidates=(),
+        proposed_assessments=(),
+        unresolved_questions=(error_code,),
+        completed_steps=(),
+        model_call_count=0,
+        duration_ms=0,
+    )
+
+
+def _specialist_event(
+    result: SpecialistResult,
+    assignment: SpecialistAssignment,
+) -> dict[str, object]:
+    return _sse_event(
+        "aiops.specialist",
+        {
+            "specialist": {
+                "role": result.role,
+                "terminalStatus": result.terminal_status,
+                "toolNames": sorted(assignment.allowed_tools),
+                "evidenceIds": list(result.evidence_ids),
+                "modelCallCount": result.model_call_count,
+                "durationMs": result.duration_ms,
+                "resultChecksum": result.result_checksum,
+            }
+        },
+    )
+
+
 def _investigation_dispatch_payload(dispatch: InvestigationDispatch) -> JsonDict:
     return {
         "taskId": dispatch.task_id,
@@ -6022,38 +6541,6 @@ def _investigation_dispatch_payload(dispatch: InvestigationDispatch) -> JsonDict
         "existingEvidenceIds": list(dispatch.existing_evidence_ids),
         "deadlineMs": dispatch.deadline_ms,
         "modelCallBudget": dispatch.model_call_budget,
-    }
-
-
-def _evidence_packet_payload(packet: EvidencePacket) -> JsonDict:
-    return {
-        "taskId": packet.task_id,
-        "ownerUserId": packet.owner_user_id,
-        "dispatchId": packet.dispatch_id,
-        "investigatorType": packet.investigator_type,
-        "status": packet.status,
-        "claims": [
-            {
-                "claimId": claim.claim_id,
-                "value": _safe_value(claim.value),
-                "quality": claim.quality,
-                "causalRole": claim.causal_role,
-                "supports": list(claim.supports),
-                "refutes": list(claim.refutes),
-                "evidenceIds": list(claim.evidence_ids),
-                "targetComponent": claim.target_component,
-                "observedAt": (
-                    claim.observed_at.isoformat()
-                    if claim.observed_at is not None
-                    else None
-                ),
-                "timeScope": claim.time_scope,
-            }
-            for claim in packet.claims
-        ],
-        "limitations": list(packet.limitations),
-        "toolCallIds": list(packet.tool_call_ids),
-        "modelCallsUsed": packet.model_calls_used,
     }
 
 
