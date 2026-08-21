@@ -10,7 +10,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from operator import add
 from time import monotonic
 from types import MappingProxyType
@@ -1825,7 +1825,15 @@ def _benchmark_strategy_mode(input_payload: Mapping[str, object]) -> StrategyMod
     if input_payload.get("benchmarkMode") not in {"snapshot", "live"}:
         return "auto"
     requested = input_payload.get("investigationStrategyMode")
-    if requested in {"auto", "single", "multi"}:
+    if requested == "multi":
+        if (
+            input_payload.get("benchmarkMode") == "live"
+            and input_payload.get("benchmarkScenarioId")
+            == "APY-LIVE-ORDER-POOL-LEAK-001"
+        ):
+            return "multi"
+        return "auto"
+    if requested in {"auto", "single"}:
         return cast(StrategyMode, requested)
     return "auto"
 
@@ -2802,6 +2810,13 @@ class AiopsDiagnosticService:
                     ),
                 ),
             )
+        missing_causal_roles = frozenset(
+            {"trigger", "mechanism", "impact"} - causal_roles
+        )
+        decision_ready = (
+            _json_dict(state.get("evidence_sufficiency")).get("status")
+            == "sufficient"
+        )
         routing_input = InvestigationRoutingInput(
             required_domains=required_domains,
             unresolved_hypothesis_count=sum(
@@ -2819,18 +2834,13 @@ class AiopsDiagnosticService:
                     }
                 ),
             ),
-            missing_causal_roles=frozenset(
-                {"trigger", "mechanism", "impact"} - causal_roles
-            ),
+            missing_causal_roles=missing_causal_roles,
             high_quality_conflict=any(
                 item.get("hasHighQualityConflict") is True for item in assessments
             ),
             severity=str(_json_dict(state.get("alert")).get("severity") or "warning"),
             trusted_pattern_matched=state.get("root_cause_decision") is not None,
-            decision_ready=(
-                _json_dict(state.get("evidence_sufficiency")).get("status")
-                == "sufficient"
-            ),
+            decision_ready=decision_ready,
             valid_tool_calls_without_gain=min(plan_index, 2),
             knowledge_hit=bool(state.get("sop_hits")),
             remaining_time_ms=remaining_time_ms,
@@ -2838,20 +2848,20 @@ class AiopsDiagnosticService:
             completed_dispatch_keys=frozenset(),
             evidence_snapshot_hash=evidence_snapshot_hash,
             wave=int(state.get("investigation_wave") or 0),
+            cross_source_temporal_chain_required=(
+                {"runtime", "log"}.issubset(required_domains)
+                and bool(missing_causal_roles)
+            ),
+            single_evidence_domain_sufficient=(
+                decision_ready and len(required_domains) <= 1
+            ),
         )
         mode = cast(StrategyMode, state.get("investigation_strategy_mode") or "auto")
-        effective_mode: StrategyMode = (
-            "single"
-            if mode == "auto"
-            and plan_index
-            < self._investigation_router_policy.single_agent_max_initial_steps
-            else mode
-        )
         route = route_investigation(
             routing_input,
             capabilities=capabilities,
             policy=self._investigation_router_policy,
-            mode=effective_mode,
+            mode=mode,
         )
         parent_model_count = int(state.get("model_call_count") or 0)
         reserve_required = route.strategy == "multi_agent" or mode == "multi"
@@ -2881,6 +2891,9 @@ class AiopsDiagnosticService:
         )
         route_payload: JsonDict = {
             "strategy": effective_strategy,
+            "requestedStrategy": route.requested_strategy,
+            "effectiveStrategy": effective_strategy,
+            "releaseMode": route.release_mode,
             "score": route.score,
             "escalationWatch": route.escalation_watch,
             "selectedInvestigators": list(route.selected_investigators),
@@ -2893,11 +2906,25 @@ class AiopsDiagnosticService:
                     else ()
                 ),
             ],
+            "matchedFeatures": list(route.matched_features),
+            "rejectedFeatures": list(route.rejected_features),
+            "downgradeReason": (
+                "multi_model_reservation_unavailable"
+                if effective_strategy == "multi_agent_unavailable"
+                else route.downgrade_reason
+            ),
             "policyVersion": route.policy_version,
             "mode": mode,
             "wave": routing_input.wave,
         }
         dispatch_payloads = [_investigation_dispatch_payload(item) for item in dispatches]
+        for dispatch_payload in dispatch_payloads:
+            dispatch_payload["specialistSoftTimeoutMs"] = (
+                self._investigation_router_policy.specialist_soft_timeout_ms
+            )
+            dispatch_payload["specialistHardTimeoutMs"] = (
+                self._investigation_router_policy.specialist_hard_timeout_ms
+            )
         step_payload: JsonDict = {
             "workflowVersion": str(state.get("workflow_version") or "evidence-driven-v4"),
             "graphVersion": str(state.get("graph_version") or AIOPS_GRAPH_VERSION),
@@ -6325,6 +6352,25 @@ def _specialist_inputs_from_dispatches(
         required_roles = tuple(dict.fromkeys([*missing_roles, *causal_roles]))
         if not required_roles:
             required_roles = ("trigger", "mechanism", "impact")
+        current_time = _now()
+        specialist_soft_deadline = min(
+            soft_deadline,
+            current_time
+            + timedelta(
+                milliseconds=int(
+                    cast(Any, dispatch.get("specialistSoftTimeoutMs") or 120_000)
+                )
+            ),
+        )
+        specialist_hard_deadline = min(
+            hard_deadline,
+            current_time
+            + timedelta(
+                milliseconds=int(
+                    cast(Any, dispatch.get("specialistHardTimeoutMs") or 180_000)
+                )
+            ),
+        )
         assignment = SpecialistAssignment(
             role=cast(Any, role),
             objective=str(
@@ -6343,8 +6389,8 @@ def _specialist_inputs_from_dispatches(
             trusted_arguments_by_tool=bindings,
             maximum_tool_steps=min(3, max(1, len(steps))),
             model_call_budget=2,
-            soft_deadline_at=soft_deadline,
-            hard_deadline_at=hard_deadline,
+            soft_deadline_at=specialist_soft_deadline,
+            hard_deadline_at=specialist_hard_deadline,
         )
         assignments.append(assignment)
         allowed_by_role[role] = allowed_tools

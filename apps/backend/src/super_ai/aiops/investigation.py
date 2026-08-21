@@ -16,6 +16,7 @@ InvestigationStrategy = Literal[
     "deterministic_fast_path", "single_agent", "multi_agent"
 ]
 StrategyMode = Literal["auto", "single", "multi"]
+InvestigationReleaseMode = Literal["forced_benchmark", "shadow", "single"]
 SourceDomain = Literal["runtime", "log"]
 PacketStatus = Literal["completed", "inconclusive", "failed", "timeout"]
 EvidenceQuality = Literal["direct", "context", "reference"]
@@ -224,13 +225,17 @@ class TrustedToolCapability:
 class InvestigationRouterPolicy:
     version: str = "investigation-router-v1"
     escalation_watch_threshold: int = 4
-    multi_agent_threshold: int = 6
+    multi_agent_threshold: int = 5
     single_agent_max_initial_steps: int = 2
     maximum_investigation_waves: int = 2
     aggregation_reserve_ms: int = 5_000
     investigator_deadline_ms: int = 30_000
     mandatory_model_call_reserve: int = 2
-    maximum_optional_model_calls_per_investigator: int = 1
+    maximum_optional_model_calls_per_investigator: int = 2
+    specialist_soft_timeout_ms: int = 120_000
+    specialist_hard_timeout_ms: int = 180_000
+    global_soft_timeout_ms: int = 240_000
+    global_hard_timeout_ms: int = 360_000
     multi_agent_enabled: bool = False
 
     def __post_init__(self) -> None:
@@ -245,9 +250,18 @@ class InvestigationRouterPolicy:
             self.investigator_deadline_ms,
             self.mandatory_model_call_reserve,
             self.maximum_optional_model_calls_per_investigator,
+            self.specialist_soft_timeout_ms,
+            self.specialist_hard_timeout_ms,
+            self.global_soft_timeout_ms,
+            self.global_hard_timeout_ms,
         )
         if any(value <= 0 for value in positive):
             raise ValueError("Investigation router policy values must be positive.")
+        if (
+            self.specialist_soft_timeout_ms >= self.specialist_hard_timeout_ms
+            or self.global_soft_timeout_ms >= self.global_hard_timeout_ms
+        ):
+            raise ValueError("Investigation router timeout values are invalid.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +281,8 @@ class InvestigationRoutingInput:
     completed_dispatch_keys: frozenset[str]
     evidence_snapshot_hash: str
     wave: int
+    cross_source_temporal_chain_required: bool = False
+    single_evidence_domain_sufficient: bool = False
 
     def __post_init__(self) -> None:
         if not self.required_domains <= set(_INVESTIGATOR_ORDER):
@@ -310,6 +326,12 @@ class InvestigationRoute:
     rejected_investigators: Mapping[InvestigatorType, str]
     reason_codes: tuple[str, ...]
     policy_version: str
+    requested_strategy: StrategyMode
+    effective_strategy: InvestigationStrategy
+    release_mode: InvestigationReleaseMode
+    matched_features: tuple[str, ...]
+    rejected_features: tuple[str, ...]
+    downgrade_reason: str | None
 
 
 _RUNTIME_SERVER_NAMES = frozenset(
@@ -498,7 +520,10 @@ def route_investigation(
     """Choose one auditable strategy from bounded public routing features."""
     if mode not in {"auto", "single", "multi"}:
         raise ValueError("Unknown investigation strategy mode.")
-    score, score_reasons = _routing_score(routing_input)
+    score, matched_features, rejected_features = _routing_score(
+        routing_input,
+        policy=policy,
+    )
     rejected = _base_rejected_investigators(capabilities)
 
     if routing_input.trusted_pattern_matched or routing_input.decision_ready:
@@ -515,8 +540,13 @@ def route_investigation(
             escalation_watch=False,
             selected=(),
             rejected=rejected,
-            reasons=(*score_reasons, reason),
+            reasons=(*matched_features, reason),
             policy=policy,
+            requested_strategy=mode,
+            release_mode="single",
+            matched_features=matched_features,
+            rejected_features=rejected_features,
+            downgrade_reason=reason,
         )
 
     candidates: list[InvestigatorType] = []
@@ -543,13 +573,13 @@ def route_investigation(
             continue
         candidates.append(domain)
 
-    if not policy.multi_agent_enabled:
+    if mode == "multi" and not policy.multi_agent_enabled:
         gate_reasons.append("multi_agent_disabled")
     if routing_input.wave >= policy.maximum_investigation_waves:
         gate_reasons.append("maximum_investigation_waves_reached")
-    minimum_time_ms = policy.investigator_deadline_ms + policy.aggregation_reserve_ms
+    minimum_time_ms = policy.specialist_soft_timeout_ms + policy.aggregation_reserve_ms
     if routing_input.remaining_time_ms < minimum_time_ms:
-        gate_reasons.append("insufficient_time_budget")
+        gate_reasons.append("insufficient_deadline")
     required_model_calls = policy.mandatory_model_call_reserve + (
         len(candidates) * policy.maximum_optional_model_calls_per_investigator
     )
@@ -562,9 +592,7 @@ def route_investigation(
     if len(candidates) < 2:
         gate_reasons.append("insufficient_parallel_sources")
 
-    should_attempt_multi = mode == "multi" or (
-        mode == "auto" and score >= policy.multi_agent_threshold
-    )
+    should_attempt_multi = mode == "multi"
     if mode == "single":
         gate_reasons.append("forced_single_strategy")
         should_attempt_multi = False
@@ -578,12 +606,23 @@ def route_investigation(
             escalation_watch=False,
             selected=tuple(candidates),
             rejected=rejected,
-            reasons=score_reasons,
+            reasons=matched_features,
             policy=policy,
+            requested_strategy=mode,
+            release_mode="forced_benchmark",
+            matched_features=matched_features,
+            rejected_features=rejected_features,
+            downgrade_reason=None,
         )
 
     for domain in candidates:
         rejected[domain] = "single_agent_selected"
+    shadow_candidate = (
+        mode == "auto"
+        and score >= policy.multi_agent_threshold
+        and not gate_reasons
+        and len(candidates) >= 2
+    )
     escalation_watch = (
         mode == "auto"
         and policy.escalation_watch_threshold
@@ -591,7 +630,13 @@ def route_investigation(
         < policy.multi_agent_threshold
         and not gate_reasons[:-1]
     )
-    reasons: tuple[str, ...] = (*score_reasons, *gate_reasons)
+    reasons: tuple[str, ...] = (*matched_features, *gate_reasons)
+    downgrade_reason: str | None = None
+    release_mode: InvestigationReleaseMode = "single"
+    if shadow_candidate:
+        reasons = (*reasons, "shadow_multi_candidate")
+        downgrade_reason = "shadow_multi_candidate"
+        release_mode = "shadow"
     if escalation_watch:
         reasons = (*reasons, "escalation_watch")
     return _route(
@@ -602,43 +647,61 @@ def route_investigation(
         rejected=rejected,
         reasons=reasons,
         policy=policy,
+        requested_strategy=mode,
+        release_mode=release_mode,
+        matched_features=matched_features,
+        rejected_features=rejected_features,
+        downgrade_reason=downgrade_reason,
     )
 
 
 def _routing_score(
     routing_input: InvestigationRoutingInput,
-) -> tuple[int, tuple[str, ...]]:
+    *,
+    policy: InvestigationRouterPolicy,
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     score = 0
-    reasons: list[str] = []
-    domain_count = len(routing_input.required_domains)
-    if domain_count >= 3:
+    matched: list[str] = []
+    features = (
+        "runtime_cls_required",
+        "three_public_candidates",
+        "component_mechanism_span",
+        "cross_source_temporal_chain_required",
+        "deterministic_decision_ready",
+        "single_evidence_domain_sufficient",
+        "insufficient_deadline",
+        "insufficient_model_budget",
+    )
+    if {"runtime", "log"}.issubset(routing_input.required_domains):
         score += 3
-        reasons.append("three_evidence_domains_required")
-    elif domain_count == 2:
-        score += 1
-        reasons.append("two_evidence_domains_required")
+        matched.append("runtime_cls_required")
+    if routing_input.unresolved_hypothesis_count >= 3:
+        score += 2
+        matched.append("three_public_candidates")
     if routing_input.causal_component_count >= 2:
         score += 2
-        reasons.append("cross_component_investigation")
-    if routing_input.unresolved_hypothesis_count >= 3:
-        score += 1
-        reasons.append("root_cause_ambiguity")
-    if routing_input.high_quality_conflict:
-        score += 3
-        reasons.append("high_quality_evidence_conflict")
-    if routing_input.severity.casefold() in {"p0", "p1", "critical"}:
+        matched.append("component_mechanism_span")
+    if routing_input.cross_source_temporal_chain_required:
         score += 2
-        reasons.append("high_severity_incident")
-    if len(routing_input.missing_causal_roles) >= 2:
-        score += 2
-        reasons.append("multiple_causal_roles_missing")
-    if routing_input.valid_tool_calls_without_gain >= 2:
-        score += 3
-        reasons.append("investigation_stagnated")
-    if not routing_input.knowledge_hit:
-        score += 1
-        reasons.append("knowledge_match_absent")
-    return score, tuple(reasons)
+        matched.append("cross_source_temporal_chain_required")
+    if routing_input.decision_ready:
+        score -= 3
+        matched.append("deterministic_decision_ready")
+    if routing_input.single_evidence_domain_sufficient:
+        score -= 3
+        matched.append("single_evidence_domain_sufficient")
+    minimum_time_ms = policy.specialist_soft_timeout_ms + policy.aggregation_reserve_ms
+    if routing_input.remaining_time_ms < minimum_time_ms:
+        score -= 4
+        matched.append("insufficient_deadline")
+    required_model_calls = policy.mandatory_model_call_reserve + (
+        2 * policy.maximum_optional_model_calls_per_investigator
+    )
+    if routing_input.remaining_model_calls < required_model_calls:
+        score -= 4
+        matched.append("insufficient_model_budget")
+    rejected = tuple(feature for feature in features if feature not in matched)
+    return score, tuple(matched), rejected
 
 
 def _base_rejected_investigators(
@@ -664,6 +727,11 @@ def _route(
     rejected: Mapping[InvestigatorType, str],
     reasons: tuple[str, ...],
     policy: InvestigationRouterPolicy,
+    requested_strategy: StrategyMode,
+    release_mode: InvestigationReleaseMode,
+    matched_features: tuple[str, ...],
+    rejected_features: tuple[str, ...],
+    downgrade_reason: str | None,
 ) -> InvestigationRoute:
     return InvestigationRoute(
         strategy=strategy,
@@ -673,6 +741,12 @@ def _route(
         rejected_investigators=MappingProxyType(dict(rejected)),
         reason_codes=tuple(dict.fromkeys(reasons)),
         policy_version=policy.version,
+        requested_strategy=requested_strategy,
+        effective_strategy=strategy,
+        release_mode=release_mode,
+        matched_features=matched_features,
+        rejected_features=rejected_features,
+        downgrade_reason=downgrade_reason,
     )
 
 

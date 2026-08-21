@@ -52,7 +52,9 @@ LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" 
 
 
 def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
-    scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+    scenario = load_live_scenario(
+        LIVE_SCENARIOS / "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
 
     payload = build_live_diagnostic_input(
         scenario,
@@ -63,11 +65,41 @@ def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
     assert payload["benchmarkMode"] == "live"
     assert payload["investigationStrategyMode"] == "multi"
 
+    postgres = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+    with pytest.raises(ValueError, match="forced_multi_not_registered"):
+        build_live_diagnostic_input(
+            postgres,
+            workflow_version="evidence-driven-v4",
+            investigation_strategy="multi",
+        )
+
 
 def test_only_forced_multi_enables_benchmark_multi_agent_policy() -> None:
-    assert benchmark_investigation_router_policy("multi").multi_agent_enabled is True
-    assert benchmark_investigation_router_policy("single").multi_agent_enabled is False
-    assert benchmark_investigation_router_policy("auto").multi_agent_enabled is False
+    order_pool = "APY-LIVE-ORDER-POOL-LEAK-001"
+
+    assert (
+        benchmark_investigation_router_policy(
+            "multi", scenario_id=order_pool
+        ).multi_agent_enabled
+        is True
+    )
+    assert (
+        benchmark_investigation_router_policy(
+            "single", scenario_id=order_pool
+        ).multi_agent_enabled
+        is False
+    )
+    assert (
+        benchmark_investigation_router_policy(
+            "auto", scenario_id=order_pool
+        ).multi_agent_enabled
+        is False
+    )
+    with pytest.raises(ValueError, match="forced_multi_not_registered"):
+        benchmark_investigation_router_policy(
+            "multi",
+            scenario_id="APY-LIVE-PG-LOCK-001",
+        )
 
 
 def test_only_nginx_live_scenario_enables_the_proposal_policy() -> None:
@@ -392,7 +424,7 @@ def _route_public_postgres_plan(
             decision_ready=False,
             valid_tool_calls_without_gain=0,
             knowledge_hit=True,
-            remaining_time_ms=90_000,
+            remaining_time_ms=300_000,
             remaining_model_calls=8,
             completed_dispatch_keys=frozenset(),
             evidence_snapshot_hash="a" * 64,

@@ -34,6 +34,8 @@ from super_ai.mcp_client import McpClientError, McpToolDefinition
 from super_ai.memory.repositories import JsonDict, MemoryRepositories
 from super_ai.retrieval import KnowledgeRetrievalToolRunner
 
+_FORCED_MULTI_SCENARIOS = frozenset({"APY-LIVE-ORDER-POOL-LEAK-001"})
+
 
 def build_live_diagnostic_input(
     scenario: LiveScenario,
@@ -42,6 +44,8 @@ def build_live_diagnostic_input(
     investigation_strategy: StrategyMode = "auto",
 ) -> JsonDict:
     """Build Agent input solely from the public scenario contract."""
+    if investigation_strategy == "multi" and scenario.id not in _FORCED_MULTI_SCENARIOS:
+        raise ValueError("forced_multi_not_registered")
     payload: JsonDict = {
         "query": scenario.title,
         "alert": dict(scenario.alert),
@@ -62,8 +66,12 @@ def build_live_diagnostic_input(
 
 def benchmark_investigation_router_policy(
     strategy: StrategyMode,
+    *,
+    scenario_id: str,
 ) -> InvestigationRouterPolicy:
     """Enable Multi only for an explicit internal Benchmark request."""
+    if strategy == "multi" and scenario_id not in _FORCED_MULTI_SCENARIOS:
+        raise ValueError("forced_multi_not_registered")
     return InvestigationRouterPolicy(multi_agent_enabled=strategy == "multi")
 
 
@@ -400,7 +408,8 @@ class ApplicationLiveDiagnosticAdapter:
             ),
             tool_policies=proposal_tool_policies_for_scenario(scenario),
             investigation_router_policy=benchmark_investigation_router_policy(
-                self._investigation_strategy
+                self._investigation_strategy,
+                scenario_id=scenario.id,
             ),
             require_trusted_log_scope=True,
         )

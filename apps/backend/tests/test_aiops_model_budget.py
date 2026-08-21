@@ -42,7 +42,7 @@ def test_deadlines_are_derived_once_and_reused_after_resume() -> None:
     )
 
     assert resumed == deadlines
-    assert deadlines.soft_deadline_at == started + timedelta(minutes=5)
-    assert deadlines.hard_deadline_at == started + timedelta(minutes=8)
-    assert deadlines.soft_expired(started + timedelta(minutes=5)) is True
-    assert deadlines.hard_expired(started + timedelta(minutes=8)) is True
+    assert deadlines.soft_deadline_at == started + timedelta(minutes=4)
+    assert deadlines.hard_deadline_at == started + timedelta(minutes=6)
+    assert deadlines.soft_expired(started + timedelta(minutes=4)) is True
+    assert deadlines.hard_expired(started + timedelta(minutes=6)) is True

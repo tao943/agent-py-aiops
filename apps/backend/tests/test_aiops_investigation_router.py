@@ -236,8 +236,10 @@ def _routing_input(**overrides: object) -> InvestigationRoutingInput:
         "decision_ready": False,
         "valid_tool_calls_without_gain": 0,
         "knowledge_hit": True,
-        "remaining_time_ms": 90_000,
+        "remaining_time_ms": 300_000,
         "remaining_model_calls": 8,
+        "cross_source_temporal_chain_required": False,
+        "single_evidence_domain_sufficient": False,
         "completed_dispatch_keys": frozenset(),
         "evidence_snapshot_hash": "a" * 64,
         "wave": 0,
@@ -247,14 +249,13 @@ def _routing_input(**overrides: object) -> InvestigationRoutingInput:
 
 
 @pytest.mark.parametrize(
-    ("routing_input", "expected_score", "expected_strategy", "watch"),
+    ("routing_input", "expected_score", "release_mode"),
     (
-        (_routing_input(causal_component_count=2), 3, "single_agent", False),
+        (_routing_input(causal_component_count=2), 5, "shadow"),
         (
             _routing_input(causal_component_count=2, knowledge_hit=False),
-            4,
-            "single_agent",
-            True,
+            5,
+            "shadow",
         ),
         (
             _routing_input(
@@ -262,17 +263,15 @@ def _routing_input(**overrides: object) -> InvestigationRoutingInput:
                 causal_component_count=2,
                 unresolved_hypothesis_count=3,
             ),
-            6,
-            "multi_agent",
-            False,
+            7,
+            "shadow",
         ),
     ),
 )
 def test_router_applies_thresholds(
     routing_input: InvestigationRoutingInput,
     expected_score: int,
-    expected_strategy: str,
-    watch: bool,
+    release_mode: str,
 ) -> None:
     route = route_investigation(
         routing_input,
@@ -281,11 +280,12 @@ def test_router_applies_thresholds(
     )
 
     assert route.score == expected_score
-    assert route.strategy == expected_strategy
-    assert route.escalation_watch is watch
-    assert route.selected_investigators == (
-        ("runtime", "log") if expected_strategy == "multi_agent" else ()
-    )
+    assert route.strategy == "single_agent"
+    assert route.effective_strategy == "single_agent"
+    assert route.requested_strategy == "auto"
+    assert route.release_mode == release_mode
+    assert route.selected_investigators == ()
+    assert "shadow_multi_candidate" in route.reason_codes
 
 
 @pytest.mark.parametrize(
@@ -293,8 +293,8 @@ def test_router_applies_thresholds(
     (
         (
             {"required_domains": frozenset({"runtime", "log"})},
-            1,
-            "two_evidence_domains_required",
+            3,
+            "runtime_cls_required",
         ),
         (
             {
@@ -303,19 +303,23 @@ def test_router_applies_thresholds(
                 )
             },
             3,
-            "three_evidence_domains_required",
+            "runtime_cls_required",
         ),
-        ({"causal_component_count": 2}, 3, "cross_component_investigation"),
-        ({"unresolved_hypothesis_count": 3}, 2, "root_cause_ambiguity"),
-        ({"high_quality_conflict": True}, 4, "high_quality_evidence_conflict"),
-        ({"severity": "P1"}, 3, "high_severity_incident"),
+        ({"causal_component_count": 2}, 5, "component_mechanism_span"),
+        ({"unresolved_hypothesis_count": 3}, 5, "three_public_candidates"),
         (
-            {"missing_causal_roles": frozenset({"trigger", "impact"})},
-            3,
-            "multiple_causal_roles_missing",
+            {"cross_source_temporal_chain_required": True},
+            5,
+            "cross_source_temporal_chain_required",
         ),
-        ({"valid_tool_calls_without_gain": 2}, 4, "investigation_stagnated"),
-        ({"knowledge_hit": False}, 2, "knowledge_match_absent"),
+        ({"decision_ready": True}, 0, "deterministic_decision_ready"),
+        (
+            {"single_evidence_domain_sufficient": True},
+            0,
+            "single_evidence_domain_sufficient",
+        ),
+        ({"remaining_time_ms": 34_999}, -1, "insufficient_deadline"),
+        ({"remaining_model_calls": 5}, -1, "insufficient_model_budget"),
     ),
 )
 def test_router_scores_each_public_feature(
@@ -329,7 +333,45 @@ def test_router_scores_each_public_feature(
 
     assert route.score == expected_score
     assert reason_code in route.reason_codes
-    assert "recent_change" not in " ".join(route.reason_codes)
+    assert reason_code in route.matched_features
+    assert "high_severity_incident" not in " ".join(route.reason_codes)
+
+
+def test_score_five_is_shadow_candidate_and_forced_multi_is_explicit() -> None:
+    routing_input = _routing_input(unresolved_hypothesis_count=3)
+    policy = InvestigationRouterPolicy(multi_agent_enabled=True)
+
+    shadow = route_investigation(
+        routing_input,
+        capabilities=_routing_capabilities(),
+        policy=policy,
+        mode="auto",
+    )
+    forced = route_investigation(
+        routing_input,
+        capabilities=_routing_capabilities(),
+        policy=policy,
+        mode="multi",
+    )
+
+    assert shadow.score == 5
+    assert shadow.strategy == "single_agent"
+    assert shadow.release_mode == "shadow"
+    assert shadow.downgrade_reason == "shadow_multi_candidate"
+    assert forced.strategy == "multi_agent"
+    assert forced.release_mode == "forced_benchmark"
+    assert forced.selected_investigators == ("runtime", "log")
+
+
+def test_router_policy_uses_confirmed_specialist_budgets() -> None:
+    policy = InvestigationRouterPolicy()
+
+    assert policy.multi_agent_threshold == 5
+    assert policy.maximum_optional_model_calls_per_investigator == 2
+    assert policy.specialist_soft_timeout_ms == 120_000
+    assert policy.specialist_hard_timeout_ms == 180_000
+    assert policy.global_soft_timeout_ms == 240_000
+    assert policy.global_hard_timeout_ms == 360_000
 
 
 def test_router_hard_gates_override_a_high_score_and_forced_multi() -> None:
@@ -353,7 +395,7 @@ def test_router_hard_gates_override_a_high_score_and_forced_multi() -> None:
             ),
             "insufficient_parallel_sources",
         ),
-        (replace(high_score, remaining_time_ms=34_999), "insufficient_time_budget"),
+        (replace(high_score, remaining_time_ms=124_999), "insufficient_deadline"),
         (replace(high_score, remaining_model_calls=3), "insufficient_model_budget"),
         (replace(high_score, wave=2), "maximum_investigation_waves_reached"),
     )

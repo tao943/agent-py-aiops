@@ -845,7 +845,7 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
 
 
 @pytest.mark.asyncio
-async def test_strategy_starts_single_then_escalates_after_stagnation(
+async def test_auto_strategy_records_shadow_candidate_without_executing_multi(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
@@ -977,16 +977,14 @@ async def test_strategy_starts_single_then_escalates_after_stagnation(
     assert cast(dict[str, object], initial["investigation_route"])["strategy"] == (
         "single_agent"
     )
-    assert cast(dict[str, object], escalated["investigation_route"])["strategy"] == (
-        "multi_agent"
-    )
-    assert [
-        item["investigatorType"]
-        for item in cast(list[dict[str, object]], escalated["investigation_dispatches"])
-    ] == ["runtime", "log"]
-    assert escalated["multi_model_reservation_base"] == 0
-    assert escalated["multi_model_reserved"] == 4
-    assert escalated["model_call_count"] == 4
+    escalated_route = cast(dict[str, object], escalated["investigation_route"])
+    assert escalated_route["strategy"] == "single_agent"
+    assert escalated_route["requestedStrategy"] == "auto"
+    assert escalated_route["effectiveStrategy"] == "single_agent"
+    assert escalated_route["releaseMode"] == "shadow"
+    assert escalated_route["downgradeReason"] == "shadow_multi_candidate"
+    assert escalated["investigation_dispatches"] == []
+    assert "model_call_count" not in escalated
     assert cast(dict[str, object], exhausted["investigation_route"])["strategy"] == (
         "multi_agent_unavailable"
     )
@@ -1038,6 +1036,26 @@ def test_v4_graph_version_selection_is_explicit_and_legacy_safe() -> None:
         )
         == "aiops-diagnostic-v2"
     )
+
+
+def test_forced_multi_task_input_is_order_pool_benchmark_only() -> None:
+    select_mode = diagnostics_module._benchmark_strategy_mode  # pyright: ignore[reportPrivateUsage]
+
+    assert select_mode(
+        {
+            "benchmarkMode": "live",
+            "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "investigationStrategyMode": "multi",
+        }
+    ) == "multi"
+    assert select_mode(
+        {
+            "benchmarkMode": "live",
+            "benchmarkScenarioId": "APY-LIVE-PG-LOCK-001",
+            "investigationStrategyMode": "multi",
+        }
+    ) == "auto"
+    assert select_mode({"investigationStrategyMode": "multi"}) == "auto"
 
 
 @pytest.mark.asyncio
