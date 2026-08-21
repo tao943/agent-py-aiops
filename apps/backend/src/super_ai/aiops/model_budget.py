@@ -66,8 +66,8 @@ class ExecutionDeadlines:
         started = started_at or datetime.now(timezone.utc)
         return cls(
             started_at=started,
-            soft_deadline_at=started + timedelta(minutes=5),
-            hard_deadline_at=started + timedelta(minutes=8),
+            soft_deadline_at=started + timedelta(minutes=4),
+            hard_deadline_at=started + timedelta(minutes=6),
         )
 
     @classmethod

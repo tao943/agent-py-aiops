@@ -12,7 +12,7 @@ from super_ai.aiops.execution import (
     ExecutionIdentity,
     UnsafeExecutionReplay,
 )
-from super_ai.evaluation.artifacts import RunArtifact
+from super_ai.evaluation.artifacts import InvestigationAudit, RunArtifact
 from super_ai.evaluation.live.diagnostics import append_live_outcome
 from super_ai.evaluation.live.domain import (
     LiveCheck,
@@ -26,6 +26,7 @@ from super_ai.evaluation.live.domain import (
     LiveVerification,
     RecoveryExpectation,
 )
+from super_ai.evaluation.live.failure_diagnostics import LiveFailureDiagnostics
 from super_ai.evaluation.live.scenarios import (
     load_live_oracle,
     load_live_scenario,
@@ -48,12 +49,18 @@ class LiveBenchmarkError(RuntimeError):
         stage: str | None = None,
         authorization_code: str | None = None,
         cleanup_succeeded: bool | None = None,
+        diagnostics: LiveFailureDiagnostics | None = None,
+        diagnostic_task_id: str | None = None,
+        investigation_audit: InvestigationAudit | None = None,
     ) -> None:
         super().__init__("Docker Live benchmark failed at a classified boundary.")
         self.category = category
         self.stage = stage
         self.authorization_code = authorization_code
         self.cleanup_succeeded = cleanup_succeeded
+        self.diagnostics = diagnostics
+        self.diagnostic_task_id = diagnostic_task_id
+        self.investigation_audit = investigation_audit
 
 
 class LiveScenarioDriver(Protocol):
@@ -158,6 +165,7 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             raise ValueError("Live scenario ID must match its directory name.")
 
         active_error: BaseException | None = None
+        diagnostic_artifact: object | None = None
         try:
             await self._classified(
                 self._driver.preflight(identity), "preflight_failed", "preflight"
@@ -169,7 +177,11 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
                 self._driver.inject(identity), "fault_injection_failed", "inject"
             )
             if not observation.confirmed:
-                raise LiveBenchmarkError("fault_injection_failed", stage="inject")
+                raise LiveBenchmarkError(
+                    "fault_injection_failed",
+                    stage="inject",
+                    diagnostics=LiveFailureDiagnostics.from_observation(observation),
+                )
             evidence_context = await self._classified(
                 self._evidence_preparer.prepare(
                     identity=identity,
@@ -275,6 +287,11 @@ class LiveBenchmarkRunner(Generic[EvaluationT]):
             except Exception as exc:
                 raise LiveBenchmarkError("evaluation_failed", stage="evaluate") from exc
         except BaseException as exc:
+            if isinstance(exc, LiveBenchmarkError) and isinstance(
+                diagnostic_artifact, RunArtifact
+            ):
+                exc.diagnostic_task_id = diagnostic_artifact.diagnostic_task_id
+                exc.investigation_audit = diagnostic_artifact.investigation_audit
             active_error = exc
             raise
         finally:

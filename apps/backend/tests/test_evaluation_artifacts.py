@@ -218,7 +218,10 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
                     "validationOrigin": "deterministic_grounded_fallback",
                     "validationModel": "qwen3.8-max",
                     "validationErrorCategory": "retry_exhausted",
-                    "validationErrorCodes": ["invalid_json", "missing_required_field"],
+                    "validationErrorCodes": [
+                        "invalid_json",
+                        "retry_skipped_insufficient_deadline",
+                    ],
                     "validationErrorPhase": "structured_parse",
                     "validationAttempts": 2,
                     "rawResponse": "sentinel-secret-response",
@@ -236,7 +239,7 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
     assert artifact.validation_audit.error_category == "retry_exhausted"
     assert artifact.validation_audit.error_codes == (
         "invalid_json",
-        "missing_required_field",
+        "retry_skipped_insufficient_deadline",
     )
     assert artifact.validation_audit.error_phase == "structured_parse"
     assert artifact.validation_audit.attempts == 2
@@ -407,6 +410,9 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
                     "graphVersion": "aiops-diagnostic-v3",
                     "route": {
                         "strategy": "multi_agent",
+                        "requestedStrategy": "multi",
+                        "effectiveStrategy": "multi_agent",
+                        "releaseMode": "forced_benchmark",
                         "score": 7,
                         "reasonCodes": ["investigation_stagnated"],
                         "policyVersion": "investigation-router-v1",
@@ -426,6 +432,33 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
                     "workflowVersion": "evidence-driven-v4",
                     "graphVersion": "aiops-diagnostic-v3",
                     "packetStatuses": ["completed", "timeout"],
+                    "specialistStatuses": {
+                        "runtime": "completed",
+                        "log": "timeout",
+                        "oracle": "private-sentinel",
+                    },
+                    "roles": [
+                        {
+                            "role": "runtime",
+                            "terminalStatus": "completed",
+                            "evidenceIds": ["ev-runtime", "ev-runtime"],
+                            "modelCallCount": 2,
+                            "durationMs": 1250,
+                            "rawOutput": "private-sentinel",
+                        },
+                        {
+                            "role": "log",
+                            "terminalStatus": "timeout",
+                            "evidenceIds": ["ev-log"],
+                            "modelCallCount": 1,
+                            "durationMs": 180000,
+                        },
+                    ],
+                    "missingDomains": ["log", "oracle"],
+                    "conflictCount": 1,
+                    "sourceGroupCount": 2,
+                    "aggregationChecksum": "a" * 64,
+                    "terminalFailureCategory": None,
                     "fallbackReason": None,
                     "rawOutput": "private-sentinel",
                 },
@@ -448,7 +481,91 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
         "completed",
         "timeout",
     )
+    assert artifact.investigation_audit.requested_strategy == "multi"
+    assert artifact.investigation_audit.effective_strategy == "multi_agent"
+    assert artifact.investigation_audit.release_mode == "forced_benchmark"
+    assert [item.role for item in artifact.investigation_audit.roles] == [
+        "log",
+        "runtime",
+    ]
+    runtime = artifact.investigation_audit.roles[1]
+    assert runtime.status == "completed"
+    assert runtime.duration_ms == 1250
+    assert runtime.model_call_count == 2
+    assert runtime.tool_call_count == 1
+    assert runtime.evidence_ids == ("ev-runtime",)
+    assert artifact.investigation_audit.source_group_count == 2
+    assert artifact.investigation_audit.duplicate_evidence_count == 1
+    assert artifact.investigation_audit.conflict_count == 1
+    assert artifact.investigation_audit.missing_domains == ("log",)
+    assert artifact.investigation_audit.aggregation_checksum == "a" * 64
+    assert artifact.investigation_audit.terminal_failure_category is None
     assert "private-sentinel" not in repr(artifact.investigation_audit)
+
+
+def test_artifact_rejects_unbounded_or_private_specialist_metrics() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "strategy_router",
+                {
+                    "route": {
+                        "strategy": "multi_agent",
+                        "requestedStrategy": "multi",
+                        "effectiveStrategy": "multi_agent",
+                        "releaseMode": "forced_benchmark",
+                        "score": 7,
+                        "reasonCodes": [],
+                        "policyVersion": "investigation-router-v1",
+                        "selectedInvestigators": ["runtime", "log"],
+                    },
+                    "dispatches": [],
+                },
+            ),
+            _step(
+                2,
+                "evidence_aggregator",
+                {
+                    "specialistStatuses": {"runtime": "completed", "log": "failed"},
+                    "roles": [
+                        {
+                            "role": "runtime",
+                            "terminalStatus": "completed",
+                            "evidenceIds": ["x" * 129, "ground_truth.yaml"],
+                            "modelCallCount": 99,
+                            "durationMs": -1,
+                        }
+                    ],
+                    "missingDomains": ["log", "ground_truth"],
+                    "conflictCount": -1,
+                    "sourceGroupCount": 99999,
+                    "aggregationChecksum": "not-a-checksum",
+                    "terminalFailureCategory": "private-sentinel",
+                    "rawOutput": "private-sentinel",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.investigation_audit is not None
+    assert [(item.role, item.status) for item in artifact.investigation_audit.roles] == [
+        ("log", "failed"),
+        ("runtime", "completed"),
+    ]
+    assert all(item.duration_ms == 0 for item in artifact.investigation_audit.roles)
+    assert all(item.evidence_ids == () for item in artifact.investigation_audit.roles)
+    assert artifact.investigation_audit.missing_domains == ("log",)
+    assert artifact.investigation_audit.conflict_count == 0
+    assert artifact.investigation_audit.source_group_count == 0
+    assert artifact.investigation_audit.aggregation_checksum is None
+    assert artifact.investigation_audit.terminal_failure_category is None
+    assert "private-sentinel" not in repr(artifact.investigation_audit)
+    assert "ground_truth" not in repr(artifact.investigation_audit)
 
 
 def test_artifact_keeps_multi_effective_after_bounded_single_fallback() -> None:
@@ -545,6 +662,43 @@ def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
     assert (
         artifact.observation_decisions[0].causal_role_origin
         == "trusted_evidence_rule"
+    )
+
+
+def test_v4_artifact_preserves_trusted_compound_pattern_observations() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [
+                        {
+                            "purpose": "Establish the pool exhaustion mechanism.",
+                            "supports": ["order_connection_lifecycle_failure"],
+                            "refutes": [],
+                            "summary": "Checkout without checkin exhausted the pool.",
+                            "evidenceIds": ["ev-order-api", "ev-postgres"],
+                            "causalRole": "mechanism",
+                            "causalRoleOrigin": "trusted_compound_pattern",
+                        }
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert (
+        artifact.observation_decisions[0].causal_role_origin
+        == "trusted_compound_pattern"
     )
 
 

@@ -1,0 +1,504 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from super_ai.aiops import RootCauseDecision
+from super_ai.aiops.investigation import (
+    TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+    build_investigator_capabilities,
+)
+from super_ai.evaluation import RunArtifact
+from super_ai.evaluation.live.diagnostics import build_live_diagnostic_input
+from super_ai.evaluation.live.domain import LiveRunIdentity
+from super_ai.evaluation.live.order_pool_leak import (
+    ComposeServiceRestarter,
+    OrderPoolLeakScenarioDriver,
+    OrderPoolLiveConfig,
+    OrderPoolRecoveryService,
+    OrderPoolRuntimeEvidenceMcpClient,
+    PostgresOrderPoolObserver,
+)
+from super_ai.evaluation.live.postgres import PostgresConnectionConfig
+from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
+from super_ai.mcp_client import McpClientError, McpToolDefinition
+
+
+class FakeOrderApi:
+    def __init__(self, *, pool_size: int = 3) -> None:
+        self.pool_size = pool_size
+        self.active_run: str | None = None
+        self.generation = "gen-1"
+        self.checked_out = 0
+        self.waiter_observed = False
+        self.events_by_run: dict[str, list[dict[str, str]]] = {}
+        self.orders: set[str] = set()
+
+    async def health(self) -> Mapping[str, object]:
+        return {
+            "status": "ok",
+            "generation": self.generation,
+            "activeRunId": self.active_run,
+        }
+    async def start_run(self, identity: LiveRunIdentity, fault_token: str) -> None:
+        del fault_token
+        run_id = identity.run_id
+        if self.active_run not in {None, run_id}:
+            raise RuntimeError("another_run_active")
+        self.active_run = run_id
+        self.orders.add(run_id)
+        self.events_by_run.setdefault(run_id, [])
+
+    async def inject_fault(
+        self,
+        identity: LiveRunIdentity,
+        fault_token: str,
+        request_id: str,
+    ) -> None:
+        del fault_token
+        run_id = identity.run_id
+        self.checked_out += 1
+        self.events_by_run[run_id].extend(
+            (
+                self._event(run_id, request_id, "connection_checkout"),
+                self._event(run_id, request_id, "order_update_failed"),
+            )
+        )
+
+    async def probe(self, identity: LiveRunIdentity) -> bool:
+        run_id = identity.run_id
+        if self.checked_out >= self.pool_size:
+            self.waiter_observed = True
+            self.events_by_run[run_id].append(
+                self._event(run_id, "business-probe", "pool_acquire_timeout")
+            )
+            return False
+        self.events_by_run[run_id].extend(
+            (
+                self._event(run_id, "business-probe", "connection_checkout"),
+                self._event(run_id, "business-probe", "connection_checkin"),
+            )
+        )
+        return True
+
+    async def state(self, identity: LiveRunIdentity) -> Mapping[str, object]:
+        run_id = identity.run_id
+        return {
+            "runId": run_id,
+            "generation": self.generation,
+            "capacity": self.pool_size,
+            "checkedOut": self.checked_out,
+            "free": self.pool_size - self.checked_out,
+            "waitersObserved": self.waiter_observed,
+        }
+
+    async def events(self, identity: LiveRunIdentity) -> Sequence[Mapping[str, str]]:
+        return tuple(self.events_by_run[identity.run_id])
+
+    async def clear(self, identity: LiveRunIdentity) -> None:
+        run_id = identity.run_id
+        self.active_run = None
+        self.checked_out = 0
+        self.orders.discard(run_id)
+
+    def restart(self) -> None:
+        self.generation = "gen-2"
+        self.active_run = None
+        self.checked_out = 0
+
+    def _event(self, run_id: str, request_id: str, event: str) -> dict[str, str]:
+        return {
+            "run_id": run_id,
+            "request_id": request_id,
+            "event": event,
+            "service": "order-api",
+            "component": "order-api",
+            "generation": self.generation,
+            "timestamp": "2026-08-20T12:00:00+00:00",
+            "level": "error" if event.endswith(("failed", "timeout")) else "info",
+        }
+
+
+class HangingComposeProcess:
+    def __init__(self) -> None:
+        self.pid = 12345
+        self.returncode: int | None = None
+        self.killed = False
+        self.communicate_cancelled = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.communicate_cancelled = True
+            raise
+        raise AssertionError("Hanging process must be cancelled.")
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -1
+
+    async def wait(self) -> int:
+        return self.returncode or -1
+
+
+class FakePostgresObserver:
+    reachable = True
+    lock_wait = False
+
+    def __init__(self, api: FakeOrderApi) -> None:
+        self.api = api
+        self.unrelated_session_ids = {"stable-a", "stable-b"}
+
+    async def database_reachable(self) -> bool:
+        return self.reachable
+
+    async def run_scoped_session_count(self, run_id: str) -> int:
+        del run_id
+        return self.api.checked_out
+
+    async def lock_wait_observed(self, run_id: str) -> bool:
+        del run_id
+        return self.lock_wait
+
+    async def generation_session_count(self, run_id: str, generation: str) -> int:
+        del run_id
+        return self.api.checked_out if generation == self.api.generation else 0
+
+    async def test_order_count(self, run_id: str) -> int:
+        return int(run_id in self.api.orders)
+
+    async def unrelated_sessions(self) -> frozenset[str]:
+        return frozenset(self.unrelated_session_ids)
+
+
+class RecordingConnection:
+    def __init__(self, queries: list[tuple[str, tuple[object, ...]]]) -> None:
+        self._queries = queries
+
+    async def fetchval(self, query: str, *arguments: object) -> object:
+        self._queries.append((query, arguments))
+        return False if "EXISTS" in query else 0
+
+    async def close(self) -> None:
+        return None
+
+
+class RecordingPostgresConfig:
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, tuple[object, ...]]] = []
+
+    async def connect(self, *, application_name: str) -> RecordingConnection:
+        assert application_name == "order-pool-observer"
+        return RecordingConnection(self.queries)
+
+
+@pytest.mark.asyncio
+async def test_postgres_observer_uses_bounded_run_and_generation_scope() -> None:
+    config = RecordingPostgresConfig()
+    observer = PostgresOrderPoolObserver(cast(PostgresConnectionConfig, config))
+    run_id = "r" * 64
+    generation = "0123456789abcdef" * 2
+
+    await observer.run_scoped_session_count(run_id)
+    await observer.lock_wait_observed(run_id)
+    await observer.generation_session_count(run_id, generation)
+
+    expected_run_pattern = "agentpy-order-api:c9ea6f42c8efcb14:%"
+    expected_generation_name = (
+        "agentpy-order-api:c9ea6f42c8efcb14:0123456789abcdef"
+    )
+    assert [arguments for _, arguments in config.queries] == [
+        (expected_run_pattern,),
+        (expected_run_pattern,),
+        (expected_generation_name,),
+    ]
+    assert all(
+        run_id not in str(argument)
+        for _, arguments in config.queries
+        for argument in arguments
+    )
+    assert len(expected_generation_name.encode("ascii")) <= 63
+
+
+class FakeRestarter:
+    def __init__(self, api: FakeOrderApi) -> None:
+        self.api = api
+        self.calls: list[str] = []
+
+    async def restart(self, service_name: str) -> None:
+        self.calls.append(service_name)
+        self.api.restart()
+
+
+def _driver() -> tuple[OrderPoolLeakScenarioDriver, FakeOrderApi, FakePostgresObserver]:
+    api = FakeOrderApi()
+    postgres = FakePostgresObserver(api)
+    config = OrderPoolLiveConfig(
+        compose_file=Path(__file__).resolve().parents[3] / "infra" / "compose.yaml"
+    )
+    return OrderPoolLeakScenarioDriver(config, api=api, postgres=postgres), api, postgres
+
+
+@pytest.mark.asyncio
+async def test_compose_restarter_bounds_and_kills_a_hanging_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = HangingComposeProcess()
+
+    async def create_process(*args: object, **kwargs: object) -> HangingComposeProcess:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    restarter = ComposeServiceRestarter(
+        OrderPoolLiveConfig(
+            compose_file=Path(__file__).resolve().parents[3]
+            / "infra"
+            / "compose.yaml"
+        ),
+        command_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="order_pool_restart_timeout"):
+        await restarter.restart("live-eval-order-api")
+
+    assert process.communicate_cancelled is True
+    assert process.killed is True
+
+
+def _artifact(*, mechanism: str = "exception_path_connection_not_released") -> RunArtifact:
+    return RunArtifact(
+        scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+        mode="live",
+        completed=True,
+        report_produced=True,
+        decision=RootCauseDecision(
+            "order-api",
+            mechanism,
+            "fault_scoped_order_update_raises_after_checkout",
+            ("checkout", "exception", "pool saturation", "request timeout"),
+            ("order-pool-saturated", "cls-order-connection-lifecycle"),
+            0.95,
+        ),
+        evidence=(),
+        hypothesis_states=(),
+        observation_decisions=(),
+        tool_calls=(),
+        plan_step_count=4,
+        duration_ms=10,
+        safety_events=(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_driver_confirms_pool_saturation_without_claiming_the_cause() -> None:
+    driver, _, _ = _driver()
+    identity = validate_run_id("order-pool-contract")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    assert observation.confirmed is True
+    assert observation.check_passed("pool_at_capacity")
+    assert observation.check_passed("pool_free_zero")
+    assert observation.check_passed("business_probe_timed_out")
+    assert observation.check_passed("postgres_reachable")
+    assert observation.check_passed("no_lock_wait")
+    assert "primary_cause" not in str(observation.safe_facts).casefold()
+    assert "connection_leak_confirmed" not in str(observation.safe_facts).casefold()
+
+
+@pytest.mark.asyncio
+async def test_recovery_restarts_only_owned_isolated_instance_once() -> None:
+    driver, api, _ = _driver()
+    restarter = FakeRestarter(api)
+    recovery = OrderPoolRecoveryService(driver, restarter)
+    identity = validate_run_id("run-1")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    first = await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+    second = await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+    assert first.action == "restart_live_eval_order_api"
+    assert first.target_ref == "current_run_order_api_instance"
+    assert first.authorized and first.executed
+    assert second.executed is False
+    assert restarter.calls == ["live-eval-order-api"]
+    assert (await driver.verify(identity)).passed
+
+
+@pytest.mark.asyncio
+async def test_recovery_tolerates_new_unrelated_observer_session() -> None:
+    driver, api, postgres = _driver()
+    recovery = OrderPoolRecoveryService(driver, FakeRestarter(api))
+    identity = validate_run_id("run-observer-churn")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    postgres.unrelated_session_ids.add("transient-health-check")
+    await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+
+    assert (await driver.verify(identity)).check_passed(
+        "unrelated_sessions_preserved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_detects_lost_baseline_unrelated_session() -> None:
+    driver, api, postgres = _driver()
+    recovery = OrderPoolRecoveryService(driver, FakeRestarter(api))
+    identity = validate_run_id("run-unrelated-session-lost")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+
+    postgres.unrelated_session_ids.remove("stable-a")
+    await recovery.recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(),
+        observation=observation,
+    )
+
+    assert not (await driver.verify(identity)).check_passed(
+        "unrelated_sessions_preserved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_denies_wrong_mechanism_and_nonexclusive_run() -> None:
+    driver, api, _ = _driver()
+    restarter = FakeRestarter(api)
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    denied = await OrderPoolRecoveryService(driver, restarter).recover(
+        identity=identity,
+        diagnostic_artifact=_artifact(mechanism="traffic_exceeds_pool_capacity"),
+        observation=observation,
+    )
+    assert denied.authorized is False
+    assert restarter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_evidence_is_read_only_partial_and_answer_isolated() -> None:
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    client = OrderPoolRuntimeEvidenceMcpClient(observation)
+
+    tools = {item.name: item for item in await client.discover_tools()}
+    assert set(tools) == {
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    assert all(item.input_schema["additionalProperties"] is False for item in tools.values())
+    pool = await client.call_tool("InspectOrderPoolState", {})
+    sessions = await client.call_tool("InspectOrderDatabaseSessions", {})
+    serialized = f"{pool}{sessions}".casefold()
+    assert "connection_leak" not in serialized
+    assert "primary_cause" not in serialized
+    with pytest.raises(McpClientError):
+        await client.call_tool("InspectOrderPoolState", {"run_id": "other"})
+
+
+@pytest.mark.asyncio
+async def test_order_pool_runtime_and_cls_are_two_trusted_investigator_sources() -> None:
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    runtime_tools = await OrderPoolRuntimeEvidenceMcpClient(observation).discover_tools()
+    search_log = McpToolDefinition(
+        "SearchLog",
+        "Search one trusted run-scoped CLS window.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        "cls",
+    )
+    capabilities = build_investigator_capabilities(
+        discovered_tools=(*runtime_tools, search_log),
+        trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+        tool_policies={},
+        retrieval_available=False,
+        cls_available=True,
+    )
+    assert capabilities["runtime"].allowed_tools == {
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    assert capabilities["log"].allowed_tools == {"SearchLog"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_is_idempotent_and_audit_reports_only_counts() -> None:
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    await driver.inject(identity)
+    await driver.cleanup(identity)
+    await driver.cleanup(identity)
+    audit = await driver.audit(identity)
+    assert audit.clean
+    assert audit.safe_payload() == {
+        "orderApiHealthy": True,
+        "activeRunCount": 0,
+        "testOrderCount": 0,
+        "oldGenerationSessionCount": 0,
+        "clean": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_order_pool_agent_input_and_tools_do_not_expose_oracle_or_restart() -> None:
+    scenario_root = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks"
+        / "agentpy"
+        / "live"
+        / "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    scenario = load_live_scenario(scenario_root)
+    driver, _, _ = _driver()
+    identity = validate_run_id("run-1")
+    await driver.baseline(identity)
+    observation = await driver.inject(identity)
+    client = OrderPoolRuntimeEvidenceMcpClient(observation)
+    definitions = await client.discover_tools()
+    outputs = [await client.call_tool(item.name, {}) for item in definitions]
+    serialized = str(
+        {
+            "input": build_live_diagnostic_input(scenario),
+            "tools": outputs,
+            "toolNames": [item.name for item in definitions],
+        }
+    ).casefold()
+    for forbidden in (
+        "ground_truth",
+        "primary_cause",
+        "connection_leak_confirmed",
+        "fault_token",
+        "restart_live_eval_order_api",
+    ):
+        assert forbidden not in serialized

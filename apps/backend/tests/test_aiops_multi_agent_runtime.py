@@ -148,6 +148,24 @@ def _plan() -> list[dict[str, object]]:
     ]
 
 
+def test_runtime_and_log_dispatches_share_one_global_model_budget() -> None:
+    dispatches = build_investigation_dispatches(
+        task_id="diagnostic-shared-budget",
+        owner_user_id="owner-1",
+        plan=_plan(),
+        capabilities=cast(Any, _capabilities()),
+        selected_investigators=("runtime", "log"),
+        policy_version="investigation-router-v1",
+        evidence_snapshot_hash="a" * 64,
+        existing_evidence_ids=(),
+        deadline_ms=30_000,
+        model_call_budget=1,
+    )
+    assert {item.investigator_type for item in dispatches} == {"runtime", "log"}
+    assert sum(item.model_call_budget for item in dispatches) == 1
+    assert sum(len(item.steps) for item in dispatches) <= len(_plan())
+
+
 def test_dispatches_are_stable_source_scoped_and_bounded() -> None:
     first = build_investigation_dispatches(
         task_id="diagnostic-1",

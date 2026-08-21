@@ -15,6 +15,7 @@ from super_ai.aiops.diagnostics import (
     build_generic_live_plan,
     build_grounded_fallback_decision,
     merge_live_log_plan_step,
+    merge_trusted_live_hypothesis_bindings,
     plan_matches_tool_contracts,
 )
 from super_ai.aiops.investigation import (
@@ -45,12 +46,15 @@ from super_ai.evaluation.live.domain import (
 from super_ai.evaluation.live.postgres_deadlock import PostgresDeadlockEvidenceMcpClient
 from super_ai.evaluation.live.scenarios import load_live_scenario
 from super_ai.mcp_client import McpClientError, McpToolDefinition
+from super_ai.memory.repositories import JsonDict
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
 
 def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
-    scenario = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+    scenario = load_live_scenario(
+        LIVE_SCENARIOS / "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
 
     payload = build_live_diagnostic_input(
         scenario,
@@ -61,11 +65,41 @@ def test_live_adapter_input_carries_only_internal_benchmark_strategy() -> None:
     assert payload["benchmarkMode"] == "live"
     assert payload["investigationStrategyMode"] == "multi"
 
+    postgres = load_live_scenario(LIVE_SCENARIOS / "APY-LIVE-PG-LOCK-001")
+    with pytest.raises(ValueError, match="forced_multi_not_registered"):
+        build_live_diagnostic_input(
+            postgres,
+            workflow_version="evidence-driven-v4",
+            investigation_strategy="multi",
+        )
+
 
 def test_only_forced_multi_enables_benchmark_multi_agent_policy() -> None:
-    assert benchmark_investigation_router_policy("multi").multi_agent_enabled is True
-    assert benchmark_investigation_router_policy("single").multi_agent_enabled is False
-    assert benchmark_investigation_router_policy("auto").multi_agent_enabled is False
+    order_pool = "APY-LIVE-ORDER-POOL-LEAK-001"
+
+    assert (
+        benchmark_investigation_router_policy(
+            "multi", scenario_id=order_pool
+        ).multi_agent_enabled
+        is True
+    )
+    assert (
+        benchmark_investigation_router_policy(
+            "single", scenario_id=order_pool
+        ).multi_agent_enabled
+        is False
+    )
+    assert (
+        benchmark_investigation_router_policy(
+            "auto", scenario_id=order_pool
+        ).multi_agent_enabled
+        is False
+    )
+    with pytest.raises(ValueError, match="forced_multi_not_registered"):
+        benchmark_investigation_router_policy(
+            "multi",
+            scenario_id="APY-LIVE-PG-LOCK-001",
+        )
 
 
 def test_only_nginx_live_scenario_enables_the_proposal_policy() -> None:
@@ -390,7 +424,7 @@ def _route_public_postgres_plan(
             decision_ready=False,
             valid_tool_calls_without_gain=0,
             knowledge_hit=True,
-            remaining_time_ms=90_000,
+            remaining_time_ms=300_000,
             remaining_model_calls=8,
             completed_dispatch_keys=frozenset(),
             evidence_snapshot_hash="a" * 64,
@@ -469,6 +503,144 @@ def test_generic_fallback_uses_all_live_evidence_tools() -> None:
         "mechanism",
         "trigger",
     ]
+
+
+def test_generic_order_pool_plan_uses_runtime_tools_without_embedding_the_answer() -> None:
+    plan = build_generic_live_plan(
+        available_tools=(
+            "InspectOrderPoolState",
+            "InspectOrderDatabaseSessions",
+            "VerifyOrderDatabaseReachability",
+        ),
+        known_hypotheses=(
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_database_unreachable",
+            "order_slow_statement",
+            "order_database_lock_wait",
+        ),
+    )
+    assert [step["tool"] for step in plan] == [
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    ]
+    assert [step["causalIntent"] for step in plan] == [
+        "mechanism",
+        "context",
+        "impact",
+    ]
+    assert "exception_path_connection_not_released" not in str(plan)
+
+
+def test_trusted_live_bindings_repair_only_registered_public_capabilities() -> None:
+    plan: list[JsonDict] = [
+        {
+            "id": "pool",
+            "tool": "InspectOrderPoolState",
+            "arguments": {},
+            "purpose": "Inspect pool state.",
+            "testsHypotheses": [
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+            ],
+            "causalIntent": "context",
+            "causalIntentOrigin": "model",
+        },
+        {
+            "id": "sessions",
+            "tool": "InspectOrderDatabaseSessions",
+            "arguments": {},
+            "purpose": "Inspect sessions.",
+            "testsHypotheses": [
+                "order_slow_statement",
+                "order_database_lock_wait",
+                "unknown",
+                ["order_connection_lifecycle_failure"],
+            ],
+            "causalIntent": "mechanism",
+            "causalIntentOrigin": "model",
+        },
+        {
+            "id": "health",
+            "tool": "VerifyOrderDatabaseReachability",
+            "arguments": {},
+            "purpose": "Verify reachability.",
+            "testsHypotheses": [
+                "order_database_unreachable",
+                "order_database_unreachable",
+                "",
+            ],
+            "causalIntent": "impact",
+            "causalIntentOrigin": "model",
+        },
+    ]
+
+    repaired = merge_trusted_live_hypothesis_bindings(
+        plan,
+        known_hypotheses=(
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_slow_statement",
+            "order_database_lock_wait",
+            "order_database_unreachable",
+        ),
+    )
+
+    assert repaired[0]["testsHypotheses"] == [
+        "order_connection_lifecycle_failure",
+        "order_traffic_capacity_exceeded",
+        "order_slow_statement",
+        "order_database_lock_wait",
+    ]
+    assert repaired[1]["testsHypotheses"] == [
+        "order_slow_statement",
+        "order_database_lock_wait",
+        "order_connection_lifecycle_failure",
+        "order_database_unreachable",
+    ]
+    assert repaired[2]["testsHypotheses"] == [
+        "order_database_unreachable",
+        "order_connection_lifecycle_failure",
+    ]
+    assert all(
+        step["testsHypothesesOrigin"] == "trusted_capability_repair"
+        for step in repaired
+    )
+    assert (
+        merge_trusted_live_hypothesis_bindings(
+            repaired,
+            known_hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+                "order_slow_statement",
+                "order_database_lock_wait",
+                "order_database_unreachable",
+            ),
+        )
+        == repaired
+    )
+
+
+def test_unregistered_tool_cannot_gain_trusted_hypothesis_bindings() -> None:
+    repaired = merge_trusted_live_hypothesis_bindings(
+        (
+            {
+                "id": "future",
+                "tool": "InspectFutureSubsystem",
+                "arguments": {},
+                "purpose": "Inspect a future subsystem.",
+                "testsHypotheses": ["known", "unknown", {"oracle": "known"}],
+                "causalIntent": "context",
+                "causalIntentOrigin": "model",
+            },
+        ),
+        known_hypotheses=("known", "omitted"),
+    )
+
+    assert repaired[0]["testsHypotheses"] == ["known"]
+    assert repaired[0]["causalIntentOrigin"] == "model"
+    assert "testsHypothesesOrigin" not in repaired[0]
 
 
 def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:

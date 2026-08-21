@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from super_ai.evaluation.live.cls_evidence import LiveClsRecordProvider
 from super_ai.evaluation.live.domain import LiveFaultObservation
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
 from super_ai.evaluation.live.runner import LiveRecoveryService, LiveScenarioDriver
@@ -18,6 +19,7 @@ class LiveScenarioComponents:
     driver: LiveScenarioDriver
     recovery: LiveRecoveryService
     component_evidence_factory: Callable[[LiveFaultObservation], LiveMcpClient]
+    cls_record_provider: LiveClsRecordProvider | None = None
 
 
 class LiveScenarioRegistry:

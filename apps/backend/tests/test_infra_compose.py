@@ -94,15 +94,34 @@ def test_postgres_live_eval_is_isolated_and_does_not_mount_docker_socket() -> No
 def test_live_eval_profile_is_disabled_by_default_and_isolated() -> None:
     compose = _read("compose.yaml")
 
-    for service in ("live-eval-redis:", "live-eval-upstream:", "live-eval-nginx:"):
+    for service in (
+        "live-eval-redis:",
+        "live-eval-upstream:",
+        "live-eval-order-api:",
+        "live-eval-nginx:",
+    ):
         assert service in compose
-    assert compose.count('profiles: ["live-eval"]') == 3
+    assert compose.count('profiles: ["live-eval"]') == 4
     assert '"127.0.0.1:16379:6379"' in compose
     assert '"127.0.0.1:18080:80"' in compose
     assert '"--maxclients", "16"' in compose
     assert "docker.sock" not in compose.lower()
     assert (INFRA_DIR / "live-eval" / "nginx.conf").is_file()
     assert (INFRA_DIR / "live-eval" / "upstream.py").is_file()
+
+
+def test_compose_configures_isolated_order_api_for_live_eval_only() -> None:
+    compose = _read("compose.yaml")
+
+    assert "live-eval-order-api:" in compose
+    assert 'profiles: ["live-eval"]' in compose
+    assert '"127.0.0.1:18082:8082"' in compose
+    assert "dockerfile: live-eval/order-api.Dockerfile" in compose
+    assert "POSTGRES_DB: agent_py_live_eval" in compose
+    assert "postgres:\n        condition: service_healthy" in compose
+    assert "LIVE_ORDER_API_CONTROL_TOKEN: agentpy-live-eval-control" in compose
+    assert "docker.sock" not in compose.lower()
+    assert (INFRA_DIR / "live-eval" / "order-api.Dockerfile").is_file()
 
 
 def test_infra_docs_define_manual_docker_live_operation_and_defer_cls() -> None:

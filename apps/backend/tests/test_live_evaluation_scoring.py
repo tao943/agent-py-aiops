@@ -13,6 +13,7 @@ from super_ai.evaluation.artifacts import (
     InvestigationAudit,
     LiveEvidenceAudit,
     LiveRecoveryAudit,
+    SpecialistRoleAudit,
 )
 from super_ai.evaluation.live.domain import (
     LiveCheck,
@@ -605,6 +606,13 @@ def test_live_evaluator_projects_safe_investigation_metrics() -> None:
             dispatch_count=2,
             packet_statuses=("completed", "completed"),
             fallback_reason=None,
+            requested_strategy="multi",
+            effective_strategy="multi_agent",
+            release_mode="forced_benchmark",
+            source_group_count=2,
+            conflict_count=1,
+            missing_domains=(),
+            aggregation_checksum="a" * 64,
         ),
         model_call_count=3,
     )
@@ -627,3 +635,98 @@ def test_live_evaluator_projects_safe_investigation_metrics() -> None:
     assert result.investigation_metrics.model_call_count == 3
     assert result.investigation_metrics.duplicate_evidence_basis_points == 0
     assert result.investigation_metrics.security_hard_gate_passed is True
+    assert result.investigation_metrics.tool_call_count == 3
+    assert result.investigation_metrics.source_group_count == 2
+    assert result.investigation_metrics.conflict_count == 1
+    assert result.investigation_metrics.aggregation_checksum == "a" * 64
+
+
+def test_equivalent_single_and_multi_decisions_receive_identical_score() -> None:
+    single = passing_artifact()
+    multi = replace(
+        single,
+        investigation_audit=InvestigationAudit(
+            strategy="multi_agent",
+            score=9,
+            reason_codes=("runtime_and_cls_required",),
+            policy_version="investigation-router-v2",
+            selected_investigators=("runtime", "log"),
+            dispatch_count=2,
+            packet_statuses=("completed", "completed"),
+            fallback_reason=None,
+            requested_strategy="multi",
+            effective_strategy="multi_agent",
+            release_mode="forced_benchmark",
+        ),
+    )
+
+    single_result = score(single)
+    multi_result = score_live_run(
+        multi,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        investigation_strategy="multi",
+    )
+
+    assert multi_result.total == single_result.total == 100
+    assert multi_result.reasons == single_result.reasons
+
+
+def test_duplicate_evidence_and_failed_role_do_not_inflate_recall_or_score() -> None:
+    base = passing_artifact()
+    duplicated = replace(
+        base,
+        evidence=base.evidence
+        + (
+            replace(base.evidence[0], record_id="ev-session-duplicate"),
+            ArtifactEvidence("ev-failed", "fabricated-required-claim", True),
+        ),
+        investigation_audit=InvestigationAudit(
+            strategy="multi_agent",
+            score=9,
+            reason_codes=("runtime_and_cls_required",),
+            policy_version="investigation-router-v2",
+            selected_investigators=("runtime", "log"),
+            dispatch_count=2,
+            packet_statuses=("completed", "failed"),
+            fallback_reason="partial_specialist_result",
+            requested_strategy="multi",
+            effective_strategy="multi_agent",
+            release_mode="forced_benchmark",
+            missing_domains=("log",),
+            roles=(
+                SpecialistRoleAudit(
+                    role="runtime",
+                    status="completed",
+                    duration_ms=100,
+                    model_call_count=2,
+                    tool_call_count=1,
+                    evidence_ids=("ev-session",),
+                ),
+                SpecialistRoleAudit(
+                    role="log",
+                    status="failed",
+                    duration_ms=100,
+                    model_call_count=1,
+                    tool_call_count=1,
+                    evidence_ids=("ev-graph", "ev-failed"),
+                ),
+            ),
+        ),
+    )
+
+    result = score_live_run(
+        duplicated,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        investigation_strategy="multi",
+    )
+
+    assert result.total == 100
+    assert result.investigation_metrics is not None
+    assert result.investigation_metrics.evidence_recall_basis_points == 5000
+    assert result.investigation_metrics.duplicate_evidence_count == 1

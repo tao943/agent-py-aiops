@@ -69,6 +69,127 @@ def test_investigation_metrics_are_flat_allowlisted_and_round_trip() -> None:
     assert artifact_checksum(restored) == artifact_checksum(envelope)
 
 
+def _live_failure_result_payload() -> dict[str, object]:
+    return {
+        "failures": ["fault_injection_failed"],
+        "failureStage": "inject",
+        "checkResults": [
+            {"name": "pool_at_capacity", "passed": True, "source": "driver"},
+            {
+                "name": "business_probe_timed_out",
+                "passed": False,
+                "source": "driver",
+            },
+        ],
+        "failedChecks": ["business_probe_timed_out"],
+        "safeFacts": {"poolCapacity": 3, "businessProbeTimedOut": False},
+    }
+
+
+def test_live_failure_diagnostics_are_structured_and_round_trip_in_v1() -> None:
+    envelope = terminal_envelope(
+        running=_running_live(),
+        status="failed",
+        validity="VALID_FAIL",
+        passed=False,
+        metrics={"cleanupSucceeded": True},
+        result_payload=_live_failure_result_payload(),
+        diagnostic_task_id=None,
+        failure_category="fault_injection_failed",
+        completed_at=FIXED_TIME,
+    )
+
+    restored = type(envelope).from_json(envelope.to_json())
+
+    assert restored == envelope
+    assert artifact_checksum(restored) == artifact_checksum(envelope)
+    assert restored.artifact_schema_version == "v1"
+
+
+def _invalid_live_failure_payloads() -> tuple[dict[str, object], ...]:
+    missing_field = _live_failure_result_payload()
+    missing_field.pop("safeFacts")
+    extra_check_key = _live_failure_result_payload()
+    extra_check_key["checkResults"] = [
+        {"name": "probe_failed", "passed": False, "source": "driver", "detail": "no"}
+    ]
+    duplicate_checks = _live_failure_result_payload()
+    duplicate_checks["checkResults"] = [
+        {"name": "duplicate", "passed": False, "source": "driver"},
+        {"name": "duplicate", "passed": True, "source": "driver"},
+    ]
+    inconsistent_failed = _live_failure_result_payload()
+    inconsistent_failed["failedChecks"] = ["pool_at_capacity"]
+    reordered_failed = _live_failure_result_payload()
+    reordered_failed["checkResults"] = [
+        {"name": "first_failed", "passed": False, "source": "driver"},
+        {"name": "second_failed", "passed": False, "source": "driver"},
+    ]
+    reordered_failed["failedChecks"] = ["second_failed", "first_failed"]
+    non_scalar_fact = _live_failure_result_payload()
+    non_scalar_fact["safeFacts"] = {"nested": {"message": "no"}}
+    too_many_checks = _live_failure_result_payload()
+    too_many_checks["checkResults"] = [
+        {"name": f"check_{index}", "passed": False, "source": "driver"}
+        for index in range(65)
+    ]
+    too_many_checks["failedChecks"] = [f"check_{index}" for index in range(65)]
+    too_many_facts = _live_failure_result_payload()
+    too_many_facts["safeFacts"] = {f"fact_{index}": index for index in range(65)}
+    non_finite_fact = _live_failure_result_payload()
+    non_finite_fact["safeFacts"] = {"ratio": float("nan")}
+    forbidden_identifier = _live_failure_result_payload()
+    forbidden_identifier["safeFacts"] = {"ground_truth": "hidden"}
+    missing_check_key = _live_failure_result_payload()
+    missing_check_key["checkResults"] = [
+        {"name": "probe_failed", "passed": False}
+    ]
+    zero_checks = _live_failure_result_payload()
+    zero_checks["checkResults"] = []
+    zero_checks["failedChecks"] = []
+    non_mapping_facts = _live_failure_result_payload()
+    non_mapping_facts["safeFacts"] = ["invalid"]
+    overlong_fact = _live_failure_result_payload()
+    overlong_fact["safeFacts"] = {"message": "x" * 257}
+    nested_failed_checks = _live_failure_result_payload()
+    nested_failed_checks["failedChecks"] = [{"message": "invalid"}]
+    return (
+        missing_field,
+        extra_check_key,
+        duplicate_checks,
+        inconsistent_failed,
+        reordered_failed,
+        non_scalar_fact,
+        too_many_checks,
+        too_many_facts,
+        non_finite_fact,
+        forbidden_identifier,
+        missing_check_key,
+        zero_checks,
+        non_mapping_facts,
+        overlong_fact,
+        nested_failed_checks,
+    )
+
+
+@pytest.mark.parametrize("result_payload", _invalid_live_failure_payloads())
+def test_live_failure_diagnostics_reject_malformed_or_inconsistent_structures(
+    result_payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="failure diagnostic|forbidden"):
+        terminal_envelope(
+            running=_running_live(),
+            status="failed",
+            validity="VALID_FAIL",
+            passed=False,
+            metrics={"cleanupSucceeded": True},
+            result_payload=result_payload,
+            diagnostic_task_id=None,
+            failure_category="fault_injection_failed",
+            completed_at=FIXED_TIME,
+        )
+
+
 def test_terminal_envelope_checksum_is_stable_after_round_trip() -> None:
     envelope = terminal_envelope(
         running=_running(),

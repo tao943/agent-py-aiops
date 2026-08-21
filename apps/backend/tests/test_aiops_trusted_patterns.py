@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from super_ai.aiops import RootCauseDecision
+from super_ai.aiops import adjudication as adjudication_module
 from super_ai.aiops.adjudication import (
     DiagnosticFact,
     Disposition,
     HypothesisAssessment,
+    TrustedEvidenceProvenance,
     apply_deterministic_transition,
 )
 from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
@@ -23,12 +26,27 @@ _NGINX_SCENARIO = (
     / "live"
     / "APY-LIVE-NGINX-TIMEOUT-001"
 )
+_ORDER_POOL_SCENARIO = (
+    Path(__file__).resolve().parents[3]
+    / "benchmarks"
+    / "agentpy"
+    / "live"
+    / "APY-LIVE-ORDER-POOL-LEAK-001"
+)
 
 _HYPOTHESES = (
     "nginx_gateway_pressure",
     "nginx_route_mismatch",
     "nginx_upstream_response_timeout",
     "nginx_upstream_unavailable",
+)
+
+_ORDER_POOL_HYPOTHESES = (
+    "order_connection_lifecycle_failure",
+    "order_traffic_capacity_exceeded",
+    "order_slow_statement",
+    "order_database_lock_wait",
+    "order_database_unreachable",
 )
 
 
@@ -133,6 +151,305 @@ def _facts(*, gateway_latency_ms: int = 19) -> tuple[DiagnosticFact, ...]:
 
 def _evidence_ids() -> frozenset[str]:
     return frozenset(fact.evidence_id for fact in _facts())
+
+
+def _order_pool_assessments() -> tuple[HypothesisAssessment, ...]:
+    return tuple(
+        HypothesisAssessment(
+            hypothesis_id=hypothesis_id,
+            disposition="unresolved",
+            evidence_ids=(),
+            reason_code="awaiting_public_evidence",
+            assessment_source="deterministic",
+        )
+        for hypothesis_id in _ORDER_POOL_HYPOTHESES
+    )
+
+
+def _order_pool_facts() -> tuple[DiagnosticFact, ...]:
+    return (
+        _fact(
+            "SearchLog.records.event",
+            (
+                "request_received",
+                "connection_checkout",
+                "order_update_failed",
+                "pool_acquire_timeout",
+            ),
+            "ev-order-cls",
+            "SearchLog",
+        ),
+        _fact(
+            "InspectOrderPoolState.poolAtCapacity",
+            True,
+            "ev-order-pool",
+            "InspectOrderPoolState",
+        ),
+        _fact(
+            "InspectOrderPoolState.freeConnections",
+            0,
+            "ev-order-pool",
+            "InspectOrderPoolState",
+        ),
+        _fact(
+            "InspectOrderPoolState.waiterObserved",
+            True,
+            "ev-order-pool",
+            "InspectOrderPoolState",
+        ),
+        _fact(
+            "InspectOrderDatabaseSessions.runScopedSessionsPresent",
+            True,
+            "ev-order-sessions",
+            "InspectOrderDatabaseSessions",
+        ),
+        _fact(
+            "InspectOrderDatabaseSessions.databaseReachable",
+            True,
+            "ev-order-sessions",
+            "InspectOrderDatabaseSessions",
+        ),
+        _fact(
+            "InspectOrderDatabaseSessions.lockWaitObserved",
+            False,
+            "ev-order-sessions",
+            "InspectOrderDatabaseSessions",
+        ),
+        _fact(
+            "VerifyOrderDatabaseReachability.databaseReachable",
+            True,
+            "ev-order-health",
+            "VerifyOrderDatabaseReachability",
+        ),
+        _fact(
+            "VerifyOrderDatabaseReachability.businessProbeTimedOut",
+            True,
+            "ev-order-health",
+            "VerifyOrderDatabaseReachability",
+        ),
+    )
+
+
+def _order_pool_evidence_ids() -> frozenset[str]:
+    return frozenset(fact.evidence_id for fact in _order_pool_facts())
+
+
+def _order_pool_provenance(
+    facts: tuple[DiagnosticFact, ...] | None = None,
+) -> dict[str, TrustedEvidenceProvenance]:
+    selected = facts or _order_pool_facts()
+    by_evidence = {fact.evidence_id: fact for fact in selected}
+    return {
+        evidence_id: TrustedEvidenceProvenance(
+            evidence_id=evidence_id,
+            owner_user_id="owner-order-pool",
+            task_id="task-order-pool",
+            source_fingerprint=f"source:{fact.source_tool}",
+            source_domain=("log" if fact.source_tool == "SearchLog" else "runtime"),
+            tool_name=fact.source_tool,
+        )
+        for evidence_id, fact in by_evidence.items()
+    }
+
+
+def test_trusted_evidence_provenance_is_a_public_immutable_contract() -> None:
+    provenance_type = getattr(
+        adjudication_module,
+        "TrustedEvidenceProvenance",
+        None,
+    )
+
+    assert provenance_type is not None
+    assert provenance_type.__dataclass_params__.frozen is True
+
+
+def test_trusted_pattern_resolver_requires_explicit_evidence_provenance() -> None:
+    signature = inspect.signature(resolve_trusted_patterns)
+
+    assert "evidence_provenance" in signature.parameters
+
+
+def test_order_pool_pattern_closes_lifecycle_and_rules_out_database_causes() -> None:
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=_order_pool_provenance(),
+    )
+
+    by_id = {item.hypothesis_id: item for item in result.assessments}
+    assert by_id["order_connection_lifecycle_failure"].disposition == "supported"
+    assert by_id["order_database_unreachable"].disposition == "refuted"
+    assert by_id["order_database_lock_wait"].disposition == "refuted"
+    assert by_id["order_traffic_capacity_exceeded"].disposition != "supported"
+    assert by_id["order_slow_statement"].disposition != "supported"
+    assert [item["causalRole"] for item in result.observations] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    assert result.matched_pattern_ids == (
+        "order_connection_checkout_without_checkin",
+    )
+
+
+def test_order_pool_pattern_projection_satisfies_live_semantic_contract() -> None:
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=_order_pool_provenance(),
+    )
+    by_role = {
+        str(item["causalRole"]): str(item["summary"])
+        for item in result.observations
+    }
+    decision = RootCauseDecision(
+        "order-api",
+        "exception_path_connection_not_released",
+        by_role["trigger"],
+        (by_role["trigger"], by_role["mechanism"], by_role["impact"]),
+        tuple(sorted(_order_pool_evidence_ids())),
+        0.95,
+    )
+
+    score = score_root_cause_semantics(
+        decision,
+        load_live_oracle(_ORDER_POOL_SCENARIO),
+    )
+
+    assert score.total == 20
+
+
+def test_order_pool_pattern_ignores_completed_checkout_before_leaking_checkout() -> None:
+    facts = tuple(
+        replace(
+            fact,
+            value=(
+                "connection_checkout",
+                "connection_checkin",
+                "connection_checkout",
+                "order_update_failed",
+                "pool_acquire_timeout",
+            ),
+        )
+        if fact.key == "SearchLog.records.event"
+        else fact
+        for fact in _order_pool_facts()
+    )
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_order_pool_provenance(facts),
+    )
+
+    assert result.matched_pattern_ids == (
+        "order_connection_checkout_without_checkin",
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "replacement"),
+    (
+        (
+            "SearchLog.records.event",
+            ("request_received", "order_update_failed", "pool_acquire_timeout"),
+        ),
+        (
+            "SearchLog.records.event",
+            (
+                "request_received",
+                "connection_checkout",
+                "connection_checkin",
+                "order_update_failed",
+                "pool_acquire_timeout",
+            ),
+        ),
+        ("InspectOrderPoolState.poolAtCapacity", False),
+        ("InspectOrderPoolState.freeConnections", 1),
+        ("InspectOrderPoolState.waiterObserved", False),
+        ("InspectOrderDatabaseSessions.runScopedSessionsPresent", False),
+        ("InspectOrderDatabaseSessions.databaseReachable", False),
+        ("InspectOrderDatabaseSessions.lockWaitObserved", True),
+        ("VerifyOrderDatabaseReachability.databaseReachable", False),
+        ("VerifyOrderDatabaseReachability.businessProbeTimedOut", False),
+    ),
+)
+def test_order_pool_pattern_fails_closed_on_missing_or_conflicting_fact(
+    key: str,
+    replacement: object,
+) -> None:
+    facts = tuple(
+        replace(fact, value=replacement) if fact.key == key else fact
+        for fact in _order_pool_facts()
+    )
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_order_pool_provenance(facts),
+    )
+
+    assert result.matched_pattern_ids == ()
+    assert all(item.disposition == "unresolved" for item in result.assessments)
+
+
+def test_order_pool_pattern_rejects_different_evidence_ids_from_one_source() -> None:
+    provenance = _order_pool_provenance()
+    pool = provenance["ev-order-pool"]
+    health = provenance["ev-order-health"]
+    provenance["ev-order-health"] = replace(
+        health,
+        source_fingerprint=pool.source_fingerprint,
+    )
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=provenance,
+    )
+
+    assert result.matched_pattern_ids == ()
+    assert all(item.disposition == "unresolved" for item in result.assessments)
+
+
+@pytest.mark.parametrize("scope_field", ("owner_user_id", "task_id"))
+def test_order_pool_pattern_rejects_foreign_evidence_scope(scope_field: str) -> None:
+    provenance = _order_pool_provenance()
+    current = provenance["ev-order-cls"]
+    provenance["ev-order-cls"] = replace(
+        current,
+        **{scope_field: "foreign-scope"},
+    )
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=provenance,
+    )
+
+    assert result.matched_pattern_ids == ()
+    assert all(item.disposition == "unresolved" for item in result.assessments)
+
+
+def test_order_pool_pattern_rejects_missing_evidence_provenance() -> None:
+    provenance = _order_pool_provenance()
+    provenance.pop("ev-order-sessions")
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=_order_pool_facts(),
+        trusted_evidence_ids=_order_pool_evidence_ids(),
+        evidence_provenance=provenance,
+    )
+
+    assert result.matched_pattern_ids == ()
+    assert all(item.disposition == "unresolved" for item in result.assessments)
 
 
 def test_nginx_timeout_pattern_closes_each_hypothesis_with_direct_evidence() -> None:

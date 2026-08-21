@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
+from super_ai.evaluation.live.failure_diagnostics import (
+    reject_forbidden_artifact_keys,
+    validate_serialized_failure_diagnostics,
+)
 from super_ai.memory.repositories import JsonDict
 
 EvaluationKind = Literal["snapshot", "retrieval", "live"]
@@ -32,22 +36,6 @@ _STATUSES = frozenset(
 )
 _PROVENANCE = frozenset({"native", "imported", "reconstructed"})
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_FORBIDDEN_KEY_TOKENS = frozenset(
-    {
-        "apikey",
-        "accesskey",
-        "secret",
-        "secretkey",
-        "password",
-        "token",
-        "oracle",
-        "groundtruth",
-        "primarycause",
-        "answerkey",
-        "prompt",
-        "chainofthought",
-    }
-)
 _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
     "snapshot": frozenset(
         {
@@ -104,6 +92,18 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "fallbackReason",
             "effectiveInvestigationStrategy",
             "securityHardGatePassed",
+            "toolCallCount",
+            "specialistRoleStatuses",
+            "specialistRoleDurationMs",
+            "specialistRoleModelCallCounts",
+            "specialistRoleToolCallCounts",
+            "specialistRoleEvidenceCounts",
+            "sourceGroupCount",
+            "duplicateEvidenceCount",
+            "conflictCount",
+            "missingDomains",
+            "aggregationChecksum",
+            "terminalFailureCategory",
         }
     ),
     "retrieval": frozenset(
@@ -135,6 +135,18 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "fallbackReason",
             "effectiveInvestigationStrategy",
             "securityHardGatePassed",
+            "toolCallCount",
+            "specialistRoleStatuses",
+            "specialistRoleDurationMs",
+            "specialistRoleModelCallCounts",
+            "specialistRoleToolCallCounts",
+            "specialistRoleEvidenceCounts",
+            "sourceGroupCount",
+            "duplicateEvidenceCount",
+            "conflictCount",
+            "missingDomains",
+            "aggregationChecksum",
+            "terminalFailureCategory",
         }
     ),
 }
@@ -148,6 +160,9 @@ _RESULT_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "failureStage",
             "authorizationCode",
             "missingResultArtifact",
+            "checkResults",
+            "failedChecks",
+            "safeFacts",
         }
     ),
 }
@@ -316,6 +331,8 @@ def terminal_envelope(
     """Advance a running identity to one validated terminal state."""
     if running.status != "running":
         raise ValueError("Only a running evaluation can become terminal.")
+    if running.evaluation_kind == "live":
+        validate_serialized_failure_diagnostics(result_payload)
     envelope = EvaluationRunEnvelope(
         artifact_schema_version=running.artifact_schema_version,
         run_id=running.run_id,
@@ -424,27 +441,15 @@ def _validate_envelope(envelope: EvaluationRunEnvelope) -> None:
         _RESULT_KEYS[envelope.evaluation_kind],
         "result payload",
     )
+    if envelope.evaluation_kind == "live":
+        validate_serialized_failure_diagnostics(envelope.result_payload)
 
 
 def _validate_container(value: JsonDict, allowed: frozenset[str], label: str) -> None:
-    _reject_forbidden_keys(value)
+    reject_forbidden_artifact_keys(value)
     unknown = set(value).difference(allowed)
     if unknown:
         raise ValueError(f"Evaluation {label} field is not allowed: {sorted(unknown)[0]}")
-
-
-def _reject_forbidden_keys(value: object) -> None:
-    if isinstance(value, Mapping):
-        mapping = cast(Mapping[object, object], value)
-        for key, item in mapping.items():
-            canonical = re.sub(r"[^a-z0-9]", "", str(key).casefold())
-            if canonical in _FORBIDDEN_KEY_TOKENS:
-                raise ValueError(f"Evaluation artifact contains forbidden field: {key}")
-            _reject_forbidden_keys(item)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        sequence = cast(Sequence[object], value)
-        for item in sequence:
-            _reject_forbidden_keys(item)
 
 
 def _require_aware_utc(value: datetime) -> None:

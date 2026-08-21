@@ -2,6 +2,7 @@ import inspect
 
 from super_ai.aiops import causal_intents
 from super_ai.aiops.causal_intents import (
+    LIVE_TOOL_CAPABILITIES,
     allowed_causal_intents,
     next_causal_refinement_index,
     repair_plan_causal_coverage,
@@ -26,6 +27,17 @@ def _step(
         "causalIntent": causal_intent,
         "causalIntentOrigin": origin,
     }
+
+
+def _hypothesis_step(
+    step_id: str,
+    tool: str,
+    causal_intent: str,
+    hypotheses: tuple[str, ...],
+) -> JsonDict:
+    step = _step(step_id, tool, causal_intent)
+    step["testsHypotheses"] = list(hypotheses)
+    return step
 
 
 def test_tool_capabilities_describe_public_observation_semantics() -> None:
@@ -55,6 +67,12 @@ def test_tool_capabilities_describe_public_observation_semantics() -> None:
     )
     assert allowed_causal_intents("RestartTestService") == frozenset()
     assert allowed_causal_intents("InspectFutureSubsystem") == frozenset({"context"})
+
+
+def test_live_tool_registry_is_the_role_capability_source() -> None:
+    for tool_name, capability in LIVE_TOOL_CAPABILITIES.items():
+        assert allowed_causal_intents(tool_name) == capability.causal_intents
+        assert capability.generic_causal_intent in capability.causal_intents
 
 
 def test_tool_capability_registry_is_answer_isolated() -> None:
@@ -95,13 +113,49 @@ def test_plan_coverage_minimally_repairs_all_mechanism_plan() -> None:
     assert result.ambiguous_trigger is False
 
 
+def test_plan_coverage_rejects_roles_split_across_hypotheses() -> None:
+    result = repair_plan_causal_coverage(
+        (
+            _hypothesis_step(
+                "pool",
+                "InspectOrderPoolState",
+                "context",
+                ("lifecycle", "traffic"),
+            ),
+            _hypothesis_step(
+                "sessions",
+                "InspectOrderDatabaseSessions",
+                "mechanism",
+                ("slow", "lock"),
+            ),
+            _hypothesis_step(
+                "health",
+                "VerifyOrderDatabaseReachability",
+                "impact",
+                ("unavailable",),
+            ),
+            _hypothesis_step(
+                "logs",
+                "SearchLog",
+                "trigger",
+                ("slow", "lifecycle", "traffic"),
+            ),
+        )
+    )
+
+    assert result.complete is False
+    assert result.target_hypothesis_id == "slow"
+    assert result.missing_roles == ("impact",)
+
+
 def test_plan_coverage_does_not_claim_completion_without_capable_tools() -> None:
     result = repair_plan_causal_coverage(
         (_step("metrics", "GetDatabaseMetrics", "context"),)
     )
 
     assert result.complete is False
-    assert result.missing_roles == ("trigger", "mechanism", "impact")
+    assert result.target_hypothesis_id == "postgres_deadlock"
+    assert result.missing_roles == ("trigger", "impact")
     assert result.ambiguous_trigger is False
 
 
@@ -124,7 +178,7 @@ def test_plan_coverage_uses_metrics_for_impact_without_overwriting_other_roles()
     ]
 
 
-def test_log_only_plan_cannot_be_repaired_into_a_trigger() -> None:
+def test_log_lifecycle_plan_can_supply_one_trigger_when_runtime_supplies_other_roles() -> None:
     result = repair_plan_causal_coverage(
         (
             _step("logs-1", "SearchLog", "mechanism"),
@@ -133,9 +187,9 @@ def test_log_only_plan_cannot_be_repaired_into_a_trigger() -> None:
         )
     )
 
-    assert "trigger" not in allowed_causal_intents("SearchLog")
-    assert result.complete is False
-    assert result.missing_roles == ("trigger",)
+    assert "trigger" in allowed_causal_intents("SearchLog")
+    assert result.complete is True
+    assert result.missing_roles == ()
 
 
 def test_plan_coverage_reports_ambiguous_trigger_when_it_cannot_repair() -> None:

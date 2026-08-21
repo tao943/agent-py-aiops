@@ -1,0 +1,14 @@
+type: agentpy-original
+origin:
+  - AgentPy isolated order-api and PostgreSQL connection-pool experiment
+  - Public asyncpg pool and PostgreSQL monitoring documentation
+  - AgentPy postgres-pool-exhaustion knowledge card
+transformation: The service fixture, workload, evidence split, oracle, and recovery policy are project-synthesized.
+validation_references:
+  - https://magicstack.github.io/asyncpg/current/api/index.html#connection-pools
+  - https://www.postgresql.org/docs/current/monitoring-stats.html
+license_notes:
+  - Referenced documentation remains under its publishers' terms.
+  - Live fixture and benchmark contracts are original AgentPy material.
+accessed: 2026-08-20
+created: 2026-08-20

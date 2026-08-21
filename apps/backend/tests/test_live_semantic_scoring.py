@@ -16,6 +16,7 @@ SCENARIO = (
     / "live"
     / "APY-LIVE-PG-LOCK-001"
 )
+ORDER_POOL_SCENARIO = SCENARIO.parent / "APY-LIVE-ORDER-POOL-LEAK-001"
 
 
 def _decision(
@@ -162,3 +163,40 @@ def test_requires_semantic_rubric() -> None:
 
     with pytest.raises(ValueError, match="semantic rubric"):
         score_root_cause_semantics(_decision(), oracle)
+
+
+def test_scores_grounded_order_pool_lifecycle_cause_at_twenty() -> None:
+    decision = RootCauseDecision(
+        "order-api",
+        "exception_path_connection_not_released",
+        "The exception path checks out a connection but omits the matching release.",
+        (
+            "The acquired connection has no checkin after the request error.",
+            "This causes the database pool to become saturated with no free connection.",
+            "New requests wait for acquisition and order updates time out "
+            "while PostgreSQL remains reachable.",
+        ),
+        ("order-pool-saturated", "cls-order-connection-lifecycle"),
+        1.0,
+    )
+    result = score_root_cause_semantics(
+        decision,
+        load_live_oracle(ORDER_POOL_SCENARIO),
+    )
+    assert result.total == 20
+
+
+def test_order_pool_saturation_alone_does_not_earn_trigger_points() -> None:
+    decision = RootCauseDecision(
+        "order-api",
+        "exception_path_connection_not_released",
+        "The connection pool is saturated.",
+        ("Order updates time out.",),
+        ("order-pool-saturated",),
+        1.0,
+    )
+    result = score_root_cause_semantics(
+        decision,
+        load_live_oracle(ORDER_POOL_SCENARIO),
+    )
+    assert result.trigger == 0

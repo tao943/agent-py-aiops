@@ -15,6 +15,7 @@ from typing import cast
 from super_ai.aiops.execution import ExecutionCoordinator
 from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.archive import EvaluationArchive
+from super_ai.evaluation.artifacts import InvestigationAudit
 from super_ai.evaluation.history import (
     EvaluationStatus,
     running_envelope,
@@ -26,6 +27,7 @@ from super_ai.evaluation.history import (
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     LiveClsLogUploader,
+    LiveClsRecordProvider,
     McpClsSearcher,
 )
 from super_ai.evaluation.live.diagnostics import (
@@ -34,11 +36,22 @@ from super_ai.evaluation.live.diagnostics import (
 )
 from super_ai.evaluation.live.domain import EvidenceSource
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
+from super_ai.evaluation.live.failure_diagnostics import normalize_public_failed_checks
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutEvidenceMcpClient,
     NginxTimeoutLiveConfig,
     NginxTimeoutScenarioDriver,
+)
+from super_ai.evaluation.live.order_pool_leak import (
+    ComposeServiceRestarter,
+    HttpOrderApiControl,
+    OrderPoolClsRecordProvider,
+    OrderPoolLeakScenarioDriver,
+    OrderPoolLiveConfig,
+    OrderPoolRecoveryService,
+    OrderPoolRuntimeEvidenceMcpClient,
+    PostgresOrderPoolObserver,
 )
 from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
@@ -166,9 +179,13 @@ def safe_output(
         "status": status,
     }
     if result is not None:
-        payload["result"] = {
+        safe_result = {
             key: value for key, value in result.items() if key in _SAFE_RESULT_FIELDS
         }
+        failed_checks = normalize_public_failed_checks(result.get("failedChecks"))
+        if failed_checks is not None:
+            safe_result["failedChecks"] = failed_checks
+        payload["result"] = safe_result
     return payload
 
 
@@ -207,12 +224,13 @@ async def _run_live_command(
     )
 
     async def execute() -> LiveEvaluationResult:
+        components = build_live_scenario_registry().resolve(
+            cast(str, arguments.scenario)
+        )
         evidence_preparer, cls_mcp_client = build_live_evidence_runtime(
             evidence_source=evidence_source,
             config_path=config_path,
-        )
-        components = build_live_scenario_registry().resolve(
-            cast(str, arguments.scenario)
+            record_provider=components.cls_record_provider,
         )
         repositories = create_sqlalchemy_memory_repositories(session_factory)
         llm_provider = build_default_llm_provider(config_path=config_path)
@@ -338,14 +356,19 @@ async def _run_live_once(
             result_payload["failureStage"] = exc.stage
         if exc.authorization_code is not None:
             result_payload["authorizationCode"] = exc.authorization_code
+        result_payload.update(_failure_diagnostic_payload(exc))
+        failure_metrics = _cleanup_metrics(exc)
+        failure_metrics.update(
+            _investigation_process_metrics(exc.investigation_audit)
+        )
         terminal = terminal_envelope(
             running=running,
             status=cast(EvaluationStatus, status),
             validity=validity,
             passed=False if status == "failed" else None,
-            metrics=_cleanup_metrics(exc),
+            metrics=failure_metrics,
             result_payload=result_payload,
-            diagnostic_task_id=None,
+            diagnostic_task_id=exc.diagnostic_task_id,
             failure_category=exc.category,
             completed_at=datetime.now(timezone.utc),
         )
@@ -409,6 +432,34 @@ async def _run_live_once(
                 "securityHardGatePassed": (
                     investigation_metrics.security_hard_gate_passed
                 ),
+                "toolCallCount": investigation_metrics.tool_call_count,
+                "specialistRoleStatuses": dict(
+                    investigation_metrics.role_statuses
+                ),
+                "specialistRoleDurationMs": dict(
+                    investigation_metrics.role_duration_ms
+                ),
+                "specialistRoleModelCallCounts": dict(
+                    investigation_metrics.role_model_call_counts
+                ),
+                "specialistRoleToolCallCounts": dict(
+                    investigation_metrics.role_tool_call_counts
+                ),
+                "specialistRoleEvidenceCounts": dict(
+                    investigation_metrics.role_evidence_counts
+                ),
+                "sourceGroupCount": investigation_metrics.source_group_count,
+                "duplicateEvidenceCount": (
+                    investigation_metrics.duplicate_evidence_count
+                ),
+                "conflictCount": investigation_metrics.conflict_count,
+                "missingDomains": list(investigation_metrics.missing_domains),
+                "aggregationChecksum": (
+                    investigation_metrics.aggregation_checksum
+                ),
+                "terminalFailureCategory": (
+                    investigation_metrics.terminal_failure_category
+                ),
             }
         )
     terminal = terminal_envelope(
@@ -444,6 +495,57 @@ def _cleanup_metrics(error: BaseException) -> dict[str, object]:
     if isinstance(cleanup_succeeded, bool):
         return {"cleanupSucceeded": cleanup_succeeded}
     return {}
+
+
+def _investigation_process_metrics(
+    audit: InvestigationAudit | None,
+) -> dict[str, object]:
+    """Project answer-isolated investigation process metrics for failed runs."""
+    if audit is None:
+        return {}
+    roles = audit.roles
+    return {
+        "durationMs": sum(role.duration_ms for role in roles),
+        "modelCallCount": sum(role.model_call_count for role in roles),
+        "fallbackReason": audit.fallback_reason,
+        "effectiveInvestigationStrategy": (
+            audit.effective_strategy or audit.strategy
+        ),
+        "toolCallCount": sum(role.tool_call_count for role in roles),
+        "specialistRoleStatuses": {
+            role.role: role.status for role in roles
+        },
+        "specialistRoleDurationMs": {
+            role.role: role.duration_ms for role in roles
+        },
+        "specialistRoleModelCallCounts": {
+            role.role: role.model_call_count for role in roles
+        },
+        "specialistRoleToolCallCounts": {
+            role.role: role.tool_call_count for role in roles
+        },
+        "specialistRoleEvidenceCounts": {
+            role.role: len(role.evidence_ids) for role in roles
+        },
+        "sourceGroupCount": audit.source_group_count,
+        "duplicateEvidenceCount": audit.duplicate_evidence_count,
+        "conflictCount": audit.conflict_count,
+        "missingDomains": list(audit.missing_domains),
+        "aggregationChecksum": audit.aggregation_checksum,
+        "terminalFailureCategory": audit.terminal_failure_category,
+    }
+
+
+def _failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:
+    diagnostics = error.diagnostics
+    return diagnostics.to_result_payload() if diagnostics is not None else {}
+
+
+def _public_failure_diagnostic_payload(error: LiveBenchmarkError) -> dict[str, object]:
+    diagnostics = error.diagnostics
+    if diagnostics is None:
+        return {}
+    return {"failedChecks": list(diagnostics.failed_checks)}
 
 
 class _LiveScoringEvaluator:
@@ -543,6 +645,7 @@ def _live_failure_payload(
         result["failureStage"] = error.stage
     if error.authorization_code is not None:
         result["authorizationCode"] = error.authorization_code
+    result.update(_public_failure_diagnostic_payload(error))
     return (
         safe_output(
             command="run",
@@ -559,6 +662,7 @@ def build_live_evidence_runtime(
     *,
     evidence_source: EvidenceSource,
     config_path: str | Path | None,
+    record_provider: LiveClsRecordProvider | None = None,
 ) -> tuple[LiveEvidencePreparer, LiveMcpClient | None]:
     if evidence_source == "local":
         return LocalLiveEvidencePreparer(), None
@@ -592,6 +696,7 @@ def build_live_evidence_runtime(
         searcher=McpClsSearcher(cls_client, limit=required_int(live, "queryLimit")),
         timeout_seconds=float(required_int(live, "indexWaitSeconds")),
         poll_interval_seconds=float(required_int(live, "pollIntervalSeconds")),
+        record_provider=record_provider,
     )
     return preparer, cls_client
 
@@ -643,6 +748,26 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
         )
 
     registry.register("APY-LIVE-NGINX-TIMEOUT-001", nginx_timeout_components)
+
+    def order_pool_components() -> LiveScenarioComponents:
+        config = _order_pool_config_from_environment()
+        driver = OrderPoolLeakScenarioDriver(
+            config,
+            api=HttpOrderApiControl(config),
+            postgres=PostgresOrderPoolObserver(_postgres_config_from_environment()),
+        )
+        return LiveScenarioComponents(
+            driver_name="order_pool_leak",
+            driver=driver,
+            recovery=OrderPoolRecoveryService(
+                driver,
+                ComposeServiceRestarter(config),
+            ),
+            component_evidence_factory=OrderPoolRuntimeEvidenceMcpClient,
+            cls_record_provider=OrderPoolClsRecordProvider(driver),
+        )
+
+    registry.register("APY-LIVE-ORDER-POOL-LEAK-001", order_pool_components)
     return registry
 
 
@@ -712,6 +837,16 @@ def _nginx_config_from_environment() -> NginxTimeoutLiveConfig:
         upstream_url=os.getenv(
             "LIVE_NGINX_UPSTREAM_URL", "http://127.0.0.1:18081"
         ),
+    )
+
+
+def _order_pool_config_from_environment() -> OrderPoolLiveConfig:
+    return OrderPoolLiveConfig(
+        base_url=os.getenv("LIVE_ORDER_API_URL", "http://127.0.0.1:18082"),
+        control_token=os.getenv(
+            "LIVE_ORDER_API_CONTROL_TOKEN", "agentpy-live-eval-control"
+        ),
+        compose_file=REPOSITORY_ROOT / "infra" / "compose.yaml",
     )
 
 

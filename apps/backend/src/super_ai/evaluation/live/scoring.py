@@ -29,6 +29,9 @@ _CITATION_SOURCES: dict[str, frozenset[str]] = {
     "APY-LIVE-NGINX-TIMEOUT-001": frozenset(
         {"InspectNginxRequestTimeline", "SearchLog"}
     ),
+    "APY-LIVE-ORDER-POOL-LEAK-001": frozenset(
+        {"InspectOrderPoolState", "SearchLog"}
+    ),
 }
 
 
@@ -128,6 +131,8 @@ def score_live_run(
         evidence_recall_basis_points=required_evidence * 500,
         security_hard_gate_passed=hard_gate is None,
         total_score=total,
+        oracle=oracle,
+        evidence_source=evidence_source,
     )
     return LiveEvaluationResult(
         fault_confirmation,
@@ -156,6 +161,8 @@ def _investigation_metrics(
     evidence_recall_basis_points: int,
     security_hard_gate_passed: bool,
     total_score: int,
+    oracle: ScenarioOracle,
+    evidence_source: EvidenceSource,
 ) -> InvestigationBenchmarkMetrics | None:
     audit = artifact.investigation_audit
     if audit is None:
@@ -165,19 +172,78 @@ def _investigation_metrics(
     duplicate_basis_points = (
         round(duplicate_count * 10_000 / len(claim_ids)) if claim_ids else 0
     )
+    metric_recall = _specialist_evidence_recall_basis_points(
+        artifact,
+        oracle=oracle,
+        evidence_source=evidence_source,
+        fallback=evidence_recall_basis_points,
+    )
     return InvestigationBenchmarkMetrics(
         strategy=requested_strategy,
-        effective_strategy=audit.strategy,
+        effective_strategy=audit.effective_strategy or audit.strategy,
         policy_version=audit.policy_version,
         root_cause_top1_correct=root_cause_top1_correct,
-        evidence_recall_basis_points=evidence_recall_basis_points,
+        evidence_recall_basis_points=metric_recall,
         duration_ms=artifact.duration_ms,
         model_call_count=artifact.model_call_count,
         duplicate_evidence_basis_points=duplicate_basis_points,
         fallback_reason=audit.fallback_reason,
         security_hard_gate_passed=security_hard_gate_passed,
         total_score=total_score,
+        tool_call_count=len(artifact.tool_calls),
+        role_statuses=tuple((item.role, item.status) for item in audit.roles),
+        role_duration_ms=tuple(
+            (item.role, item.duration_ms) for item in audit.roles
+        ),
+        role_model_call_counts=tuple(
+            (item.role, item.model_call_count) for item in audit.roles
+        ),
+        role_tool_call_counts=tuple(
+            (item.role, item.tool_call_count) for item in audit.roles
+        ),
+        role_evidence_counts=tuple(
+            (item.role, len(item.evidence_ids)) for item in audit.roles
+        ),
+        source_group_count=audit.source_group_count,
+        duplicate_evidence_count=duplicate_count,
+        conflict_count=audit.conflict_count,
+        missing_domains=audit.missing_domains,
+        aggregation_checksum=audit.aggregation_checksum,
+        terminal_failure_category=audit.terminal_failure_category,
     )
+
+
+def _specialist_evidence_recall_basis_points(
+    artifact: RunArtifact,
+    *,
+    oracle: ScenarioOracle,
+    evidence_source: EvidenceSource,
+    fallback: int,
+) -> int:
+    audit = artifact.investigation_audit
+    if audit is None or not audit.roles:
+        return fallback
+    eligible_record_ids = {
+        evidence_id
+        for role in audit.roles
+        if role.status in {"completed", "inconclusive"}
+        for evidence_id in role.evidence_ids
+    }
+    grounded_claim_ids = {
+        evidence.claim_id
+        for evidence in artifact.evidence
+        if evidence.grounded and evidence.record_id in eligible_record_ids
+    }
+    milestones = oracle.required_evidence
+    if evidence_source == "cls":
+        milestones += oracle.cls_required_evidence
+    if not milestones:
+        return 0
+    satisfied = sum(
+        any(set(alternative) <= grounded_claim_ids for alternative in milestone.alternatives)
+        for milestone in milestones
+    )
+    return int(10_000 * satisfied / len(milestones))
 
 
 def _hard_gate(
@@ -461,6 +527,7 @@ def _executed_action_is_scoped(recovery: LiveRecoveryRecord) -> bool:
             "transaction-b",
         },
         "close_current_run_benchmark_clients": {"current_run_named_clients"},
+        "restart_live_eval_order_api": {"current_run_order_api_instance"},
     }
     return recovery.target_ref in allowed_targets.get(recovery.action, set())
 

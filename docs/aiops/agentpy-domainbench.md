@@ -555,6 +555,241 @@ cleanup 和独立验证通过。
 但 Evidence Recall 与 Root Cause Top-1 均无能力增益；同时缺少第二个完整有效场景。未降低
 评分阈值、required Evidence、Validator 或恢复授权规则。生产 `auto` 不默认升级 Multi。
 
+### Order API 连接池生命周期 Live 合同（2026-08-20）
+
+新增 `APY-LIVE-ORDER-POOL-LEAK-001`，实现提交基线为 `4b0c2be`。隔离
+`live-eval-order-api` 使用固定容量 asyncpg pool 和 `agent_py_live_eval` 中的 run-scoped 测试订单；
+异常订单路径在 checkout 和真实参数化更新后进入错误分支并有界保留连接。Runtime 证据只证明池饱和、
+业务 acquire timeout、PostgreSQL 可达和无锁等待；CLS records 来自 order-api `/events` 的真实
+checkout/error/checkin/timeout 生命周期，不使用 evaluator 合成答案。
+
+Docker run `docker-order-pool-contract` 已验证：基线订单更新成功、3 个异常连接累积、池 free 为 0、
+业务探针超时、旧 generation 连接在 scoped restart 后释放、新 generation ready、业务更新恢复、测试订单
+删除、双 cleanup 和最终 audit clean。首次运行发现 Compose restart 完成早于 HTTP ready，现已加入有界
+健康轮询；知识卡 `postgres-pool-exhaustion.md` 只标记为本隔离 order-api fixture 已验证，不外推到所有
+连接池实现。
+
+目标回归、Ruff、Pyright、Compose config 与 OpenSpec strict validation 均通过，未运行全量 pytest。
+Single 与 Multi 的 Runtime/CLS 工具、可信参数和评分器相同；并行 Dispatch 共享一次全局模型预算，
+不能给每个 Investigator 复制额度。尚未执行真实 LLM+CLS 3×3 A/B，因此当前只能证明场景、路由和安全
+闭环成立，不能宣称 Multi-Agent 具有能力增益或适合生产默认启用。
+
+### Order Pool hypothesis-coherent 修复 canary（2026-08-20）
+
+提交 `7076304` 完成了三项安全修复：计划覆盖必须围绕同一公开 hypothesis；Live 工具角色、公开
+hypothesis 能力与 Generic Plan 共同读取单一 capability registry；Order Pool mechanism/impact 只能由
+incident-scoped CLS lifecycle、连接池满载、run-scoped PostgreSQL 会话、数据库可达和业务 acquire
+timeout 的结构化组合事实投影。普通 summary、neutral/error observation 或仅排除竞争候选的 Evidence
+不再被升级为正 Evidence；未修改 Validator、评分、独立 Evidence 门槛或恢复授权。
+
+本地受控模型为 `qwen3.7-plus` 与 `qwen3-vl-rerank`，独立 Validator 和 embedding 保持不变。真实模型
+readiness 2/2、真实 CLS upload/search contract、30 documents/180 chunks RAG scope audit、目标 pytest、
+Ruff 与 Pyright 均通过；未运行全量 pytest。
+
+唯一 Single canary `order-pool-causal-single-canary-20260820-125754` 在 Agent/LLM 诊断前以
+`VALID_FAIL/fault_injection_failed` 终止，`diagnosticTaskId=null`，因此不能用于评价本次因果链修复。
+失败终态同时保存到 PostgreSQL 与 Evaluation Archive，artifact checksum 为
+`496026c2c2bda37555c2211e3dad095dd4c02a8b66a5f6a31876456d23b671a5`；首次 Verify 检测到残留，随后
+显式 Cleanup 成功并持久化 `cleanupSucceeded=true`。旧失败 Run
+`order-pool-q3r-ab-single-01-20260820` 的 checksum、result identity、失败分类与 cleanup 终态保持不变。
+
+后续不自动重跑第二个付费 canary。真实 Docker 合同复查显示 fault injection 可复现通过，但恢复后的
+`unrelated_sessions_preserved` 仍以瞬时 session 数完全相等作为条件，会受并发 observer/health connection
+波动影响。应先单独加固该 Live harness 的稳定身份/集合比较，再经确认运行新的唯一 Single canary；
+在此之前不得开始 3×3 A/B，也不得宣称真实修复已达到 `VALID_PASS`。
+
+提交 `d0e90a5` 将 order-api 空闲池连接标记为 `agentpy-order-api:idle`，observer 排除所有
+`agentpy-order-api:%` 会话，并以 `pid + backend_start` 稳定身份和 baseline 子集语义验证真正的无关会话；
+瞬时新增 observer 会话不再造成误判，baseline 无关会话丢失仍会失败。16 项目标测试、Ruff、Pyright 和
+真实 Docker 恢复合同均通过，未运行全量 pytest。
+
+随后唯一 Single canary `order-pool-causal-single-canary-20260820-220146` 仍在 Agent/LLM 前以
+`VALID_FAIL/fault_injection_failed` 终止，`diagnosticTaskId=null`。三次 fault 请求及 probe/state 请求均到达
+order-api，但当前失败 Artifact 未持久化六项注入检查的逐项安全结果，因而不能据此确定是哪一项检查发生
+波动，也不能评价因果链修复。独立 Verify 先发现残留，显式 Cleanup 后通过并持久化
+`cleanupSucceeded=true`；PostgreSQL Artifact checksum 为
+`26d167ea22c5c656e3693e0999c4cccf50e4bbda3f9cee164afeaf116031314e`。此前两个失败 Run 的 checksum、
+result identity、失败分类与 cleanup 终态保持不变。下一步应先为注入失败持久化允许列表内的 check 名称、
+布尔结果和安全事实，再凭证据修复具体波动；在此之前不再运行付费 canary 或 3×3 A/B。
+
+提交 `8ce6c43`、`753c9e3` 与 `c51dca3` 完成上述可观测性链路。未确认的
+`LiveFaultObservation` 现在通过类型化、不可变的安全诊断携带有序 `checkResults`、由 false 检查严格
+投影的 `failedChecks` 和 driver 显式声明的标量 `safeFacts`；完整结构进入同一个 v1 terminal Envelope，
+由 Archive-first recorder 同步到 Evaluation Archive 与 PostgreSQL JSONB。CLI 与本地 report 只公开经过
+重新规范化的失败检查名称，不公开完整事实。
+
+Runner 构造、Artifact 反序列化和 report 读取共同使用一套数量、唯一性、标识符、有限数值、标量类型与
+禁用答案/凭据字段校验；三项诊断字段必须同时存在，`failedChecks` 必须与 false 检查的原顺序完全一致。
+inject 在返回 Observation 前直接异常时不伪造诊断；恶意、嵌套、重复、超长、非有限或结构不一致的内容
+被省略或拒绝，同时保留原失败分类和 cleanup 语义。目标 Runner/CLI/history/archive/recording/persistence/
+Order Pool contract 回归、精确本地失败路径、Ruff 与 Pyright 均通过；未运行全量 pytest、真实 LLM、CLS、
+Docker 或新的付费 canary。因此前一 canary 的具体波动原因仍未知，下一条经批准的唯一 canary 才能用新
+Artifact 给出具体失败检查。
+
+### Order Pool PostgreSQL session scope 修复与唯一 canary（2026-08-20）
+
+失败 Run `order-pool-diagnostics-single-20260820-225508` 的安全诊断确认仅
+`run_scoped_sessions_present=false`：3 个连接已 checkout、pool capacity 为 3、free 为 0、业务探针
+超时、PostgreSQL 可达且无锁等待，但 observer 看到的当前 Run 会话数为 0。根因是原标签
+`agentpy-order-api:<full_run_id>:<full_generation>` 超过 PostgreSQL `application_name` 的 63 字节上限，
+服务端在 generation 前截断，而 observer 仍按完整 Run ID 与 generation 查询。
+
+提交 `386690e` 将仅用于 PostgreSQL session 的标签改为
+`agentpy-order-api:<sha256(run_id)[:16]>:<generation[:16]>`，最长 51 个 ASCII 字节；HTTP、订单、事件、
+CLS、Artifact 与 PostgreSQL 评测历史中的完整 Run ID 不变。order-api 与 backend observer 使用相同算法，
+run pattern 和 generation 精确匹配均有 64 字符 Run ID 合同覆盖。19 项定向单元测试、Ruff、Pyright 与
+重建镜像后的真实 Docker 恢复/幂等清理合同通过；未运行全量 pytest。canary 前置审计同时确认
+30 documents/180 chunks/0 scope mismatch、主模型与独立 Validator readiness 2/2，旧失败 Run 的
+`VALID_FAIL/fault_injection_failed` 状态及 checksum
+`17ddbe924a1ed34ecca638c088962e40763a3f22a46afd1aafa8b1880097e42d` 未改变。
+
+唯一真实 Single canary `order-pool-bounded-single-20260820-231711` 已越过 fault injection 硬门禁；按
+Runner 控制流，这意味着 `pool_at_capacity`、`pool_free_zero`、`business_probe_timed_out`、
+`postgres_reachable`、`no_lock_wait` 和 `run_scoped_sessions_present` 六项均为 true。随后真实诊断任务
+`diagnostic_904360a7dcc74d5ab25f2e3878aca18d` 成功完成，`evidence-driven-v4` 收集 4 条 Evidence、执行
+5 次模型调用，但以 `rootCauseDecision=null`、`terminationReason=no_useful_step` 结束；确定性 Validator
+给出 `invalid/deterministic_gap`，Recovery Plan 为 `no_action`，Policy 为
+`no_grounded_action` 且 `executionPermitted=false`。因此 Live 运行安全终止为
+`VALID_FAIL/recovery_denied`，授权码为 `order_pool_decision_required`，不能据此执行自动恢复。
+
+该 terminal Envelope 已同时保存在 Evaluation Archive 与 PostgreSQL，checksum 为
+`82f86cf339a2fa5f3bd0ffd1776c135dbf53269da954f768e3a9148877b273a4`。失败后独立 Verify 检出残留，
+随后 scoped Cleanup 返回 `verificationPassed=true`、`cleanupSucceeded=true`，最终 audit clean；终态
+Envelope 保持不可变，独立清理结果不会回写并改变上述 checksum。按一次 canary 约束未运行第二次。
+本次结果证明 session scope 修复有效，但尚未证明 Agent 根因决策与自动恢复闭环通过；下一轮应单独分析
+`no_useful_step/deterministic_gap`，不得通过放宽恢复授权或评分门槛绕过。
+
+### Order Pool trusted lifecycle 真实 Single 门禁（2026-08-21）
+
+真实 Run `order-pool-specialist-single-gate-20260821` 使用 CLS 与 active indexed 的
+30 documents/180 chunks 知识作用域，完成诊断任务
+`diagnostic_28cef91204ff45e0bf4e3eb0c031516a`。运行收集 4 组独立工具 Evidence；池满、空闲连接 0、
+waiter、run-scoped sessions、PostgreSQL 可达、无锁等待和业务探针超时均成立。CLS 生命周期包含一组
+先完成归还的正常 checkout/checkin，之后才出现未归还 checkout、更新失败与 acquire timeout。
+
+该 Run 执行 5 次模型调用后仍以 `rootCauseDecision=null`、`terminationReason=no_useful_step` 结束，
+Recovery Policy 安全拒绝执行（`no_grounded_action`、`executionPermitted=false`），Live 终态为
+`VALID_FAIL/recovery_denied`，cleanup 成功。terminal Envelope 位于外部 Evaluation Archive，checksum 为
+`f5dd60342e23f8f156e87b676f686f4587d2f620ec52647ab1b2d5d1cc4368c3`；失败终态保持不可变。
+
+根因不是 LLM、RAG 或 CLS 缺证据，而是 trusted lifecycle matcher 将任意位置出现的
+`connection_checkin` 都当作冲突，误伤了泄漏链之前已经闭合的正常请求。matcher 已改为按
+`checkout ... order_update_failed ... pool_acquire_timeout` 窗口判断，仅当该候选 checkout 到 timeout
+之间没有 checkin 时才匹配；泄漏窗口内 checkin 仍 fail-closed。新增真实前序形态回归后，Order Pool
+trusted/fact/adjudication/live contract 定向测试、生产图定向测试、Ruff 与 Pyright 均通过。按一次
+canary 约束尚未执行修复后的第二次真实 Run，也未开始 Specialist Multi-Agent 实现。
+
+修复后的真实 Single Run `order-pool-specialist-single-gate-fixed-20260821` 已成功形成
+`deterministic_grounded` 根因决策，并由 deterministic Validator 判定 valid。决策 component 为
+`order-api`、mechanism 为 `exception_path_connection_not_released`，引用 4 组独立工具 Evidence；恢复、
+独立验证和 cleanup 均成功，安全硬门禁通过，Evidence Recall 为 100%，运行耗时 195161 ms。
+
+该 Run 的原始总分为 90，终态仍为 `VALID_FAIL`，失败项是
+`primary_trigger_unsupported`、`causal_chain_incomplete` 和 `primary_root_cause_wrong`。根因是 trusted
+pattern 的确定性投影只陈述了观察到的事件和池状态，没有显式表达“exception path”、未释放连接导致池耗尽、
+以及新订单等待连接后超时的因果关系；component、mechanism、证据、恢复和安全策略均正确。terminal
+Envelope checksum 为 `1f7cd23049a073439a23cc87a52e085021962d13e7443b99dc6913c4465aa132`，
+其诊断任务为 `diagnostic_7a850951612e4ecdb62ed54432c39119`，不可覆盖。
+
+新增 production trusted-pattern semantic contract 后，旧投影稳定复现 10/20；随后仅将已有证据明确投影为
+trigger/mechanism/impact，并为 mechanism 与 impact 补齐相应 Evidence 引用，合同达到 20/20。Ground Truth、
+评分器、同义词表、总分阈值、恢复授权和安全门禁均未修改。此修复目前只有离线验证，尚未执行新的真实
+Single Run，也未开始 Specialist Multi-Agent 实现。
+
+最终真实 Single 门禁 `order-pool-specialist-single-gate-semantic-fixed-20260821` 达到
+`100/100`、`VALID_PASS`，无失败项。Root Cause Top-1、Evidence Recall、恢复验证、cleanup 和安全硬门禁
+全部通过；运行耗时 206829 ms，Archive 口径成功模型调用数为 3，Evidence 无重复。对应诊断任务
+`diagnostic_d879de6b40484420a3bfbd26d834f20e` 收集 8 条持久化 Evidence、4 个独立
+`sourceFingerprint`，匹配 `order_connection_checkout_without_checkin`；Decision 来源为
+`deterministic_grounded`，deterministic Validator 判定 valid，根因为
+`order-api / exception_path_connection_not_released`。
+
+生产 Recovery Policy 仍保持 `manual_review_required`、`executionPermitted=false`；本次 executed recovery
+仅由隔离 Live Benchmark harness 按场景合同执行并独立验证，不改变生产自动恢复授权。terminal Envelope
+checksum 为 `a85abec8ce1398080506dda21ecf91a6b75d93725aeeea660c32ce10ba85412e`。
+该结果完成 Specialist Multi-Agent 实现前的 Single 门禁。
+
+### Order Pool Specialist 真实 3×3 Single/Multi A/B（2026-08-21）
+
+真实验收 campaign 为 `order-pool-specialist-ab-20260821-555c1aff`。六次运行均使用
+`eval-user`、`kb-30-cards`、CLS、相同项目配置与模型覆盖，按 Single 01～03、Multi
+01～03 顺序执行，未并发注入故障。生产 `auto` 路由始终保持 Single/shadow；Multi 仅由
+Benchmark forced mode 触发。
+
+| 策略 | Run ID | 终态 | 诊断耗时 ms | Root Cause Top-1 | Evidence Recall | 独立来源组 | 成功/失败模型调用 | Specialist 状态 | Archive checksum |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Single | `order-pool-specialist-ab-single-01-20260821` | `100/100 VALID_PASS` | 206872 | 是 | 100% | 4 | 3/0 | 不适用 | `0ebb21ed77458ab8c37941f887a0e326e62ac635c76c78f2827dbb230082cbc1` |
+| Single | `order-pool-specialist-ab-single-02-20260821` | `100/100 VALID_PASS` | 200881 | 是 | 100% | 4 | 3/0 | 不适用 | `6ab267272e35fc47591559c00254be3c8754b29fd7da5d3773a53adf6c8bfee5` |
+| Single | `order-pool-specialist-ab-single-03-20260821` | `100/100 VALID_PASS` | 192259 | 是 | 100% | 4 | 3/0 | 不适用 | `b8312c2bb6b8098c9ef5169686411f1e8e733b78ad05c772a81c9a9185860bd6` |
+| Multi | `order-pool-specialist-ab-multi-01-20260821` | `VALID_FAIL / recovery_denied` | 94770 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `8dfdeadede4883fe5b768cb94005e281ea8bf2a6fb2cd159812d4836cd97b9e8` |
+| Multi | `order-pool-specialist-ab-multi-02-20260821` | `VALID_FAIL / recovery_denied` | 94886 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `a78eed2318e47a0844deeaaf331fb2900abd78cff46c29ea93170d2828165e95` |
+| Multi | `order-pool-specialist-ab-multi-03-20260821` | `VALID_FAIL / recovery_denied` | 106542 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `d9a093acd3b4be37a0c047e1f779cab7b8de6ff8ce0ef89a54c60cbbad7dc2a5` |
+
+Single 的平均诊断耗时为 200004 ms，nearest-rank P95 为 206872 ms；Multi 平均为
+98733 ms，P95 为 106542 ms。Multi 的低耗时不构成性能收益，因为它在 Specialist Local
+Plan 阶段提前失败。Single 三次均完整形成 trigger、mechanism、impact 因果链，无重复
+Evidence，恢复、独立验证、安全硬门禁与 cleanup 全部通过。Multi 六个 Specialist 角色执行
+全部失败，失败率 100%；每次只有中央 Planner 的一次成功模型调用，Runtime 与 Log Local Plan
+各一次模型调用均返回 `provider_4xx / model_call_failed`，没有进入工具调用。聚合器三次均确定性
+生成 `multi_investigation_failed`，`missingDomains=[log,runtime]`、`sourceGroupCount=0`、
+`conflictCount=0`，随后生产恢复策略以 `order_pool_decision_required` 拒绝执行。三个 Multi Run
+均显式再次执行幂等 cleanup 并返回 clean，没有发生不安全恢复或跨 Run 清理。
+
+本轮同时暴露一个持久化缺口：成功路径的固定 A/B 指标完整进入 terminal Envelope；
+`recovery_denied` 失败路径只在 terminal Envelope 保存 `cleanupSucceeded=true`，没有投影
+`diagnosticTaskId` 与 Specialist 指标。三次 Multi 的角色状态、预算、缺失域和 aggregation
+checksum 仍完整保存在 PostgreSQL Diagnostic Step/checkpoint，失败 terminal 本身保持不可变，
+没有为补数据而重写归档。后续应先用测试驱动补齐 Live 失败路径的安全指标投影，再进行新的
+Multi 复验。
+
+结论：Multi 不满足“不降低 Root Cause Top-1 且至少提升一项能力指标”的门槛，当前仅保留
+Benchmark forced mode，生产自动 Multi 继续禁用。修复供应商结构化 Local Plan 请求兼容性后，
+仍需新的、单独批准的 A/B campaign；本轮结果不能作为默认启用依据。
+
+### V4 Structured LLM Validator 真实 Multi canary（2026-08-21）
+
+真实 Run `v4-structured-validator-multi-20260821203446` 使用 CLS、forced Multi、主模型
+`qwen3.7-plus`、独立 Validator `qwen3.8-max`，两者均按配置使用 `json_mode`。运行达到
+`100/100 VALID_PASS`，Root Cause Top-1 正确、Evidence Recall 100%、4 个独立来源组、无重复
+Evidence，恢复验证、安全硬门禁和 cleanup 全部通过；诊断耗时 360417 ms，总模型调用数为 8。
+Runtime Specialist 收集 3 条 Evidence、调用 3 个工具，Log Specialist 收集 1 条 Evidence、调用
+1 个 CLS 工具；两个角色虽因各自局部模型边界记录为 inconclusive，聚合后的确定性证据仍完整支持根因。
+
+Validator Router 仅因 `execution_requested` 选择语义门，证明低风险 proposal-only 路由未被改为强制调用。
+Validator 第一次结构化调用耗时 23973 ms，请求成功但 Schema 解析失败；格式纠正后的第二次调用受全局
+剩余硬截止限制，28293 ms 后以 `timeout/model_invoke` 结束。持久化 Step 与 Checkpoint 均记录
+`validationOrigin=llm_failed`、`semanticValidationAttempts=2`、`validationModel=qwen3.8-max`、
+`validationErrorCode=timeout`，Policy Gate 保持 `executionPermitted=false`。Live Benchmark harness 按隔离
+场景合同完成恢复验证不代表生产 Agent 获得自动执行权限。
+
+该不可变 terminal Envelope 位于外部 Evaluation Archive，SHA-256 为
+`225479eefefcc693a0d12784332f3561e16ac5855e228b94212ad50247015cac`，诊断任务为
+`diagnostic_9fa11787dd7d457d995c3359dfd673d1`。终态后再次独立执行 Verify 与幂等 Cleanup，分别返回
+`verificationPassed=true` 和 `cleanupSucceeded=true`。随后离线回归补充了“第一次解析错误 + 最终调用错误”
+的有界错误历史保留；历史真实 Envelope 不回写，未来 Run 将同时保留两阶段安全错误码。
+
+针对该 canary 暴露的格式纠正问题，V4 Validator 现复用一份严格公开输出合同：固定五字段、
+`valid/invalid` 枚举、数组和空数组语义、禁止额外字段，并附不含真实 Evidence 的合成 JSON 示例。
+第一次 structured parse 失败后，只有 hard deadline 至少还剩 60 秒 Validator role timeout 加
+5 秒调度余量时才允许一次纠正重试；否则不调用供应商、不消耗第二次模型预算，保存首次 parse code
+和 `retry_skipped_insufficient_deadline`，继续保持 `manual_review` 与
+`executionPermitted=false`。该行为已通过 60/65 秒冻结时钟边界、Artifact allowlist、Ruff、Pyright
+和 focused OpenSpec 离线验证；尚未用新的真实 Run 宣称供应商 Validator 已恢复稳定。
+
+随后真实 Run `v4-validator-contract-canary-20260821-1787319745759` 使用 CLS、forced Multi、
+主模型 `qwen3.7-plus` 和独立 Validator `qwen3.8-max` 完成 `100/100 VALID_PASS`。运行耗时
+360432 ms，总模型调用数 7，Root Cause Top-1 正确、Evidence Recall 100%、4 个独立来源组、
+无重复 Evidence，恢复验证和安全硬门禁通过。Validator Router 因 `execution_requested` 开启；
+Validator 首次结构化调用在 28560 ms 内返回 `llm_semantic/valid`，
+`semanticValidationAttempts=1`，没有 parse、timeout 或 retry 错误。Policy Gate 仍返回
+`external_policy_required` 与 `executionPermitted=false`，证明语义核验成功没有绕过恢复授权。
+
+该不可变 Envelope 的 SHA-256 为
+`103bb05c322ea03252f8606243f3471a85c248d3ca6aa551f2a2710a9a113211`，诊断任务为
+`diagnostic_b1affce557654ef98049451adac1018b`。终态后再次独立执行 Verify 与幂等 Cleanup，均返回
+clean，最终 `verificationPassed=true`、`cleanupSucceeded=true`。本次结果证明精确输出合同在该真实
+canary 上首次成功，不代表所有供应商响应或未来场景均不会触发 deadline-aware 安全降级。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

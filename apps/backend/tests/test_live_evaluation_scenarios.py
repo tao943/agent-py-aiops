@@ -13,13 +13,15 @@ from super_ai.evaluation.live.scenarios import (
     resolve_live_scenario_directory,
     validate_run_id,
 )
+from super_ai.evaluation.live.scoring import required_citation_sources
 
 LIVE_SCENARIOS = Path(__file__).resolve().parents[3] / "benchmarks" / "agentpy" / "live"
 
 
-def test_repository_contains_exactly_four_live_scenarios() -> None:
+def test_repository_contains_exactly_five_live_scenarios() -> None:
     assert sorted(path.name for path in LIVE_SCENARIOS.iterdir() if path.is_dir()) == [
         "APY-LIVE-NGINX-TIMEOUT-001",
+        "APY-LIVE-ORDER-POOL-LEAK-001",
         "APY-LIVE-PG-DEADLOCK-001",
         "APY-LIVE-PG-LOCK-001",
         "APY-LIVE-REDIS-MAXCLIENTS-001",
@@ -36,6 +38,12 @@ def test_repository_contains_exactly_four_live_scenarios() -> None:
 @pytest.mark.parametrize(
     ("scenario_id", "driver", "mechanism", "expectation"),
     [
+        (
+            "APY-LIVE-ORDER-POOL-LEAK-001",
+            "order_pool_leak",
+            "exception_path_connection_not_released",
+            "executed_recovery",
+        ),
         (
             "APY-LIVE-PG-DEADLOCK-001",
             "postgres_deadlock",
@@ -88,6 +96,19 @@ def test_loads_answer_free_postgres_lock_live_scenario() -> None:
         "postgres_connectivity_failure",
     ]
     assert scenario.driver == "postgres_lock_wait"
+
+
+def test_order_pool_scenario_requires_runtime_and_cls_lifecycle_evidence() -> None:
+    root = LIVE_SCENARIOS / "APY-LIVE-ORDER-POOL-LEAK-001"
+    scenario = load_live_scenario(root)
+    oracle = load_live_oracle(root)
+    assert scenario.driver == "order_pool_leak"
+    assert oracle.primary_cause.component == "order-api"
+    assert oracle.primary_cause.mechanism == "exception_path_connection_not_released"
+    assert required_citation_sources(scenario.id) == {
+        "InspectOrderPoolState",
+        "SearchLog",
+    }
 
 
 def test_oracle_is_loaded_only_by_the_evaluator_boundary() -> None:

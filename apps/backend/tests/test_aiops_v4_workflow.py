@@ -11,12 +11,20 @@ from langgraph.types import Send
 from super_ai.aiops import AiopsDiagnosticService
 from super_ai.aiops import diagnostics as diagnostics_module
 from super_ai.aiops.adjudication import DiagnosticFact, HypothesisAssessment
+from super_ai.aiops.causal_intents import supported_causal_coverage
 from super_ai.aiops.diagnostics import (
     _initial_hypothesis_assessments,  # pyright: ignore[reportPrivateUsage]
     _project_adjudicated_observations,  # pyright: ignore[reportPrivateUsage]
 )
-from super_ai.aiops.investigation import InvestigationRouterPolicy
+from super_ai.aiops.investigation import EvidenceClaim, InvestigationRouterPolicy
 from super_ai.aiops.model_budget import ExecutionDeadlines
+from super_ai.aiops.specialists import (
+    SharedRunContext,
+    SpecialistAssignment,
+    SpecialistEvidenceAnalysisOutput,
+    SpecialistLocalPlanOutput,
+    SpecialistResult,
+)
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.repositories import JsonDict
@@ -166,6 +174,87 @@ def _service(repositories: object, provider: object = object()) -> AiopsDiagnost
     )
 
 
+def _order_pool_hypotheses() -> list[dict[str, object]]:
+    return [
+        {"id": hypothesis_id, "description": hypothesis_id.replace("_", " ")}
+        for hypothesis_id in (
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_slow_statement",
+            "order_database_lock_wait",
+            "order_database_unreachable",
+        )
+    ]
+
+
+def _order_pool_steps() -> list[dict[str, object]]:
+    return [
+        {
+            "id": f"order-pool-{index}",
+            "tool": tool,
+            "arguments": {},
+            "purpose": purpose,
+            "testsHypotheses": [item["id"] for item in _order_pool_hypotheses()],
+            "causalIntent": causal_intent,
+            "evidenceRules": [],
+        }
+        for index, (tool, purpose, causal_intent) in enumerate(
+            (
+                ("InspectOrderPoolState", "Inspect pool capacity.", "mechanism"),
+                (
+                    "InspectOrderDatabaseSessions",
+                    "Inspect current-run database sessions.",
+                    "mechanism",
+                ),
+                (
+                    "VerifyOrderDatabaseReachability",
+                    "Verify database and business acquisition health.",
+                    "impact",
+                ),
+                ("SearchLog", "Inspect the current incident lifecycle.", "trigger"),
+            ),
+            start=1,
+        )
+    ]
+
+
+def _order_pool_outputs() -> list[tuple[str, dict[str, object]]]:
+    return [
+        (
+            "ev-order-pool",
+            {
+                "poolAtCapacity": True,
+                "freeConnections": 0,
+                "waiterObserved": True,
+            },
+        ),
+        (
+            "ev-order-sessions",
+            {
+                "runScopedSessionsPresent": True,
+                "databaseReachable": True,
+                "lockWaitObserved": False,
+            },
+        ),
+        (
+            "ev-order-health",
+            {"databaseReachable": True, "businessProbeTimedOut": True},
+        ),
+        (
+            "ev-order-cls",
+            {
+                "recordCount": 4,
+                "records": [
+                    {"event": "request_received"},
+                    {"event": "connection_checkout"},
+                    {"event": "order_update_failed"},
+                    {"event": "pool_acquire_timeout"},
+                ],
+            },
+        ),
+    ]
+
+
 def test_v4_graph_removes_per_observation_model_nodes() -> None:
     graph = _service(object())._build_graph(  # pyright: ignore[reportPrivateUsage]
         workflow_version="evidence-driven-v4"
@@ -183,10 +272,50 @@ def test_v4_graph_removes_per_observation_model_nodes() -> None:
 
 def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
     service = _service(object())
-    dispatches = [
-        {"dispatchId": "dispatch-log", "investigatorType": "log"},
-        {"dispatchId": "dispatch-runtime", "investigatorType": "runtime"},
+    dispatches: list[dict[str, object]] = [
+        {
+            "dispatchId": "dispatch-log",
+            "investigatorType": "log",
+            "objective": "Inspect public log evidence.",
+            "testsHypotheses": [],
+            "missingCausalRoles": ["trigger"],
+            "allowedTools": ["SearchLog"],
+            "steps": [
+                {
+                    "id": "log-1",
+                    "tool": "SearchLog",
+                    "arguments": {
+                        "Region": "ap-guangzhou",
+                        "TopicId": "topic-safe",
+                        "From": 10,
+                        "To": 20,
+                        "Query": 'incident_id:"safe"',
+                        "Limit": 20,
+                    },
+                    "testsHypotheses": [],
+                    "causalIntent": "trigger",
+                }
+            ],
+        },
+        {
+            "dispatchId": "dispatch-runtime",
+            "investigatorType": "runtime",
+            "objective": "Inspect public runtime evidence.",
+            "testsHypotheses": ["pool_lifecycle_failure"],
+            "missingCausalRoles": ["mechanism"],
+            "allowedTools": ["InspectOrderPoolState"],
+            "steps": [
+                {
+                    "id": "runtime-1",
+                    "tool": "InspectOrderPoolState",
+                    "arguments": {},
+                    "testsHypotheses": ["pool_lifecycle_failure"],
+                    "causalIntent": "mechanism",
+                }
+            ],
+        },
     ]
+    now = datetime.now(timezone.utc)
 
     multi = service._route_after_strategy(  # pyright: ignore[reportPrivateUsage]
         cast(
@@ -196,6 +325,15 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
                 "investigation_dispatches": dispatches,
                 "owner_user_id": "owner-1",
                 "task_id": "diagnostic-1",
+                "graph_version": "evidence-driven-v4",
+                "alert": {"service": "order-api"},
+                "public_hypotheses": [{"id": "pool_lifecycle_failure"}],
+                "decision_vocabulary": {"components": ["order-api"]},
+                "soft_deadline_at": (now + timedelta(minutes=4)).isoformat(),
+                "hard_deadline_at": (now + timedelta(minutes=6)).isoformat(),
+                "model_call_count": 2,
+                "multi_model_reservation_base": 2,
+                "multi_model_reserved": 4,
             },
         )
     )
@@ -212,42 +350,271 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
     assert isinstance(multi, list)
     assert all(isinstance(item, Send) for item in multi)
     investigator_types = [
-        cast(Any, item).arg["investigation_dispatch"]["investigatorType"]
-        for item in multi
+        cast(Any, item).arg["specialist_assignment"].role for item in multi
     ]
     assert investigator_types == [
         "runtime",
         "log",
     ]
+    assignments = [cast(Any, item).arg["specialist_assignment"] for item in multi]
+    assert all(
+        assignment.hypotheses_to_test == ("pool_lifecycle_failure",)
+        for assignment in assignments
+    )
+    for item in cast(list[Any], multi):
+        branch = item.arg
+        assert isinstance(branch["shared_run_context"], SharedRunContext)
+        assert isinstance(branch["specialist_assignment"], SpecialistAssignment)
+        assert branch["specialist_results"] == []
+        assert not {
+            "investigation_dispatches",
+            "investigation_packets",
+            "model_call_count",
+        } & set(branch)
     assert single == "executor"
     assert fast == "sufficiency_gate"
 
 
 @pytest.mark.asyncio
 async def test_investigator_branch_cannot_write_shared_diagnostic_state() -> None:
+    now = datetime.now(timezone.utc)
+    context = SharedRunContext(
+        owner_user_id="owner-1",
+        task_id="diagnostic-1",
+        graph_version="evidence-driven-v4",
+        public_incident_input={"service": "order-api"},
+        public_hypotheses=("pool_lifecycle_failure",),
+        decision_vocabulary={"components": ("order-api",)},
+        allowed_tools_by_specialist={
+            "runtime": frozenset({"InspectOrderPoolState"}),
+            "log": frozenset({"SearchLog"}),
+        },
+        trusted_arguments_by_specialist={
+            "runtime": {"InspectOrderPoolState": {}},
+            "log": {
+                "SearchLog": {
+                    "Region": "ap-guangzhou",
+                    "TopicId": "topic-safe",
+                    "From": 10,
+                    "To": 20,
+                    "Query": 'incident_id:"safe"',
+                    "Limit": 20,
+                }
+            },
+        },
+        global_soft_deadline_at=now - timedelta(minutes=1),
+        global_hard_deadline_at=now + timedelta(minutes=1),
+        global_model_budget=4,
+    )
+    assignment = SpecialistAssignment(
+        role="runtime",
+        objective="Inspect public runtime evidence.",
+        hypotheses_to_test=("pool_lifecycle_failure",),
+        required_causal_roles=("mechanism",),
+        allowed_tools=frozenset({"InspectOrderPoolState"}),
+        trusted_arguments_by_tool={"InspectOrderPoolState": {}},
+        maximum_tool_steps=1,
+        model_call_budget=2,
+        soft_deadline_at=now - timedelta(minutes=1),
+        hard_deadline_at=now + timedelta(minutes=1),
+    )
     update = await _service(object())._investigator_dispatch(  # pyright: ignore[reportPrivateUsage]
         cast(
             Any,
             {
                 "owner_user_id": "owner-1",
                 "task_id": "diagnostic-1",
-                "investigation_dispatch": {
-                    "dispatchId": "dispatch-runtime",
-                    "investigatorType": "runtime",
-                    "steps": [],
-                },
+                "shared_run_context": context,
+                "specialist_assignment": assignment,
             },
         )
     )
 
-    assert set(update) == {"investigation_packets", "events"}
-    packet = cast(list[dict[str, object]], update["investigation_packets"])[0]
-    assert packet["status"] == "failed"
+    assert set(update) == {"specialist_results", "events"}
+    result = cast(list[dict[str, object]], update["specialist_results"])[0]
+    assert result["terminalStatus"] == "timeout"
     assert not {
         "diagnostic_facts",
         "hypothesis_assessments",
         "observation_decisions",
+        "model_call_count",
     } & set(update)
+
+
+@pytest.mark.asyncio
+async def test_specialist_branch_runs_model_tool_and_persists_evidence(
+    migrated_database_url: str,
+) -> None:
+    class SpecialistModel:
+        def __init__(self) -> None:
+            self.schema: type[object] | None = None
+            self.calls = 0
+            self.structured_output_methods: list[object] = []
+
+        def with_structured_output(
+            self,
+            schema: type[object],
+            **kwargs: object,
+        ) -> SpecialistModel:
+            self.schema = schema
+            self.structured_output_methods.append(kwargs.get("method"))
+            return self
+
+        async def ainvoke(self, _input: object) -> object:
+            self.calls += 1
+            if self.schema is SpecialistLocalPlanOutput:
+                parsed = SpecialistLocalPlanOutput.model_validate(
+                    {
+                        "steps": [
+                            {
+                                "step_id": "runtime-1",
+                                "tool_name": "InspectOrderPoolState",
+                                "tested_hypotheses": ["pool_lifecycle_failure"],
+                                "causal_intent": "mechanism",
+                                "proposed_arguments": {},
+                            }
+                        ]
+                    }
+                )
+            else:
+                parsed = SpecialistEvidenceAnalysisOutput.model_validate(
+                    {
+                        "tested_hypotheses": ["pool_lifecycle_failure"],
+                        "fact_candidates": [],
+                        "proposed_assessments": [],
+                        "unresolved_questions": [],
+                    }
+                )
+            return {"parsed": parsed, "parsing_error": None}
+
+    class SpecialistProvider:
+        structured_output_method = "json_mode"
+
+        def __init__(self, model: SpecialistModel) -> None:
+            self.model = model
+
+        def create_chat_model(self) -> SpecialistModel:
+            return self.model
+
+    class SpecialistMcpClient:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict[str, object],
+        ) -> dict[str, object]:
+            assert name == "InspectOrderPoolState"
+            assert arguments == {}
+            return {"poolAtCapacity": True, "freeConnections": 0}
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="specialist-branch-user",
+            task_id="v4-specialist-branch",
+            status="running",
+            query="Inspect public runtime evidence.",
+            input_payload={},
+        )
+        model = SpecialistModel()
+        service = AiopsDiagnosticService(
+            repositories=repositories,
+            llm_provider=cast(Any, SpecialistProvider(model)),
+            retrieval_tool=EmptyRetrieval(),
+            mcp_client=cast(Any, SpecialistMcpClient()),
+            cls_region="unused",
+            cls_topic_id="unused",
+        )
+        now = datetime.now(timezone.utc)
+        context = SharedRunContext(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+            graph_version="aiops-diagnostic-v3",
+            public_incident_input={"service": "order-api"},
+            public_hypotheses=("pool_lifecycle_failure",),
+            decision_vocabulary={"components": ("order-api",)},
+            allowed_tools_by_specialist={
+                "runtime": frozenset({"InspectOrderPoolState"}),
+                "log": frozenset({"SearchLog"}),
+            },
+            trusted_arguments_by_specialist={
+                "runtime": {"InspectOrderPoolState": {}},
+                "log": {
+                    "SearchLog": {
+                        "Region": "ap-guangzhou",
+                        "TopicId": "topic-safe",
+                        "From": 10,
+                        "To": 20,
+                        "Query": 'incident_id:"safe"',
+                        "Limit": 20,
+                    }
+                },
+            },
+            global_soft_deadline_at=now + timedelta(minutes=4),
+            global_hard_deadline_at=now + timedelta(minutes=6),
+            global_model_budget=4,
+        )
+        assignment = SpecialistAssignment(
+            role="runtime",
+            objective="Inspect public runtime evidence.",
+            hypotheses_to_test=("pool_lifecycle_failure",),
+            required_causal_roles=("mechanism",),
+            allowed_tools=frozenset({"InspectOrderPoolState"}),
+            trusted_arguments_by_tool={"InspectOrderPoolState": {}},
+            maximum_tool_steps=1,
+            model_call_budget=2,
+            soft_deadline_at=now + timedelta(minutes=2),
+            hard_deadline_at=now + timedelta(minutes=3),
+        )
+
+        update = await service._investigator_dispatch(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "graph_version": "aiops-diagnostic-v3",
+                    "query": task.query,
+                    "accessible_knowledge_base_ids": (),
+                    "started_at": now.isoformat(),
+                    "shared_run_context": context,
+                    "specialist_assignment": assignment,
+                    "specialist_tool_definitions": (
+                        McpToolDefinition(
+                            "InspectOrderPoolState",
+                            "Inspect public pool state.",
+                            {"type": "object", "additionalProperties": False},
+                            "default",
+                        ),
+                    ),
+                },
+            )
+        )
+        evidence = await repositories.diagnostics.list_evidence(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    result = cast(list[dict[str, object]], update["specialist_results"])[0]
+    assert result["terminalStatus"] == "completed"
+    assert result["modelCallCount"] == 2
+    assert len(cast(list[object], result["evidenceIds"])) == 1
+    assert model.calls == 2
+    assert model.structured_output_methods == ["json_mode", "json_mode"]
+    assert len(evidence) == 1
+    event_text = json.dumps(update["events"], ensure_ascii=False).casefold()
+    assert "inspectorderpoolstate" in event_text
+    assert "evidence" in event_text
+    assert "modelcallcount" in event_text
+    assert not any(
+        forbidden in event_text
+        for forbidden in ("rawresponse", "privatereasoning", "credential")
+    )
 
 
 def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
@@ -275,7 +642,208 @@ def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
                 }
             },
         )
-    ) == "executor"
+    ) == "manual_review"
+
+    assert service._route_after_deterministic_validation_v4(  # pyright: ignore[reportPrivateUsage]
+        cast(
+            Any,
+            {
+                "next_route": "recovery_planner",
+                "investigation_aggregation": {"missingDomains": ["log"]},
+            },
+        )
+    ) == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_specialist_aggregation_releases_budget_and_preserves_partial_evidence(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="specialist-fanin-user",
+            task_id="v4-specialist-fanin",
+            status="running",
+            query="Investigate public pool evidence.",
+            input_payload={},
+        )
+        assert repositories.tool_call_audits is not None
+        audit = await repositories.tool_call_audits.create_for_diagnostic_task(
+            owner_user_id=task.owner_user_id,
+            audit_id="tool-specialist-runtime",
+            diagnostic_task_id=task.id,
+            tool_name="InspectOrderPoolState",
+            arguments={},
+        )
+        completed_audit = await repositories.tool_call_audits.finalize(
+            owner_user_id=task.owner_user_id,
+            audit_id=audit.id,
+            status="completed",
+            result_summary="Safe public observation.",
+        )
+        assert completed_audit is not None
+        audit = completed_audit
+        evidence = await repositories.diagnostics.create_evidence(
+            owner_user_id=task.owner_user_id,
+            evidence_id="evidence-specialist-runtime",
+            task_id=task.id,
+            step_id=None,
+            tool_call_id=audit.id,
+            kind="tool_observation",
+            source="InspectOrderPoolState",
+            summary="Safe public observation.",
+            payload={"sourceFingerprint": "runtime-pool-source"},
+        )
+        claim = EvidenceClaim(
+            claim_id="InspectOrderPoolState.observation",
+            value={"poolAtCapacity": True},
+            quality="direct",
+            causal_role="mechanism",
+            supports=("pool_lifecycle_failure",),
+            refutes=(),
+            evidence_ids=(evidence.id,),
+            target_component="order-api",
+            observed_at=datetime.now(timezone.utc),
+            time_scope="incident_window",
+        )
+        runtime_result = SpecialistResult.create(
+            role="runtime",
+            terminal_status="completed",
+            tested_hypotheses=("pool_lifecycle_failure",),
+            evidence_ids=(evidence.id,),
+            fact_candidates=(claim,),
+            proposed_assessments=(),
+            unresolved_questions=(),
+            completed_steps=("runtime-1",),
+            model_call_count=2,
+            duration_ms=20,
+        )
+        log_result = SpecialistResult.create(
+            role="log",
+            terminal_status="timeout",
+            tested_hypotheses=("pool_lifecycle_failure",),
+            evidence_ids=(),
+            fact_candidates=(),
+            proposed_assessments=(),
+            unresolved_questions=("specialist_soft_deadline_expired",),
+            completed_steps=(),
+            model_call_count=0,
+            duration_ms=10,
+        )
+        now = datetime.now(timezone.utc)
+        dispatches: list[dict[str, object]] = [
+            {
+                "dispatchId": "dispatch-runtime",
+                "investigatorType": "runtime",
+                "objective": "Inspect public runtime evidence.",
+                "testsHypotheses": ["pool_lifecycle_failure"],
+                "missingCausalRoles": ["mechanism"],
+                "allowedTools": ["InspectOrderPoolState"],
+                "steps": [
+                    {
+                        "id": "runtime-1",
+                        "tool": "InspectOrderPoolState",
+                        "arguments": {},
+                        "testsHypotheses": ["pool_lifecycle_failure"],
+                        "causalIntent": "mechanism",
+                    }
+                ],
+            },
+            {
+                "dispatchId": "dispatch-log",
+                "investigatorType": "log",
+                "objective": "Inspect public log evidence.",
+                "testsHypotheses": ["pool_lifecycle_failure"],
+                "missingCausalRoles": ["trigger"],
+                "allowedTools": ["SearchLog"],
+                "steps": [
+                    {
+                        "id": "log-1",
+                        "tool": "SearchLog",
+                        "arguments": {
+                            "Region": "ap-guangzhou",
+                            "TopicId": "topic-safe",
+                            "From": 10,
+                            "To": 20,
+                            "Query": 'incident_id:"safe"',
+                            "Limit": 20,
+                        },
+                        "testsHypotheses": ["pool_lifecycle_failure"],
+                        "causalIntent": "trigger",
+                    }
+                ],
+            },
+        ]
+        service = _service(repositories)
+        state = cast(
+            Any,
+            {
+                "workflow_version": "evidence-driven-v4",
+                "graph_version": "aiops-diagnostic-v3",
+                "owner_user_id": task.owner_user_id,
+                "task_id": task.id,
+                "alert": {"service": "order-api"},
+                "public_hypotheses": [{"id": "pool_lifecycle_failure"}],
+                "decision_vocabulary": {"components": ["order-api"]},
+                "investigation_dispatches": dispatches,
+                "specialist_results": [
+                    diagnostics_module._specialist_result_payload(runtime_result),  # pyright: ignore[reportPrivateUsage]
+                    diagnostics_module._specialist_result_payload(log_result),  # pyright: ignore[reportPrivateUsage]
+                ],
+                "multi_model_reservation_base": 1,
+                "multi_model_reserved": 4,
+                "model_call_count": 5,
+                "started_at": now.isoformat(),
+                "soft_deadline_at": (now + timedelta(minutes=4)).isoformat(),
+                "hard_deadline_at": (now + timedelta(minutes=6)).isoformat(),
+                "plan_index": 0,
+                "replan_count": 0,
+                "max_replans": 1,
+            },
+        )
+
+        update = await service._evidence_aggregator(state)  # pyright: ignore[reportPrivateUsage]
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        checkpoints = await repositories.diagnostics.list_checkpoints(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+    finally:
+        await engine.dispose()
+
+    aggregation = cast(dict[str, object], update["investigation_aggregation"])
+    assert aggregation["completedPacketCount"] == 1
+    assert aggregation["failedPacketCount"] == 1
+    assert aggregation["missingDomains"] == ["log"]
+    assert aggregation["fallbackPermitted"] is False
+    assert update["model_call_count"] == 3
+    assert update["evidence_ids"] == [evidence.id]
+    aggregated_facts = cast(list[dict[str, object]], update["aggregated_facts"])
+    assert [item["key"] for item in aggregated_facts] == [
+        "InspectOrderPoolState.poolAtCapacity"
+    ]
+    assert service._route_after_aggregation(cast(Any, update)) == "fact_adapter"  # pyright: ignore[reportPrivateUsage]
+    persisted_text = json.dumps(
+        {
+            "steps": [item.payload for item in steps],
+            "checkpoints": [item.checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    ).casefold()
+    assert "runtime" in persisted_text
+    assert "evidence-specialist-runtime" in persisted_text
+    assert "modelcallcount" in persisted_text
+    assert not any(
+        forbidden in persisted_text
+        for forbidden in ("rawresponse", "privatereasoning", "credential")
+    )
     assert service._route_after_aggregation(  # pyright: ignore[reportPrivateUsage]
         cast(
             Any,
@@ -291,7 +859,7 @@ def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_strategy_starts_single_then_escalates_after_stagnation(
+async def test_auto_strategy_records_shadow_candidate_without_executing_multi(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
@@ -403,6 +971,17 @@ async def test_strategy_starts_single_then_escalates_after_stagnation(
         escalated = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
             cast(Any, {**state, "plan_index": 2})
         )
+        exhausted = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    **state,
+                    "plan_index": 2,
+                    "model_call_count": 6,
+                    "investigation_strategy_mode": "multi",
+                },
+            )
+        )
         second_wave = await service._strategy_router(  # pyright: ignore[reportPrivateUsage]
             cast(Any, {**state, "plan_index": 2, "investigation_wave": 2})
         )
@@ -412,13 +991,19 @@ async def test_strategy_starts_single_then_escalates_after_stagnation(
     assert cast(dict[str, object], initial["investigation_route"])["strategy"] == (
         "single_agent"
     )
-    assert cast(dict[str, object], escalated["investigation_route"])["strategy"] == (
-        "multi_agent"
+    escalated_route = cast(dict[str, object], escalated["investigation_route"])
+    assert escalated_route["strategy"] == "single_agent"
+    assert escalated_route["requestedStrategy"] == "auto"
+    assert escalated_route["effectiveStrategy"] == "single_agent"
+    assert escalated_route["releaseMode"] == "shadow"
+    assert escalated_route["downgradeReason"] == "shadow_multi_candidate"
+    assert escalated["investigation_dispatches"] == []
+    assert "model_call_count" not in escalated
+    assert cast(dict[str, object], exhausted["investigation_route"])["strategy"] == (
+        "multi_agent_unavailable"
     )
-    assert [
-        item["investigatorType"]
-        for item in cast(list[dict[str, object]], escalated["investigation_dispatches"])
-    ] == ["runtime", "log"]
+    assert exhausted["investigation_dispatches"] == []
+    assert service._route_after_strategy(cast(Any, exhausted)) == "manual_review"  # pyright: ignore[reportPrivateUsage]
     assert cast(dict[str, object], second_wave["investigation_route"])["strategy"] == (
         "single_agent"
     )
@@ -465,6 +1050,26 @@ def test_v4_graph_version_selection_is_explicit_and_legacy_safe() -> None:
         )
         == "aiops-diagnostic-v2"
     )
+
+
+def test_forced_multi_task_input_is_order_pool_benchmark_only() -> None:
+    select_mode = diagnostics_module._benchmark_strategy_mode  # pyright: ignore[reportPrivateUsage]
+
+    assert select_mode(
+        {
+            "benchmarkMode": "live",
+            "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "investigationStrategyMode": "multi",
+        }
+    ) == "multi"
+    assert select_mode(
+        {
+            "benchmarkMode": "live",
+            "benchmarkScenarioId": "APY-LIVE-PG-LOCK-001",
+            "investigationStrategyMode": "multi",
+        }
+    ) == "auto"
+    assert select_mode({"investigationStrategyMode": "multi"}) == "auto"
 
 
 @pytest.mark.asyncio
@@ -1274,6 +1879,195 @@ async def test_v4_adjudicator_projects_citations_back_to_observations(
     assert all(item["assessmentSource"] == "llm_adjudicated" for item in observations)
 
 
+def test_v4_adjudicator_reuses_trusted_order_pool_facts_for_causal_roles() -> None:
+    hypothesis_id = "order_connection_lifecycle_failure"
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect incident-scoped CLS events.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Failed updates check out connections before acquisition times out.",
+                "evidenceIds": ["ev-cls"],
+                "causalRole": "trigger",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Inspect the order connection pool.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The pool is at capacity.",
+                "evidenceIds": ["ev-pool"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Inspect database sessions.",
+                "supports": [],
+                "refutes": [],
+                "summary": "Run-scoped sessions are present without lock waits.",
+                "evidenceIds": ["ev-sessions"],
+                "causalRole": "context",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+            {
+                "purpose": "Verify database and business reachability.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The business probe times out while PostgreSQL is reachable.",
+                "evidenceIds": ["ev-health"],
+                "causalRole": "impact",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            },
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id=hypothesis_id,
+                disposition="supported",
+                evidence_ids=("ev-cls",),
+                reason_code="incident_logs_support_connection_lifecycle",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[
+            DiagnosticFact(
+                key="SearchLog.records.event",
+                value=(
+                    "connection_checkout",
+                    "order_update_failed",
+                    "connection_checkout",
+                    "order_update_failed",
+                    "pool_acquire_timeout",
+                ),
+                evidence_id="ev-cls",
+                source_tool="SearchLog",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.poolAtCapacity",
+                value=True,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.freeConnections",
+                value=0,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderPoolState.waiterObserved",
+                value=True,
+                evidence_id="ev-pool",
+                source_tool="InspectOrderPoolState",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.databaseReachable",
+                value=True,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.runScopedSessionsPresent",
+                value=True,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="InspectOrderDatabaseSessions.lockWaitObserved",
+                value=False,
+                evidence_id="ev-sessions",
+                source_tool="InspectOrderDatabaseSessions",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="VerifyOrderDatabaseReachability.databaseReachable",
+                value=True,
+                evidence_id="ev-health",
+                source_tool="VerifyOrderDatabaseReachability",
+                quality="direct",
+            ),
+            DiagnosticFact(
+                key="VerifyOrderDatabaseReachability.businessProbeTimedOut",
+                value=True,
+                evidence_id="ev-health",
+                source_tool="VerifyOrderDatabaseReachability",
+                quality="direct",
+            ),
+        ],
+    )
+
+    derived = [
+        item
+        for item in projected
+        if item.get("causalRoleOrigin") == "trusted_fact_projection"
+    ]
+
+    assert [item["causalRole"] for item in derived] == ["mechanism", "impact"]
+    assert derived[0]["evidenceIds"] == ["ev-cls", "ev-pool", "ev-sessions"]
+    assert derived[1]["evidenceIds"] == ["ev-cls", "ev-health"]
+    assert all(item["supports"] == [hypothesis_id] for item in derived)
+    coverage = supported_causal_coverage(
+        hypothesis_states=(
+            {
+                "id": hypothesis_id,
+                "status": "supported",
+                "evidenceIds": ["ev-cls"],
+            },
+        ),
+        observation_decisions=projected,
+    )
+    assert coverage.missing_roles == ()
+
+
+def test_v4_adjudicator_does_not_promote_order_pool_summary_without_trusted_facts() -> None:
+    hypothesis_id = "order_connection_lifecycle_failure"
+    projected = _project_adjudicated_observations(
+        observations=[
+            {
+                "purpose": "Inspect a bounded observation.",
+                "supports": [],
+                "refutes": [],
+                "summary": "The pool is probably exhausted and requests time out.",
+                "evidenceIds": ["ev-neutral"],
+                "causalRole": "mechanism",
+                "causalRoleOrigin": "plan_contract",
+                "assessmentSource": "deterministic",
+                "testsHypotheses": [hypothesis_id],
+            }
+        ],
+        assessments=[
+            HypothesisAssessment(
+                hypothesis_id=hypothesis_id,
+                disposition="supported",
+                evidence_ids=("ev-cls",),
+                reason_code="incident_logs_support_connection_lifecycle",
+                assessment_source="llm_adjudicated",
+            )
+        ],
+        facts=[],
+    )
+
+    assert all(
+        item.get("causalRoleOrigin") != "trusted_fact_projection"
+        for item in projected
+    )
+    assert projected[0]["supports"] == []
+
+
 def test_v4_adjudicator_derives_grounded_nginx_port_mismatch_chain() -> None:
     projected = _project_adjudicated_observations(
         observations=[
@@ -2072,7 +2866,7 @@ async def test_fact_adapter_reduces_trusted_rules_without_a_model_call(
 
 
 @pytest.mark.asyncio
-async def test_fact_adapter_records_cross_evidence_differential_support(
+async def test_fact_adapter_does_not_promote_competitor_refutation_to_support(
     migrated_database_url: str,
 ) -> None:
     hypotheses: list[JsonDict] = [
@@ -2190,7 +2984,7 @@ async def test_fact_adapter_records_cross_evidence_differential_support(
     )[0]
     assert first_observation["causalRole"] == "trigger"
     observation = cast(list[dict[str, object]], second["observation_decisions"])[0]
-    assert observation["supports"] == ["upstream_process_down"]
+    assert observation["supports"] == []
     assert observation["refutes"] == [
         "dns_resolution_failure",
         "upstream_port_mismatch",
@@ -2305,12 +3099,15 @@ async def test_fact_adapter_deterministically_closes_redis_availability_chain(
             ),
         ]
         observations: list[dict[str, object]] = []
+        evidence_ids: list[str] = []
         for step, (evidence_id, summary, output) in zip(plan, outputs, strict=True):
+            evidence_ids.append(evidence_id)
             update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
                 cast(
                     Any,
                     {
                         **state,
+                        "evidence_ids": list(evidence_ids),
                         "current_plan_step": step,
                         "current_evidence_id": evidence_id,
                         "current_evidence_summary": summary,
@@ -2463,6 +3260,154 @@ async def test_fact_adapter_closes_nginx_timeout_from_current_task_trusted_patte
 
 
 @pytest.mark.asyncio
+async def test_fact_adapter_closes_order_pool_from_persisted_scoped_provenance(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-order-pool-trusted-pattern",
+            status="running",
+            query="Resolve an order-api pool acquisition timeout.",
+            input_payload={},
+        )
+        hypotheses = _order_pool_hypotheses()
+        steps = _order_pool_steps()
+        state: dict[str, object] = {
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "workflow_version": "evidence-driven-v4",
+            "public_hypotheses": hypotheses,
+            "hypothesis_assessments": _initial_hypothesis_assessments(hypotheses),
+            "diagnostic_facts": [],
+            "observation_decisions": [],
+            "evidence_ids": [],
+            "plan": steps,
+            "decision_vocabulary": {
+                "labelsByHypothesis": {
+                    "order_connection_lifecycle_failure": {
+                        "component": "order-api",
+                        "mechanism": "exception_path_connection_not_released",
+                    }
+                }
+            },
+        }
+        service = _service(repositories)
+        evidence_ids: list[str] = []
+        observations: list[dict[str, object]] = []
+        assert repositories.tool_call_audits is not None
+        for step, (evidence_id, output) in zip(
+            steps,
+            _order_pool_outputs(),
+            strict=True,
+        ):
+            tool_name = str(step["tool"])
+            audit_id = f"audit-{evidence_id}"
+            await repositories.tool_call_audits.create_for_diagnostic_task(
+                owner_user_id=task.owner_user_id,
+                audit_id=audit_id,
+                diagnostic_task_id=task.id,
+                tool_name=tool_name,
+                arguments={},
+            )
+            await repositories.tool_call_audits.finalize(
+                owner_user_id=task.owner_user_id,
+                audit_id=audit_id,
+                status="completed",
+                result_summary="Bounded current-task evidence.",
+            )
+            await repositories.diagnostics.create_evidence(
+                owner_user_id=task.owner_user_id,
+                evidence_id=evidence_id,
+                task_id=task.id,
+                kind="tool_observation",
+                source=tool_name,
+                summary="Bounded current-task evidence.",
+                payload={
+                    "sourceFingerprint": f"source:{tool_name}",
+                    "arguments": {},
+                    "output": output,
+                },
+                tool_call_id=audit_id,
+            )
+            evidence_ids.append(evidence_id)
+            update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        **state,
+                        "current_plan_step": step,
+                        "current_evidence_id": evidence_id,
+                        "current_evidence_summary": "Bounded current-task evidence.",
+                        "current_tool_output": output,
+                        "evidence_ids": list(evidence_ids),
+                    },
+                )
+            )
+            state["hypothesis_assessments"] = update["hypothesis_assessments"]
+            state["diagnostic_facts"] = update["diagnostic_facts"]
+            observations.extend(
+                cast(list[dict[str, object]], update["observation_decisions"])
+            )
+            state["observation_decisions"] = observations
+        state.update(
+            {
+                "evidence_ids": evidence_ids,
+                "plan_index": len(steps),
+                "executor_attempt_count": len(steps),
+                "max_total_steps": 6,
+                "max_replans": 1,
+            }
+        )
+        sufficiency = await service._sufficiency_gate_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
+        decision = await service._decision_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
+    finally:
+        await engine.dispose()
+
+    assessments = {
+        item["hypothesisId"]: item
+        for item in cast(
+            list[dict[str, object]],
+            state["hypothesis_assessments"],
+        )
+    }
+    assert assessments["order_connection_lifecycle_failure"]["disposition"] == (
+        "supported"
+    )
+    assert assessments["order_database_unreachable"]["disposition"] == "refuted"
+    assert assessments["order_database_lock_wait"]["disposition"] == "refuted"
+    trusted = [
+        item
+        for item in observations
+        if item.get("causalRoleOrigin") == "trusted_compound_pattern"
+    ]
+    assert [item["causalRole"] for item in trusted] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+    sufficiency_payload = cast(
+        dict[str, object],
+        sufficiency["evidence_sufficiency"],
+    )
+    assert sufficiency_payload["status"] == "sufficient", sufficiency_payload
+    assert sufficiency["next_route"] == "decision"
+    root_cause = cast(dict[str, object], decision["root_cause_decision"])
+    assert root_cause["component"] == "order-api"
+    assert root_cause["mechanism"] == "exception_path_connection_not_released"
+    assert root_cause["trigger"]
+    assert len(cast(list[object], root_cause["causalChain"])) == 3
+
+
+@pytest.mark.asyncio
 async def test_fact_adapter_rejects_foreign_task_fact_from_trusted_pattern(
     migrated_database_url: str,
 ) -> None:
@@ -2595,7 +3540,8 @@ async def test_fact_adapter_derives_upstream_deadline_trigger_from_probe(
         "mechanism",
         "trigger",
     ]
-    assert all(item["supports"] == [hypothesis] for item in observations)
+    assert observations[0]["supports"] == []
+    assert observations[1]["supports"] == [hypothesis]
     assert observations[1]["evidenceIds"] == ["ev-probe"]
     assert observations[1]["causalRoleOrigin"] == "coverage_repair"
 
@@ -2752,12 +3698,21 @@ async def test_v4_sufficiency_accepts_a_buildable_differential_decision(
                             "summary": "Nginx reached the route but the connection was refused.",
                         },
                     ],
-                    "plan": [],
+                    "plan": [
+                        {
+                            "id": "central-step-not-needed-after-multi",
+                            "tool": "InspectContainer",
+                            "arguments": {},
+                        }
+                    ],
                     "plan_index": 0,
                     "executor_attempt_count": 2,
                     "max_total_steps": 6,
                     "replan_count": 0,
                     "max_replans": 1,
+                    "investigation_aggregation": {
+                        "completedPacketCount": 2,
+                    },
                 },
             )
         )
@@ -2896,16 +3851,451 @@ async def test_v4_decision_and_validator_use_dispositions_without_model_calls(
     assert "no_open_competitor" not in check_codes
 
 
+class SemanticValidatorModel:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = responses
+        self.schema: type[object] | None = None
+        self.structured_output_methods: list[object] = []
+        self.prompts: list[object] = []
+
+    def with_structured_output(
+        self,
+        schema: type[object],
+        **kwargs: object,
+    ) -> SemanticValidatorModel:
+        assert kwargs.get("include_raw") is True
+        self.schema = schema
+        self.structured_output_methods.append(kwargs.get("method"))
+        return self
+
+    async def ainvoke(self, prompt: object) -> object:
+        self.prompts.append(prompt)
+        response = self.responses[len(self.prompts) - 1]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class SemanticValidatorProvider:
+    validator_structured_output_method = "json_mode"
+    validator_model_name = "validator-test-model"
+
+    def __init__(self, model: SemanticValidatorModel) -> None:
+        self.model = model
+
+    def create_validator_model(self) -> SemanticValidatorModel:
+        return self.model
+
+    def create_chat_model(self) -> SemanticValidatorModel:
+        return self.model
+
+
+def _semantic_validation_envelope(
+    *,
+    status: str = "valid",
+    raw: object | None = None,
+    parsing_error: object | None = None,
+) -> dict[str, object]:
+    return {
+        "raw": raw if raw is not None else object(),
+        "parsed": (
+            {
+                "status": status,
+                "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+                "unsupportedFields": [] if status == "valid" else ["causalChain"],
+                "missingEvidence": [] if status == "valid" else ["causal impact"],
+                "summary": (
+                    "Every public candidate field is supported."
+                    if status == "valid"
+                    else "The causal impact is not supported."
+                ),
+            }
+            if parsing_error is None
+            else None
+        ),
+        "parsing_error": parsing_error,
+    }
+
+
+async def _run_semantic_validator(
+    *,
+    migrated_database_url: str,
+    task_id: str,
+    model: SemanticValidatorModel,
+    model_call_count: int = 2,
+    deadlines: ExecutionDeadlines | None = None,
+) -> tuple[
+    dict[str, object],
+    dict[str, object] | None,
+    list[object],
+    list[object],
+]:
+    active_deadlines = deadlines or ExecutionDeadlines.start()
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Validate a risky diagnosis.",
+            input_payload={},
+        )
+        service = _service(repositories, SemanticValidatorProvider(model))
+        update = await service._llm_validator_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "model_call_count": model_call_count,
+                    "started_at": active_deadlines.started_at.isoformat(),
+                    "soft_deadline_at": active_deadlines.soft_deadline_at.isoformat(),
+                    "hard_deadline_at": active_deadlines.hard_deadline_at.isoformat(),
+                    "root_cause_decision": {
+                        "component": "order-service",
+                        "mechanism": "transaction_deadlock",
+                        "trigger": "Transactions acquired rows in opposite order.",
+                        "causalChain": [
+                            "Transactions acquired rows in opposite order.",
+                            "The wait graph formed a cycle.",
+                            "PostgreSQL aborted one transaction.",
+                        ],
+                        "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+                        "confidence": 0.95,
+                    },
+                    "evidence_ids": ["ev-1", "ev-2", "ev-3"],
+                    "observation_decisions": [],
+                    "decision_validation": {
+                        "status": "valid",
+                        "validationOrigin": "deterministic",
+                    },
+                    "validator_routing": {
+                        "validationReasonCodes": ["execution_requested"]
+                    },
+                    "tool_definitions": (),
+                },
+            )
+        )
+        policy: dict[str, object] | None = None
+        if "recovery_plan" in update:
+            policy = await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        "owner_user_id": task.owner_user_id,
+                        "task_id": task.id,
+                        "recovery_plan": update["recovery_plan"],
+                    },
+                )
+            )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        checkpoints = await repositories.diagnostics.list_checkpoints(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        return update, policy, cast(list[object], steps), cast(list[object], checkpoints)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_uses_configured_json_mode(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-json-mode",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert model.structured_output_methods == ["json_mode"]
+    assert validation["validationOrigin"] == "llm_semantic"
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 1
+    assert validation["validationModel"] == "validator-test-model"
+    assert update["model_call_count"] == 3
+    assert len(cast(list[object], update["model_call_audits"])) == 1
+    prompt = cast(str, model.prompts[0])
+    assert '"status": "valid"' in prompt
+    assert '"evidenceIds": ["evidence-id"]' in prompt
+    assert '"unsupportedFields": []' in prompt
+    assert '"missingEvidence": []' in prompt
+    assert "valid or invalid" in prompt
+    assert "No additional fields" in prompt
+    assert "recovery_plan" not in update
+    assert policy is None
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_retries_format_once_and_redacts_raw_data(
+    migrated_database_url: str,
+) -> None:
+    sentinel = "SENSITIVE_RAW_VALIDATOR_SENTINEL"
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(
+                raw={"content": sentinel},
+                parsing_error=ValueError(sentinel),
+            ),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, steps, checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-format-retry",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 2
+    assert update["model_call_count"] == 4
+    assert len(cast(list[object], update["model_call_audits"])) == 2
+    assert len(model.prompts) == 2
+    assert model.prompts[1] != model.prompts[0]
+    assert policy is None
+    persisted = json.dumps(
+        {
+            "update": update,
+            "steps": [cast(Any, item).payload for item in steps],
+            "checkpoints": [cast(Any, item).checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    )
+    assert sentinel not in persisted
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_skips_retry_without_scheduling_margin(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(diagnostics_module, "_now", lambda: now)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(seconds=1),
+        soft_deadline_at=now + timedelta(seconds=30),
+        hard_deadline_at=now + timedelta(seconds=60),
+    )
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(parsing_error=ValueError()),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-insufficient-retry-deadline",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationAttempts"] == 1
+    assert validation["validationErrorCategory"] == "retry_exhausted"
+    assert validation["validationErrorCode"] == "retry_skipped_insufficient_deadline"
+    assert validation["validationErrorCodes"] == [
+        "structured_envelope_mismatch",
+        "retry_skipped_insufficient_deadline",
+    ]
+    assert validation["validationErrorPhase"] == "structured_parse"
+    assert validation["validationRetryable"] is False
+    assert update["model_call_count"] == 3
+    assert len(cast(list[object], update["model_call_audits"])) == 1
+    assert len(model.prompts) == 1
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_retries_with_complete_window_and_margin(
+    migrated_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(diagnostics_module, "_now", lambda: now)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(seconds=1),
+        soft_deadline_at=now + timedelta(seconds=30),
+        hard_deadline_at=now + timedelta(seconds=65),
+    )
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(parsing_error=ValueError()),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-complete-retry-window",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 2
+    assert update["model_call_count"] == 4
+    assert len(cast(list[object], update["model_call_audits"])) == 2
+    assert len(model.prompts) == 2
+    assert policy is None
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_retry_exhaustion(
+    migrated_database_url: str,
+) -> None:
+    sentinel = "SENSITIVE_RAW_VALIDATOR_SENTINEL"
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(raw=sentinel, parsing_error=ValueError(sentinel)),
+            _semantic_validation_envelope(raw=sentinel, parsing_error=ValueError(sentinel)),
+        ]
+    )
+
+    update, policy, steps, checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-retry-exhausted",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert validation["validationOrigin"] == "llm_failed"
+    assert validation["semanticValidationStatus"] == "failed"
+    assert validation["validationErrorCategory"] == "retry_exhausted"
+    assert validation["validationErrorCodes"] == ["structured_envelope_mismatch"]
+    assert validation["validationErrorPhase"] == "structured_parse"
+    assert validation["validationRetryable"] is False
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+    persisted = json.dumps(
+        {
+            "update": update,
+            "steps": [cast(Any, item).payload for item in steps],
+            "checkpoints": [cast(Any, item).checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    )
+    assert sentinel not in persisted
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_rejection_is_not_a_model_failure(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope(status="invalid")])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-rejected",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert validation["validationOrigin"] == "llm_semantic"
+    assert validation["semanticValidationStatus"] == "invalid"
+    assert validation["validationErrorCategory"] == "model_rejected"
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_budget_exhaustion(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-budget-exhausted",
+        model=model,
+        model_call_count=8,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    audits = cast(list[dict[str, object]], update["model_call_audits"])
+    assert validation["validationErrorCode"] == "model_call_budget_exhausted"
+    assert validation["validationErrorPhase"] == "model_invoke"
+    assert audits[-1]["safeErrorCode"] == "model_call_budget_exhausted"
+    assert model.prompts == []
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_hard_deadline(
+    migrated_database_url: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(minutes=10),
+        soft_deadline_at=now - timedelta(minutes=5),
+        hard_deadline_at=now - timedelta(minutes=1),
+    )
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-hard-deadline",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    audits = cast(list[dict[str, object]], update["model_call_audits"])
+    assert validation["validationErrorCode"] == "hard_deadline_exceeded"
+    assert validation["validationErrorPhase"] == "model_invoke"
+    assert audits[-1]["safeErrorCode"] == "hard_deadline_exceeded"
+    assert model.prompts == []
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
 @pytest.mark.asyncio
 async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_review(
     migrated_database_url: str,
 ) -> None:
     class FailingModel:
+        def with_structured_output(
+            self, _schema: type[object], **_kwargs: object
+        ) -> FailingModel:
+            return self
+
         async def ainvoke(self, prompt: object) -> str:
             del prompt
             raise TimeoutError
 
     class Provider:
+        validator_structured_output_method = "json_mode"
+        validator_model_name = "validator-timeout-model"
+
+        def create_validator_model(self) -> FailingModel:
+            return FailingModel()
+
         def create_chat_model(self) -> FailingModel:
             return FailingModel()
 
@@ -2977,6 +4367,8 @@ async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_r
     audit = cast(list[dict[str, object]], update["model_call_audits"])
     assert validation["status"] == "valid"
     assert validation["validationOrigin"] == "llm_failed"
+    assert validation["validationErrorCode"] == "timeout"
+    assert validation["validationErrorPhase"] == "model_invoke"
     assert recovery["mode"] == "manual_review"
     assert audit[-1]["safeErrorCode"] == "timeout"
     assert cast(dict[str, object], policy["recovery_policy"])[

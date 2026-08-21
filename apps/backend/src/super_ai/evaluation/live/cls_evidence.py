@@ -37,6 +37,17 @@ class ClsSearchBoundary(Protocol):
     async def search(self, scope: LiveClsScope) -> Sequence[Mapping[str, object]]: ...
 
 
+class LiveClsRecordProvider(Protocol):
+    async def records(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+        now: datetime,
+    ) -> Sequence[Mapping[str, str]]: ...
+
+
 def build_cls_search_arguments(
     scope: LiveClsScope,
     *,
@@ -215,6 +226,7 @@ class LiveClsEvidencePreparer:
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        record_provider: LiveClsRecordProvider | None = None,
     ) -> None:
         if timeout_seconds <= 0 or poll_interval_seconds <= 0:
             raise ValueError("CLS readiness timing must be positive.")
@@ -227,6 +239,7 @@ class LiveClsEvidencePreparer:
         self._now = now
         self._monotonic = monotonic
         self._sleep = sleep
+        self._record_provider = record_provider
 
     async def prepare(
         self,
@@ -235,14 +248,27 @@ class LiveClsEvidencePreparer:
         scenario: LiveScenario,
         observation: LiveFaultObservation,
     ) -> LiveEvidenceContext:
-        del observation
         incident_id = f"{scenario.id}-{identity.run_id}"
         now = self._now()
-        records = build_live_cls_records(
+        if self._record_provider is None:
+            candidates = build_live_cls_records(
+                run_id=identity.run_id,
+                scenario_id=scenario.id,
+                incident_id=incident_id,
+                now=now,
+            )
+        else:
+            candidates = await self._record_provider.records(
+                identity=identity,
+                scenario=scenario,
+                observation=observation,
+                now=now,
+            )
+        records = _validate_safe_cls_records(
+            candidates,
             run_id=identity.run_id,
             scenario_id=scenario.id,
             incident_id=incident_id,
-            now=now,
         )
         try:
             uploaded_count = await self._uploader.put(
@@ -312,3 +338,74 @@ def _matching_records(
         and record.get("scenario_id") == scope.scenario_id
         and record.get("incident_id") == scope.incident_id
     )
+
+
+_SAFE_CLS_FIELDS = frozenset(
+    {
+        "run_id",
+        "scenario_id",
+        "incident_id",
+        "request_id",
+        "event",
+        "service",
+        "component",
+        "generation",
+        "timestamp",
+        "level",
+        "environment",
+        "trace",
+    }
+)
+_SAFE_CLS_EVENTS = frozenset(
+    {
+        "request_received",
+        "database_contention",
+        "alert_fired",
+        "connection_rejected",
+        "upstream_timeout",
+        "connection_checkout",
+        "connection_checkin",
+        "order_update_failed",
+        "pool_acquire_timeout",
+    }
+)
+_FORBIDDEN_CLS_TERMS = (
+    "oracle",
+    "groundtruth",
+    "primarycause",
+    "password",
+    "secret",
+    "token",
+    "dsn",
+    "sql",
+)
+
+
+def _validate_safe_cls_records(
+    records: Sequence[Mapping[str, str]],
+    *,
+    run_id: str,
+    scenario_id: str,
+    incident_id: str,
+) -> tuple[dict[str, str], ...]:
+    if not records or len(records) > 64:
+        raise LiveInfrastructureError("cls_records_invalid")
+    validated: list[dict[str, str]] = []
+    for record in records:
+        keys = set(record)
+        normalized_keys = {
+            "".join(character for character in key.casefold() if character.isalnum())
+            for key in keys
+        }
+        if (
+            not keys <= _SAFE_CLS_FIELDS
+            or any(term in key for key in normalized_keys for term in _FORBIDDEN_CLS_TERMS)
+            or record.get("run_id") != run_id
+            or record.get("scenario_id") != scenario_id
+            or record.get("incident_id") != incident_id
+            or record.get("event") not in _SAFE_CLS_EVENTS
+            or any(not value for value in record.values())
+        ):
+            raise LiveInfrastructureError("cls_records_invalid")
+        validated.append(dict(record))
+    return tuple(validated)

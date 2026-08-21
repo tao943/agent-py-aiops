@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence, Set
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 import openai
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -52,6 +53,9 @@ ValidationErrorCode = Literal[
     "provider_4xx",
     "provider_5xx",
     "structured_output_unsupported",
+    "model_call_budget_exhausted",
+    "hard_deadline_exceeded",
+    "retry_skipped_insufficient_deadline",
     "unknown",
 ]
 ValidationErrorPhase = Literal[
@@ -127,6 +131,41 @@ class StructuredDecisionOutcome:
     http_status_class: ValidationHttpStatusClass | None = None
 
 
+class SafeModelInvocationFailure(RuntimeError):
+    """Carry only allowlisted runtime failure metadata across an invocation seam."""
+
+    def __init__(self, failure: SafeModelFailure) -> None:
+        super().__init__()
+        self.failure = failure
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedStructuredRoleAudit:
+    """Secret-safe metadata for one structured role attempt."""
+
+    role: str
+    attempt: int
+    duration_ms: int
+    error_category: str | None
+
+
+_StructuredRoleModel = TypeVar("_StructuredRoleModel", bound=BaseModel)
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedStructuredRoleOutcome(Generic[_StructuredRoleModel]):
+    """Typed role output without prompts, raw responses, or exception text."""
+
+    value: _StructuredRoleModel | None
+    error_category: DecisionValidationErrorCategory | None
+    attempts: int
+    audits: tuple[BoundedStructuredRoleAudit, ...]
+    error_code: ValidationErrorCode | None = None
+    error_phase: ValidationErrorPhase | None = None
+    retryable: bool | None = None
+    http_status_class: ValidationHttpStatusClass | None = None
+
+
 class _RootCauseDecisionSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -148,16 +187,36 @@ class _RootCauseValidationSchema(BaseModel):
     summary: str = Field(min_length=1)
 
 
+ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT = (
+    "Return exactly one JSON object with these five fields and no others. "
+    "status is a string and must be valid or invalid. evidenceIds is an array of "
+    "persisted Evidence ID strings. unsupportedFields is an array containing only "
+    "component, mechanism, trigger, or causalChain. missingEvidence is an array of "
+    "strings. summary is a non-empty string. Use empty arrays when there are no "
+    "unsupported fields or missing evidence. No additional fields are allowed. "
+    'Valid example: {"status": "valid", "evidenceIds": ["evidence-id"], '
+    '"unsupportedFields": [], "missingEvidence": [], "summary": "All candidate '
+    'fields are supported by the cited evidence."}'
+)
+
+
 class _AsyncInvoker(Protocol):
     async def ainvoke(self, input: object) -> object:
         """Invoke a structured or raw chat model."""
         ...
 
 
+StructuredValidationInvoke = Callable[[_AsyncInvoker, object], Awaitable[object]]
+StructuredValidationRetryGuard = Callable[[], bool]
+
+
+async def _invoke_direct(invoker: _AsyncInvoker, input: object) -> object:
+    return await invoker.ainvoke(input)
+
+
 _CORRECTION_SUFFIX = (
     "\n\nThe previous response did not match the required validation schema. "
-    "Return JSON only with status, evidenceIds, unsupportedFields, missingEvidence, "
-    "and summary. Schema errors: invalid_json_or_schema."
+    f"{ROOT_CAUSE_VALIDATION_OUTPUT_CONTRACT} Schema errors: invalid_json_or_schema."
 )
 _DECISION_CORRECTION_SUFFIX = (
     "\n\nThe previous response did not match the required root-cause decision schema. "
@@ -192,12 +251,135 @@ def can_replan_deterministic_gap(
     )
 
 
+async def invoke_bounded_structured_role(
+    *,
+    model: ChatModel,
+    schema: type[_StructuredRoleModel],
+    prompt: str,
+    correction_prompt: str,
+    role: str,
+    maximum_attempts: int = 2,
+    structured_output_method: StructuredOutputMethod = "function_calling",
+) -> BoundedStructuredRoleOutcome[_StructuredRoleModel]:
+    """Invoke one bounded model role with at most one format-only correction."""
+    if maximum_attempts not in {1, 2}:
+        raise ValueError("Bounded structured roles allow one or two attempts.")
+    try:
+        structured = _structured_invoker(
+            model,
+            schema,
+            method=structured_output_method,
+        )
+    except Exception as exc:
+        failure = classify_model_failure(exc, phase="structured_invoker_setup")
+        return BoundedStructuredRoleOutcome(
+            value=None,
+            error_category="model_call_failed",
+            attempts=0,
+            audits=(),
+            error_code=failure.code,
+            error_phase=failure.phase,
+            retryable=failure.retryable,
+            http_status_class=failure.http_status_class,
+        )
+
+    invoker: _AsyncInvoker = structured or model
+    audits: list[BoundedStructuredRoleAudit] = []
+    current_prompt = prompt
+    for attempt in range(1, maximum_attempts + 1):
+        started = time.perf_counter()
+        try:
+            response = await invoker.ainvoke(current_prompt)
+        except Exception as exc:
+            failure = classify_model_failure(exc, phase="model_invoke")
+            audits.append(
+                BoundedStructuredRoleAudit(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    error_category="model_call_failed",
+                )
+            )
+            return BoundedStructuredRoleOutcome(
+                value=None,
+                error_category="model_call_failed",
+                attempts=attempt,
+                audits=tuple(audits),
+                error_code=failure.code,
+                error_phase=failure.phase,
+                retryable=failure.retryable,
+                http_status_class=failure.http_status_class,
+            )
+        try:
+            value = _bounded_role_value_from_response(
+                response,
+                schema=schema,
+                structured=structured is not None,
+            )
+        except (TypeError, ValueError, ValidationError):
+            audits.append(
+                BoundedStructuredRoleAudit(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    error_category="invalid_model_output",
+                )
+            )
+            if attempt < maximum_attempts:
+                current_prompt = f"{prompt}\n\n{correction_prompt}"
+                continue
+            return BoundedStructuredRoleOutcome(
+                value=None,
+                error_category="retry_exhausted",
+                attempts=attempt,
+                audits=tuple(audits),
+                error_phase="structured_parse",
+                retryable=False,
+            )
+        audits.append(
+            BoundedStructuredRoleAudit(
+                role=role,
+                attempt=attempt,
+                duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                error_category=None,
+            )
+        )
+        return BoundedStructuredRoleOutcome(
+            value=value,
+            error_category=None,
+            attempts=attempt,
+            audits=tuple(audits),
+        )
+    raise AssertionError("The bounded structured role loop must return.")
+
+
+def _bounded_role_value_from_response(
+    response: object,
+    *,
+    schema: type[_StructuredRoleModel],
+    structured: bool,
+) -> _StructuredRoleModel:
+    if structured:
+        if not isinstance(response, Mapping):
+            raise ValueError("Structured role response must be an envelope.")
+        envelope = cast(Mapping[object, object], response)
+        if envelope.get("parsing_error") is not None or "parsed" not in envelope:
+            raise ValueError("Structured role envelope is invalid.")
+        parsed = envelope.get("parsed")
+        if isinstance(parsed, schema):
+            return parsed
+        return schema.model_validate(parsed)
+    return schema.model_validate_json(_model_text(response))
+
+
 async def invoke_structured_root_cause_validation(
     *,
     model: ChatModel,
     prompt: str,
     available_evidence_ids: Set[str],
     structured_output_method: StructuredOutputMethod = "function_calling",
+    invoke: StructuredValidationInvoke | None = None,
+    allow_format_retry: StructuredValidationRetryGuard | None = None,
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
     try:
@@ -210,14 +392,19 @@ async def invoke_structured_root_cause_validation(
         failure = classify_model_failure(exc, phase="structured_invoker_setup")
         return _model_failure_outcome(failure, attempts=0)
     invoker: _AsyncInvoker = structured or model
+    invoke_attempt = invoke or _invoke_direct
     current_prompt = prompt
     parse_codes: list[str] = []
     for attempt in (1, 2):
         try:
-            response = await invoker.ainvoke(current_prompt)
+            response = await invoke_attempt(invoker, current_prompt)
         except Exception as exc:
             failure = classify_model_failure(exc, phase="model_invoke")
-            return _model_failure_outcome(failure, attempts=attempt)
+            return _model_failure_outcome(
+                failure,
+                attempts=attempt,
+                prior_error_codes=parse_codes,
+            )
         try:
             decision = _validation_decision_from_response(
                 response,
@@ -227,6 +414,8 @@ async def invoke_structured_root_cause_validation(
         except _StructuredParseFailure as exc:
             _append_parse_codes(parse_codes, exc.codes)
             if attempt == 1:
+                if allow_format_retry is not None and not allow_format_retry():
+                    return _format_retry_skipped_outcome(parse_codes)
                 current_prompt = prompt + _CORRECTION_SUFFIX
                 continue
             return StructuredValidationOutcome(
@@ -240,6 +429,8 @@ async def invoke_structured_root_cause_validation(
         except (TypeError, ValueError):
             _append_parse_codes(parse_codes, ("invalid_json_or_schema",))
             if attempt == 1:
+                if allow_format_retry is not None and not allow_format_retry():
+                    return _format_retry_skipped_outcome(parse_codes)
                 current_prompt = prompt + _CORRECTION_SUFFIX
                 continue
             return StructuredValidationOutcome(
@@ -257,6 +448,21 @@ async def invoke_structured_root_cause_validation(
             error_codes=tuple(parse_codes),
         )
     raise AssertionError("The bounded validation loop must return within two attempts.")
+
+
+def _format_retry_skipped_outcome(
+    parse_codes: Sequence[str],
+) -> StructuredValidationOutcome:
+    error_code: ValidationErrorCode = "retry_skipped_insufficient_deadline"
+    return StructuredValidationOutcome(
+        decision=None,
+        error_category="retry_exhausted",
+        attempts=1,
+        error_codes=tuple(dict.fromkeys([*parse_codes, error_code]))[:6],
+        error_code=error_code,
+        error_phase="structured_parse",
+        retryable=False,
+    )
 
 
 async def invoke_structured_root_cause_decision(
@@ -317,6 +523,8 @@ def classify_model_failure(
     phase: ValidationErrorPhase,
 ) -> SafeModelFailure:
     """Map exception identity to an allowlisted record without reading its message."""
+    if isinstance(exc, SafeModelInvocationFailure):
+        return exc.failure
     if phase == "structured_invoker_setup" and isinstance(
         exc, (NotImplementedError, TypeError)
     ):
@@ -348,12 +556,14 @@ def _model_failure_outcome(
     failure: SafeModelFailure,
     *,
     attempts: int,
+    prior_error_codes: Sequence[str] = (),
 ) -> StructuredValidationOutcome:
+    error_codes = list(dict.fromkeys([*prior_error_codes, failure.code]))[:6]
     return StructuredValidationOutcome(
         decision=None,
         error_category="model_call_failed",
         attempts=attempts,
-        error_codes=(failure.code,),
+        error_codes=tuple(error_codes),
         error_code=failure.code,
         error_phase=failure.phase,
         retryable=failure.retryable,

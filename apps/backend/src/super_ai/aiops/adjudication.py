@@ -10,6 +10,7 @@ from typing import Literal, cast
 Disposition = Literal["supported", "refuted", "causally_inactive", "unresolved"]
 AssessmentSource = Literal["deterministic", "llm_adjudicated"]
 FactQuality = Literal["direct", "context"]
+EvidenceSourceDomain = Literal["runtime", "log"]
 PredicateOperator = Literal["eq", "ne", "in", "contains", "exists", "empty", "truthy"]
 
 _DISPOSITIONS = frozenset({"supported", "refuted", "causally_inactive", "unresolved"})
@@ -31,6 +32,29 @@ class DiagnosticFact:
     def __post_init__(self) -> None:
         if not self.key.strip() or not self.evidence_id.strip() or not self.source_tool.strip():
             raise ValueError("Diagnostic fact identity must be non-empty.")
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedEvidenceProvenance:
+    """Owner-scoped public provenance for one persisted diagnostic Evidence record."""
+
+    evidence_id: str
+    owner_user_id: str
+    task_id: str
+    source_fingerprint: str
+    source_domain: EvidenceSourceDomain
+    tool_name: str
+
+    def __post_init__(self) -> None:
+        identity = (
+            self.evidence_id,
+            self.owner_user_id,
+            self.task_id,
+            self.source_fingerprint,
+            self.tool_name,
+        )
+        if any(not value.strip() for value in identity):
+            raise ValueError("Trusted Evidence provenance identity must be non-empty.")
 
 
 @dataclass(frozen=True, slots=True)

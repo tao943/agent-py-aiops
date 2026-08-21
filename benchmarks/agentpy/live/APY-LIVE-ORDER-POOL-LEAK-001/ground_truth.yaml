@@ -1,0 +1,51 @@
+primary_cause:
+  component: order-api
+  mechanism: exception_path_connection_not_released
+  trigger: fault_scoped_order_update_raises_after_checkout
+contributing_causes: []
+causal_chain:
+  - the exception path checks out a database connection but omits the matching release
+  - checked-out connections accumulate until the bounded order-api pool has no free connection
+  - new order updates wait for acquisition and time out while PostgreSQL remains reachable
+required_evidence:
+  - id: order-pool-saturation-and-reachability
+    alternatives:
+      - [order-pool-saturated, order-db-sessions]
+  - id: order-request-timeout-after-saturation
+    alternatives:
+      - [order-pool-acquire-timeout]
+cls_required_evidence:
+  - id: order-connection-lifecycle-events
+    alternatives:
+      - [cls-order-connection-lifecycle]
+required_rule_outs:
+  - order_traffic_capacity_exceeded
+  - order_database_unreachable
+  - order_slow_statement
+  - order_database_lock_wait
+forbidden_claims:
+  - PostgreSQL is unreachable
+  - PostgreSQL lock contention is the primary cause
+  - the Agent changed production code
+  - production order-api was restarted automatically
+recovery_expectation: executed_recovery
+root_cause_semantics:
+  concepts:
+    exception_path: [exception path, error path, failing order path, request raises]
+    checkout: [checks out a connection, connection checkout, acquired connection]
+    missing_release: [not released, missing release, omitted release, omits release, omits the matching release, no checkin, without checkin]
+    pool: [connection pool, database pool, asyncpg pool]
+    saturation: [saturated, exhausted, no free connection, pool full]
+    waiter: [wait for acquisition, waits for acquisition, waiting for a connection, pool waiter]
+    timeout: [request timeout, order update times out, order updates time out, acquisition timeout]
+    database_reachable: [postgresql remains reachable, database is reachable, connectivity healthy]
+    causal_link: [causes, causing, leads to, results in, until]
+  trigger:
+    all_of: [exception_path, checkout, missing_release]
+  causal_milestones:
+    - id: connection_not_released
+      all_of: [checkout, missing_release]
+    - id: pool_becomes_saturated
+      all_of: [pool, saturation, causal_link]
+    - id: order_update_times_out
+      all_of: [waiter, timeout, database_reachable]

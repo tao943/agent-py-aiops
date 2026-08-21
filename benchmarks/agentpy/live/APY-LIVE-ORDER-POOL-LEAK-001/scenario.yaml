@@ -1,0 +1,21 @@
+id: APY-LIVE-ORDER-POOL-LEAK-001
+title: Order updates time out while PostgreSQL remains reachable and the order-api pool is saturated.
+symptom_family: order-api-pool-exhaustion
+difficulty: hard
+modes: [live]
+driver: order_pool_leak
+alert:
+  name: OrderApiDatabasePoolExhausted
+  severity: critical
+  summary: Order updates time out while PostgreSQL remains reachable and the order-api pool is saturated.
+hypotheses:
+  - id: order_connection_lifecycle_failure
+    description: An order request path does not complete the expected database connection lifecycle.
+  - id: order_traffic_capacity_exceeded
+    description: Legitimate order concurrency exceeds the configured database pool capacity.
+  - id: order_database_unreachable
+    description: PostgreSQL is unreachable or rejects authentication.
+  - id: order_slow_statement
+    description: A slow order statement retains connections until requests time out.
+  - id: order_database_lock_wait
+    description: PostgreSQL lock contention keeps order updates waiting.

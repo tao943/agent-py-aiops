@@ -9,7 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
-from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics
+from super_ai.evaluation.artifacts import (
+    InvestigationAudit,
+    InvestigationBenchmarkMetrics,
+    SpecialistRoleAudit,
+)
 from super_ai.evaluation.live import cli as live_cli
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
@@ -22,10 +26,15 @@ from super_ai.evaluation.live.cli import (
     safe_output,
     write_safe_report,
 )
-from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult
+from super_ai.evaluation.live.domain import LiveCheck, LiveCleanupResult, LiveFaultObservation
+from super_ai.evaluation.live.failure_diagnostics import LiveFailureDiagnostics
 from super_ai.evaluation.live.nginx_timeout import (
     NginxProposalRecoveryService,
     NginxTimeoutScenarioDriver,
+)
+from super_ai.evaluation.live.order_pool_leak import (
+    OrderPoolLeakScenarioDriver,
+    OrderPoolRecoveryService,
 )
 from super_ai.evaluation.live.postgres import (
     PostgresLiveRecoveryService,
@@ -45,12 +54,30 @@ from super_ai.evaluation.recording import EvaluationRunRecorder
 from super_ai.project_config import ProjectConfigurationError
 
 
+def test_registry_resolves_order_pool_runtime() -> None:
+    components = build_live_scenario_registry().resolve(
+        "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    assert isinstance(components.driver, OrderPoolLeakScenarioDriver)
+    assert isinstance(components.recovery, OrderPoolRecoveryService)
+    assert components.cls_record_provider is not None
+
+
 class AvailableEvaluationRepository:
     async def start_envelope(self, envelope: object) -> None:
         del envelope
 
     async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
         del envelope, artifact_checksum
+
+
+class CapturingEvaluationRepository(AvailableEvaluationRepository):
+    def __init__(self) -> None:
+        self.finalized_envelope: object | None = None
+
+    async def finalize_envelope(self, envelope: object, *, artifact_checksum: str) -> None:
+        del artifact_checksum
+        self.finalized_envelope = envelope
 
 
 class RecordingAiopsRuntimeProvider:
@@ -110,7 +137,29 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     recorder, archive = live_recorder(tmp_path)
 
     async def execute():
-        error = LiveBenchmarkError("recovery_denied", stage="recover")
+        error = LiveBenchmarkError(
+            "recovery_denied",
+            stage="recover",
+            diagnostic_task_id="diagnostic-multi-failed-1",
+            investigation_audit=InvestigationAudit(
+                strategy="multi_agent",
+                score=9,
+                reason_codes=("cross_source_evidence_required",),
+                policy_version="investigation-router-v1",
+                selected_investigators=("runtime", "log"),
+                dispatch_count=2,
+                packet_statuses=("failed", "failed"),
+                fallback_reason="multi_investigation_failed",
+                effective_strategy="multi_agent",
+                roles=(
+                    SpecialistRoleAudit("runtime", "failed", 21, 1, 0, ()),
+                    SpecialistRoleAudit("log", "failed", 34, 1, 0, ()),
+                ),
+                missing_domains=("log", "runtime"),
+                aggregation_checksum="a" * 64,
+                terminal_failure_category="multi_investigation_failed",
+            ),
+        )
         error.cleanup_succeeded = True
         raise error
 
@@ -127,6 +176,95 @@ async def test_recovery_denied_is_saved_as_valid_failure(tmp_path: Path) -> None
     assert envelope.status == "failed"
     assert envelope.validity == "VALID_FAIL"
     assert envelope.metrics["cleanupSucceeded"] is True
+    assert envelope.diagnostic_task_id == "diagnostic-multi-failed-1"
+    assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
+    assert envelope.metrics["specialistRoleStatuses"] == {
+        "runtime": "failed",
+        "log": "failed",
+    }
+    assert envelope.metrics["specialistRoleModelCallCounts"] == {
+        "runtime": 1,
+        "log": 1,
+    }
+    assert envelope.metrics["missingDomains"] == ["log", "runtime"]
+    assert envelope.metrics["terminalFailureCategory"] == "multi_investigation_failed"
+    assert not {
+        "total",
+        "rawTotal",
+        "rootCauseTop1Correct",
+        "evidenceRecallBasisPoints",
+        "securityHardGatePassed",
+    }.intersection(envelope.metrics)
+    public_result = payload["result"]
+    assert isinstance(public_result, dict)
+    assert "specialistRoleStatuses" not in public_result
+    assert "aggregationChecksum" not in public_result
+
+
+def _failure_diagnostics() -> LiveFailureDiagnostics:
+    diagnostics = LiveFailureDiagnostics.from_observation(
+        LiveFaultObservation(
+            scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+            checks=(
+                LiveCheck("pool_at_capacity", True),
+                LiveCheck("business_probe_timed_out", False),
+            ),
+            safe_facts=(("poolCapacity", 3), ("businessProbeTimedOut", False)),
+        )
+    )
+    assert diagnostics is not None
+    return diagnostics
+
+
+@pytest.mark.asyncio
+async def test_fault_injection_failure_persists_safe_check_diagnostics(tmp_path: Path) -> None:
+    archive = EvaluationArchive(
+        tmp_path / "archive", repository_root=tmp_path / "repository"
+    )
+    repository = CapturingEvaluationRepository()
+    recorder = EvaluationRunRecorder(archive=archive, repository=repository)
+
+    async def execute():
+        error = LiveBenchmarkError(
+            "fault_injection_failed",
+            stage="inject",
+            diagnostics=_failure_diagnostics(),
+        )
+        error.cleanup_succeeded = True
+        raise error
+
+    payload, exit_code = await live_cli._run_live_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+        run_id="live-fault-diagnostics",
+        evidence_source="local",
+        execute=execute,
+        recorder=recorder,
+    )
+    envelope = archive.load("live-fault-diagnostics")
+
+    assert exit_code == 1
+    assert envelope.result_payload == {
+        "failures": ["fault_injection_failed"],
+        "failureStage": "inject",
+        "checkResults": [
+            {"name": "pool_at_capacity", "passed": True, "source": "driver"},
+            {
+                "name": "business_probe_timed_out",
+                "passed": False,
+                "source": "driver",
+            },
+        ],
+        "failedChecks": ["business_probe_timed_out"],
+        "safeFacts": {"poolCapacity": 3, "businessProbeTimedOut": False},
+    }
+    assert payload["result"] == {
+        "evidenceSource": "local",
+        "validity": "VALID_FAIL",
+        "failureCategory": "fault_injection_failed",
+        "failureStage": "inject",
+        "failedChecks": ["business_probe_timed_out"],
+    }
+    assert repository.finalized_envelope == envelope
 
 
 @pytest.mark.asyncio
@@ -352,6 +490,18 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
                 fallback_reason=None,
                 security_hard_gate_passed=True,
                 total_score=100,
+                tool_call_count=4,
+                role_statuses=(("log", "completed"), ("runtime", "completed")),
+                role_duration_ms=(("log", 800), ("runtime", 1100)),
+                role_model_call_counts=(("log", 2), ("runtime", 2)),
+                role_tool_call_counts=(("log", 1), ("runtime", 3)),
+                role_evidence_counts=(("log", 1), ("runtime", 3)),
+                source_group_count=4,
+                duplicate_evidence_count=0,
+                conflict_count=1,
+                missing_domains=(),
+                aggregation_checksum="a" * 64,
+                terminal_failure_category=None,
             ),
         )
 
@@ -369,6 +519,33 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
     assert envelope.metadata["investigationStrategy"] == "multi"
     assert envelope.metrics["effectiveInvestigationStrategy"] == "multi_agent"
     assert envelope.metrics["rootCauseTop1Correct"] is True
+    assert envelope.metrics["specialistRoleStatuses"] == {
+        "log": "completed",
+        "runtime": "completed",
+    }
+    assert envelope.metrics["specialistRoleDurationMs"] == {
+        "log": 800,
+        "runtime": 1100,
+    }
+    assert envelope.metrics["specialistRoleModelCallCounts"] == {
+        "log": 2,
+        "runtime": 2,
+    }
+    assert envelope.metrics["specialistRoleToolCallCounts"] == {
+        "log": 1,
+        "runtime": 3,
+    }
+    assert envelope.metrics["specialistRoleEvidenceCounts"] == {
+        "log": 1,
+        "runtime": 3,
+    }
+    assert envelope.metrics["toolCallCount"] == 4
+    assert envelope.metrics["sourceGroupCount"] == 4
+    assert envelope.metrics["duplicateEvidenceCount"] == 0
+    assert envelope.metrics["conflictCount"] == 1
+    assert envelope.metrics["missingDomains"] == []
+    assert envelope.metrics["aggregationChecksum"] == "a" * 64
+    assert envelope.metrics["terminalFailureCategory"] is None
 
 
 def test_cli_rejects_missing_identity() -> None:
@@ -544,6 +721,55 @@ def test_live_failure_payload_keeps_only_bounded_error_metadata() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "invalid_failed_checks",
+    [
+        {"message": "sensitive"},
+        [{"message": "sensitive"}],
+        ["duplicate", "duplicate"],
+        ["ground_truth"],
+        ["x" * 81],
+        [f"check_{index}" for index in range(65)],
+    ],
+)
+def test_safe_output_drops_malformed_or_forbidden_failed_checks(
+    invalid_failed_checks: object,
+) -> None:
+    payload = safe_output(
+        command="run",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        run_id="live-run-1",
+        status="failed",
+        result={"failedChecks": invalid_failed_checks},
+    )
+
+    result = payload.get("result")
+    assert isinstance(result, dict)
+    assert "failedChecks" not in result
+
+
+def test_safe_report_revalidates_failed_check_names_after_tampering(tmp_path: Path) -> None:
+    report = tmp_path / "live-run-1.json"
+    report.write_text(
+        json.dumps(
+            {
+                "command": "run",
+                "scenarioId": "APY-LIVE-PG-LOCK-001",
+                "runId": "live-run-1",
+                "status": "failed",
+                "result": {"failedChecks": [{"message": "sensitive"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = read_safe_report(report)
+
+    result = restored.get("result")
+    assert isinstance(result, dict)
+    assert "failedChecks" not in result
+
+
 @pytest.mark.asyncio
 async def test_cleanup_command_resolves_the_scenario_driver_from_registry(
     monkeypatch: pytest.MonkeyPatch,
@@ -677,7 +903,11 @@ def test_report_round_trip_reapplies_output_allowlist(tmp_path: Path) -> None:
         scenario_id="APY-LIVE-PG-LOCK-001",
         run_id="live-run-1",
         status="passed",
-        result={"total": 100, "passed": True},
+        result={
+            "total": 100,
+            "passed": True,
+            "failedChecks": ["business_probe_timed_out"],
+        },
     )
     path = tmp_path / "report.json"
 
@@ -689,5 +919,9 @@ def test_report_round_trip_reapplies_output_allowlist(tmp_path: Path) -> None:
 
     report = read_safe_report(path)
     serialized = json.dumps(report)
-    assert report["result"] == {"total": 100, "passed": True}
+    assert report["result"] == {
+        "total": 100,
+        "passed": True,
+        "failedChecks": ["business_probe_timed_out"],
+    }
     assert "secret" not in serialized

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
+from types import MappingProxyType
 from typing import Literal, cast
 
 from super_ai.memory.repositories import JsonDict
@@ -48,6 +49,8 @@ _CONTEXT_OR_MECHANISM = frozenset(
         "InspectGatewayRequestTimeline",
         "InspectHostLimits",
         "InspectNginx",
+        "InspectOrderDatabaseSessions",
+        "InspectOrderPoolState",
         "InspectRedisClientPool",
         "InspectRedisServer",
         "InspectTrafficAndDependencyHealth",
@@ -59,7 +62,9 @@ _CONTEXT_OR_MECHANISM = frozenset(
 )
 _CONTEXT_OR_MECHANISM_OR_IMPACT = frozenset({"GetServiceMetrics"})
 _TRIGGER_OR_CONTEXT_OR_MECHANISM = frozenset({"InspectPostgres", "InspectRedis"})
-_CONTEXT_OR_IMPACT = frozenset({"VerifyServiceHealth"})
+_CONTEXT_OR_IMPACT = frozenset(
+    {"VerifyOrderDatabaseReachability", "VerifyServiceHealth"}
+)
 _LOG_EVIDENCE = frozenset({"SearchLog", "SearchLogs"})
 _NON_DIAGNOSTIC_PREFIXES = (
     "Apply",
@@ -73,9 +78,96 @@ _NON_DIAGNOSTIC_PREFIXES = (
 
 
 @dataclass(frozen=True, slots=True)
+class LiveToolCapability:
+    """Public diagnostic scope and generic fallback metadata for a Live tool."""
+
+    causal_intents: frozenset[CausalIntent]
+    hypotheses: tuple[str, ...]
+    generic_purpose: str
+    generic_arguments: tuple[tuple[str, object], ...]
+    generic_causal_intent: CausalIntent
+
+
+LIVE_TOOL_CAPABILITIES: Mapping[str, LiveToolCapability] = MappingProxyType(
+    {
+        "VerifyServiceHealth": LiveToolCapability(
+            causal_intents=frozenset({"context", "impact"}),
+            hypotheses=("postgres_connectivity_failure",),
+            generic_purpose="Check database reachability and service health.",
+            generic_arguments=(
+                ("target", "postgres_cluster"),
+                ("check_connection_pool", True),
+            ),
+            generic_causal_intent="impact",
+        ),
+        "InspectPostgresSessions": LiveToolCapability(
+            causal_intents=frozenset({"mechanism", "impact"}),
+            hypotheses=(
+                "postgres_slow_query_without_lock",
+                "postgres_lock_blocking",
+            ),
+            generic_purpose="Inspect session states and wait events.",
+            generic_arguments=(
+                ("state_filter", ("active", "idle in transaction")),
+                ("include_wait_events", True),
+            ),
+            generic_causal_intent="mechanism",
+        ),
+        "InspectPostgresLockGraph": LiveToolCapability(
+            causal_intents=frozenset({"trigger", "mechanism"}),
+            hypotheses=("postgres_lock_blocking",),
+            generic_purpose="Inspect current blocking chains and deadlock signals.",
+            generic_arguments=(
+                ("detect_deadlocks", True),
+                ("analyze_blocking_chains", True),
+            ),
+            generic_causal_intent="trigger",
+        ),
+        "InspectOrderPoolState": LiveToolCapability(
+            causal_intents=frozenset({"context", "mechanism"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_traffic_capacity_exceeded",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            generic_purpose="Inspect sanitized order-api pool capacity and waiter state.",
+            generic_arguments=(),
+            generic_causal_intent="mechanism",
+        ),
+        "InspectOrderDatabaseSessions": LiveToolCapability(
+            causal_intents=frozenset({"context", "mechanism"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+                "order_slow_statement",
+                "order_database_lock_wait",
+            ),
+            generic_purpose="Inspect scoped database sessions and rule out lock waits.",
+            generic_arguments=(),
+            generic_causal_intent="context",
+        ),
+        "VerifyOrderDatabaseReachability": LiveToolCapability(
+            causal_intents=frozenset({"context", "impact"}),
+            hypotheses=(
+                "order_connection_lifecycle_failure",
+                "order_database_unreachable",
+            ),
+            generic_purpose=(
+                "Separate database reachability from the business acquisition timeout."
+            ),
+            generic_arguments=(),
+            generic_causal_intent="impact",
+        ),
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanCausalCoverage:
     steps: tuple[JsonDict, ...]
     complete: bool
+    target_hypothesis_id: str | None
     missing_roles: tuple[CoreCausalRole, ...]
     ambiguous_trigger: bool
 
@@ -99,6 +191,9 @@ class CausalCoverage:
 
 def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
     """Return the public observation roles a diagnostic tool can establish."""
+    live_capability = LIVE_TOOL_CAPABILITIES.get(tool_name)
+    if live_capability is not None:
+        return live_capability.causal_intents
     if tool_name in _TRIGGER_OR_MECHANISM:
         return frozenset({"trigger", "mechanism"})
     if tool_name in _IMPACT:
@@ -116,7 +211,7 @@ def allowed_causal_intents(tool_name: str) -> frozenset[CausalIntent]:
     if tool_name in _CONTEXT_OR_IMPACT:
         return frozenset({"context", "impact"})
     if tool_name in _LOG_EVIDENCE:
-        return frozenset({"context", "mechanism", "impact"})
+        return frozenset({"trigger", "context", "mechanism", "impact"})
     if tool_name.startswith(_NON_DIAGNOSTIC_PREFIXES):
         return frozenset()
     return frozenset({"context"})
@@ -136,54 +231,99 @@ def repair_plan_causal_coverage(
         for step in original
     )
 
-    candidates: list[tuple[int, tuple[int, ...], tuple[CausalIntent, ...]]] = []
+    hypotheses = sorted(
+        {
+            hypothesis_id
+            for step in original
+            for hypothesis_id in _string_set(step.get("testsHypotheses"))
+            if hypothesis_id.strip()
+        }
+    )
+    candidates: list[
+        tuple[
+            int,
+            int,
+            tuple[int, ...],
+            str,
+            tuple[CoreCausalRole, ...],
+            tuple[CausalIntent, ...],
+        ]
+    ] = []
     if all(allowed_by_step):
         for assignment in product(*allowed_by_step):
             typed_assignment = cast(tuple[CausalIntent, ...], assignment)
-            if typed_assignment.count("trigger") != 1:
-                continue
-            if "mechanism" not in typed_assignment or "impact" not in typed_assignment:
-                continue
             changes = sum(
                 role != step.get("causalIntent")
                 for step, role in zip(original, typed_assignment, strict=True)
             )
             priority = tuple(_ROLE_PRIORITY.index(role) for role in typed_assignment)
-            candidates.append((changes, priority, typed_assignment))
+            for hypothesis_id in hypotheses:
+                roles = tuple(
+                    role
+                    for step, role in zip(original, typed_assignment, strict=True)
+                    if hypothesis_id in _string_set(step.get("testsHypotheses"))
+                )
+                missing = cast(
+                    tuple[CoreCausalRole, ...],
+                    tuple(
+                        role
+                        for role in _CORE_ROLES
+                        if (
+                            roles.count("trigger") != 1
+                            if role == "trigger"
+                            else role not in roles
+                        )
+                    ),
+                )
+                candidates.append(
+                    (
+                        len(missing),
+                        changes,
+                        priority,
+                        hypothesis_id,
+                        missing,
+                        typed_assignment,
+                    )
+                )
 
     if candidates:
-        _, _, assignment = min(candidates)
-        repaired: list[JsonDict] = []
-        for step, role in zip(original, assignment, strict=True):
-            updated = dict(step)
-            if role != step.get("causalIntent"):
-                updated["causalIntent"] = role
-                updated["causalIntentOrigin"] = "coverage_repair"
-            repaired.append(updated)
+        _, _, _, hypothesis_id, missing_roles, assignment = min(candidates)
+        if not missing_roles:
+            repaired: list[JsonDict] = []
+            for step, role in zip(original, assignment, strict=True):
+                updated = dict(step)
+                if role != step.get("causalIntent"):
+                    updated["causalIntent"] = role
+                    updated["causalIntentOrigin"] = "coverage_repair"
+                repaired.append(updated)
+            return PlanCausalCoverage(
+                steps=tuple(repaired),
+                complete=True,
+                target_hypothesis_id=hypothesis_id,
+                missing_roles=(),
+                ambiguous_trigger=False,
+            )
+
+        trigger_count = sum(
+            step.get("causalIntent") == "trigger"
+            and hypothesis_id in _string_set(step.get("testsHypotheses"))
+            for step in original
+        )
+        ambiguous_trigger = trigger_count > 1
         return PlanCausalCoverage(
-            steps=tuple(repaired),
-            complete=True,
-            missing_roles=(),
-            ambiguous_trigger=False,
+            steps=original,
+            complete=False,
+            target_hypothesis_id=hypothesis_id,
+            missing_roles=_CORE_ROLES if ambiguous_trigger else missing_roles,
+            ambiguous_trigger=ambiguous_trigger,
         )
 
-    trigger_count = sum(step.get("causalIntent") == "trigger" for step in original)
-    ambiguous_trigger = trigger_count > 1
-    missing_roles: tuple[CoreCausalRole, ...]
-    if ambiguous_trigger:
-        missing_roles = _CORE_ROLES
-    else:
-        present = {
-            cast(CoreCausalRole, step.get("causalIntent"))
-            for step in original
-            if step.get("causalIntent") in _CORE_ROLES
-        }
-        missing_roles = tuple(role for role in _CORE_ROLES if role not in present)
     return PlanCausalCoverage(
         steps=original,
         complete=False,
-        missing_roles=missing_roles,
-        ambiguous_trigger=ambiguous_trigger,
+        target_hypothesis_id=None,
+        missing_roles=_CORE_ROLES,
+        ambiguous_trigger=False,
     )
 
 

@@ -36,3 +36,9 @@
 - [x] 6.3 以 TDD 增加八类脱敏 structured parse 子分类和有界重试审计
 - [x] 6.4 将模型名与错误码安全投影到 Step、Checkpoint 和 Run Artifact，不改变评分
 - [x] 6.5 运行两组专项离线回归和一次合成 `qwen3.8-max` Live readiness
+
+## 7. Validator 输出合同与 deadline 感知纠错
+
+- [x] 7.1 以失败测试覆盖完整输出合同、60 秒不足与 65 秒允许格式纠错的边界
+- [x] 7.2 实现精确 Prompt、retry guard 与 `retry_skipped_insufficient_deadline` 安全分类
+- [x] 7.3 运行 Validator/V4 专项 pytest、触及文件 Ruff/Pyright 和 focused OpenSpec 验证

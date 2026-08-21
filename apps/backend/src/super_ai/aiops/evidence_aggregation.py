@@ -17,6 +17,17 @@ from super_ai.aiops.investigation import (
     InvestigatorType,
     JsonValue,
 )
+from super_ai.aiops.specialists import (
+    PublicAssessmentSignal,
+    SpecialistAssignment,
+    SpecialistResult,
+    SpecialistRole,
+)
+from super_ai.memory.repositories import (
+    AgentToolCallAuditRecord,
+    DiagnosticEvidenceRecord,
+    ToolCallAuditRecord,
+)
 
 _INVESTIGATOR_ORDER: Mapping[InvestigatorType, int] = MappingProxyType(
     {"knowledge": 0, "runtime": 1, "log": 2, "change": 3}
@@ -80,6 +91,339 @@ class AggregationResult:
     rejected_dispatches: Mapping[str, str]
     claims: tuple[EvidenceClaim, ...]
     conflicts: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SpecialistAggregationContext:
+    """Code-owned scope and persisted provenance for Specialist fan-in."""
+
+    owner_user_id: str
+    task_id: str
+    graph_version: str
+    assignments: Mapping[SpecialistRole, SpecialistAssignment]
+    evidence_by_id: Mapping[str, DiagnosticEvidenceRecord]
+    completed_tool_audit_by_id: Mapping[
+        str, ToolCallAuditRecord | AgentToolCallAuditRecord
+    ]
+
+    def __post_init__(self) -> None:
+        if not self.owner_user_id.strip() or not self.task_id.strip():
+            raise ValueError("Specialist aggregation requires owner and task identity.")
+        if not self.graph_version.strip():
+            raise ValueError("Specialist aggregation requires a graph version.")
+        if any(role != assignment.role for role, assignment in self.assignments.items()):
+            raise ValueError("Specialist aggregation assignment role is invalid.")
+        object.__setattr__(
+            self,
+            "assignments",
+            MappingProxyType(dict(sorted(self.assignments.items()))),
+        )
+        object.__setattr__(
+            self,
+            "evidence_by_id",
+            MappingProxyType(dict(sorted(self.evidence_by_id.items()))),
+        )
+        object.__setattr__(
+            self,
+            "completed_tool_audit_by_id",
+            MappingProxyType(dict(sorted(self.completed_tool_audit_by_id.items()))),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AggregatedInvestigation:
+    """Deterministic Specialist output; it cannot decide or authorize recovery."""
+
+    specialist_statuses: Mapping[str, str]
+    evidence: tuple[str, ...]
+    normalized_facts: tuple[EvidenceClaim, ...]
+    hypothesis_signals: tuple[PublicAssessmentSignal, ...]
+    conflicts: tuple[Mapping[str, object], ...]
+    source_groups: Mapping[str, tuple[str, ...]]
+    missing_domains: tuple[str, ...]
+    budget_usage: Mapping[str, int]
+    aggregation_checksum: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "specialist_statuses",
+            MappingProxyType(dict(sorted(self.specialist_statuses.items()))),
+        )
+        object.__setattr__(
+            self,
+            "source_groups",
+            MappingProxyType(
+                {
+                    key: tuple(sorted(set(value)))
+                    for key, value in sorted(self.source_groups.items())
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "budget_usage",
+            MappingProxyType(dict(sorted(self.budget_usage.items()))),
+        )
+        object.__setattr__(
+            self,
+            "conflicts",
+            tuple(MappingProxyType(dict(item)) for item in self.conflicts),
+        )
+
+    @property
+    def terminal_failure_category(self) -> str | None:
+        failed = {"failed", "timeout", "cancelled", "missing"}
+        if self.specialist_statuses and all(
+            status in failed for status in self.specialist_statuses.values()
+        ):
+            return "multi_investigation_failed"
+        return None
+
+    def to_checkpoint_payload(self) -> dict[str, object]:
+        """Project only bounded public aggregation data into a checkpoint."""
+        return {
+            "specialistStatuses": dict(self.specialist_statuses),
+            "evidence": list(self.evidence),
+            "normalizedFacts": [_claim_checkpoint_payload(item) for item in self.normalized_facts],
+            "hypothesisSignals": [
+                _signal_checkpoint_payload(item) for item in self.hypothesis_signals
+            ],
+            "conflicts": [dict(item) for item in self.conflicts],
+            "sourceGroups": {
+                key: list(value) for key, value in self.source_groups.items()
+            },
+            "missingDomains": list(self.missing_domains),
+            "budgetUsage": dict(self.budget_usage),
+            "aggregationChecksum": self.aggregation_checksum,
+            "terminalFailureCategory": self.terminal_failure_category,
+        }
+
+
+def aggregate_specialist_results(
+    results: Sequence[SpecialistResult],
+    *,
+    context: SpecialistAggregationContext,
+) -> AggregatedInvestigation:
+    """Validate and merge Specialist results using persisted provenance only."""
+    result_by_role: dict[SpecialistRole, SpecialistResult] = {}
+    for result in results:
+        existing = result_by_role.get(result.role)
+        if existing is not None and existing != result:
+            raise ValueError("conflicting_specialist_result")
+        result_by_role[result.role] = result
+
+    statuses: dict[str, str] = {}
+    for role in context.assignments:
+        result = result_by_role.get(role)
+        statuses[role] = result.terminal_status if result is not None else "missing"
+    if set(result_by_role).difference(context.assignments):
+        raise ValueError("unexpected_specialist_result")
+
+    evidence_ids: set[str] = set()
+    source_groups: dict[str, set[str]] = defaultdict(set)
+    ordered_facts: list[tuple[str, EvidenceClaim]] = []
+    ordered_signals: list[tuple[str, PublicAssessmentSignal]] = []
+    seen_fact_fingerprints: set[str] = set()
+    seen_signal_fingerprints: set[str] = set()
+    for role, result in sorted(result_by_role.items()):
+        assignment = context.assignments[role]
+        owned_ids = frozenset(result.evidence_ids)
+        for evidence_id in owned_ids:
+            record = context.evidence_by_id.get(evidence_id)
+            if not _specialist_evidence_is_valid(
+                record,
+                role=role,
+                assignment=assignment,
+                context=context,
+            ):
+                raise ValueError("invalid_specialist_evidence")
+            assert record is not None
+            source_fingerprint = record.payload.get("sourceFingerprint")
+            assert isinstance(source_fingerprint, str)
+            evidence_ids.add(evidence_id)
+            source_groups[source_fingerprint].add(evidence_id)
+
+        for fact in result.fact_candidates:
+            if not set(fact.evidence_ids).issubset(owned_ids):
+                raise ValueError("invalid_specialist_evidence")
+            if not set(fact.supports).issubset(assignment.hypotheses_to_test):
+                raise ValueError("invalid_specialist_evidence")
+            if not set(fact.refutes).issubset(assignment.hypotheses_to_test):
+                raise ValueError("invalid_specialist_evidence")
+            fingerprint = _specialist_claim_fingerprint(role, fact)
+            if fingerprint not in seen_fact_fingerprints:
+                seen_fact_fingerprints.add(fingerprint)
+                ordered_facts.append((fingerprint, fact))
+
+        for signal in result.proposed_assessments:
+            if signal.hypothesis_id not in assignment.hypotheses_to_test:
+                raise ValueError("invalid_specialist_evidence")
+            if not set(signal.evidence_ids).issubset(owned_ids):
+                raise ValueError("invalid_specialist_evidence")
+            fingerprint = _specialist_signal_fingerprint(role, signal)
+            if fingerprint not in seen_signal_fingerprints:
+                seen_signal_fingerprints.add(fingerprint)
+                ordered_signals.append((fingerprint, signal))
+
+    ordered_facts.sort(key=lambda item: item[0])
+    ordered_signals.sort(key=lambda item: item[0])
+    facts = tuple(item[1] for item in ordered_facts)
+    signals = tuple(item[1] for item in ordered_signals)
+    missing_domains = tuple(
+        role
+        for role, status in sorted(statuses.items())
+        if status in {"failed", "timeout", "cancelled", "missing"}
+    )
+    budget_usage = {
+        role: result.model_call_count for role, result in sorted(result_by_role.items())
+    }
+    budget_usage["total"] = sum(budget_usage.values())
+    checksum_material = "\x1f".join(
+        (
+            context.task_id,
+            context.graph_version,
+            *sorted(result.result_checksum for result in result_by_role.values()),
+        )
+    )
+    return AggregatedInvestigation(
+        specialist_statuses=statuses,
+        evidence=tuple(sorted(evidence_ids)),
+        normalized_facts=facts,
+        hypothesis_signals=signals,
+        conflicts=_find_specialist_conflicts(ordered_facts),
+        source_groups={
+            key: tuple(sorted(value)) for key, value in sorted(source_groups.items())
+        },
+        missing_domains=missing_domains,
+        budget_usage=budget_usage,
+        aggregation_checksum=hashlib.sha256(checksum_material.encode("utf-8")).hexdigest(),
+    )
+
+
+def _specialist_evidence_is_valid(
+    record: DiagnosticEvidenceRecord | None,
+    *,
+    role: SpecialistRole,
+    assignment: SpecialistAssignment,
+    context: SpecialistAggregationContext,
+) -> bool:
+    if record is None:
+        return False
+    if record.owner_user_id != context.owner_user_id or record.task_id != context.task_id:
+        return False
+    if record.tool_call_id is None:
+        return False
+    source_fingerprint = record.payload.get("sourceFingerprint")
+    if not isinstance(source_fingerprint, str) or not source_fingerprint.strip():
+        return False
+    audit = context.completed_tool_audit_by_id.get(record.tool_call_id)
+    if audit is None:
+        return False
+    if (
+        audit.owner_user_id != context.owner_user_id
+        or _tool_audit_task_id(audit) != context.task_id
+        or audit.status != "completed"
+        or audit.completed_at is None
+    ):
+        return False
+    if audit.tool_name not in assignment.allowed_tools or record.source != audit.tool_name:
+        return False
+    capability_role = context.assignments.get(role)
+    return capability_role is assignment
+
+
+def _tool_audit_task_id(
+    audit: ToolCallAuditRecord | AgentToolCallAuditRecord,
+) -> str | None:
+    if isinstance(audit, ToolCallAuditRecord):
+        return audit.task_id
+    return audit.diagnostic_task_id
+
+
+def _specialist_claim_fingerprint(role: SpecialistRole, claim: EvidenceClaim) -> str:
+    return hashlib.sha256(
+        _canonical_json(
+            cast(
+                JsonValue,
+                {
+                    "role": role,
+                    "claim": _claim_checkpoint_payload(claim),
+                },
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _specialist_signal_fingerprint(
+    role: SpecialistRole,
+    signal: PublicAssessmentSignal,
+) -> str:
+    return hashlib.sha256(
+        _canonical_json(
+            cast(
+                JsonValue,
+                {
+                    "role": role,
+                    "signal": _signal_checkpoint_payload(signal),
+                },
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _claim_checkpoint_payload(claim: EvidenceClaim) -> dict[str, object]:
+    return {
+        "claimId": claim.claim_id,
+        "value": _plain_json(claim.value),
+        "quality": claim.quality,
+        "causalRole": claim.causal_role,
+        "supports": list(claim.supports),
+        "refutes": list(claim.refutes),
+        "evidenceIds": list(claim.evidence_ids),
+        "targetComponent": claim.target_component,
+        "observedAt": claim.observed_at.isoformat() if claim.observed_at else None,
+        "timeScope": claim.time_scope,
+    }
+
+
+def _signal_checkpoint_payload(signal: PublicAssessmentSignal) -> dict[str, object]:
+    return {
+        "hypothesisId": signal.hypothesis_id,
+        "disposition": signal.disposition,
+        "evidenceIds": list(signal.evidence_ids),
+        "summary": signal.summary,
+    }
+
+
+def _find_specialist_conflicts(
+    facts: Sequence[tuple[str, EvidenceClaim]],
+) -> tuple[Mapping[str, object], ...]:
+    grouped: dict[tuple[str, str, str], list[tuple[str, EvidenceClaim]]] = defaultdict(
+        list
+    )
+    for fingerprint, fact in facts:
+        if fact.quality == "direct":
+            grouped[(fact.claim_id, fact.target_component, fact.time_scope)].append(
+                (fingerprint, fact)
+            )
+    conflicts: list[Mapping[str, object]] = []
+    for (claim_id, component, time_scope), members in sorted(grouped.items()):
+        if len({_canonical_json(item.value) for _, item in members}) <= 1:
+            continue
+        conflicts.append(
+            MappingProxyType(
+                {
+                    "claimId": claim_id,
+                    "targetComponent": component,
+                    "timeScope": time_scope,
+                    "claimFingerprints": tuple(
+                        sorted(fingerprint for fingerprint, _ in members)
+                    ),
+                }
+            )
+        )
+    return tuple(conflicts)
 
 
 def aggregate_evidence_packets(
