@@ -30,7 +30,7 @@
 
 - [x] 5.1 Add the fail-closed Order Pool trusted compound pattern and provenance-negative tests.
 - [x] 5.2 Persist and verify one grounded real Single canary before Multi implementation.
-- [ ] 5.3 Add immutable Specialist contracts, exact source bindings, and answer-isolation tests.
+- [x] 5.3 Add immutable Specialist contracts, exact source bindings, and answer-isolation tests.
 - [ ] 5.4 Add bounded Local Planning, tool execution, Evidence Analysis, and replay-safe model budgets.
 - [ ] 5.5 Add deterministic source-group aggregation, conflict handling, and PostgreSQL replay tests.
 - [ ] 5.6 Wire isolated Runtime/Log Specialist branches into the existing LangGraph central safety chain.
