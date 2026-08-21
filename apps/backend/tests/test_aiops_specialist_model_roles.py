@@ -422,6 +422,42 @@ def test_local_plan_prompt_states_code_owned_scope_constraints() -> None:
     assert "do not add, remove, or modify any argument" in prompt
 
 
+def test_local_plan_uses_code_owned_causal_intent_bindings() -> None:
+    now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+    assignment = _assignment(now)
+    output = SpecialistLocalPlanOutput.model_validate(
+        {
+            "steps": [
+                {
+                    "step_id": "runtime-1",
+                    "tool_name": "InspectOrderPoolState",
+                    "tested_hypotheses": ["lifecycle_failure"],
+                    "causal_intent": "impact",
+                    "proposed_arguments": {},
+                },
+                {
+                    "step_id": "runtime-2",
+                    "tool_name": "VerifyOrderDatabaseReachability",
+                    "tested_hypotheses": ["database_unreachable"],
+                    "causal_intent": "trigger",
+                    "proposed_arguments": {},
+                },
+            ]
+        }
+    )
+
+    steps = SpecialistExecutor._validate_plan(  # pyright: ignore[reportPrivateUsage]
+        _context(now), assignment, output
+    )
+    prompt = SpecialistExecutor._local_plan_prompt(  # pyright: ignore[reportPrivateUsage]
+        _context(now), assignment
+    )
+
+    assert [item.causal_intent for item in steps] == ["mechanism", "impact"]
+    assert '"allowedCausalIntentsByTool"' in prompt
+    assert '"InspectOrderPoolState": ["mechanism"]' in prompt
+
+
 @pytest.mark.asyncio
 async def test_soft_deadline_prevents_new_local_plan() -> None:
     now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)

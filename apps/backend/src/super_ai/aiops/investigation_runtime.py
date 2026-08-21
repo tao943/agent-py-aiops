@@ -6,12 +6,13 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 
+from super_ai.aiops.causal_intents import allowed_causal_intents
 from super_ai.aiops.decision_validation import invoke_bounded_structured_role
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.investigation import (
@@ -800,13 +801,21 @@ class SpecialistExecutor:
         steps = tuple(item.to_contract() for item in output.steps)
         assigned_hypotheses = set(assignment.hypotheses_to_test)
         assigned_roles = set(assignment.required_causal_roles)
+        normalized_steps: list[SpecialistPlanStep] = []
         for step in steps:
             if step.tool_name not in assignment.allowed_tools:
                 raise ValueError("Specialist plan contains an unauthorized tool.")
             if not set(step.tested_hypotheses).issubset(assigned_hypotheses):
                 raise ValueError("Specialist plan contains an unknown hypothesis.")
-            if step.causal_intent not in assigned_roles:
+            allowed_roles = (
+                set(allowed_causal_intents(step.tool_name)) & assigned_roles
+            )
+            if not allowed_roles:
                 raise ValueError("Specialist plan contains an unassigned causal role.")
+            if step.causal_intent not in allowed_roles:
+                if len(allowed_roles) != 1:
+                    raise ValueError("Specialist plan contains an invalid tool causal role.")
+                step = replace(step, causal_intent=next(iter(allowed_roles)))
             trusted = assignment.trusted_arguments_by_tool[step.tool_name]
             if _plain_json_mapping(step.proposed_arguments) != _plain_json_mapping(trusted):
                 raise ValueError("Specialist plan altered code-owned tool arguments.")
@@ -815,7 +824,8 @@ class SpecialistExecutor:
             ]
             if _plain_json_mapping(trusted) != _plain_json_mapping(context_trusted):
                 raise ValueError("Specialist plan binding differs from shared context.")
-        return steps
+            normalized_steps.append(step)
+        return tuple(normalized_steps)
 
     @staticmethod
     def _validate_analysis(
@@ -855,6 +865,13 @@ class SpecialistExecutor:
             "causalRoles": list(assignment.required_causal_roles),
             "maximumSteps": assignment.maximum_tool_steps,
             "allowedTools": sorted(assignment.allowed_tools),
+            "allowedCausalIntentsByTool": {
+                tool: sorted(
+                    set(allowed_causal_intents(tool))
+                    & set(assignment.required_causal_roles)
+                )
+                for tool in sorted(assignment.allowed_tools)
+            },
             "trustedArguments": {
                 tool: _plain_json_mapping(arguments)
                 for tool, arguments in assignment.trusted_arguments_by_tool.items()
@@ -863,7 +880,9 @@ class SpecialistExecutor:
         return (
             "Create a bounded public Specialist Local Plan. "
             "Return no more than maximumSteps. Use only listed hypotheses, "
-            "causalRoles, and allowedTools. proposed_arguments must exactly equal "
+            "causalRoles, and allowedTools. causal_intent must be one of the "
+            "allowedCausalIntentsByTool values for that tool. proposed_arguments "
+            "must exactly equal "
             "the trustedArguments object for that tool; do not add, remove, or "
             "modify any argument.\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
