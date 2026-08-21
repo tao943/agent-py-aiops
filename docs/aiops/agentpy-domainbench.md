@@ -696,6 +696,19 @@ trigger/mechanism/impact，并为 mechanism 与 impact 补齐相应 Evidence 引
 评分器、同义词表、总分阈值、恢复授权和安全门禁均未修改。此修复目前只有离线验证，尚未执行新的真实
 Single Run，也未开始 Specialist Multi-Agent 实现。
 
+最终真实 Single 门禁 `order-pool-specialist-single-gate-semantic-fixed-20260821` 达到
+`100/100`、`VALID_PASS`，无失败项。Root Cause Top-1、Evidence Recall、恢复验证、cleanup 和安全硬门禁
+全部通过；运行耗时 206829 ms，Archive 口径成功模型调用数为 3，Evidence 无重复。对应诊断任务
+`diagnostic_d879de6b40484420a3bfbd26d834f20e` 收集 8 条持久化 Evidence、4 个独立
+`sourceFingerprint`，匹配 `order_connection_checkout_without_checkin`；Decision 来源为
+`deterministic_grounded`，deterministic Validator 判定 valid，根因为
+`order-api / exception_path_connection_not_released`。
+
+生产 Recovery Policy 仍保持 `manual_review_required`、`executionPermitted=false`；本次 executed recovery
+仅由隔离 Live Benchmark harness 按场景合同执行并独立验证，不改变生产自动恢复授权。terminal Envelope
+checksum 为 `a85abec8ce1398080506dda21ecf91a6b75d93725aeeea660c32ce10ba85412e`。
+该结果完成 Specialist Multi-Agent 实现前的 Single 门禁。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

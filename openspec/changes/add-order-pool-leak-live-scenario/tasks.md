@@ -29,7 +29,7 @@
 ## 5. Specialist diagnostic closure
 
 - [x] 5.1 Add the fail-closed Order Pool trusted compound pattern and provenance-negative tests.
-- [ ] 5.2 Persist and verify one grounded real Single canary before Multi implementation.
+- [x] 5.2 Persist and verify one grounded real Single canary before Multi implementation.
 - [ ] 5.3 Add immutable Specialist contracts, exact source bindings, and answer-isolation tests.
 - [ ] 5.4 Add bounded Local Planning, tool execution, Evidence Analysis, and replay-safe model budgets.
 - [ ] 5.5 Add deterministic source-group aggregation, conflict handling, and PostgreSQL replay tests.
