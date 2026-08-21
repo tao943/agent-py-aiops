@@ -6320,6 +6320,11 @@ def _specialist_inputs_from_dispatches(
         raise ValueError("Multi Specialist routing requires Runtime and Log roles.")
     soft_deadline = datetime.fromisoformat(str(state.get("soft_deadline_at") or ""))
     hard_deadline = datetime.fromisoformat(str(state.get("hard_deadline_at") or ""))
+    hypotheses = tuple(
+        str(item.get("id"))
+        for item in _json_list(state.get("public_hypotheses"))
+        if item.get("id")
+    )
     assignments: list[SpecialistAssignment] = []
     allowed_by_role: dict[Any, frozenset[str]] = {}
     bindings_by_role: dict[Any, Mapping[str, Mapping[str, JsonValue]]] = {}
@@ -6374,19 +6379,20 @@ def _specialist_inputs_from_dispatches(
                 )
             ),
         )
+        dispatch_hypotheses = tuple(
+            str(item)
+            for item in cast(
+                list[object], dispatch.get("testsHypotheses") or []
+            )
+            if str(item)
+        )
         assignment = SpecialistAssignment(
             role=cast(Any, role),
             objective=str(
                 dispatch.get("objective")
                 or f"Investigate public {role} evidence."
             ),
-            hypotheses_to_test=tuple(
-                str(item)
-                for item in cast(
-                    list[object], dispatch.get("testsHypotheses") or []
-                )
-                if str(item)
-            ),
+            hypotheses_to_test=dispatch_hypotheses or hypotheses,
             required_causal_roles=cast(Any, required_roles),
             allowed_tools=allowed_tools,
             trusted_arguments_by_tool=bindings,
@@ -6398,11 +6404,6 @@ def _specialist_inputs_from_dispatches(
         assignments.append(assignment)
         allowed_by_role[role] = allowed_tools
         bindings_by_role[role] = bindings
-    hypotheses = tuple(
-        str(item.get("id"))
-        for item in _json_list(state.get("public_hypotheses"))
-        if item.get("id")
-    )
     context = SharedRunContext(
         owner_user_id=str(state["owner_user_id"]),
         task_id=str(state["task_id"]),

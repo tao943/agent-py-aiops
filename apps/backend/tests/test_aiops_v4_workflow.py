@@ -277,7 +277,7 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
             "dispatchId": "dispatch-log",
             "investigatorType": "log",
             "objective": "Inspect public log evidence.",
-            "testsHypotheses": ["pool_lifecycle_failure"],
+            "testsHypotheses": [],
             "missingCausalRoles": ["trigger"],
             "allowedTools": ["SearchLog"],
             "steps": [
@@ -292,7 +292,7 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
                         "Query": 'incident_id:"safe"',
                         "Limit": 20,
                     },
-                    "testsHypotheses": ["pool_lifecycle_failure"],
+                    "testsHypotheses": [],
                     "causalIntent": "trigger",
                 }
             ],
@@ -356,6 +356,11 @@ def test_strategy_route_fans_out_stably_or_preserves_safe_chain() -> None:
         "runtime",
         "log",
     ]
+    assignments = [cast(Any, item).arg["specialist_assignment"] for item in multi]
+    assert all(
+        assignment.hypotheses_to_test == ("pool_lifecycle_failure",)
+        for assignment in assignments
+    )
     for item in cast(list[Any], multi):
         branch = item.arg
         assert isinstance(branch["shared_run_context"], SharedRunContext)
