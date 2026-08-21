@@ -3698,12 +3698,21 @@ async def test_v4_sufficiency_accepts_a_buildable_differential_decision(
                             "summary": "Nginx reached the route but the connection was refused.",
                         },
                     ],
-                    "plan": [],
+                    "plan": [
+                        {
+                            "id": "central-step-not-needed-after-multi",
+                            "tool": "InspectContainer",
+                            "arguments": {},
+                        }
+                    ],
                     "plan_index": 0,
                     "executor_attempt_count": 2,
                     "max_total_steps": 6,
                     "replan_count": 0,
                     "max_replans": 1,
+                    "investigation_aggregation": {
+                        "completedPacketCount": 2,
+                    },
                 },
             )
         )

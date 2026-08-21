@@ -4174,7 +4174,18 @@ class AiopsDiagnosticService:
         attempts = int(state.get("executor_attempt_count") or 0)
         maximum = int(state.get("max_total_steps") or 6)
         soft_expired = _execution_deadlines_from_state(state).soft_expired()
-        if plan_index < len(plan) and attempts < maximum:
+        multi_evidence_ready = int(
+            cast(
+                Any,
+                _json_dict(state.get("investigation_aggregation")).get(
+                    "completedPacketCount"
+                )
+                or 0,
+            )
+        ) > 0
+        if decision_ready and multi_evidence_ready:
+            next_route = "decision"
+        elif plan_index < len(plan) and attempts < maximum:
             next_route = "executor"
         elif decision_ready:
             next_route = "decision"
