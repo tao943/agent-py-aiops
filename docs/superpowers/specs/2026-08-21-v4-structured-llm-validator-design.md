@@ -146,8 +146,9 @@ not replace Pydantic validation or evidence-ID allowlisting.
 
 After the first structured parse failure, the shared helper asks an optional
 retry guard whether a complete correction attempt can still start. The V4
-adapter answers from the persisted hard deadline and the existing 60-second
-Validator role timeout. If fewer than 60 seconds remain, the helper does not
+adapter answers from the persisted hard deadline, the existing 60-second
+Validator role timeout, and a fixed five-second scheduling margin. If fewer
+than 65 seconds remain, the helper does not
 invoke the provider or reserve another model-call unit. It returns the
 allowlisted code `retry_skipped_insufficient_deadline`, preserves the first
 parse code, and fails closed to manual review.
@@ -197,7 +198,7 @@ still routinely reach the Validator too late.
 - Low-risk deterministic paths still skip the LLM Validator entirely.
 - No raw model output, exception text, secret, private reasoning, or ground
   truth is persisted.
-- A correction retry starts only when at least one complete 60-second Validator
-  invocation window remains; otherwise the safe skip classification is
+- A correction retry starts only when a complete 60-second Validator invocation
+  window plus a five-second scheduling margin remains; otherwise the safe skip classification is
   persisted and execution remains denied.
 - No new dependency or external service is introduced.

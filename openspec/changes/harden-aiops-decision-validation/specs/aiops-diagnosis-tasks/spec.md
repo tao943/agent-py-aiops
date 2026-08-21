@@ -91,7 +91,7 @@ Workflow SHALL 将 structured parse 失败分类为允许列表中的 `invalid_j
 - **AND** 审计 MUST 保留第一次的安全 parse code
 
 #### Scenario: Format correction has insufficient deadline
-- **WHEN** Validator 第一次响应无法通过 JSON 或 Schema 校验且剩余 hard deadline 少于一个完整 Validator role timeout
+- **WHEN** Validator 第一次响应无法通过 JSON 或 Schema 校验且剩余 hard deadline 少于一个完整 Validator role timeout 加 5 秒调度余量
 - **THEN** Workflow MUST NOT 发起第二次模型调用或消耗第二次模型预算
 - **AND** Workflow MUST 保存首次安全 parse code 和 `retry_skipped_insufficient_deadline`
 - **AND** Recovery Policy MUST 保持 `executionPermitted=false` 并进入人工审核

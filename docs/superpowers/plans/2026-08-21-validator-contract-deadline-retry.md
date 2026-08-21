@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the optional V4 LLM Validator produce a more reliable schema-valid first response and skip its single correction attempt when the persisted hard deadline cannot provide a complete 60-second Validator window.
+**Goal:** Make the optional V4 LLM Validator produce a more reliable schema-valid first response and skip its single correction attempt when the persisted hard deadline cannot provide a complete 60-second Validator window plus a five-second scheduling margin.
 
 **Architecture:** Reuse the existing LangChain structured invoker, Pydantic schema, V4 model budget, deadline, and audit adapter. Add one shared public-output contract string and one optional synchronous retry guard to the structured Validator helper; the V4 workflow supplies a guard computed from its persisted hard deadline. Failures remain secret-safe and force manual review.
 
@@ -104,7 +104,7 @@ assert "valid or invalid" in prompt
 assert "No additional fields" in prompt
 ```
 
-Add a V4 test with a first parse failure and deadlines whose hard deadline is less than 60 seconds in the future. Assert one captured prompt, one new audit, `model_call_count` increased by one only, `semanticValidationAttempts == 1`, both safe error codes are persisted, recovery is `manual_review`, and Policy Gate returns `executionPermitted=false`.
+Add V4 tests with a frozen `_now()`: one first-parse failure with exactly 60 seconds remaining must skip retry; one with exactly 65 seconds remaining must allow retry. For the skipped case, assert one captured prompt, one new audit, `model_call_count` increased by one only, `semanticValidationAttempts == 1`, both safe error codes are persisted, recovery is `manual_review`, and Policy Gate returns `executionPermitted=false`. For the allowed case, assert two prompts, two audits, and two consumed model calls.
 
 - [ ] **Step 2: Run the new V4 tests and verify RED**
 
@@ -123,7 +123,7 @@ Import and prepend/append this contract in `_llm_validator_v4()` before public c
 ```python
 def allow_format_retry() -> bool:
     remaining = (model_runtime.deadlines.hard_deadline_at - _now()).total_seconds()
-    return remaining >= float(ROLE_TIMEOUT_SECONDS["validator"])
+    return remaining >= float(ROLE_TIMEOUT_SECONDS["validator"] + 5)
 ```
 
 to the structured helper. Do not reserve budget in the guard and do not alter `_invoke_v4_structured_model()`.
