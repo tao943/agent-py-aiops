@@ -659,6 +659,26 @@ Envelope 保持不可变，独立清理结果不会回写并改变上述 checksu
 本次结果证明 session scope 修复有效，但尚未证明 Agent 根因决策与自动恢复闭环通过；下一轮应单独分析
 `no_useful_step/deterministic_gap`，不得通过放宽恢复授权或评分门槛绕过。
 
+### Order Pool trusted lifecycle 真实 Single 门禁（2026-08-21）
+
+真实 Run `order-pool-specialist-single-gate-20260821` 使用 CLS 与 active indexed 的
+30 documents/180 chunks 知识作用域，完成诊断任务
+`diagnostic_28cef91204ff45e0bf4e3eb0c031516a`。运行收集 4 组独立工具 Evidence；池满、空闲连接 0、
+waiter、run-scoped sessions、PostgreSQL 可达、无锁等待和业务探针超时均成立。CLS 生命周期包含一组
+先完成归还的正常 checkout/checkin，之后才出现未归还 checkout、更新失败与 acquire timeout。
+
+该 Run 执行 5 次模型调用后仍以 `rootCauseDecision=null`、`terminationReason=no_useful_step` 结束，
+Recovery Policy 安全拒绝执行（`no_grounded_action`、`executionPermitted=false`），Live 终态为
+`VALID_FAIL/recovery_denied`，cleanup 成功。terminal Envelope 位于外部 Evaluation Archive，checksum 为
+`f5dd60342e23f8f156e87b676f686f4587d2f620ec52647ab1b2d5d1cc4368c3`；失败终态保持不可变。
+
+根因不是 LLM、RAG 或 CLS 缺证据，而是 trusted lifecycle matcher 将任意位置出现的
+`connection_checkin` 都当作冲突，误伤了泄漏链之前已经闭合的正常请求。matcher 已改为按
+`checkout ... order_update_failed ... pool_acquire_timeout` 窗口判断，仅当该候选 checkout 到 timeout
+之间没有 checkin 时才匹配；泄漏窗口内 checkin 仍 fail-closed。新增真实前序形态回归后，Order Pool
+trusted/fact/adjudication/live contract 定向测试、生产图定向测试、Ruff 与 Pyright 均通过。按一次
+canary 约束尚未执行修复后的第二次真实 Run，也未开始 Specialist Multi-Agent 实现。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）

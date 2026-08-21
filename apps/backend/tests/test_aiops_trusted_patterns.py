@@ -286,6 +286,35 @@ def test_order_pool_pattern_closes_lifecycle_and_rules_out_database_causes() -> 
     )
 
 
+def test_order_pool_pattern_ignores_completed_checkout_before_leaking_checkout() -> None:
+    facts = tuple(
+        replace(
+            fact,
+            value=(
+                "connection_checkout",
+                "connection_checkin",
+                "connection_checkout",
+                "order_update_failed",
+                "pool_acquire_timeout",
+            ),
+        )
+        if fact.key == "SearchLog.records.event"
+        else fact
+        for fact in _order_pool_facts()
+    )
+
+    result = resolve_trusted_patterns(
+        assessments=_order_pool_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_order_pool_provenance(facts),
+    )
+
+    assert result.matched_pattern_ids == (
+        "order_connection_checkout_without_checkin",
+    )
+
+
 @pytest.mark.parametrize(
     ("key", "replacement"),
     (

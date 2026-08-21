@@ -385,11 +385,19 @@ def _one_ordered_lifecycle_fact(
     if not isinstance(raw_value, tuple):
         return None
     events = cast(tuple[object, ...], raw_value)
-    required = ("connection_checkout", "order_update_failed", "pool_acquire_timeout")
-    if any(event not in events for event in required) or "connection_checkin" in events:
-        return None
-    positions = tuple(events.index(event) for event in required)
-    return fact if positions == tuple(sorted(positions)) else None
+    for timeout_position, event in enumerate(events):
+        if event != "pool_acquire_timeout":
+            continue
+        for checkout_position in range(timeout_position - 1, -1, -1):
+            if events[checkout_position] != "connection_checkout":
+                continue
+            lifecycle_window = events[checkout_position + 1 : timeout_position]
+            if (
+                "order_update_failed" in lifecycle_window
+                and "connection_checkin" not in lifecycle_window
+            ):
+                return fact
+    return None
 
 
 def _match_nginx_timeout(
