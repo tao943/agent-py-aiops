@@ -385,7 +385,11 @@ async def invoke_structured_root_cause_validation(
             response = await invoke_attempt(invoker, current_prompt)
         except Exception as exc:
             failure = classify_model_failure(exc, phase="model_invoke")
-            return _model_failure_outcome(failure, attempts=attempt)
+            return _model_failure_outcome(
+                failure,
+                attempts=attempt,
+                prior_error_codes=parse_codes,
+            )
         try:
             decision = _validation_decision_from_response(
                 response,
@@ -518,12 +522,14 @@ def _model_failure_outcome(
     failure: SafeModelFailure,
     *,
     attempts: int,
+    prior_error_codes: Sequence[str] = (),
 ) -> StructuredValidationOutcome:
+    error_codes = list(dict.fromkeys([*prior_error_codes, failure.code]))[:6]
     return StructuredValidationOutcome(
         decision=None,
         error_category="model_call_failed",
         attempts=attempts,
-        error_codes=(failure.code,),
+        error_codes=tuple(error_codes),
         error_code=failure.code,
         error_phase=failure.phase,
         retryable=failure.retryable,

@@ -511,6 +511,47 @@ async def test_structured_validator_preserves_safe_callback_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structured_validator_preserves_parse_history_before_callback_failure() -> None:
+    model = StructuredCapableChatModel(
+        [
+            {"raw": object(), "parsed": None, "parsing_error": ValueError()},
+            {"raw": object(), "parsed": _validation_schema(), "parsing_error": None},
+        ],
+        expected_method="json_mode",
+    )
+    calls = 0
+
+    async def invoke(invoker: object, prompt: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SafeModelInvocationFailure(
+                SafeModelFailure(
+                    code="timeout",
+                    phase="model_invoke",
+                    retryable=True,
+                )
+            )
+        return await cast(Any, invoker).ainvoke(prompt)
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="Validate public evidence.",
+        available_evidence_ids={"ev-1", "ev-2"},
+        structured_output_method="json_mode",
+        invoke=invoke,
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == "timeout"
+    assert outcome.error_codes == ("structured_envelope_mismatch", "timeout")
+    assert outcome.error_phase == "model_invoke"
+    assert outcome.retryable is True
+    assert outcome.attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_structured_decision_keeps_raw_model_compatibility() -> None:
     model = SequenceChatModel([_decision_json()])
 
