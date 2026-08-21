@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
@@ -15,6 +16,7 @@ from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import build_live_diagnostic_input
 from super_ai.evaluation.live.domain import LiveRunIdentity
 from super_ai.evaluation.live.order_pool_leak import (
+    ComposeServiceRestarter,
     OrderPoolLeakScenarioDriver,
     OrderPoolLiveConfig,
     OrderPoolRecoveryService,
@@ -42,7 +44,6 @@ class FakeOrderApi:
             "generation": self.generation,
             "activeRunId": self.active_run,
         }
-
     async def start_run(self, identity: LiveRunIdentity, fault_token: str) -> None:
         del fault_token
         run_id = identity.run_id
@@ -120,6 +121,28 @@ class FakeOrderApi:
             "timestamp": "2026-08-20T12:00:00+00:00",
             "level": "error" if event.endswith(("failed", "timeout")) else "info",
         }
+
+
+class HangingComposeProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.killed = False
+        self.communicate_cancelled = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.communicate_cancelled = True
+            raise
+        raise AssertionError("Hanging process must be cancelled.")
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -1
+
+    async def wait(self) -> int:
+        return self.returncode or -1
 
 
 class FakePostgresObserver:
@@ -218,6 +241,33 @@ def _driver() -> tuple[OrderPoolLeakScenarioDriver, FakeOrderApi, FakePostgresOb
         compose_file=Path(__file__).resolve().parents[3] / "infra" / "compose.yaml"
     )
     return OrderPoolLeakScenarioDriver(config, api=api, postgres=postgres), api, postgres
+
+
+@pytest.mark.asyncio
+async def test_compose_restarter_bounds_and_kills_a_hanging_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = HangingComposeProcess()
+
+    async def create_process(*args: object, **kwargs: object) -> HangingComposeProcess:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    restarter = ComposeServiceRestarter(
+        OrderPoolLiveConfig(
+            compose_file=Path(__file__).resolve().parents[3]
+            / "infra"
+            / "compose.yaml"
+        ),
+        command_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="order_pool_restart_timeout"):
+        await restarter.restart("live-eval-order-api")
+
+    assert process.communicate_cancelled is True
+    assert process.killed is True
 
 
 def _artifact(*, mechanism: str = "exception_path_connection_not_released") -> RunArtifact:

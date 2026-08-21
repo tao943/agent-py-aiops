@@ -280,8 +280,16 @@ class PostgresOrderPoolObserver:
 
 
 class ComposeServiceRestarter:
-    def __init__(self, config: OrderPoolLiveConfig) -> None:
+    def __init__(
+        self,
+        config: OrderPoolLiveConfig,
+        *,
+        command_timeout_seconds: float = 30.0,
+    ) -> None:
+        if command_timeout_seconds <= 0:
+            raise ValueError("order_pool_restart_timeout_invalid")
         self._config = config
+        self._command_timeout_seconds = command_timeout_seconds
 
     async def restart(self, service_name: str) -> None:
         if service_name != self._config.service_name:
@@ -296,7 +304,18 @@ class ComposeServiceRestarter:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, _ = await process.communicate()
+        try:
+            _, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self._command_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            process.kill()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except TimeoutError:
+                pass
+            raise RuntimeError("order_pool_restart_timeout") from exc
         if process.returncode != 0:
             raise RuntimeError("order_pool_restart_failed")
         for _ in range(60):
