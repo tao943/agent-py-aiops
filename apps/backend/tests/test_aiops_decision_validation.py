@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import openai
@@ -10,6 +10,8 @@ import pytest
 from pydantic import ValidationError
 
 from super_ai.aiops.decision_validation import (
+    SafeModelFailure,
+    SafeModelInvocationFailure,
     _RootCauseDecisionSchema,  # pyright: ignore[reportPrivateUsage]
     _RootCauseValidationSchema,  # pyright: ignore[reportPrivateUsage]
     can_replan_deterministic_gap,
@@ -444,6 +446,68 @@ async def test_structured_decision_uses_configured_json_mode() -> None:
     assert outcome.error_category is None
     assert model.wrapper_calls == 1
     assert model.raw_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_uses_callback_for_format_retry() -> None:
+    model = StructuredCapableChatModel(
+        [
+            {"raw": object(), "parsed": None, "parsing_error": ValueError()},
+            {"raw": object(), "parsed": _validation_schema(), "parsing_error": None},
+        ],
+        expected_method="json_mode",
+    )
+    calls: list[object] = []
+
+    async def invoke(invoker: object, prompt: object) -> object:
+        calls.append(prompt)
+        return await cast(Any, invoker).ainvoke(prompt)
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="Validate public evidence.",
+        available_evidence_ids={"ev-1", "ev-2"},
+        structured_output_method="json_mode",
+        invoke=invoke,
+    )
+
+    assert outcome.decision is not None
+    assert outcome.attempts == 2
+    assert len(calls) == 2
+    assert model.wrapper_calls == 1
+    assert calls[1] != calls[0]
+
+
+@pytest.mark.asyncio
+async def test_structured_validator_preserves_safe_callback_failure() -> None:
+    model = StructuredCapableChatModel(
+        [{"raw": object(), "parsed": _validation_schema(), "parsing_error": None}],
+        expected_method="json_mode",
+    )
+
+    async def invoke(_invoker: object, _prompt: object) -> object:
+        raise SafeModelInvocationFailure(
+            SafeModelFailure(
+                code="model_call_budget_exhausted",
+                phase="model_invoke",
+                retryable=False,
+            )
+        )
+
+    outcome = await invoke_structured_root_cause_validation(
+        model=model,
+        prompt="Validate public evidence.",
+        available_evidence_ids={"ev-1", "ev-2"},
+        structured_output_method="json_mode",
+        invoke=invoke,
+    )
+
+    assert outcome.decision is None
+    assert outcome.error_category == "model_call_failed"
+    assert outcome.error_code == "model_call_budget_exhausted"
+    assert outcome.error_phase == "model_invoke"
+    assert outcome.retryable is False
+    assert outcome.attempts == 1
 
 
 @pytest.mark.asyncio

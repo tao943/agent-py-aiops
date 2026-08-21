@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeVar, cast
 
@@ -53,6 +53,8 @@ ValidationErrorCode = Literal[
     "provider_4xx",
     "provider_5xx",
     "structured_output_unsupported",
+    "model_call_budget_exhausted",
+    "hard_deadline_exceeded",
     "unknown",
 ]
 ValidationErrorPhase = Literal[
@@ -128,6 +130,14 @@ class StructuredDecisionOutcome:
     http_status_class: ValidationHttpStatusClass | None = None
 
 
+class SafeModelInvocationFailure(RuntimeError):
+    """Carry only allowlisted runtime failure metadata across an invocation seam."""
+
+    def __init__(self, failure: SafeModelFailure) -> None:
+        super().__init__()
+        self.failure = failure
+
+
 @dataclass(frozen=True, slots=True)
 class BoundedStructuredRoleAudit:
     """Secret-safe metadata for one structured role attempt."""
@@ -180,6 +190,13 @@ class _AsyncInvoker(Protocol):
     async def ainvoke(self, input: object) -> object:
         """Invoke a structured or raw chat model."""
         ...
+
+
+StructuredValidationInvoke = Callable[[_AsyncInvoker, object], Awaitable[object]]
+
+
+async def _invoke_direct(invoker: _AsyncInvoker, input: object) -> object:
+    return await invoker.ainvoke(input)
 
 
 _CORRECTION_SUFFIX = (
@@ -347,6 +364,7 @@ async def invoke_structured_root_cause_validation(
     prompt: str,
     available_evidence_ids: Set[str],
     structured_output_method: StructuredOutputMethod = "function_calling",
+    invoke: StructuredValidationInvoke | None = None,
 ) -> StructuredValidationOutcome:
     """Invoke one Validator with one format-only correction and safe audit output."""
     try:
@@ -359,11 +377,12 @@ async def invoke_structured_root_cause_validation(
         failure = classify_model_failure(exc, phase="structured_invoker_setup")
         return _model_failure_outcome(failure, attempts=0)
     invoker: _AsyncInvoker = structured or model
+    invoke_attempt = invoke or _invoke_direct
     current_prompt = prompt
     parse_codes: list[str] = []
     for attempt in (1, 2):
         try:
-            response = await invoker.ainvoke(current_prompt)
+            response = await invoke_attempt(invoker, current_prompt)
         except Exception as exc:
             failure = classify_model_failure(exc, phase="model_invoke")
             return _model_failure_outcome(failure, attempts=attempt)
@@ -466,6 +485,8 @@ def classify_model_failure(
     phase: ValidationErrorPhase,
 ) -> SafeModelFailure:
     """Map exception identity to an allowlisted record without reading its message."""
+    if isinstance(exc, SafeModelInvocationFailure):
+        return exc.failure
     if phase == "structured_invoker_setup" and isinstance(
         exc, (NotImplementedError, TypeError)
     ):
