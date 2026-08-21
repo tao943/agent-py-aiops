@@ -1678,6 +1678,11 @@ class SQLAlchemyDiagnosticMemoryRepository:
             or row.checkpoint_id != checkpoint_id
         ):
             raise TenantScopeError("Graph checkpoint identity is outside task scope.")
+        if (
+            _json_dict(row.checkpoint_payload) != values["checkpoint_payload"]
+            or _json_dict(row.metadata_json) != values["metadata_json"]
+        ):
+            raise ValueError("checkpoint_content_conflict")
         return _graph_checkpoint_record(row)
 
     async def list_checkpoints(

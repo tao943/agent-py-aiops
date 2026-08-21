@@ -8,9 +8,20 @@ import pytest
 
 from super_ai.aiops.evidence_aggregation import (
     AggregationContext,
+    SpecialistAggregationContext,
     aggregate_evidence_packets,
+    aggregate_specialist_results,
 )
 from super_ai.aiops.investigation import EvidenceClaim, EvidencePacket
+from super_ai.aiops.specialists import (
+    PublicAssessmentSignal,
+    SpecialistAssignment,
+    SpecialistResult,
+)
+from super_ai.memory.repositories import (
+    DiagnosticEvidenceRecord,
+    ToolCallAuditRecord,
+)
 
 
 def _claim(**overrides: object) -> EvidenceClaim:
@@ -325,3 +336,240 @@ def test_identical_packet_retry_is_aggregated_once() -> None:
     assert result.accepted_packets == (packet,)
     assert len(result.claims) == 1
     assert result.rejected_dispatches == {}
+
+
+def _specialist_assignment(role: str) -> SpecialistAssignment:
+    deadline = datetime(2026, 8, 20, 10, 10, tzinfo=timezone.utc)
+    if role == "runtime":
+        tools = frozenset({"InspectOrderPoolState"})
+        arguments: dict[str, dict[str, object]] = {"InspectOrderPoolState": {}}
+    else:
+        tools = frozenset({"SearchLog"})
+        arguments = {
+            "SearchLog": {
+                "Region": "ap-guangzhou",
+                "TopicId": "topic-safe",
+                "From": 10,
+                "To": 20,
+                "Query": 'incident_id:"safe"',
+                "Limit": 20,
+            }
+        }
+    return SpecialistAssignment(
+        role=cast(Any, role),
+        objective="Test public evidence.",
+        hypotheses_to_test=("pool_lifecycle_failure",),
+        required_causal_roles=("trigger", "mechanism", "impact"),
+        allowed_tools=tools,
+        trusted_arguments_by_tool=cast(Any, arguments),
+        maximum_tool_steps=3,
+        model_call_budget=2,
+        soft_deadline_at=deadline,
+        hard_deadline_at=deadline.replace(minute=11),
+    )
+
+
+def _specialist_evidence(
+    evidence_id: str,
+    *,
+    role: str,
+    source_fingerprint: str,
+    owner_user_id: str = "owner-1",
+    task_id: str = "diagnostic-1",
+    tool_name: str | None = None,
+) -> DiagnosticEvidenceRecord:
+    selected_tool = tool_name or (
+        "InspectOrderPoolState" if role == "runtime" else "SearchLog"
+    )
+    return DiagnosticEvidenceRecord(
+        id=evidence_id,
+        owner_user_id=owner_user_id,
+        task_id=task_id,
+        step_id=f"step-{role}",
+        tool_call_id=f"call-{evidence_id}",
+        kind="tool_observation",
+        source=selected_tool,
+        summary="A safe public observation.",
+        payload={"sourceFingerprint": source_fingerprint},
+        created_at=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc),
+    )
+
+
+def _specialist_audit(
+    evidence: DiagnosticEvidenceRecord,
+    *,
+    tool_name: str | None = None,
+) -> ToolCallAuditRecord:
+    assert evidence.tool_call_id is not None
+    return ToolCallAuditRecord(
+        id=evidence.tool_call_id,
+        owner_user_id=evidence.owner_user_id,
+        task_id=evidence.task_id,
+        tool_name=tool_name or evidence.source,
+        status="completed",
+        arguments={},
+        result_payload={},
+        error_message=None,
+        started_at=evidence.created_at,
+        completed_at=evidence.created_at,
+        created_at=evidence.created_at,
+    )
+
+
+def _specialist_result(
+    role: str,
+    evidence_ids: tuple[str, ...],
+    *,
+    status: str = "completed",
+    value: object = True,
+) -> SpecialistResult:
+    facts = (
+        _claim(
+            claim_id="order_pool_saturated",
+            value=value,
+            supports=("pool_lifecycle_failure",),
+            refutes=(),
+            evidence_ids=evidence_ids,
+            target_component="order-api",
+        ),
+    ) if evidence_ids else ()
+    assessments = (
+        PublicAssessmentSignal(
+            hypothesis_id="pool_lifecycle_failure",
+            disposition="supported",
+            evidence_ids=evidence_ids,
+            summary="Untrusted Specialist assessment.",
+        ),
+    ) if evidence_ids else ()
+    return SpecialistResult.create(
+        role=cast(Any, role),
+        terminal_status=cast(Any, status),
+        tested_hypotheses=("pool_lifecycle_failure",),
+        evidence_ids=evidence_ids,
+        fact_candidates=facts,
+        proposed_assessments=assessments,
+        unresolved_questions=() if status == "completed" else (f"{role}_unavailable",),
+        completed_steps=(f"{role}-1",) if evidence_ids else (),
+        model_call_count=2 if evidence_ids else 1,
+        duration_ms=10,
+    )
+
+
+def _specialist_context(
+    evidence: tuple[DiagnosticEvidenceRecord, ...],
+    *,
+    audits: tuple[ToolCallAuditRecord, ...] | None = None,
+) -> SpecialistAggregationContext:
+    selected_audits = audits or tuple(_specialist_audit(item) for item in evidence)
+    return SpecialistAggregationContext(
+        owner_user_id="owner-1",
+        task_id="diagnostic-1",
+        graph_version="evidence-driven-v4",
+        assignments={
+            "runtime": _specialist_assignment("runtime"),
+            "log": _specialist_assignment("log"),
+        },
+        evidence_by_id={item.id: item for item in evidence},
+        completed_tool_audit_by_id={item.id: item for item in selected_audits},
+    )
+
+
+def test_specialist_aggregation_is_order_independent_and_groups_sources() -> None:
+    runtime_evidence = _specialist_evidence(
+        "evidence-runtime", role="runtime", source_fingerprint="shared-source"
+    )
+    log_evidence = _specialist_evidence(
+        "evidence-log", role="log", source_fingerprint="shared-source"
+    )
+    context = _specialist_context((runtime_evidence, log_evidence))
+    runtime = _specialist_result("runtime", (runtime_evidence.id, runtime_evidence.id))
+    log = _specialist_result("log", (log_evidence.id,))
+
+    forward = aggregate_specialist_results((runtime, log), context=context)
+    reverse = aggregate_specialist_results((log, runtime), context=context)
+
+    assert forward == reverse
+    assert forward.evidence == ("evidence-log", "evidence-runtime")
+    assert forward.source_groups == {
+        "shared-source": ("evidence-log", "evidence-runtime")
+    }
+    assert forward.budget_usage == {"log": 2, "runtime": 2, "total": 4}
+
+
+def test_specialist_aggregation_records_conflict_without_voting() -> None:
+    runtime_evidence = _specialist_evidence(
+        "evidence-runtime", role="runtime", source_fingerprint="runtime-source"
+    )
+    log_evidence = _specialist_evidence(
+        "evidence-log", role="log", source_fingerprint="log-source"
+    )
+    result = aggregate_specialist_results(
+        (
+            _specialist_result("runtime", (runtime_evidence.id,), value=True),
+            _specialist_result("log", (log_evidence.id,), value=False),
+        ),
+        context=_specialist_context((runtime_evidence, log_evidence)),
+    )
+
+    assert len(result.normalized_facts) == 2
+    assert len(result.conflicts) == 1
+    assert result.conflicts[0]["claimId"] == "order_pool_saturated"
+    assert len(result.hypothesis_signals) == 2
+
+
+@pytest.mark.parametrize(
+    ("record_overrides", "audit_tool"),
+    (
+        ({"owner_user_id": "owner-2"}, None),
+        ({"task_id": "diagnostic-2"}, None),
+        ({}, "SearchLog"),
+    ),
+)
+def test_specialist_aggregation_rejects_foreign_or_wrong_role_evidence(
+    record_overrides: dict[str, str],
+    audit_tool: str | None,
+) -> None:
+    evidence = _specialist_evidence(
+        "evidence-runtime",
+        role="runtime",
+        source_fingerprint="runtime-source",
+        **record_overrides,
+    )
+    audit = _specialist_audit(evidence, tool_name=audit_tool)
+
+    with pytest.raises(ValueError, match="invalid_specialist_evidence"):
+        aggregate_specialist_results(
+            (_specialist_result("runtime", (evidence.id,)),),
+            context=_specialist_context((evidence,), audits=(audit,)),
+        )
+
+
+def test_specialist_timeout_preserves_other_domain_and_both_fail_closed() -> None:
+    runtime_evidence = _specialist_evidence(
+        "evidence-runtime", role="runtime", source_fingerprint="runtime-source"
+    )
+    context = _specialist_context((runtime_evidence,))
+    partial = aggregate_specialist_results(
+        (
+            _specialist_result("runtime", (runtime_evidence.id,)),
+            _specialist_result("log", (), status="timeout"),
+        ),
+        context=context,
+    )
+
+    assert partial.evidence == (runtime_evidence.id,)
+    assert partial.missing_domains == ("log",)
+    assert partial.terminal_failure_category is None
+
+    failed = aggregate_specialist_results(
+        (
+            _specialist_result("runtime", (), status="failed"),
+            _specialist_result("log", (), status="timeout"),
+        ),
+        context=_specialist_context(()),
+    )
+
+    assert failed.terminal_failure_category == "multi_investigation_failed"
+    payload = failed.to_checkpoint_payload()
+    assert "rootCause" not in payload
+    assert "recovery" not in payload
