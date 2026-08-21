@@ -167,6 +167,87 @@ def _service(repositories: object, provider: object = object()) -> AiopsDiagnost
     )
 
 
+def _order_pool_hypotheses() -> list[dict[str, object]]:
+    return [
+        {"id": hypothesis_id, "description": hypothesis_id.replace("_", " ")}
+        for hypothesis_id in (
+            "order_connection_lifecycle_failure",
+            "order_traffic_capacity_exceeded",
+            "order_slow_statement",
+            "order_database_lock_wait",
+            "order_database_unreachable",
+        )
+    ]
+
+
+def _order_pool_steps() -> list[dict[str, object]]:
+    return [
+        {
+            "id": f"order-pool-{index}",
+            "tool": tool,
+            "arguments": {},
+            "purpose": purpose,
+            "testsHypotheses": [item["id"] for item in _order_pool_hypotheses()],
+            "causalIntent": causal_intent,
+            "evidenceRules": [],
+        }
+        for index, (tool, purpose, causal_intent) in enumerate(
+            (
+                ("InspectOrderPoolState", "Inspect pool capacity.", "mechanism"),
+                (
+                    "InspectOrderDatabaseSessions",
+                    "Inspect current-run database sessions.",
+                    "mechanism",
+                ),
+                (
+                    "VerifyOrderDatabaseReachability",
+                    "Verify database and business acquisition health.",
+                    "impact",
+                ),
+                ("SearchLog", "Inspect the current incident lifecycle.", "trigger"),
+            ),
+            start=1,
+        )
+    ]
+
+
+def _order_pool_outputs() -> list[tuple[str, dict[str, object]]]:
+    return [
+        (
+            "ev-order-pool",
+            {
+                "poolAtCapacity": True,
+                "freeConnections": 0,
+                "waiterObserved": True,
+            },
+        ),
+        (
+            "ev-order-sessions",
+            {
+                "runScopedSessionsPresent": True,
+                "databaseReachable": True,
+                "lockWaitObserved": False,
+            },
+        ),
+        (
+            "ev-order-health",
+            {"databaseReachable": True, "businessProbeTimedOut": True},
+        ),
+        (
+            "ev-order-cls",
+            {
+                "recordCount": 4,
+                "records": [
+                    {"event": "request_received"},
+                    {"event": "connection_checkout"},
+                    {"event": "order_update_failed"},
+                    {"event": "pool_acquire_timeout"},
+                ],
+            },
+        ),
+    ]
+
+
 def test_v4_graph_removes_per_observation_model_nodes() -> None:
     graph = _service(object())._build_graph(  # pyright: ignore[reportPrivateUsage]
         workflow_version="evidence-driven-v4"
@@ -1411,6 +1492,7 @@ def test_v4_adjudicator_reuses_trusted_order_pool_facts_for_causal_roles() -> No
         for item in projected
         if item.get("causalRoleOrigin") == "trusted_fact_projection"
     ]
+
     assert [item["causalRole"] for item in derived] == ["mechanism", "impact"]
     assert derived[0]["evidenceIds"] == ["ev-cls", "ev-pool", "ev-sessions"]
     assert derived[1]["evidenceIds"] == ["ev-cls", "ev-health"]
@@ -2652,6 +2734,120 @@ async def test_fact_adapter_closes_nginx_timeout_from_current_task_trusted_patte
     )
     assert root_cause["trigger"]
     assert len(cast(list[object], root_cause["causalChain"])) >= 2
+
+
+@pytest.mark.asyncio
+async def test_fact_adapter_closes_order_pool_from_persisted_scoped_provenance(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-order-pool-trusted-pattern",
+            status="running",
+            query="Resolve an order-api pool acquisition timeout.",
+            input_payload={},
+        )
+        hypotheses = _order_pool_hypotheses()
+        steps = _order_pool_steps()
+        state: dict[str, object] = {
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "workflow_version": "evidence-driven-v4",
+            "public_hypotheses": hypotheses,
+            "hypothesis_assessments": _initial_hypothesis_assessments(hypotheses),
+            "diagnostic_facts": [],
+            "observation_decisions": [],
+            "evidence_ids": [],
+            "plan": steps,
+        }
+        service = _service(repositories)
+        evidence_ids: list[str] = []
+        observations: list[dict[str, object]] = []
+        assert repositories.tool_call_audits is not None
+        for step, (evidence_id, output) in zip(
+            steps,
+            _order_pool_outputs(),
+            strict=True,
+        ):
+            tool_name = str(step["tool"])
+            audit_id = f"audit-{evidence_id}"
+            await repositories.tool_call_audits.create_for_diagnostic_task(
+                owner_user_id=task.owner_user_id,
+                audit_id=audit_id,
+                diagnostic_task_id=task.id,
+                tool_name=tool_name,
+                arguments={},
+            )
+            await repositories.tool_call_audits.finalize(
+                owner_user_id=task.owner_user_id,
+                audit_id=audit_id,
+                status="completed",
+                result_summary="Bounded current-task evidence.",
+            )
+            await repositories.diagnostics.create_evidence(
+                owner_user_id=task.owner_user_id,
+                evidence_id=evidence_id,
+                task_id=task.id,
+                kind="tool_observation",
+                source=tool_name,
+                summary="Bounded current-task evidence.",
+                payload={
+                    "sourceFingerprint": f"source:{tool_name}",
+                    "arguments": {},
+                    "output": output,
+                },
+                tool_call_id=audit_id,
+            )
+            evidence_ids.append(evidence_id)
+            update = await service._fact_adapter(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        **state,
+                        "current_plan_step": step,
+                        "current_evidence_id": evidence_id,
+                        "current_evidence_summary": "Bounded current-task evidence.",
+                        "current_tool_output": output,
+                        "evidence_ids": list(evidence_ids),
+                    },
+                )
+            )
+            state["hypothesis_assessments"] = update["hypothesis_assessments"]
+            state["diagnostic_facts"] = update["diagnostic_facts"]
+            observations.extend(
+                cast(list[dict[str, object]], update["observation_decisions"])
+            )
+            state["observation_decisions"] = observations
+    finally:
+        await engine.dispose()
+
+    assessments = {
+        item["hypothesisId"]: item
+        for item in cast(
+            list[dict[str, object]],
+            state["hypothesis_assessments"],
+        )
+    }
+    assert assessments["order_connection_lifecycle_failure"]["disposition"] == (
+        "supported"
+    )
+    assert assessments["order_database_unreachable"]["disposition"] == "refuted"
+    assert assessments["order_database_lock_wait"]["disposition"] == "refuted"
+    trusted = [
+        item
+        for item in observations
+        if item.get("causalRoleOrigin") == "trusted_compound_pattern"
+    ]
+    assert [item["causalRole"] for item in trusted] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
 
 
 @pytest.mark.asyncio

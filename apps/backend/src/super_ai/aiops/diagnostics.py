@@ -28,6 +28,7 @@ from super_ai.aiops.adjudication import (
     HypothesisAssessment,
     HypothesisEvidenceRule,
     HypothesisTransition,
+    TrustedEvidenceProvenance,
     assess_sufficiency,
     instantiate_trusted_evidence_rule,
     reduce_hypotheses,
@@ -3507,7 +3508,11 @@ class AiopsDiagnosticService:
             kind=_evidence_kind_for_tool(tool_name),
             source=tool_name,
             summary=summary,
-            payload={"arguments": arguments, "output": _safe_value(output)},
+            payload={
+                "arguments": arguments,
+                "output": _safe_value(output),
+                "sourceFingerprint": tool_step_fingerprint(tool_name, arguments),
+            },
         )
         evidence["evidenceId"] = evidence_record.id
         await self._save_checkpoint(state, "executor", {"evidence": evidence})
@@ -3582,10 +3587,50 @@ class AiopsDiagnosticService:
             facts=all_facts,
             rules=rules,
         )
+        evidence_records = await self._repositories.diagnostics.list_evidence(
+            owner_user_id=owner_user_id,
+            task_id=task_id,
+        )
+        audit_repository = self._repositories.tool_call_audits
+        completed_audits = {
+            audit.id: audit
+            for audit in (
+                await audit_repository.list_for_diagnostic_task(
+                    owner_user_id=owner_user_id,
+                    diagnostic_task_id=task_id,
+                )
+                if audit_repository is not None
+                else []
+            )
+            if audit.status == "completed"
+        }
+        evidence_provenance: dict[str, TrustedEvidenceProvenance] = {}
+        for record in evidence_records:
+            audit = completed_audits.get(str(record.tool_call_id or ""))
+            source_fingerprint = record.payload.get("sourceFingerprint")
+            if (
+                record.id not in trusted_evidence_ids
+                or audit is None
+                or audit.tool_name != record.source
+                or not isinstance(source_fingerprint, str)
+                or not source_fingerprint
+            ):
+                continue
+            evidence_provenance[record.id] = TrustedEvidenceProvenance(
+                evidence_id=record.id,
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                source_fingerprint=source_fingerprint,
+                source_domain=(
+                    "log" if record.source in {"SearchLog", "SearchLogs"} else "runtime"
+                ),
+                tool_name=record.source,
+            )
         trusted_resolution = resolve_trusted_patterns(
             assessments=reduced,
             facts=all_facts,
             trusted_evidence_ids=frozenset(trusted_evidence_ids),
+            evidence_provenance=evidence_provenance,
         )
         reduced = trusted_resolution.assessments
         assessment_payloads = [_hypothesis_assessment_payload(item) for item in reduced]
