@@ -662,6 +662,43 @@ def test_v4_artifact_reads_fact_adapter_observation_decisions() -> None:
     )
 
 
+def test_v4_artifact_preserves_trusted_compound_pattern_observations() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "fact_adapter",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "hypothesisAssessments": [],
+                    "observationDecisions": [
+                        {
+                            "purpose": "Establish the pool exhaustion mechanism.",
+                            "supports": ["order_connection_lifecycle_failure"],
+                            "refutes": [],
+                            "summary": "Checkout without checkin exhausted the pool.",
+                            "evidenceIds": ["ev-order-api", "ev-postgres"],
+                            "causalRole": "mechanism",
+                            "causalRoleOrigin": "trusted_compound_pattern",
+                        }
+                    ],
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert len(artifact.observation_decisions) == 1
+    assert (
+        artifact.observation_decisions[0].causal_role_origin
+        == "trusted_compound_pattern"
+    )
+
+
 def test_v4_artifact_prefers_adjudicator_observation_projection() -> None:
     base_observation = {
         "purpose": "Inspect database work.",

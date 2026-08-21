@@ -71,7 +71,11 @@ class ObservationDecision:
     evidence_ids: tuple[str, ...] = ()
     causal_role: CausalRole = "context"
     causal_role_origin: Literal[
-        "model", "plan_contract", "trusted_evidence_rule", "coverage_repair"
+        "model",
+        "plan_contract",
+        "trusted_evidence_rule",
+        "trusted_compound_pattern",
+        "coverage_repair",
     ] | None = None
     reported_causal_role: CausalRole | None = None
     causal_role_corrected: bool = False

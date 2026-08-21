@@ -953,6 +953,7 @@ def _observation_decisions_from_steps(
                     "model",
                     "plan_contract",
                     "trusted_evidence_rule",
+                    "trusted_compound_pattern",
                     "coverage_repair",
                 }
                 and reported_causal_role
@@ -975,6 +976,7 @@ def _observation_decisions_from_steps(
                                 "model",
                                 "plan_contract",
                                 "trusted_evidence_rule",
+                                "trusted_compound_pattern",
                                 "coverage_repair",
                             ]
                             | None,
