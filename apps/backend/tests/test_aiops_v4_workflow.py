@@ -2764,6 +2764,14 @@ async def test_fact_adapter_closes_order_pool_from_persisted_scoped_provenance(
             "observation_decisions": [],
             "evidence_ids": [],
             "plan": steps,
+            "decision_vocabulary": {
+                "labelsByHypothesis": {
+                    "order_connection_lifecycle_failure": {
+                        "component": "order-api",
+                        "mechanism": "exception_path_connection_not_released",
+                    }
+                }
+            },
         }
         service = _service(repositories)
         evidence_ids: list[str] = []
@@ -2823,6 +2831,21 @@ async def test_fact_adapter_closes_order_pool_from_persisted_scoped_provenance(
                 cast(list[dict[str, object]], update["observation_decisions"])
             )
             state["observation_decisions"] = observations
+        state.update(
+            {
+                "evidence_ids": evidence_ids,
+                "plan_index": len(steps),
+                "executor_attempt_count": len(steps),
+                "max_total_steps": 6,
+                "max_replans": 1,
+            }
+        )
+        sufficiency = await service._sufficiency_gate_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
+        decision = await service._decision_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(Any, state)
+        )
     finally:
         await engine.dispose()
 
@@ -2848,6 +2871,17 @@ async def test_fact_adapter_closes_order_pool_from_persisted_scoped_provenance(
         "mechanism",
         "impact",
     ]
+    sufficiency_payload = cast(
+        dict[str, object],
+        sufficiency["evidence_sufficiency"],
+    )
+    assert sufficiency_payload["status"] == "sufficient", sufficiency_payload
+    assert sufficiency["next_route"] == "decision"
+    root_cause = cast(dict[str, object], decision["root_cause_decision"])
+    assert root_cause["component"] == "order-api"
+    assert root_cause["mechanism"] == "exception_path_connection_not_released"
+    assert root_cause["trigger"]
+    assert len(cast(list[object], root_cause["causalChain"])) == 3
 
 
 @pytest.mark.asyncio

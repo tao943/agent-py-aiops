@@ -202,6 +202,12 @@ def _resolve_order_pool_lifecycle(
             (cls_id, pool_id),
             "failed_update_lifecycle_precedes_pool_timeout",
         ),
+        (
+            "order_slow_statement",
+            "causally_inactive",
+            (cls_id, sessions_id, health_id),
+            "failed_lifecycle_with_reachable_unlocked_database",
+        ),
     )
     resolved = dict(by_id)
     for hypothesis_id, disposition, evidence_ids, reason_code in transitions:

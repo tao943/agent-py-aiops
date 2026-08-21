@@ -3676,30 +3676,46 @@ class AiopsDiagnosticService:
             else:
                 causal_role = _safe_causal_role(current_step.get("causalIntent"))
                 causal_role_origin = "plan_contract"
-            observation_payloads.append(
-                {
-                    "purpose": str(current_step.get("purpose") or "Inspect public evidence."),
-                    "supports": supports,
-                    "refutes": refutes,
-                    "summary": str(
-                        state.get("current_evidence_summary")
-                        or "A bounded public tool observation was collected."
-                    ),
-                    "evidenceIds": linked_ids,
-                    "causalRole": causal_role,
-                    "causalRoleOrigin": causal_role_origin,
-                    "assessmentSource": "deterministic",
-                    "testsHypotheses": _unique_strings(
-                        [
-                            value
-                            for value in cast(
-                                list[object], current_step.get("testsHypotheses") or []
-                            )
-                            if isinstance(value, str)
-                        ]
-                    ),
+            current_evidence_projected = any(
+                evidence_id
+                in {
+                    value
+                    for value in cast(
+                        list[object],
+                        observation.get("evidenceIds") or [],
+                    )
+                    if isinstance(value, str)
                 }
+                for observation in observation_payloads
             )
+            if not current_evidence_projected:
+                observation_payloads.append(
+                    {
+                        "purpose": str(
+                            current_step.get("purpose") or "Inspect public evidence."
+                        ),
+                        "supports": supports,
+                        "refutes": refutes,
+                        "summary": str(
+                            state.get("current_evidence_summary")
+                            or "A bounded public tool observation was collected."
+                        ),
+                        "evidenceIds": linked_ids,
+                        "causalRole": causal_role,
+                        "causalRoleOrigin": causal_role_origin,
+                        "assessmentSource": "deterministic",
+                        "testsHypotheses": _unique_strings(
+                            [
+                                value
+                                for value in cast(
+                                    list[object],
+                                    current_step.get("testsHypotheses") or [],
+                                )
+                                if isinstance(value, str)
+                            ]
+                        ),
+                    }
+                )
             if len(supported_assessments) == 1:
                 observation_payloads.extend(
                     _derive_upstream_deadline_observations(
