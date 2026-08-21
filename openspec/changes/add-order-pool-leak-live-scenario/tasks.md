@@ -35,4 +35,4 @@
 - [x] 5.5 Add deterministic source-group aggregation, conflict handling, and PostgreSQL replay tests.
 - [x] 5.6 Wire isolated Runtime/Log Specialist branches into the existing LangGraph central safety chain.
 - [x] 5.7 Add threshold-5 forced/shadow routing and fixed-schema Specialist evaluation metrics.
-- [ ] 5.8 Pass offline acceptance and persist the approved real 3×3 Single/Multi comparison.
+- [x] 5.8 Pass offline acceptance and persist the approved real 3×3 Single/Multi comparison.

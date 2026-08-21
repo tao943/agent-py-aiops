@@ -709,6 +709,43 @@ Single Run，也未开始 Specialist Multi-Agent 实现。
 checksum 为 `a85abec8ce1398080506dda21ecf91a6b75d93725aeeea660c32ce10ba85412e`。
 该结果完成 Specialist Multi-Agent 实现前的 Single 门禁。
 
+### Order Pool Specialist 真实 3×3 Single/Multi A/B（2026-08-21）
+
+真实验收 campaign 为 `order-pool-specialist-ab-20260821-555c1aff`。六次运行均使用
+`eval-user`、`kb-30-cards`、CLS、相同项目配置与模型覆盖，按 Single 01～03、Multi
+01～03 顺序执行，未并发注入故障。生产 `auto` 路由始终保持 Single/shadow；Multi 仅由
+Benchmark forced mode 触发。
+
+| 策略 | Run ID | 终态 | 诊断耗时 ms | Root Cause Top-1 | Evidence Recall | 独立来源组 | 成功/失败模型调用 | Specialist 状态 | Archive checksum |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Single | `order-pool-specialist-ab-single-01-20260821` | `100/100 VALID_PASS` | 206872 | 是 | 100% | 4 | 3/0 | 不适用 | `0ebb21ed77458ab8c37941f887a0e326e62ac635c76c78f2827dbb230082cbc1` |
+| Single | `order-pool-specialist-ab-single-02-20260821` | `100/100 VALID_PASS` | 200881 | 是 | 100% | 4 | 3/0 | 不适用 | `6ab267272e35fc47591559c00254be3c8754b29fd7da5d3773a53adf6c8bfee5` |
+| Single | `order-pool-specialist-ab-single-03-20260821` | `100/100 VALID_PASS` | 192259 | 是 | 100% | 4 | 3/0 | 不适用 | `b8312c2bb6b8098c9ef5169686411f1e8e733b78ad05c772a81c9a9185860bd6` |
+| Multi | `order-pool-specialist-ab-multi-01-20260821` | `VALID_FAIL / recovery_denied` | 94770 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `8dfdeadede4883fe5b768cb94005e281ea8bf2a6fb2cd159812d4836cd97b9e8` |
+| Multi | `order-pool-specialist-ab-multi-02-20260821` | `VALID_FAIL / recovery_denied` | 94886 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `a78eed2318e47a0844deeaaf331fb2900abd78cff46c29ea93170d2828165e95` |
+| Multi | `order-pool-specialist-ab-multi-03-20260821` | `VALID_FAIL / recovery_denied` | 106542 | 否 | 0% | 0 | 1/2 | Runtime、Log 均 failed | `d9a093acd3b4be37a0c047e1f779cab7b8de6ff8ce0ef89a54c60cbbad7dc2a5` |
+
+Single 的平均诊断耗时为 200004 ms，nearest-rank P95 为 206872 ms；Multi 平均为
+98733 ms，P95 为 106542 ms。Multi 的低耗时不构成性能收益，因为它在 Specialist Local
+Plan 阶段提前失败。Single 三次均完整形成 trigger、mechanism、impact 因果链，无重复
+Evidence，恢复、独立验证、安全硬门禁与 cleanup 全部通过。Multi 六个 Specialist 角色执行
+全部失败，失败率 100%；每次只有中央 Planner 的一次成功模型调用，Runtime 与 Log Local Plan
+各一次模型调用均返回 `provider_4xx / model_call_failed`，没有进入工具调用。聚合器三次均确定性
+生成 `multi_investigation_failed`，`missingDomains=[log,runtime]`、`sourceGroupCount=0`、
+`conflictCount=0`，随后生产恢复策略以 `order_pool_decision_required` 拒绝执行。三个 Multi Run
+均显式再次执行幂等 cleanup 并返回 clean，没有发生不安全恢复或跨 Run 清理。
+
+本轮同时暴露一个持久化缺口：成功路径的固定 A/B 指标完整进入 terminal Envelope；
+`recovery_denied` 失败路径只在 terminal Envelope 保存 `cleanupSucceeded=true`，没有投影
+`diagnosticTaskId` 与 Specialist 指标。三次 Multi 的角色状态、预算、缺失域和 aggregation
+checksum 仍完整保存在 PostgreSQL Diagnostic Step/checkpoint，失败 terminal 本身保持不可变，
+没有为补数据而重写归档。后续应先用测试驱动补齐 Live 失败路径的安全指标投影，再进行新的
+Multi 复验。
+
+结论：Multi 不满足“不降低 Root Cause Top-1 且至少提升一项能力指标”的门槛，当前仅保留
+Benchmark forced mode，生产自动 Multi 继续禁用。修复供应商结构化 Local Plan 请求兼容性后，
+仍需新的、单独批准的 A/B campaign；本轮结果不能作为默认启用依据。
+
 ## 当前阶段边界
 
 ### PostgreSQL CLS Multi 离线路由回归（2026-08-20）
