@@ -3851,16 +3851,363 @@ async def test_v4_decision_and_validator_use_dispositions_without_model_calls(
     assert "no_open_competitor" not in check_codes
 
 
+class SemanticValidatorModel:
+    def __init__(self, responses: list[object]) -> None:
+        self.responses = responses
+        self.schema: type[object] | None = None
+        self.structured_output_methods: list[object] = []
+        self.prompts: list[object] = []
+
+    def with_structured_output(
+        self,
+        schema: type[object],
+        **kwargs: object,
+    ) -> SemanticValidatorModel:
+        assert kwargs.get("include_raw") is True
+        self.schema = schema
+        self.structured_output_methods.append(kwargs.get("method"))
+        return self
+
+    async def ainvoke(self, prompt: object) -> object:
+        self.prompts.append(prompt)
+        response = self.responses[len(self.prompts) - 1]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class SemanticValidatorProvider:
+    validator_structured_output_method = "json_mode"
+    validator_model_name = "validator-test-model"
+
+    def __init__(self, model: SemanticValidatorModel) -> None:
+        self.model = model
+
+    def create_validator_model(self) -> SemanticValidatorModel:
+        return self.model
+
+    def create_chat_model(self) -> SemanticValidatorModel:
+        return self.model
+
+
+def _semantic_validation_envelope(
+    *,
+    status: str = "valid",
+    raw: object | None = None,
+    parsing_error: object | None = None,
+) -> dict[str, object]:
+    return {
+        "raw": raw if raw is not None else object(),
+        "parsed": (
+            {
+                "status": status,
+                "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+                "unsupportedFields": [] if status == "valid" else ["causalChain"],
+                "missingEvidence": [] if status == "valid" else ["causal impact"],
+                "summary": (
+                    "Every public candidate field is supported."
+                    if status == "valid"
+                    else "The causal impact is not supported."
+                ),
+            }
+            if parsing_error is None
+            else None
+        ),
+        "parsing_error": parsing_error,
+    }
+
+
+async def _run_semantic_validator(
+    *,
+    migrated_database_url: str,
+    task_id: str,
+    model: SemanticValidatorModel,
+    model_call_count: int = 2,
+    deadlines: ExecutionDeadlines | None = None,
+) -> tuple[
+    dict[str, object],
+    dict[str, object] | None,
+    list[object],
+    list[object],
+]:
+    active_deadlines = deadlines or ExecutionDeadlines.start()
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Validate a risky diagnosis.",
+            input_payload={},
+        )
+        service = _service(repositories, SemanticValidatorProvider(model))
+        update = await service._llm_validator_v4(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "workflow_version": "evidence-driven-v4",
+                    "model_call_count": model_call_count,
+                    "started_at": active_deadlines.started_at.isoformat(),
+                    "soft_deadline_at": active_deadlines.soft_deadline_at.isoformat(),
+                    "hard_deadline_at": active_deadlines.hard_deadline_at.isoformat(),
+                    "root_cause_decision": {
+                        "component": "order-service",
+                        "mechanism": "transaction_deadlock",
+                        "trigger": "Transactions acquired rows in opposite order.",
+                        "causalChain": [
+                            "Transactions acquired rows in opposite order.",
+                            "The wait graph formed a cycle.",
+                            "PostgreSQL aborted one transaction.",
+                        ],
+                        "evidenceIds": ["ev-1", "ev-2", "ev-3"],
+                        "confidence": 0.95,
+                    },
+                    "evidence_ids": ["ev-1", "ev-2", "ev-3"],
+                    "observation_decisions": [],
+                    "decision_validation": {
+                        "status": "valid",
+                        "validationOrigin": "deterministic",
+                    },
+                    "validator_routing": {
+                        "validationReasonCodes": ["execution_requested"]
+                    },
+                    "tool_definitions": (),
+                },
+            )
+        )
+        policy: dict[str, object] | None = None
+        if "recovery_plan" in update:
+            policy = await service._policy_gate(  # pyright: ignore[reportPrivateUsage]
+                cast(
+                    Any,
+                    {
+                        "owner_user_id": task.owner_user_id,
+                        "task_id": task.id,
+                        "recovery_plan": update["recovery_plan"],
+                    },
+                )
+            )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        checkpoints = await repositories.diagnostics.list_checkpoints(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        return update, policy, cast(list[object], steps), cast(list[object], checkpoints)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_uses_configured_json_mode(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-json-mode",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert model.structured_output_methods == ["json_mode"]
+    assert validation["validationOrigin"] == "llm_semantic"
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 1
+    assert validation["validationModel"] == "validator-test-model"
+    assert update["model_call_count"] == 3
+    assert len(cast(list[object], update["model_call_audits"])) == 1
+    assert "recovery_plan" not in update
+    assert policy is None
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_retries_format_once_and_redacts_raw_data(
+    migrated_database_url: str,
+) -> None:
+    sentinel = "SENSITIVE_RAW_VALIDATOR_SENTINEL"
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(
+                raw={"content": sentinel},
+                parsing_error=ValueError(sentinel),
+            ),
+            _semantic_validation_envelope(),
+        ]
+    )
+
+    update, policy, steps, checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-format-retry",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    assert validation["semanticValidationStatus"] == "valid"
+    assert validation["semanticValidationAttempts"] == 2
+    assert update["model_call_count"] == 4
+    assert len(cast(list[object], update["model_call_audits"])) == 2
+    assert len(model.prompts) == 2
+    assert model.prompts[1] != model.prompts[0]
+    assert policy is None
+    persisted = json.dumps(
+        {
+            "update": update,
+            "steps": [cast(Any, item).payload for item in steps],
+            "checkpoints": [cast(Any, item).checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    )
+    assert sentinel not in persisted
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_retry_exhaustion(
+    migrated_database_url: str,
+) -> None:
+    sentinel = "SENSITIVE_RAW_VALIDATOR_SENTINEL"
+    model = SemanticValidatorModel(
+        [
+            _semantic_validation_envelope(raw=sentinel, parsing_error=ValueError(sentinel)),
+            _semantic_validation_envelope(raw=sentinel, parsing_error=ValueError(sentinel)),
+        ]
+    )
+
+    update, policy, steps, checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-retry-exhausted",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert validation["validationOrigin"] == "llm_failed"
+    assert validation["semanticValidationStatus"] == "failed"
+    assert validation["validationErrorCategory"] == "retry_exhausted"
+    assert validation["validationErrorCodes"] == ["structured_envelope_mismatch"]
+    assert validation["validationErrorPhase"] == "structured_parse"
+    assert validation["validationRetryable"] is False
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+    persisted = json.dumps(
+        {
+            "update": update,
+            "steps": [cast(Any, item).payload for item in steps],
+            "checkpoints": [cast(Any, item).checkpoint_payload for item in checkpoints],
+        },
+        ensure_ascii=False,
+    )
+    assert sentinel not in persisted
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_rejection_is_not_a_model_failure(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope(status="invalid")])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-rejected",
+        model=model,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    recovery = cast(dict[str, object], update["recovery_plan"])
+    assert validation["validationOrigin"] == "llm_semantic"
+    assert validation["semanticValidationStatus"] == "invalid"
+    assert validation["validationErrorCategory"] == "model_rejected"
+    assert recovery["mode"] == "manual_review"
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_budget_exhaustion(
+    migrated_database_url: str,
+) -> None:
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-budget-exhausted",
+        model=model,
+        model_call_count=8,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    audits = cast(list[dict[str, object]], update["model_call_audits"])
+    assert validation["validationErrorCode"] == "model_call_budget_exhausted"
+    assert validation["validationErrorPhase"] == "model_invoke"
+    assert audits[-1]["safeErrorCode"] == "model_call_budget_exhausted"
+    assert model.prompts == []
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
+@pytest.mark.asyncio
+async def test_v4_semantic_validator_classifies_hard_deadline(
+    migrated_database_url: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    deadlines = ExecutionDeadlines(
+        started_at=now - timedelta(minutes=10),
+        soft_deadline_at=now - timedelta(minutes=5),
+        hard_deadline_at=now - timedelta(minutes=1),
+    )
+    model = SemanticValidatorModel([_semantic_validation_envelope()])
+
+    update, policy, _steps, _checkpoints = await _run_semantic_validator(
+        migrated_database_url=migrated_database_url,
+        task_id="v4-semantic-validator-hard-deadline",
+        model=model,
+        deadlines=deadlines,
+    )
+
+    validation = cast(dict[str, object], update["decision_validation"])
+    audits = cast(list[dict[str, object]], update["model_call_audits"])
+    assert validation["validationErrorCode"] == "hard_deadline_exceeded"
+    assert validation["validationErrorPhase"] == "model_invoke"
+    assert audits[-1]["safeErrorCode"] == "hard_deadline_exceeded"
+    assert model.prompts == []
+    assert cast(dict[str, object], cast(dict[str, object], policy)["recovery_policy"])[
+        "executionPermitted"
+    ] is False
+
+
 @pytest.mark.asyncio
 async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_review(
     migrated_database_url: str,
 ) -> None:
     class FailingModel:
+        def with_structured_output(
+            self, _schema: type[object], **_kwargs: object
+        ) -> FailingModel:
+            return self
+
         async def ainvoke(self, prompt: object) -> str:
             del prompt
             raise TimeoutError
 
     class Provider:
+        validator_structured_output_method = "json_mode"
+        validator_model_name = "validator-timeout-model"
+
+        def create_validator_model(self) -> FailingModel:
+            return FailingModel()
+
         def create_chat_model(self) -> FailingModel:
             return FailingModel()
 
@@ -3932,6 +4279,8 @@ async def test_failed_semantic_validator_preserves_diagnosis_but_forces_manual_r
     audit = cast(list[dict[str, object]], update["model_call_audits"])
     assert validation["status"] == "valid"
     assert validation["validationOrigin"] == "llm_failed"
+    assert validation["validationErrorCode"] == "timeout"
+    assert validation["validationErrorPhase"] == "model_invoke"
     assert recovery["mode"] == "manual_review"
     assert audit[-1]["safeErrorCode"] == "timeout"
     assert cast(dict[str, object], policy["recovery_policy"])[

@@ -45,6 +45,9 @@ from super_ai.aiops.causal_intents import (
 )
 from super_ai.aiops.checkpointing import PostgresDiagnosticCheckpointSaver
 from super_ai.aiops.decision_validation import (
+    SafeModelFailure,
+    SafeModelInvocationFailure,
+    StructuredValidationOutcome,
     can_replan_deterministic_gap,
     deterministic_checks_payload,
     invoke_structured_root_cause_decision,
@@ -103,7 +106,6 @@ from super_ai.aiops.reasoning import (
     parse_observation_decision,
     parse_plan,
     parse_recovery_plan,
-    parse_root_cause_validation,
     project_hypothesis_assessment,
 )
 from super_ai.aiops.specialists import (
@@ -2153,6 +2155,79 @@ class AiopsDiagnosticService:
                 )
             )
             return None
+        runtime.audits.append(
+            _model_call_audit_payload(
+                role=role,
+                attempt=attempt,
+                duration_ms=int(round(elapsed_ms(started_at))),
+                safe_error_code=None,
+            )
+        )
+        return response
+
+    async def _invoke_v4_structured_model(
+        self,
+        runtime: _ModelRuntime,
+        *,
+        role: ModelRole,
+        invoker: ChatModel,
+        prompt: object,
+    ) -> object:
+        """Invoke an already-structured model through V4 budget and audit controls."""
+        started_at = monotonic()
+        if runtime.deadlines.hard_expired():
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=runtime.budget.used,
+                    duration_ms=0,
+                    safe_error_code="hard_deadline_exceeded",
+                )
+            )
+            raise SafeModelInvocationFailure(
+                SafeModelFailure(
+                    code="hard_deadline_exceeded",
+                    phase="model_invoke",
+                    retryable=False,
+                )
+            )
+        try:
+            attempt = runtime.budget.reserve(role)
+        except ModelCallBudgetExceeded:
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=runtime.budget.used,
+                    duration_ms=0,
+                    safe_error_code="model_call_budget_exhausted",
+                )
+            )
+            raise SafeModelInvocationFailure(
+                SafeModelFailure(
+                    code="model_call_budget_exhausted",
+                    phase="model_invoke",
+                    retryable=False,
+                )
+            ) from None
+        remaining = max(
+            0.001,
+            (runtime.deadlines.hard_deadline_at - _now()).total_seconds(),
+        )
+        try:
+            response = await asyncio.wait_for(
+                invoker.ainvoke(prompt),
+                timeout=min(float(ROLE_TIMEOUT_SECONDS[role]), remaining),
+            )
+        except Exception as exc:
+            runtime.audits.append(
+                _model_call_audit_payload(
+                    role=role,
+                    attempt=attempt,
+                    duration_ms=int(round(elapsed_ms(started_at))),
+                    safe_error_code=_safe_model_call_error_code(exc),
+                )
+            )
+            raise
         runtime.audits.append(
             _model_call_audit_payload(
                 role=role,
@@ -5136,8 +5211,9 @@ class AiopsDiagnosticService:
             _unique_strings(cast(list[str], state.get("evidence_ids") or []))
         )
         model_runtime = self._model_runtime(state)
-        initial_model_count = model_runtime.budget.used
         validation: RootCauseValidationDecision | None = None
+        outcome: StructuredValidationOutcome | None = None
+        validation_model = _validator_model_name(self._llm_provider)
         if candidate is not None:
             prompt = (
                 "Return JSON only with status, evidenceIds, unsupportedFields, "
@@ -5148,20 +5224,24 @@ class AiopsDiagnosticService:
                 "Observations: "
                 f"{json.dumps(state.get('observation_decisions') or [], ensure_ascii=False)}."
             )
-            try:
-                response = await self._invoke_v4_model(
+            async def invoke_validator(invoker: object, current_prompt: object) -> object:
+                return await self._invoke_v4_structured_model(
                     model_runtime,
                     role="validator",
-                    prompt=prompt,
+                    invoker=cast(ChatModel, invoker),
+                    prompt=current_prompt,
                 )
-                if response is None:
-                    raise RuntimeError("Validator model call was unavailable.")
-                validation = parse_root_cause_validation(
-                    _model_text(response),
-                    available_evidence_ids=evidence_ids,
-                )
-            except Exception:
-                validation = None
+
+            outcome = await invoke_structured_root_cause_validation(
+                model=_validator_chat_model(self._llm_provider),
+                prompt=prompt,
+                available_evidence_ids=evidence_ids,
+                structured_output_method=_validator_structured_output_method(
+                    self._llm_provider
+                ),
+                invoke=invoke_validator,
+            )
+            validation = outcome.decision
         semantic_valid = validation is not None and validation.status == "valid"
         payload: JsonDict = {
             **_json_dict(state.get("decision_validation")),
@@ -5169,8 +5249,20 @@ class AiopsDiagnosticService:
             "semanticValidationStatus": (
                 validation.status if validation is not None else "failed"
             ),
-            "semanticValidationAttempts": model_runtime.budget.used
-            - initial_model_count,
+            "semanticValidationAttempts": outcome.attempts if outcome is not None else 0,
+            "validationModel": validation_model,
+            "validationErrorCategory": (
+                outcome.error_category if outcome is not None else "candidate_missing"
+            ),
+            "validationErrorCode": outcome.error_code if outcome is not None else None,
+            "validationErrorCodes": (
+                list(outcome.error_codes) if outcome is not None else []
+            ),
+            "validationErrorPhase": outcome.error_phase if outcome is not None else None,
+            "validationRetryable": outcome.retryable if outcome is not None else None,
+            "validationHttpStatusClass": (
+                outcome.http_status_class if outcome is not None else None
+            ),
             "validationRequired": True,
             "validationSkipped": False,
             "validationReasonCodes": list(
