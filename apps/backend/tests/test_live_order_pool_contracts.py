@@ -125,6 +125,7 @@ class FakeOrderApi:
 
 class HangingComposeProcess:
     def __init__(self) -> None:
+        self.pid = 12345
         self.returncode: int | None = None
         self.killed = False
         self.communicate_cancelled = False

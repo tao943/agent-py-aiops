@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -301,8 +302,8 @@ class ComposeServiceRestarter:
             str(self._config.compose_file),
             "restart",
             self._config.service_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             _, _ = await asyncio.wait_for(
@@ -310,11 +311,7 @@ class ComposeServiceRestarter:
                 timeout=self._command_timeout_seconds,
             )
         except TimeoutError as exc:
-            process.kill()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except TimeoutError:
-                pass
+            await _terminate_subprocess(process)
             raise RuntimeError("order_pool_restart_timeout") from exc
         if process.returncode != 0:
             raise RuntimeError("order_pool_restart_failed")
@@ -328,6 +325,31 @@ class ComposeServiceRestarter:
                 pass
             await asyncio.sleep(0.25)
         raise RuntimeError("order_pool_restart_readiness_timeout")
+
+
+async def _terminate_subprocess(process: asyncio.subprocess.Process) -> None:
+    if os.name == "nt":
+        try:
+            tree_killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(tree_killer.wait(), timeout=5.0)
+        except (OSError, TimeoutError):
+            pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5.0)
+    except TimeoutError:
+        pass
 
 
 @dataclass(frozen=True, slots=True)
