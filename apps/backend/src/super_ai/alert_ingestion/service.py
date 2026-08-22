@@ -78,6 +78,12 @@ class AlertIngestionService:
             service=first.labels.get("service", "unknown service"),
             severity=first.labels.get("severity", "unknown"),
             starts_at=_parse_datetime(first.starts_at),
+            scenario_id=first.labels.get("scenario_id"),
+            run_id=(
+                first.labels.get("run_id")
+                if first.labels.get("scenario_id") is not None
+                else None
+            ),
         )
 
 

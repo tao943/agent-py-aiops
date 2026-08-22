@@ -38,6 +38,8 @@ class IngestionWrite:
     service: str
     severity: str
     starts_at: datetime | None
+    scenario_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

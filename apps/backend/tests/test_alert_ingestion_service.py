@@ -12,13 +12,26 @@ from super_ai.alert_ingestion.repositories import IngestionResult, IngestionWrit
 from super_ai.alert_ingestion.service import AlertIngestionService
 
 
-def _delivery(*, environment: str = "test") -> AlertmanagerDelivery:
+def _delivery(
+    *,
+    environment: str = "test",
+    live_correlation: bool = False,
+) -> AlertmanagerDelivery:
+    correlation = (
+        {
+            "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "run_id": "closure-001",
+        }
+        if live_correlation
+        else {}
+    )
     alert = NormalizedAlert(
         labels={
             "alertname": "HighLatency",
             "service": "order-service",
             "severity": "critical",
             "environment": environment,
+            **correlation,
         },
         annotations={"summary": "slow requests"},
         starts_at="2026-08-22T01:00:00Z",
@@ -175,3 +188,15 @@ def test_service_parses_start_time_and_builds_only_safe_alert_input() -> None:
     assert write.safe_alert["labels"] == _delivery().alerts[0].labels
     assert "ownerUserId" not in write.safe_alert
     assert "executionPermitted" not in write.safe_alert
+
+
+def test_service_builds_exact_live_correlation_without_webhook_authority() -> None:
+    write = AlertIngestionService.build_write(
+        _source(),
+        _delivery(live_correlation=True),
+        filtered=False,
+        received_at=datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert write.scenario_id == "APY-LIVE-ORDER-POOL-LEAK-001"
+    assert write.run_id == "closure-001"
