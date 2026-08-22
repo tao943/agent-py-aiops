@@ -23,6 +23,30 @@ class AlertPersistenceError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class AlertIncidentRecord:
+    """Minimal owner-scoped Incident projection safe for application queries."""
+
+    id: str
+    owner_user_id: str
+    status: str
+    alert_name: str
+    service: str
+    severity: str
+    last_seen_at: datetime
+    diagnostic_task_id: str | None
+
+
+class AlertIncidentQueryRepository(Protocol):
+    async def list_active(
+        self, *, owner_user_id: str, limit: int
+    ) -> list[AlertIncidentRecord]: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class IngestionWrite:
     owner_user_id: str
     source_id: str

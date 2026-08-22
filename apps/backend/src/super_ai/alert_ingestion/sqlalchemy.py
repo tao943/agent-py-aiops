@@ -19,6 +19,7 @@ from super_ai.memory.models import (
 
 from .repositories import (
     AlertDisposition,
+    AlertIncidentRecord,
     AlertPersistenceError,
     IngestionResult,
     IngestionWrite,
@@ -30,6 +31,34 @@ class SQLAlchemyAlertIngestionRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def list_active(
+        self, *, owner_user_id: str, limit: int
+    ) -> list[AlertIncidentRecord]:
+        bounded_limit = min(max(limit, 1), 50)
+        statement = (
+            select(AlertIncidentModel)
+            .where(
+                AlertIncidentModel.owner_user_id == owner_user_id,
+                AlertIncidentModel.status == "active",
+            )
+            .order_by(AlertIncidentModel.updated_at.desc(), AlertIncidentModel.id.asc())
+            .limit(bounded_limit)
+        )
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(statement)).all())
+        return [_incident_record(row) for row in rows]
+
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None:
+        statement = select(AlertIncidentModel).where(
+            AlertIncidentModel.id == incident_id,
+            AlertIncidentModel.owner_user_id == owner_user_id,
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+        return _incident_record(row) if row is not None else None
 
     async def apply(self, write: IngestionWrite) -> IngestionResult:
         try:
@@ -232,3 +261,16 @@ def _job_id(task_id: str | None) -> str | None:
     if task_id is None:
         return None
     return f"job_{task_id.removeprefix('diagnostic_')}"
+
+
+def _incident_record(row: AlertIncidentModel) -> AlertIncidentRecord:
+    return AlertIncidentRecord(
+        id=row.id,
+        owner_user_id=row.owner_user_id,
+        status=row.status,
+        alert_name=row.alert_name,
+        service=row.service,
+        severity=row.severity,
+        last_seen_at=row.last_seen_at,
+        diagnostic_task_id=row.diagnostic_task_id,
+    )
