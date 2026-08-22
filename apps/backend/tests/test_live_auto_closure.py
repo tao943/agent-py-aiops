@@ -19,6 +19,7 @@ from super_ai.evaluation.live.auto_closure import (
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveCleanupResult,
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveVerification,
@@ -179,11 +180,22 @@ class Coordinator:
         return ExecutionResult(await operation(), False, 1)
 
 
+class EvidencePreparer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def prepare(self, identity, observation) -> LiveEvidenceContext:
+        assert observation.confirmed
+        self.calls += 1
+        return LiveEvidenceContext.local(incident_id=f"{SCENARIO_ID}-{identity.run_id}")
+
+
 @pytest.mark.asyncio
 async def test_automatic_closure_waits_for_report_recovers_once_and_closes_verified() -> None:
     driver = Driver()
     recovery = Recovery()
     repository = LifecycleRepository()
+    evidence_preparer = EvidencePreparer()
     orchestrator = OrderPoolAutoClosureOrchestrator(
         owner_user_id="owner",
         source_id="local-alertmanager",
@@ -192,6 +204,7 @@ async def test_automatic_closure_waits_for_report_recovers_once_and_closes_verif
         diagnostic_loader=Loader(),
         recovery=recovery,
         recovery_coordinator=Coordinator(),
+        evidence_preparer=evidence_preparer,
         budgets=AutoClosureBudgets(poll_seconds=0),
     )
 
@@ -204,6 +217,10 @@ async def test_automatic_closure_waits_for_report_recovers_once_and_closes_verif
     assert result.correlation.report_id == "report-1"
     assert result.recovery_intent_id
     assert recovery.calls == 1
+    assert evidence_preparer.calls == 1
+    assert result.diagnostic_artifact is not None
+    assert result.diagnostic_artifact.live_evidence is not None
+    assert result.diagnostic_artifact.live_evidence.source == "local"
     assert repository.verification_calls == 1
     assert driver.calls == ["preflight", "baseline", "inject", "verify", "cleanup"]
 

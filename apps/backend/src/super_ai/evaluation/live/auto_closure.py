@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, Literal, Protocol, cast
@@ -16,8 +16,10 @@ from super_ai.aiops.execution import (
 )
 from super_ai.alert_ingestion.repositories import LiveAlertLifecycle
 from super_ai.evaluation.artifacts import RunArtifact, build_run_artifact
+from super_ai.evaluation.live.diagnostics import append_live_evidence_context
 from super_ai.evaluation.live.domain import (
     LiveCleanupResult,
+    LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
     LiveRunIdentity,
@@ -145,6 +147,14 @@ class DiagnosticOutcomeLoader(Protocol):
     ) -> PersistedDiagnosticOutcome: ...
 
 
+class EvidencePreparer(Protocol):
+    async def prepare(
+        self,
+        identity: LiveRunIdentity,
+        observation: LiveFaultObservation,
+    ) -> LiveEvidenceContext: ...
+
+
 class PersistedDiagnosticOutcomeLoader:
     """Rebuild a trusted artifact from records, never from report prose."""
 
@@ -262,6 +272,7 @@ class OrderPoolAutoClosureOrchestrator:
         diagnostic_loader: DiagnosticOutcomeLoader,
         recovery: RecoveryService,
         recovery_coordinator: RecoveryCoordinator,
+        evidence_preparer: EvidencePreparer | None = None,
         budgets: AutoClosureBudgets | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -272,6 +283,7 @@ class OrderPoolAutoClosureOrchestrator:
         self._diagnostic_loader = diagnostic_loader
         self._recovery = recovery
         self._recovery_coordinator = recovery_coordinator
+        self._evidence_preparer = evidence_preparer
         self._budgets = budgets or AutoClosureBudgets()
         self._sleep = sleep
 
@@ -287,6 +299,7 @@ class OrderPoolAutoClosureOrchestrator:
             raise ValueError("Automatic closure supports only the order-pool scenario.")
         identity = validate_run_id(run_id)
         observation: LiveFaultObservation | None = None
+        evidence_context: LiveEvidenceContext | None = None
         outcome: PersistedDiagnosticOutcome | None = None
         lifecycle: LiveAlertLifecycle | None = None
         recovery: LiveRecoveryRecord | None = None
@@ -299,6 +312,11 @@ class OrderPoolAutoClosureOrchestrator:
                 await self._driver.preflight(identity)
                 await self._driver.baseline(identity)
                 observation = await self._driver.inject(identity)
+                if observation.confirmed and self._evidence_preparer is not None:
+                    evidence_context = await self._evidence_preparer.prepare(
+                        identity,
+                        observation,
+                    )
             except Exception:
                 return await self._finish(
                     identity,
@@ -341,6 +359,14 @@ class OrderPoolAutoClosureOrchestrator:
                 owner_user_id=self._owner_user_id,
                 diagnostic_task_id=lifecycle.diagnostic_task_id,
             )
+            if evidence_context is not None:
+                outcome = replace(
+                    outcome,
+                    artifact=append_live_evidence_context(
+                        outcome.artifact,
+                        context=evidence_context,
+                    ),
+                )
             authorization = authorize_order_pool_recovery(
                 outcome,
                 observation,
