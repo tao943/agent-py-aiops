@@ -15,6 +15,7 @@ from super_ai.chat.evaluation import (
     load_conversation_eval_fixtures,
     run_conversation_eval,
 )
+from super_ai.chat.execution_policy import policy_for
 from super_ai.chat.intent import ChatIntentRouter, ChatRoute, KeywordRouterModel
 
 FIXTURES = Path(__file__).parent / "fixtures" / "conversation_eval.json"
@@ -29,6 +30,15 @@ class SafeFakeConversationRunner:
             dict(cast(Mapping[str, object], expected_safety))
             if isinstance(expected_safety, dict)
             else None
+        )
+        expected_policy = policy_for(
+            ChatRoute(
+                scenario.expected_intent,
+                1.0,
+                "rule",
+                incident_id=scenario.expected_incident_id,
+                diagnostic_task_id=scenario.expected_diagnostic_task_id,
+            )
         )
         return ConversationEvalObservation(
             intent=scenario.expected_intent,
@@ -48,6 +58,10 @@ class SafeFakeConversationRunner:
             replayed_event_sequences=(2, 3),
             expected_replay_sequences=(2, 3),
             structured_safety=safety,
+            mode=expected_policy.mode,
+            required_tools=tuple(sorted(expected_policy.required_tools)),
+            direct_read_bypassed_react=expected_policy.mode == "direct_read",
+            confirmation_required=expected_policy.mode == "confirmation_required",
         )
 
 
@@ -59,7 +73,17 @@ class MutatingRunner(SafeFakeConversationRunner):
         self, scenario: ConversationEvalScenario
     ) -> ConversationEvalObservation:
         observation = await super().evaluate(scenario)
-        if scenario.id != "CHAT-SEC-002":
+        target_scenario = {
+            "missing_required_tool_success": "CHAT-GEN-002",
+            "unconfirmed_write": "CHAT-START-001",
+            "post_budget_call": "CHAT-GEN-001",
+            "mode": "CHAT-INC-001",
+            "postcondition": "CHAT-GEN-001",
+            "direct_bypass": "CHAT-INC-001",
+            "confirmation": "CHAT-START-001",
+            "context_fidelity": "CHAT-GEN-001",
+        }.get(self.gate, "CHAT-SEC-002")
+        if scenario.id != target_scenario:
             return observation
         if self.gate == "cross_tenant":
             return replace(observation, cross_tenant_access_count=1)
@@ -78,6 +102,22 @@ class MutatingRunner(SafeFakeConversationRunner):
             )
         if self.gate == "recovery_execution":
             return replace(observation, automatic_recovery_execution_count=1)
+        if self.gate == "missing_required_tool_success":
+            return replace(observation, invoked_tools=(), completed=True)
+        if self.gate == "unconfirmed_write":
+            return replace(observation, unconfirmed_write_count=1)
+        if self.gate == "post_budget_call":
+            return replace(observation, post_budget_call_count=1)
+        if self.gate == "mode":
+            return replace(observation, mode="bounded_react")
+        if self.gate == "postcondition":
+            return replace(observation, postcondition_satisfied=False)
+        if self.gate == "direct_bypass":
+            return replace(observation, direct_read_bypassed_react=False)
+        if self.gate == "confirmation":
+            return replace(observation, confirmation_required=False)
+        if self.gate == "context_fidelity":
+            return replace(observation, context_fidelity=False)
         raise AssertionError(f"unknown gate {self.gate}")
 
 
@@ -124,16 +164,24 @@ async def test_eval_passes_twelve_bounded_scenarios() -> None:
         "security": 2,
     }
     assert result.intent_accuracy == 1.0
+    assert result.mode_accuracy == 1.0
     assert result.target_extraction == 1.0
     assert result.allowed_tool_precision == 1.0
+    assert result.required_tool_recall == 1.0
     assert result.task_completion == 1.0
+    assert result.postcondition == 1.0
+    assert result.direct_bypass == 1.0
+    assert result.budget_compliance == 1.0
+    assert result.confirmation == 1.0
     assert result.grounding == 1.0
+    assert result.context_fidelity == 1.0
     assert result.idempotency == 1.0
     assert result.cross_tenant_isolation == 1.0
     assert result.recovery_safety == 1.0
     assert result.structured_safety_fidelity == 1.0
     assert result.reasoning_leakage_count == 0
     assert result.sse_replay_correctness == 1.0
+    assert result.hard_gates.passed is True
     assert result.passed is True
 
 
@@ -147,6 +195,40 @@ async def test_any_security_gate_failure_fails_suite(gate: str) -> None:
 
     assert result.passed is False
     assert gate in result.failed_hard_gates
+
+
+@pytest.mark.parametrize(
+    "gate",
+    ["missing_required_tool_success", "unconfirmed_write", "post_budget_call"],
+)
+@pytest.mark.asyncio
+async def test_any_execution_gate_failure_fails_suite(gate: str) -> None:
+    result = await run_conversation_eval(load_scenarios(), runner=MutatingRunner(gate))
+
+    assert result.passed is False
+    assert gate in result.failed_hard_gates
+
+
+@pytest.mark.parametrize(
+    ("mutation", "metric"),
+    [
+        ("mode", "mode_accuracy"),
+        ("postcondition", "postcondition"),
+        ("direct_bypass", "direct_bypass"),
+        ("confirmation", "confirmation"),
+        ("context_fidelity", "context_fidelity"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_incorrect_execution_contract_fails_suite(
+    mutation: str, metric: str
+) -> None:
+    result = await run_conversation_eval(
+        load_scenarios(), runner=MutatingRunner(mutation)
+    )
+
+    assert getattr(result, metric) < 1.0
+    assert result.passed is False
 
 
 @pytest.mark.asyncio
