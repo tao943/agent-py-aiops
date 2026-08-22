@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from super_ai.api.app import create_app
+from super_ai.chat.pending_actions import PendingChatActionService
 from super_ai.chat.run_events import PublicRunEventError, public_run_event, tool_call_key
 from super_ai.chat.runs import ChatRunJobHandler
 from super_ai.chat.streaming import (
@@ -294,3 +295,48 @@ async def _register(client: httpx.AsyncClient, email: str, display_name: str) ->
 
 def _auth_headers(token: object) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_pending_action_api_is_owner_scoped_idempotent_and_listed(
+    migrated_database_url: str,
+) -> None:
+    app = create_app(database_url=migrated_database_url, chat_agent_runner=FakeRunner())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        owner = await _register(client, "action-owner@example.com", "Action Owner")
+        other = await _register(client, "action-other@example.com", "Action Other")
+        owner_headers = _auth_headers(owner["accessToken"])
+        other_headers = _auth_headers(other["accessToken"])
+        session_response = await client.post("/chat/sessions", headers=owner_headers, json={})
+        session_id = session_response.json()["data"]["id"]
+        repositories = app.state.memory_repositories
+        assert repositories.pending_chat_actions is not None
+        action = await PendingChatActionService(
+            repositories.pending_chat_actions
+        ).preview_start(
+            owner_user_id=owner["user"]["id"],
+            session_id=session_id,
+            incident_id="incident_1",
+        )
+
+        pending = await client.get(
+            f"/chat/sessions/{session_id}/actions/pending",
+            headers=owner_headers,
+        )
+        first = await client.post(
+            f"/chat/actions/{action.id}/confirm", headers=owner_headers
+        )
+        duplicate = await client.post(
+            f"/chat/actions/{action.id}/confirm", headers=owner_headers
+        )
+        foreign = await client.post(
+            f"/chat/actions/{action.id}/confirm", headers=other_headers
+        )
+
+    assert pending.status_code == 200
+    assert pending.json()["data"]["items"][0]["id"] == action.id
+    assert first.status_code == duplicate.status_code == 200
+    assert first.json()["data"] == duplicate.json()["data"]
+    assert first.json()["data"]["status"] == "confirmed"
+    assert foreign.status_code == 404

@@ -83,7 +83,9 @@ from super_ai.chat.memory import (
     ChatMemoryService,
     memory_payload,
 )
-from super_ai.chat.routes import create_chat_runs_router
+from super_ai.chat.pending_action_jobs import PendingChatActionJobHandler
+from super_ai.chat.pending_actions import PendingChatActionService
+from super_ai.chat.routes import create_chat_runs_router, create_pending_chat_actions_router
 from super_ai.chat.runs import ChatRunJobHandler
 from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.documents import (
@@ -451,6 +453,12 @@ def create_app(
             current_user_dependency=_current_user,
         )
     )
+    app.include_router(
+        create_pending_chat_actions_router(
+            repositories=repositories,
+            current_user_dependency=_current_user,
+        )
+    )
     incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
@@ -481,6 +489,9 @@ def create_app(
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
     background_runtime.register("chat_agent_run", _chat_run_job_handler(app))
+    background_runtime.register(
+        "pending_chat_action", _pending_chat_action_job_handler(app)
+    )
     app.state.background_job_runtime = background_runtime
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
@@ -2078,6 +2089,18 @@ def _chat_run_job_handler(
     return handle
 
 
+def _pending_chat_action_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        await PendingChatActionJobHandler(
+            repositories=cast(MemoryRepositories, app.state.memory_repositories),
+            bridge=cast(AiopsBridgeService, app.state.aiops_bridge_service),
+        )(context)
+
+    return handle
+
+
 def _aiops_job_handler(
     app: FastAPI,
 ) -> Callable[[BackgroundJobContext], Awaitable[None]]:
@@ -2533,9 +2556,19 @@ def _chat_agent_runner(request: Request) -> ChatAgentRunner:
                 bridge=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
                 explanation_model=_llm_provider(request).create_chat_model(),
             ),
+            pending_actions=PendingChatActionService(
+                _require_pending_chat_actions(request)
+            ),
         )
         request.app.state.chat_agent_runner = runner
     return cast(ChatAgentRunner, runner)
+
+
+def _require_pending_chat_actions(request: Request):  # type: ignore[no-untyped-def]
+    repository = _memory_repositories(request).pending_chat_actions
+    if repository is None:
+        raise RuntimeError("Pending Chat Action repository is required")
+    return repository
 
 
 def _chat_intent_router(request: Request) -> ChatIntentRouter:

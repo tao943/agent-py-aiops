@@ -20,6 +20,31 @@ export interface ChatRun {
   readonly updatedAt: string;
 }
 
+export type PendingChatActionType = "start_diagnostic" | "create_recovery_approval";
+export type PendingChatActionStatus =
+  | "pending"
+  | "confirmed"
+  | "executed"
+  | "cancelled"
+  | "expired"
+  | "manual_review";
+
+export interface PendingChatAction {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly actionType: PendingChatActionType;
+  readonly targetResourceId: string;
+  readonly publicArguments: Record<string, unknown>;
+  readonly status: PendingChatActionStatus;
+  readonly expiresAt: string;
+  readonly backgroundJobId: string | null;
+  readonly executionResultId: string | null;
+}
+
+export interface PendingChatActionListResponse {
+  readonly items: readonly PendingChatAction[];
+}
+
 export interface ChatMessageMetadata {
   readonly citations?: readonly ReferenceSourceSseEvent["reference"][];
   readonly toolCallIds?: readonly string[];

@@ -6,6 +6,7 @@ import {
   OPENAPI_CONTRACT,
   SSE_EVENT_TYPES,
   type ChatRun,
+  type PendingChatAction,
   type AuthTokenResponse,
   type AuthUser,
   type AppendChatMessageRequest,
@@ -499,6 +500,13 @@ describe("SSE event contracts", () => {
       "diagnostic.result",
       "run.status",
       "run.restarted",
+      "execution.mode_selected",
+      "structured.result",
+      "confirmation.required",
+      "confirmation.resolved",
+      "explanation.delta",
+      "explanation.degraded",
+      "budget.exhausted",
       "task.status",
       "report",
       "complete",
@@ -523,6 +531,25 @@ describe("SSE event contracts", () => {
     expect(run.status).toBe("queued");
     expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs"]).toBeDefined();
     expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs/active"]).toBeDefined();
+  });
+
+  it("defines durable pending chat action contracts and routes", () => {
+    const action: PendingChatAction = {
+      id: "chat_action_1",
+      sessionId: "session_1",
+      actionType: "start_diagnostic",
+      targetResourceId: "incident_1",
+      publicArguments: { incidentId: "incident_1" },
+      status: "pending",
+      expiresAt: "2026-08-22T00:15:00Z",
+      backgroundJobId: null,
+      executionResultId: null
+    };
+    expect(action.status).toBe("pending");
+    expect(OPENAPI_CONTRACT.paths["/chat/actions/{action_id}/confirm"]).toBeDefined();
+    expect(
+      OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/actions/pending"]
+    ).toBeDefined();
   });
 
   it("reuses structured errors for streaming failures", () => {

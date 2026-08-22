@@ -271,6 +271,42 @@ export const OPENAPI_CONTRACT = {
         }
       }
     },
+    "/chat/sessions/{session_id}/actions/pending": {
+      get: {
+        operationId: "listPendingChatActions",
+        summary: "List active pending chat actions for an owned session",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/PendingChatActionListApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/chat/actions/{action_id}/confirm": {
+      post: {
+        operationId: "confirmPendingChatAction",
+        summary: "Confirm and durably enqueue one owned pending chat action",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/PendingChatActionApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/chat/actions/{action_id}/cancel": {
+      post: {
+        operationId: "cancelPendingChatAction",
+        summary: "Cancel one owned pending chat action",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/PendingChatActionApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
     "/chat/configuration": {
       get: {
         operationId: "getChatAssemblyConfiguration",
@@ -2135,6 +2171,8 @@ export const OPENAPI_CONTRACT = {
         }
       },
       ChatRunApiResponse: { type: "object" },
+      PendingChatActionApiResponse: { type: "object" },
+      PendingChatActionListApiResponse: { type: "object" },
       ContentDeltaEvent: { type: "object" },
       ToolCallEvent: { type: "object" },
       DiagnosticResultEvent: {

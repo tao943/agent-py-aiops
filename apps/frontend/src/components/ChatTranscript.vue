@@ -2,22 +2,34 @@
 import { BookOpen, Bot, Wrench } from "lucide-vue-next";
 import { computed, ref } from "vue";
 
-import type { ChatMessage, DiagnosticResultSseEvent, ToolCallAudit } from "@agent-py/api-contracts";
+import type {
+  ChatMessage,
+  DiagnosticResultSseEvent,
+  PendingChatAction,
+  ToolCallAudit
+} from "@agent-py/api-contracts";
 import type { ChatReference, LiveToolCall } from "../stores/chat";
 import AppLoadingState from "./AppLoadingState.vue";
 import AsyncStatusBadge from "./AsyncStatusBadge.vue";
 import ChatCitationDetail from "./ChatCitationDetail.vue";
 import DiagnosticResultCard from "./DiagnosticResultCard.vue";
 import MarkdownContent from "./MarkdownContent.vue";
+import PendingChatActionCard from "./PendingChatActionCard.vue";
 import RetrievalStageTrace from "./RetrievalStageTrace.vue";
 import UserFeedbackControl from "./UserFeedbackControl.vue";
 
-const emit = defineEmits<{ "open-document": [reference: ChatReference] }>();
+const emit = defineEmits<{
+  "cancel-action": [actionId: string];
+  "confirm-action": [actionId: string];
+  "open-document": [reference: ChatReference];
+}>();
 const props = defineProps<{
   readonly isLoading: boolean;
   readonly diagnosticResults: readonly DiagnosticResultSseEvent["diagnostic"][];
   readonly liveToolCalls: readonly LiveToolCall[];
   readonly messages: readonly ChatMessage[];
+  readonly pendingActionLoadingIds: readonly string[];
+  readonly pendingActions: readonly PendingChatAction[];
   readonly references: readonly ChatReference[];
   readonly toolAudits: readonly ToolCallAudit[];
 }>();
@@ -68,6 +80,16 @@ function messageAudits(message: ChatMessage): readonly ToolCallAudit[] {
         </article>
       </li>
     </ol>
+    <div v-if="pendingActions.length > 0" class="chat-transcript__pending-actions" aria-label="待确认操作">
+      <PendingChatActionCard
+        v-for="action in pendingActions"
+        :key="action.id"
+        :action="action"
+        :is-loading="pendingActionLoadingIds.includes(action.id)"
+        @cancel="emit('cancel-action', $event)"
+        @confirm="emit('confirm-action', $event)"
+      />
+    </div>
     <div v-if="diagnosticResults.length > 0" class="chat-transcript__diagnostics" aria-label="诊断结果">
       <DiagnosticResultCard v-for="diagnostic in diagnosticResults" :key="diagnostic.taskId" :diagnostic="diagnostic" />
     </div>
@@ -104,6 +126,7 @@ function messageAudits(message: ChatMessage): readonly ToolCallAudit[] {
 .chat-transcript__details p { color: var(--text-secondary); font-size: 0.78rem; line-height: 1.6; margin: 0.65rem 0 0; white-space: pre-wrap; }
 .chat-transcript__context { background: #fbfbfc; border: 1px solid var(--line); border-radius: var(--radius-md); max-width: 46rem; padding: 0.9rem 1rem; }
 .chat-transcript__diagnostics { display: grid; gap: 0.75rem; max-width: 46rem; }
+.chat-transcript__pending-actions { display: grid; gap: 0.75rem; max-width: 46rem; }
 h2 { align-items: center; color: var(--text-secondary); display: flex; font-size: 0.78rem; font-weight: 700; gap: 0.42rem; margin: 0 0 0.7rem; }
 .chat-transcript__context ul { display: grid; gap: 0.42rem; list-style: none; margin: 0; padding: 0; }
 .chat-transcript__context li { display: grid; gap: 0.45rem; }

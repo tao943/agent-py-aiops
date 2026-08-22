@@ -13,12 +13,14 @@ from super_ai.chat.execution import (
 )
 from super_ai.chat.intent import ChatRoute
 from super_ai.chat.streaming import (
+    ChatAgentConfirmationRequired,
     ChatAgentEvent,
     ChatAgentRequest,
     ChatAgentStructuredResult,
     PolicyDispatchingChatAgentRunner,
 )
-from super_ai.memory.repositories import ChatMessageRecord
+from super_ai.memory.models import utc_now
+from super_ai.memory.repositories import ChatMessageRecord, PendingChatActionRecord
 
 
 class FakeBridge:
@@ -191,3 +193,80 @@ async def test_dispatcher_bypasses_react_for_direct_read() -> None:
 
     assert fallback.calls == 0
     assert any(isinstance(event, ChatAgentStructuredResult) for event in events)
+
+
+class FakePendingActions:
+    async def preview_start(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        incident_id: str,
+        chat_run_id: str | None = None,
+        note: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord:
+        del note, expires_at
+        now = utc_now()
+        return PendingChatActionRecord(
+            id="chat_action_1",
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            chat_run_id=chat_run_id,
+            action_type="start_diagnostic",
+            target_resource_id=incident_id,
+            public_arguments={"incidentId": incident_id},
+            action_fingerprint="a" * 64,
+            status="pending",
+            expires_at=now,
+            confirmed_at=None,
+            execution_result_id=None,
+            background_job_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def preview_recovery_approval(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        diagnostic_task_id: str,
+        reason: str,
+        chat_run_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord:
+        del owner_user_id, session_id, diagnostic_task_id, reason, chat_run_id, expires_at
+        raise AssertionError("recovery preview is not expected")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_turns_new_write_into_confirmation_without_react() -> None:
+    fallback = FallbackRunner()
+    runner = PolicyDispatchingChatAgentRunner(
+        fallback=fallback,
+        direct_execution=ChatTurnExecutionService(
+            bridge=FakeBridge(), explanation_model=ExplanationModel()
+        ),
+        pending_actions=FakePendingActions(),
+    )
+    request = ChatAgentRequest(
+        owner_user_id="owner_1",
+        session_id="session_1",
+        messages=(),
+        accessible_knowledge_base_ids=(),
+        system_prompt="system",
+        chat_run_id="run_1",
+        route=ChatRoute(
+            "start_diagnostic", 1.0, "rule", incident_id="incident_1"
+        ),
+    )
+
+    events = [event async for event in runner.stream(request)]
+
+    assert fallback.calls == 0
+    confirmation = next(
+        event for event in events if isinstance(event, ChatAgentConfirmationRequired)
+    )
+    assert confirmation.action["id"] == "chat_action_1"
+    assert confirmation.action["status"] == "pending"

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from super_ai.auth.repositories import UserRecord
+from super_ai.chat.pending_actions import PendingActionNotFound, PendingChatActionService
 from super_ai.chat.run_events import encode_run_sse, public_run_event
 from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.memory.repositories import ChatRunRecord, MemoryRepositories
@@ -25,6 +26,13 @@ _PUBLIC_EVENT_TYPES = frozenset(
         "tool.call",
         "reference.source",
         "diagnostic.result",
+        "execution.mode_selected",
+        "structured.result",
+        "confirmation.required",
+        "confirmation.resolved",
+        "explanation.delta",
+        "explanation.degraded",
+        "budget.exhausted",
         "run.restarted",
         "complete",
         "error",
@@ -143,6 +151,63 @@ def create_chat_runs_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    return router
+
+
+def create_pending_chat_actions_router(
+    *,
+    repositories: MemoryRepositories,
+    current_user_dependency: Callable[..., object],
+) -> APIRouter:
+    router = APIRouter(tags=["chat"])
+
+    def service() -> PendingChatActionService:
+        if repositories.pending_chat_actions is None:
+            raise RuntimeError("Pending Chat Action repository is required")
+        return PendingChatActionService(repositories.pending_chat_actions)
+
+    @router.get("/chat/sessions/{session_id}/actions/pending")
+    async def list_pending_actions(
+        request: Request,
+        session_id: str,
+        user: UserRecord = Depends(current_user_dependency),  # noqa: B008
+    ) -> JSONResponse:
+        session = await repositories.chat.get_session(
+            owner_user_id=user.id,
+            session_id=session_id,
+        )
+        if session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        actions = await service().list_pending(
+            owner_user_id=user.id,
+            session_id=session_id,
+        )
+        return _success(request, {"items": [action.to_payload() for action in actions]})
+
+    @router.post("/chat/actions/{action_id}/confirm")
+    async def confirm_action(
+        request: Request,
+        action_id: str,
+        user: UserRecord = Depends(current_user_dependency),  # noqa: B008
+    ) -> JSONResponse:
+        try:
+            action = await service().confirm(owner_user_id=user.id, action_id=action_id)
+        except PendingActionNotFound as exc:
+            raise HTTPException(status_code=404, detail="Pending action not found") from exc
+        return _success(request, action.to_payload())
+
+    @router.post("/chat/actions/{action_id}/cancel")
+    async def cancel_action(
+        request: Request,
+        action_id: str,
+        user: UserRecord = Depends(current_user_dependency),  # noqa: B008
+    ) -> JSONResponse:
+        try:
+            action = await service().cancel(owner_user_id=user.id, action_id=action_id)
+        except PendingActionNotFound as exc:
+            raise HTTPException(status_code=404, detail="Pending action not found") from exc
+        return _success(request, action.to_payload())
 
     return router
 

@@ -8,6 +8,8 @@ import type {
   ChatSkillUploadResponse,
   ChatMemoryMode,
   ChatRun,
+  PendingChatAction,
+  PendingChatActionListResponse,
   CreateChatRunRequest,
   CreateChatSessionRequest,
   CreateChatPromptRequest,
@@ -45,6 +47,9 @@ export interface ChatClient {
   getRun?(sessionId: string, runId: string): Promise<ChatRun>;
   getActiveRun?(sessionId: string): Promise<ChatRun | null>;
   streamRunEvents?(sessionId: string, runId: string, afterSequence: number): AsyncIterable<SseEvent>;
+  listPendingActions?(sessionId: string): Promise<PendingChatActionListResponse>;
+  confirmPendingAction?(actionId: string): Promise<PendingChatAction>;
+  cancelPendingAction?(actionId: string): Promise<PendingChatAction>;
 }
 
 export interface CreateChatClientOptions {
@@ -124,6 +129,18 @@ export function createChatClient(options: CreateChatClientOptions = {}): ChatCli
       api.request<ChatRun>(`/chat/sessions/${sessionId}/runs/${runId}`),
     getActiveRun: (sessionId) =>
       api.request<ChatRun | null>(`/chat/sessions/${sessionId}/runs/active`),
+    listPendingActions: (sessionId) =>
+      api.request<PendingChatActionListResponse>(
+        `/chat/sessions/${sessionId}/actions/pending`
+      ),
+    confirmPendingAction: (actionId) =>
+      api.request<PendingChatAction>(`/chat/actions/${actionId}/confirm`, {
+        method: "POST"
+      }),
+    cancelPendingAction: (actionId) =>
+      api.request<PendingChatAction>(`/chat/actions/${actionId}/cancel`, {
+        method: "POST"
+      }),
     streamRunEvents: (sessionId, runId, afterSequence) =>
       sse.stream(
         `/chat/sessions/${sessionId}/runs/${runId}/events`,

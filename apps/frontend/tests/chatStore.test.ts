@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ChatMessage,
+  PendingChatAction,
   ChatRun,
   ChatSessionSummary,
   SseEvent,
@@ -57,6 +58,19 @@ const audit = (): ToolCallAudit => ({
   createdAt: "2026-07-10T00:00:01.000Z"
 });
 
+const pendingAction = (overrides: Partial<PendingChatAction> = {}): PendingChatAction => ({
+  id: "chat_action_1",
+  sessionId: "chat_1",
+  actionType: "start_diagnostic",
+  targetResourceId: "incident_1",
+  publicArguments: {},
+  status: "pending",
+  expiresAt: "2026-08-22T00:15:00Z",
+  backgroundJobId: null,
+  executionResultId: null,
+  ...overrides
+});
+
 afterEach(() => {
   vi.useRealTimers();
   setChatClientFactoryForTests(null);
@@ -64,7 +78,9 @@ afterEach(() => {
 
 describe("chat store", () => {
   it("loads session history from the backend when a user selects a conversation", async () => {
-    setChatClientFactoryForTests(() => fakeClient());
+    const client = fakeClient();
+    client.listPendingActions = async () => ({ items: [pendingAction()] });
+    setChatClientFactoryForTests(() => client);
     setActivePinia(createPinia());
     const store = useChatStore();
 
@@ -75,6 +91,36 @@ describe("chat store", () => {
     expect(store.activeSessionId).toBe("chat_1");
     expect(store.messages).toEqual([message()]);
     expect(store.toolAudits).toEqual([audit()]);
+    expect(store.pendingActions).toEqual([pendingAction()]);
+  });
+
+  it("guards duplicate pending-action decisions while the first request is in flight", async () => {
+    let releaseConfirmation: (() => void) | undefined;
+    const confirmationGate = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    const confirmPendingAction = vi.fn(async () => {
+      await confirmationGate;
+      return pendingAction({ status: "confirmed", backgroundJobId: "job_1" });
+    });
+    const client = fakeClient();
+    client.listPendingActions = async () => ({ items: [pendingAction()] });
+    client.confirmPendingAction = confirmPendingAction;
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+    await store.initialize();
+
+    const first = store.confirmPendingAction("chat_action_1");
+    const duplicate = store.confirmPendingAction("chat_action_1");
+    await Promise.resolve();
+
+    expect(confirmPendingAction).toHaveBeenCalledTimes(1);
+    expect(store.pendingActionLoadingIds).toEqual(["chat_action_1"]);
+    releaseConfirmation?.();
+    await Promise.all([first, duplicate]);
+    expect(store.pendingActions[0]).toMatchObject({ status: "confirmed", backgroundJobId: "job_1" });
+    expect(store.pendingActionLoadingIds).toEqual([]);
   });
 
   it("reconciles streamed content, references, and tool calls with persisted history", async () => {

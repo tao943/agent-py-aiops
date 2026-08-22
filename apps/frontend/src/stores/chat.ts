@@ -8,6 +8,7 @@ import type {
   ChatMemoryMode,
   ChatRun,
   DiagnosticResultSseEvent,
+  PendingChatAction,
   ReferenceSourceSseEvent,
   ToolCallAudit
 } from "@agent-py/api-contracts";
@@ -42,6 +43,8 @@ export const useChatStore = defineStore("chat", () => {
   const liveToolCalls = ref<readonly LiveToolCall[]>([]);
   const references = ref<readonly ChatReference[]>([]);
   const diagnosticResults = ref<readonly DiagnosticResultSseEvent["diagnostic"][]>([]);
+  const pendingActions = ref<readonly PendingChatAction[]>([]);
+  const pendingActionLoadingIds = ref<readonly string[]>([]);
   const activeRunId = ref<string | null>(null);
   const isLoading = ref(false);
   const isSending = ref(false);
@@ -67,13 +70,15 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function loadSession(sessionId: string, resumeActiveRun = true): Promise<void> {
-    const [detail, audits] = await Promise.all([
+    const [detail, audits, pending] = await Promise.all([
       client.getSession(sessionId),
-      client.listToolCallAudits(sessionId)
+      client.listToolCallAudits(sessionId),
+      client.listPendingActions?.(sessionId) ?? Promise.resolve({ items: [] })
     ]);
     activeSessionId.value = detail.session.id;
     messages.value = detail.messages;
     toolAudits.value = audits.items;
+    pendingActions.value = pending.items;
     liveToolCalls.value = [];
     setReferencesFromMessages(detail.messages);
     upsertSession(detail.session);
@@ -119,6 +124,12 @@ export const useChatStore = defineStore("chat", () => {
                 ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
               ];
             }
+            if (event.type === "confirmation.required") {
+              upsertPendingAction(event.action, pendingActions);
+            }
+            if (event.type === "confirmation.resolved") {
+              upsertPendingAction(event.action, pendingActions);
+            }
             if (event.type === "complete") completed = true;
             if (event.type === "error") throw new ApiClientError(event.error);
           }
@@ -163,6 +174,8 @@ export const useChatStore = defineStore("chat", () => {
     liveToolCalls.value = [];
     references.value = [];
     diagnosticResults.value = [];
+    pendingActions.value = [];
+    pendingActionLoadingIds.value = [];
     errorMessage.value = null;
     configuration.value = null;
     isSavingConfiguration.value = false;
@@ -178,6 +191,8 @@ export const useChatStore = defineStore("chat", () => {
     errorMessage,
     configuration,
     diagnosticResults,
+    pendingActions,
+    pendingActionLoadingIds,
     isSavingConfiguration,
     isLoading,
     isSending,
@@ -201,6 +216,7 @@ export const useChatStore = defineStore("chat", () => {
           toolAudits.value = [];
           references.value = [];
           diagnosticResults.value = [];
+          pendingActions.value = [];
         }
       } catch (error) {
         reportError(error);
@@ -219,6 +235,7 @@ export const useChatStore = defineStore("chat", () => {
         liveToolCalls.value = [];
         references.value = [];
         diagnosticResults.value = [];
+        pendingActions.value = [];
         return created;
       } catch (error) {
         reportError(error);
@@ -249,6 +266,7 @@ export const useChatStore = defineStore("chat", () => {
             toolAudits.value = [];
             references.value = [];
             diagnosticResults.value = [];
+            pendingActions.value = [];
           } else {
             await loadSession(nextSession.id);
           }
@@ -336,6 +354,44 @@ export const useChatStore = defineStore("chat", () => {
       }
     },
     reset,
+    confirmPendingAction: async (actionId: string): Promise<void> => {
+      if (
+        client.confirmPendingAction === undefined ||
+        pendingActionLoadingIds.value.includes(actionId)
+      ) return;
+      pendingActionLoadingIds.value = [...pendingActionLoadingIds.value, actionId];
+      try {
+        upsertPendingAction(
+          await client.confirmPendingAction(actionId),
+          pendingActions
+        );
+      } catch (error) {
+        reportError(error);
+        throw error;
+      } finally {
+        pendingActionLoadingIds.value = pendingActionLoadingIds.value.filter(
+          (item) => item !== actionId
+        );
+      }
+    },
+    cancelPendingAction: async (actionId: string): Promise<void> => {
+      if (
+        client.cancelPendingAction === undefined ||
+        pendingActionLoadingIds.value.includes(actionId)
+      ) return;
+      pendingActionLoadingIds.value = [...pendingActionLoadingIds.value, actionId];
+      try {
+        await client.cancelPendingAction(actionId);
+        pendingActions.value = pendingActions.value.filter((item) => item.id !== actionId);
+      } catch (error) {
+        reportError(error);
+        throw error;
+      } finally {
+        pendingActionLoadingIds.value = pendingActionLoadingIds.value.filter(
+          (item) => item !== actionId
+        );
+      }
+    },
     resumeRun: async (sessionId: string, runId: string): Promise<void> => {
       if (client.getRun === undefined) return;
       await resumeRun(sessionId, await client.getRun(sessionId, runId));
@@ -418,6 +474,12 @@ export const useChatStore = defineStore("chat", () => {
               ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
             ];
           }
+          if (event.type === "confirmation.required") {
+            upsertPendingAction(event.action, pendingActions);
+          }
+          if (event.type === "confirmation.resolved") {
+            upsertPendingAction(event.action, pendingActions);
+          }
           if (event.type === "error") {
             throw new ApiClientError(event.error);
           }
@@ -499,6 +561,13 @@ function updateLiveToolCall(
     ...(next.output === undefined ? {} : { output: next.output })
   };
   target.value = [merged, ...target.value.filter((item) => item.id !== next.id)];
+}
+
+function upsertPendingAction(
+  next: PendingChatAction,
+  target: { value: readonly PendingChatAction[] }
+): void {
+  target.value = [next, ...target.value.filter((item) => item.id !== next.id)];
 }
 
 function uniqueReferences(items: readonly ChatReference[]): readonly ChatReference[] {

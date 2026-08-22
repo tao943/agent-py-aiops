@@ -47,6 +47,7 @@ from super_ai.memory.repositories import (
     ChatSessionRecord,
     JsonDict,
     MemoryRepositories,
+    PendingChatActionRecord,
 )
 from super_ai.observability import elapsed_ms, emit_event
 from super_ai.retrieval import (
@@ -224,6 +225,11 @@ class ChatAgentExplanationDegraded:
     retryable: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ChatAgentConfirmationRequired:
+    action: Mapping[str, object]
+
+
 ChatAgentEvent = (
     ChatAgentContentDelta
     | ChatAgentReasoningDelta
@@ -232,6 +238,7 @@ ChatAgentEvent = (
     | ChatAgentExecutionModeSelected
     | ChatAgentStructuredResult
     | ChatAgentExplanationDegraded
+    | ChatAgentConfirmationRequired
 )
 
 
@@ -265,6 +272,30 @@ class ChatAgentRunner(Protocol):
         ...
 
 
+class PendingActionPreviewer(Protocol):
+    async def preview_start(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        incident_id: str,
+        chat_run_id: str | None = None,
+        note: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord: ...
+
+    async def preview_recovery_approval(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        diagnostic_task_id: str,
+        reason: str,
+        chat_run_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord: ...
+
+
 class PolicyDispatchingChatAgentRunner:
     """Bypass ReAct for deterministic Direct Read policies."""
 
@@ -273,12 +304,55 @@ class PolicyDispatchingChatAgentRunner:
         *,
         fallback: ChatAgentRunner,
         direct_execution: ChatTurnExecutionService,
+        pending_actions: PendingActionPreviewer | None = None,
     ) -> None:
         self._fallback = fallback
         self._direct_execution = direct_execution
+        self._pending_actions = pending_actions
 
     async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
-        if policy_for(request.route).mode != "direct_read":
+        policy = policy_for(request.route)
+        if policy.mode == "confirmation_required":
+            if self._pending_actions is None:
+                raise RuntimeError("Pending Chat Action service is unavailable.")
+            content = next(
+                (
+                    message.content
+                    for message in reversed(request.messages)
+                    if message.role == "user"
+                ),
+                "",
+            )
+            if request.route.intent == "start_diagnostic":
+                incident_id = request.route.incident_id
+                if incident_id is None:
+                    raise ValueError("Incident ID is required for confirmation.")
+                action = await self._pending_actions.preview_start(
+                    owner_user_id=request.owner_user_id,
+                    session_id=request.session_id,
+                    incident_id=incident_id,
+                    chat_run_id=request.chat_run_id,
+                    note=content,
+                )
+            else:
+                task_id = request.route.diagnostic_task_id
+                if task_id is None:
+                    raise ValueError("Diagnostic task ID is required for confirmation.")
+                action = await self._pending_actions.preview_recovery_approval(
+                    owner_user_id=request.owner_user_id,
+                    session_id=request.session_id,
+                    diagnostic_task_id=task_id,
+                    reason=content or "用户请求创建人工恢复审批",
+                    chat_run_id=request.chat_run_id,
+                )
+            yield ChatAgentExecutionModeSelected(
+                mode=policy.mode,
+                required_capability=policy.required_capability,
+                postcondition=policy.postcondition,
+            )
+            yield ChatAgentConfirmationRequired(action.to_payload())
+            return
+        if policy.mode != "direct_read":
             async for event in self._fallback.stream(request):
                 yield event
             return
@@ -504,6 +578,11 @@ class ChatStreamingService:
                     yield _sse_event(
                         "explanation.degraded",
                         {"code": event.code, "retryable": event.retryable},
+                    )
+                elif isinstance(event, ChatAgentConfirmationRequired):
+                    structured_results.append({"pendingAction": dict(event.action)})
+                    yield _sse_event(
+                        "confirmation.required", {"action": dict(event.action)}
                     )
                 elif isinstance(event, ChatAgentToolCall):
                     pending = content_buffer.flush(monotonic())
