@@ -36,16 +36,18 @@ class AlertLease:
     def __init__(
         self,
         mode: RedisMode,
-        release_callback: Callable[[], Awaitable[None]],
+        release_callback: Callable[[], Awaitable[bool]],
     ) -> None:
         self.mode: RedisMode = mode
-        self._release_callback: Callable[[], Awaitable[None]] | None = release_callback
+        self._release_callback: Callable[[], Awaitable[bool]] | None = release_callback
 
     async def release(self) -> None:
         callback = self._release_callback
         self._release_callback = None
         if callback is not None:
-            await callback()
+            released = await callback()
+            if not released and self.mode == "primary":
+                self.mode = "degraded"
 
 
 class AlertLeaseManager:
@@ -73,15 +75,16 @@ class AlertLeaseManager:
             return AlertLease("contended", _noop)
         return AlertLease("primary", lambda: self._release(key, token))
 
-    async def _release(self, key: str, token: str) -> None:
+    async def _release(self, key: str, token: str) -> bool:
         client = self._client
         if client is None:
-            return
+            return False
         try:
             await asyncio.wait_for(client.eval(_COMPARE_DELETE, 1, key, token), timeout=0.25)
         except Exception:
-            return
+            return False
+        return True
 
 
-async def _noop() -> None:
-    return
+async def _noop() -> bool:
+    return True

@@ -77,5 +77,4 @@ async def test_release_failure_is_safely_ignored() -> None:
 
     await lease.release()
 
-    assert lease.mode == "primary"
-
+    assert lease.mode == "degraded"

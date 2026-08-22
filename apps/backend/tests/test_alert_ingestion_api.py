@@ -37,22 +37,28 @@ def _body() -> bytes:
 
 
 class Service:
-    def __init__(self, *, failure: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        failure: bool = False,
+        result: IngestionResult | None = None,
+    ) -> None:
         self.calls = 0
         self.failure = failure
-
-    async def ingest(self, source: AlertSourceConfig, delivery: object) -> IngestionResult:
-        del source, delivery
-        self.calls += 1
-        if self.failure:
-            raise AlertPersistenceError("must not leak")
-        return IngestionResult(
+        self.result = result or IngestionResult(
             "incident_created",
             "incident-one",
             "diagnostic-one",
             "job-one",
             "primary",
         )
+
+    async def ingest(self, source: AlertSourceConfig, delivery: object) -> IngestionResult:
+        del source, delivery
+        self.calls += 1
+        if self.failure:
+            raise AlertPersistenceError("must not leak")
+        return self.result
 
 
 class Runtime:
@@ -203,3 +209,43 @@ async def test_runtime_wakeup_failure_remains_safe_202_after_commit() -> None:
     assert runtime.start_count == 1
     assert metrics.snapshot()["ingestionFailedTotal"] == 0
     assert "private-group" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_duplicate", "expected_filtered", "expected_wakeup"),
+    [
+        (
+            IngestionResult(
+                "duplicate_updated", "incident-one", "diagnostic-one", "job-one", "contended"
+            ),
+            True,
+            False,
+            0,
+        ),
+        (IngestionResult("filtered", None, None, None, "primary"), False, True, 0),
+        (
+            IngestionResult(
+                "incident_resolved", "incident-one", "diagnostic-one", "job-one", "primary"
+            ),
+            False,
+            False,
+            0,
+        ),
+        (IngestionResult("orphan_resolved", None, None, None, "degraded"), False, False, 0),
+    ],
+)
+async def test_non_creating_dispositions_return_safe_202_without_runtime_wakeup(
+    result: IngestionResult,
+    expected_duplicate: bool,
+    expected_filtered: bool,
+    expected_wakeup: int,
+) -> None:
+    app, _, runtime, _ = _app(service=Service(result=result))
+
+    response = await _post(app, _body())
+
+    assert response.status_code == 202
+    assert response.json()["duplicate"] is expected_duplicate
+    assert response.json()["filtered"] is expected_filtered
+    assert response.json()["redisMode"] == result.redis_mode
+    assert runtime.start_count == expected_wakeup

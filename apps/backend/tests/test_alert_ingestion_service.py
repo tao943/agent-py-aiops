@@ -87,8 +87,9 @@ class LeaseProvider:
         assert source_id == "local-alertmanager"
         assert group_key_hash == "a" * 64
 
-        async def release() -> None:
+        async def release() -> bool:
             self.release_count += 1
+            return True
 
         return AlertLease(self.mode, release)
 
