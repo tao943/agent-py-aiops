@@ -167,6 +167,28 @@ severity="critical"
 
 `scenario_id` becomes a bounded parser label. No execution-related label is accepted.
 
+### 6.1 Trusted CLS scope for the alert-created Task
+
+The automatic closure acceptance uses `evidence_source=cls`. Local evidence remains available for
+ordinary, directly invoked Live Benchmarks, but it cannot transfer the orchestrator's in-memory
+observation into the resident backend process that owns an Alertmanager-created durable Task.
+
+For the allowlisted order-pool scenario, alert ingestion persists a safe `liveEvidenceScope` in the
+Task input. It contains only the already validated `run_id`, `scenario_id`, the deterministic Live
+evidence incident identity, and a bounded time window derived from `startsAt`. It contains no CLS
+credentials, topic, Region, answer, recovery target, or fault token.
+
+`AiopsDiagnosticService` derives task-local trusted `SearchLog` arguments by combining that persisted
+public scope with the backend-owned CLS Region and Topic configuration. The Query binds `run_id`,
+`scenario_id`, and `incident_id`. The binding is accepted only when the discovered tool is exactly
+`SearchLog` from server `cls` and the official tool JSON Schema accepts the complete argument mapping.
+Planner or Replanner output cannot replace Region, Topic, time bounds, identity query, or Limit.
+
+The binding is derived per Task and is never written into mutable singleton state, so concurrent
+incidents cannot inherit each other's scope. Missing, malformed, traversing, overlength,
+foreign-scenario, non-CLS, or schema-incompatible scope remains fail-closed and cannot fall back to a
+wildcard query for automatic recovery authority.
+
 ## 7. Persistence and Correlation
 
 Migration `202608220002` extends `aiops_alert_incidents` with nullable, bounded fields:
@@ -323,6 +345,10 @@ an alert disappearance, or a generated proposal as executed recovery.
 - Stable recovery execution key and reuse.
 - Resolved/verification ordering and state transitions.
 - Uncertain side effects require manual review and are not replayed.
+- Alert-created Task input carries only the bounded public Live evidence scope.
+- The resident Single-Agent plan receives one exact CLS `SearchLog` binding for the matching run.
+- LLM arguments, foreign run IDs, traversal, non-CLS tools, and concurrent Tasks cannot alter or
+  share the trusted scope.
 
 ### 14.2 PostgreSQL and API integration
 
@@ -367,4 +393,3 @@ The accepted run must not call the existing alert publisher. It must prove:
 12. cleanup leaves no active run, test order, old generation session, or unrelated damage.
 
 The terminal result and artifact are persisted under the existing evaluation history contract.
-

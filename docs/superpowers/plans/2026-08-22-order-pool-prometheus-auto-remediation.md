@@ -626,6 +626,19 @@ git commit -m "test: gate automatic live closure offline"
 - Script starts required profiles, performs readiness checks, invokes the CLI once, prints short stage updates, and tears down only run-scoped fixture state.
 - It never calls the manual alert publisher and never reads or prints secrets.
 
+Before the real acceptance, close the discovered cross-process evidence gap:
+
+- Persist a bounded public `liveEvidenceScope` in the alert-created Task input for the exact
+  allowlisted scenario and validated run.
+- Derive task-local trusted CLS `SearchLog` arguments from that public scope plus backend-owned
+  Region/Topic configuration.
+- Reuse the existing Live Adapter binding and schema normalization; never accept an LLM or webhook
+  override and never mutate shared runner scope.
+- Require `-EvidenceSource cls` for automatic closure acceptance. Keep `local` for directly invoked
+  ordinary Live Benchmarks only.
+- Add focused alert-ingestion, planner/executor, concurrency-isolation, traversal, and script
+  contract tests before implementation.
+
 - [ ] **Step 1: Add script contract test**
 
 ```python
@@ -648,7 +661,7 @@ Expected: services healthy; Prometheus has no active `OrderApiConnectionPoolExha
 
 - [ ] **Step 4: Run one real acceptance without publisher**
 
-Run: `powershell -ExecutionPolicy Bypass -File scripts/run_order_pool_auto_closure.ps1 -RunId "auto-closure-<timestamp>"`
+Run: `powershell -ExecutionPolicy Bypass -File scripts/run_order_pool_auto_closure.ps1 -RunId "auto-closure-<timestamp>" -EvidenceSource cls`
 Expected: automatic firing; exactly one correlated Incident/Task/Job; one persisted Single-Agent Report; diagnosis `order-api / exception_path_connection_not_released`; one authorized restart; six verification checks pass; automatic resolved; `verification_status=passed`; terminal `VALID_PASS` artifact saved.
 
 - [ ] **Step 5: Verify attributed model behavior and idempotency**
