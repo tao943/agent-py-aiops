@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,7 +20,14 @@ from super_ai.alert_ingestion.repositories import (
     IncidentDiagnosticScheduler,
     IncidentUnavailable,
 )
-from super_ai.memory.repositories import DiagnosticMemoryRepository, JsonDict
+from super_ai.chat.run_events import tool_call_key
+from super_ai.memory.models import utc_now
+from super_ai.memory.repositories import (
+    ChatToolExecutionClaim,
+    ChatToolExecutionRepository,
+    DiagnosticMemoryRepository,
+    JsonDict,
+)
 
 
 class BridgeResourceNotFound(LookupError):
@@ -161,11 +169,13 @@ class AiopsBridgeService:
         diagnostics: DiagnosticMemoryRepository,
         scheduler: IncidentDiagnosticScheduler | None = None,
         approval_requests: RecoveryApprovalRequestRepository | None = None,
+        tool_executions: ChatToolExecutionRepository | None = None,
     ) -> None:
         self._incidents = incidents
         self._diagnostics = diagnostics
         self._scheduler = scheduler
         self._approval_requests = approval_requests
+        self.tool_executions = tool_executions
 
     async def list_active_incidents(
         self, *, owner_user_id: str, limit: int = 10
@@ -430,9 +440,83 @@ def build_aiops_bridge_tools(
             CreateRecoveryApprovalInput,
         ),
     )
+    invocation_counts: dict[str, int] = {}
+
+    def wrap(
+        name: str,
+        operation: Callable[..., Awaitable[JsonDict]],
+    ) -> Callable[..., Awaitable[JsonDict]]:
+        async def invoke(**arguments: object) -> JsonDict:
+            executions = service.tool_executions
+            if chat_run_id is None or executions is None:
+                return await operation(**arguments)
+            invocation_counts[name] = invocation_counts.get(name, 0) + 1
+            logical_step = f"{name}:{invocation_counts[name]}"
+            canonical = json.dumps(
+                arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            arguments_fingerprint = sha256(canonical.encode("utf-8")).hexdigest()
+            key = tool_call_key(chat_run_id, logical_step, name, arguments)
+            lease_owner = f"chat_tool_{uuid4().hex}"
+            side_effecting = name in {
+                "start_incident_diagnostic",
+                "create_recovery_approval_request",
+            }
+            claim = await executions.claim(
+                ChatToolExecutionClaim(
+                    tool_call_key=key,
+                    owner_user_id=owner_user_id,
+                    chat_run_id=chat_run_id,
+                    logical_step=logical_step,
+                    tool_name=name,
+                    arguments_fingerprint=arguments_fingerprint,
+                    lease_owner=lease_owner,
+                    lease_expires_at=utc_now() + timedelta(seconds=30),
+                    side_effecting=side_effecting,
+                )
+            )
+            if claim.action == "reuse":
+                return claim.execution.public_result
+            if claim.action == "manual_review":
+                return {
+                    "status": "manual_review",
+                    "executionPermitted": False,
+                    "toolCallKey": key,
+                }
+            if claim.action == "wait":
+                return {"status": "in_progress", "toolCallKey": key}
+            try:
+                result = await operation(**arguments)
+            except Exception:
+                if side_effecting:
+                    await executions.mark_uncertain(
+                        tool_call_key=key,
+                        lease_owner=lease_owner,
+                        safe_error_code="BRIDGE_TOOL_OUTCOME_UNKNOWN",
+                    )
+                else:
+                    await executions.fail(
+                        tool_call_key=key,
+                        lease_owner=lease_owner,
+                        safe_error_code="BRIDGE_TOOL_FAILED",
+                        retryable=True,
+                    )
+                raise
+            await executions.complete(
+                tool_call_key=key,
+                lease_owner=lease_owner,
+                public_result=result,
+            )
+            return result
+
+        return invoke
+
     return {
         name: StructuredTool.from_function(
-            coroutine=coroutine,
+            coroutine=wrap(name, cast(Callable[..., Awaitable[JsonDict]], coroutine)),
             name=name,
             description=description,
             args_schema=args_schema,

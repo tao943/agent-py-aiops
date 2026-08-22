@@ -81,6 +81,7 @@ from super_ai.chat.memory import (
     ChatMemoryService,
     memory_payload,
 )
+from super_ai.chat.routes import create_chat_runs_router
 from super_ai.chat.runs import ChatRunJobHandler
 from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.documents import (
@@ -442,6 +443,12 @@ def create_app(
     app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
     repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
+    app.include_router(
+        create_chat_runs_router(
+            repositories=repositories,
+            current_user_dependency=_current_user,
+        )
+    )
     incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
@@ -451,6 +458,7 @@ def create_app(
             BridgeRecoveryApprovalRequestRepository | None,
             repositories.recovery_approvals,
         ),
+        tool_executions=repositories.chat_tool_executions,
     )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
         config_path=resolved_project_config_path
@@ -1586,7 +1594,11 @@ def create_app(
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Deprecation": "true",
+                "Link": '</chat/sessions/{session_id}/runs>; rel="successor-version"',
+            },
         )
 
     @app.post("/chat/sessions/{session_id}/messages:clear")

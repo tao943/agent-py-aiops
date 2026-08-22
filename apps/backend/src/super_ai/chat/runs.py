@@ -106,6 +106,7 @@ class ChatRunJobHandler:
                 existing_user_message_id=user_message.id,
                 assistant_message_id=assistant_message_id,
                 raise_errors=True,
+                chat_run_id=run.id,
             ):
                 await context.raise_if_cancelled()
                 event_type = str(event.get("type", ""))

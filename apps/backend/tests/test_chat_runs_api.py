@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from typing import Any
 
+import httpx
 import pytest
 
+from super_ai.api.app import create_app
+from super_ai.chat.run_events import PublicRunEventError, public_run_event, tool_call_key
 from super_ai.chat.runs import ChatRunJobHandler
 from super_ai.chat.streaming import (
     ChatAgentContentDelta,
@@ -44,6 +48,87 @@ class FailOnceRunner:
             yield ChatAgentContentDelta("恢复后的公开回答")
 
         return events()
+
+
+def test_tool_call_key_is_stable_for_canonical_arguments() -> None:
+    first = tool_call_key("run_1", "2", "get_report", {"b": 2, "a": 1})
+    second = tool_call_key("run_1", "2", "get_report", {"a": 1, "b": 2})
+    assert first == second
+    assert len(first) == 64
+
+
+def test_public_run_event_rejects_private_nested_keys() -> None:
+    with pytest.raises(PublicRunEventError):
+        public_run_event(
+            sequence=2,
+            event_type="content.delta",
+            payload={"safe": {"reasoning": "private"}},
+            timestamp=utc_now(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_api_is_owner_scoped_and_replays_after_last_event_id(
+    migrated_database_url: str,
+) -> None:
+    app = create_app(database_url=migrated_database_url, chat_agent_runner=FakeRunner())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        owner = await _register(client, "run-owner@example.com", "Run Owner")
+        other = await _register(client, "run-other@example.com", "Run Other")
+        owner_headers = _auth_headers(owner["accessToken"])
+        other_headers = _auth_headers(other["accessToken"])
+        session_response = await client.post("/chat/sessions", headers=owner_headers, json={})
+        session_id = session_response.json()["data"]["id"]
+        create_response = await client.post(
+            f"/chat/sessions/{session_id}/runs",
+            headers=owner_headers,
+            json={
+                "content": "查看事故",
+                "clientRequestId": "request_api_1",
+            },
+        )
+        assert create_response.status_code == 202, create_response.text
+        run_id = create_response.json()["data"]["id"]
+        active_response = await client.get(
+            f"/chat/sessions/{session_id}/runs/active", headers=owner_headers
+        )
+        forbidden_response = await client.get(
+            f"/chat/sessions/{session_id}/runs/{run_id}", headers=other_headers
+        )
+
+        repositories = app.state.memory_repositories
+        assert repositories.chat_runs is not None
+        for index in range(3):
+            await repositories.chat_runs.append_event(
+                owner_user_id=owner["user"]["id"],
+                run_id=run_id,
+                event_type="content.delta",
+                public_payload={"delta": str(index), "sequence": index + 1},
+            )
+        await repositories.chat_runs.fail_with_event(
+            owner_user_id=owner["user"]["id"],
+            run_id=run_id,
+            error_code="CHAT_AGENT_MODEL_FAILED",
+            public_payload={
+                "code": "CHAT_AGENT_MODEL_FAILED",
+                "retryable": False,
+                "runId": run_id,
+            },
+        )
+        replay_response = await client.get(
+            f"/chat/sessions/{session_id}/runs/{run_id}/events",
+            headers={**owner_headers, "Last-Event-ID": "2"},
+        )
+
+    assert create_response.status_code == 202
+    assert create_response.json()["data"]["status"] == "queued"
+    assert active_response.json()["data"]["id"] == run_id
+    assert forbidden_response.status_code == 404
+    assert [line for line in replay_response.text.splitlines() if line.startswith("id: ")] == [
+        "id: 3",
+        "id: 4",
+    ]
 
 
 @pytest.mark.asyncio
@@ -193,3 +278,19 @@ async def test_transient_attempt_failure_restarts_without_terminal_run_error(
         if runtime is not None:
             await runtime.stop()
         await engine.dispose()
+
+
+async def _register(client: httpx.AsyncClient, email: str, display_name: str) -> dict[str, Any]:
+    response = await client.post(
+        "/auth/register",
+        json={
+            "email": email,
+            "displayName": display_name,
+            "password": "correct horse battery staple",
+        },
+    )
+    return response.json()["data"]
+
+
+def _auth_headers(token: object) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}

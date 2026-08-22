@@ -118,6 +118,7 @@ class ChatAgentRequest:
     messages: Sequence[ChatMessageRecord]
     accessible_knowledge_base_ids: tuple[str, ...]
     system_prompt: str
+    chat_run_id: str | None = None
     route: ChatRoute = ChatRoute("general_chat", 0.0, "fallback")
     tool_names: tuple[str, ...] = ()
     skills: tuple[SelectedChatSkill, ...] = ()
@@ -191,6 +192,7 @@ class ChatStreamingService:
         existing_user_message_id: str | None = None,
         assistant_message_id: str | None = None,
         raise_errors: bool = False,
+        chat_run_id: str | None = None,
     ) -> AsyncIterator[dict[str, object]]:
         started_at = monotonic()
         message_content = content.strip()
@@ -275,6 +277,7 @@ class ChatStreamingService:
             messages=model_messages if model_messages else [user_message],
             accessible_knowledge_base_ids=tuple(accessible_knowledge_base_ids),
             system_prompt=system_prompt,
+            chat_run_id=chat_run_id,
             route=route,
             tool_names=tuple(sorted(allowed_tools)),
             skills=selected_skills,
@@ -615,6 +618,7 @@ class LangChainChatAgentRunner:
                 build_aiops_bridge_tools(
                     owner_user_id=request.owner_user_id,
                     service=self._aiops_bridge_service,
+                    chat_run_id=request.chat_run_id,
                 )
             )
         tools = [tool_registry[name] for name in request.tool_names if name in tool_registry]
