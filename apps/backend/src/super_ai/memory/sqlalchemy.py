@@ -152,6 +152,9 @@ class SQLAlchemyChatMemoryRepository:
                 row.memory_mode = memory_mode
             if clear_compaction:
                 row.memory_summary = None
+                row.structured_memory = {}
+                row.memory_summary_version = 0
+                row.memory_through_message_id = None
                 row.compacted_message_count = 0
                 row.context_tokens = 0
                 row.last_compacted_at = None
@@ -188,6 +191,7 @@ class SQLAlchemyChatMemoryRepository:
                 structured_memory=memory.model_dump(mode="json"),
                 memory_summary_version=expected_version + 1,
                 memory_through_message_id=through_message_id,
+                memory_summary=None,
                 updated_at=utc_now(),
             )
             .returning(ChatSessionModel.id)
@@ -275,6 +279,9 @@ class SQLAlchemyChatMemoryRepository:
             )
             parent.updated_at = timestamp
             parent.memory_summary = None
+            parent.structured_memory = {}
+            parent.memory_summary_version = 0
+            parent.memory_through_message_id = None
             parent.compacted_message_count = 0
             parent.context_tokens = 0
             parent.last_compacted_at = None
@@ -316,6 +323,46 @@ class SQLAlchemyChatMemoryRepository:
         stmt = stmt.order_by(ChatMessageModel.created_at.asc(), ChatMessageModel.id.asc())
         async with self._session_factory() as session:
             rows = list((await session.scalars(stmt)).all())
+        return [_chat_message_record(row) for row in rows]
+
+    async def list_messages_through(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        through_message_id: str,
+    ) -> list[ChatMessageRecord]:
+        async with self._session_factory() as session:
+            boundary = (
+                await session.scalars(
+                    select(ChatMessageModel).where(
+                        ChatMessageModel.id == through_message_id,
+                        ChatMessageModel.owner_user_id == owner_user_id,
+                        ChatMessageModel.session_id == session_id,
+                    )
+                )
+            ).one_or_none()
+            if boundary is None:
+                return []
+            rows = list(
+                (
+                    await session.scalars(
+                        select(ChatMessageModel)
+                        .where(
+                            ChatMessageModel.owner_user_id == owner_user_id,
+                            ChatMessageModel.session_id == session_id,
+                            (
+                                (ChatMessageModel.created_at < boundary.created_at)
+                                | (
+                                    (ChatMessageModel.created_at == boundary.created_at)
+                                    & (ChatMessageModel.id <= boundary.id)
+                                )
+                            ),
+                        )
+                        .order_by(ChatMessageModel.created_at.asc(), ChatMessageModel.id.asc())
+                    )
+                ).all()
+            )
         return [_chat_message_record(row) for row in rows]
 
     async def get_message(

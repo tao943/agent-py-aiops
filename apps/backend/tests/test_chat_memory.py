@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,7 +27,18 @@ class FakeChatModel:
 
     async def ainvoke(self, input: object) -> object:
         self.inputs.append(input)
-        return FakeMessage("用户正在排查 API；已确认需要保留工具结果和后续任务。")
+        return FakeMessage(
+            json.dumps(
+                {
+                    "user_goals": [],
+                    "confirmed_facts": [],
+                    "preferences": [],
+                    "decisions": [],
+                    "open_tasks": [],
+                    "resource_refs": [],
+                }
+            )
+        )
 
 
 class FakeProvider:
@@ -172,7 +184,7 @@ async def test_context_threshold_and_manual_mode_are_session_scoped(
     assert threshold_result.session.memory_mode == "context_70_percent"
     assert threshold_result.session.compacted_message_count == 1
     assert manual_result.memory_mode == "manual"
-    assert manual_result.compacted_message_count == 1
+    assert manual_result.memory_summary_version == 1
     assert len(provider.model.inputs) == 2
 
 

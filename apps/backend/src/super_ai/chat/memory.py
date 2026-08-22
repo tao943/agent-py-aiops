@@ -27,6 +27,8 @@ SUPPORTED_CHAT_MEMORY_MODES: tuple[ChatMemoryModeInput, ...] = (
     "manual",
 )
 AUTO_CONTEXT_THRESHOLD_PERCENT = 70.0
+BACKGROUND_COMPACTION_THRESHOLD_PERCENT = 60.0
+SYNCHRONOUS_COMPACTION_THRESHOLD_PERCENT = 85.0
 
 
 class ChatContextLimitReached(RuntimeError):
@@ -111,6 +113,28 @@ class ChatMemoryService:
             ContextEnvelopeRequest,
             ContextEnvelopeService,
         )
+        synchronous_boundary = _older_history_boundary(history)
+        if (
+            _usage_percent(candidate_tokens, self.context_window_tokens)
+            >= SYNCHRONOUS_COMPACTION_THRESHOLD_PERCENT
+            and synchronous_boundary is not None
+        ):
+            from super_ai.chat.memory_jobs import StructuredMemoryCompactionHandler
+
+            await StructuredMemoryCompactionHandler(
+                repositories=self._repositories,
+                llm_provider=self._llm_provider,
+            ).compact(
+                owner_user_id=owner_user_id,
+                session_id=current.id,
+                through_message_id=synchronous_boundary,
+                expected_version=current.memory_summary_version,
+            )
+            current = (
+                await self._repositories.chat.get_session(
+                    owner_user_id=owner_user_id, session_id=current.id
+                )
+            ) or current
         from super_ai.chat.structured_memory import StructuredChatMemory
 
         envelope = ContextEnvelopeService().prepare(
@@ -119,6 +143,11 @@ class ChatMemoryService:
                 messages=tuple(candidate_messages),
                 structured_memory=StructuredChatMemory.model_validate(
                     current.structured_memory
+                ),
+                legacy_untrusted_summary=(
+                    current.memory_summary
+                    if current.memory_summary_version == 0
+                    else None
                 ),
                 tool_schemas=tuple(tool_schemas),
                 observations=tuple(observations),
@@ -165,7 +194,13 @@ class ChatMemoryService:
             session_id=session.id,
             context_tokens=tokens,
         )
-        return updated or session
+        current = updated or session
+        await self._schedule_background_compaction(
+            owner_user_id=owner_user_id,
+            session=current,
+            history=history,
+        )
+        return current
 
     async def set_mode(
         self,
@@ -205,18 +240,33 @@ class ChatMemoryService:
         history: list[ChatMessageRecord],
         system_prompt: str,
     ) -> ChatSessionRecord:
-        uncompressed = history[session.compacted_message_count :]
-        if not uncompressed:
+        if not history:
             return await self.refresh_usage(
                 owner_user_id=owner_user_id,
                 session=session,
                 history=history,
                 system_prompt=system_prompt,
             )
-        return await self._compact_messages(
+        from super_ai.chat.memory_jobs import StructuredMemoryCompactionHandler
+
+        await StructuredMemoryCompactionHandler(
+            repositories=self._repositories,
+            llm_provider=self._llm_provider,
+        ).compact(
             owner_user_id=owner_user_id,
-            session=session,
-            messages=uncompressed,
+            session_id=session.id,
+            through_message_id=history[-1].id,
+            expected_version=session.memory_summary_version,
+        )
+        current = (
+            await self._repositories.chat.get_session(
+                owner_user_id=owner_user_id, session_id=session.id
+            )
+        ) or session
+        return await self.refresh_usage(
+            owner_user_id=owner_user_id,
+            session=current,
+            history=history,
             system_prompt=system_prompt,
         )
 
@@ -257,6 +307,34 @@ class ChatMemoryService:
             last_compacted_at=datetime.now(timezone.utc),
         )
         return updated or session
+
+    async def _schedule_background_compaction(
+        self,
+        *,
+        owner_user_id: str,
+        session: ChatSessionRecord,
+        history: list[ChatMessageRecord],
+    ) -> None:
+        if session.memory_mode != "adaptive" or self._repositories.background_jobs is None:
+            return
+        legacy_boundary = history[-1].id if session.memory_summary and history else None
+        usage_boundary = (
+            _older_history_boundary(history)
+            if _usage_percent(session.context_tokens, self.context_window_tokens)
+            >= BACKGROUND_COMPACTION_THRESHOLD_PERCENT
+            else None
+        )
+        through_message_id = legacy_boundary or usage_boundary
+        if through_message_id is None:
+            return
+        from super_ai.chat.memory_jobs import schedule_compaction
+
+        await schedule_compaction(
+            repositories=self._repositories,
+            owner_user_id=owner_user_id,
+            session=session,
+            through_message_id=through_message_id,
+        )
 
 
 def estimate_context_tokens(
@@ -310,6 +388,13 @@ def _candidate_user_message(
 
 def _usage_percent(tokens: int, window: int) -> float:
     return round(min(100.0, tokens / window * 100), 1)
+
+
+def _older_history_boundary(history: Sequence[ChatMessageRecord]) -> str | None:
+    """Return the last message before the six newest user/assistant turns."""
+    if len(history) <= 12:
+        return None
+    return history[-13].id
 
 
 def _memory_instruction(summary: str) -> str:

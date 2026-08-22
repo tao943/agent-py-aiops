@@ -8,6 +8,7 @@ from typing import cast
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.memory.models import (
@@ -82,6 +83,66 @@ class SQLAlchemyBackgroundJobRepository:
         async with self._session_factory() as session:
             row = (await session.scalars(stmt)).one_or_none()
         return _background_job_record(row) if row is not None else None
+
+    async def enqueue_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        job_id: str,
+        kind: str,
+        resource_type: str,
+        resource_id: str,
+        payload: JsonDict | None = None,
+        max_attempts: int = 3,
+        timeout_seconds: int = 900,
+        available_at: datetime | None = None,
+    ) -> BackgroundJobRecord:
+        now = utc_now()
+        statement = (
+            postgresql_insert(BackgroundJobModel)
+            .values(
+                id=job_id,
+                owner_user_id=owner_user_id,
+                kind=kind,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                status="queued",
+                payload=payload or {},
+                attempt=0,
+                max_attempts=max_attempts,
+                timeout_seconds=timeout_seconds,
+                available_at=available_at or now,
+                lease_owner=None,
+                lease_expires_at=None,
+                cancel_requested_at=None,
+                retry_of_job_id=None,
+                error_message=None,
+                created_at=now,
+                updated_at=now,
+                started_at=None,
+                completed_at=None,
+            )
+            .on_conflict_do_nothing(index_elements=[BackgroundJobModel.id])
+        )
+        async with self._session_factory() as session, session.begin():
+            await session.execute(statement)
+            row = (
+                await session.scalars(
+                    select(BackgroundJobModel).where(
+                        BackgroundJobModel.id == job_id,
+                        BackgroundJobModel.owner_user_id == owner_user_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            raise RuntimeError("Stable background job id belongs to another owner")
+        if (
+            row.kind != kind
+            or row.resource_type != resource_type
+            or row.resource_id != resource_id
+        ):
+            raise RuntimeError("Stable background job id has conflicting identity")
+        return _background_job_record(row)
 
     async def find_for_resource(
         self,

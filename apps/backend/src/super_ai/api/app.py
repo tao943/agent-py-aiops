@@ -83,6 +83,7 @@ from super_ai.chat.memory import (
     ChatMemoryService,
     memory_payload,
 )
+from super_ai.chat.memory_jobs import StructuredMemoryCompactionHandler
 from super_ai.chat.pending_action_jobs import PendingChatActionJobHandler
 from super_ai.chat.pending_actions import PendingChatActionService
 from super_ai.chat.routes import create_chat_runs_router, create_pending_chat_actions_router
@@ -489,6 +490,9 @@ def create_app(
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
     background_runtime.register("chat_agent_run", _chat_run_job_handler(app))
+    background_runtime.register(
+        "chat_memory_compaction", _chat_memory_compaction_job_handler(app)
+    )
     background_runtime.register(
         "pending_chat_action", _pending_chat_action_job_handler(app)
     )
@@ -2096,6 +2100,19 @@ def _pending_chat_action_job_handler(
         await PendingChatActionJobHandler(
             repositories=cast(MemoryRepositories, app.state.memory_repositories),
             bridge=cast(AiopsBridgeService, app.state.aiops_bridge_service),
+        )(context)
+
+    return handle
+
+
+def _chat_memory_compaction_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        request = _request_for_app(app)
+        await StructuredMemoryCompactionHandler(
+            repositories=_memory_repositories(request),
+            llm_provider=_llm_provider(request),
         )(context)
 
     return handle

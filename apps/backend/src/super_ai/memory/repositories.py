@@ -730,6 +730,16 @@ class ChatMemoryRepository(Protocol):
         """List chat messages by session and optional time range."""
         ...
 
+    async def list_messages_through(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        through_message_id: str,
+    ) -> list[ChatMessageRecord]:
+        """List a stable owner-scoped prefix using the boundary's timestamp and id."""
+        ...
+
     async def get_message(
         self,
         *,
@@ -1494,6 +1504,20 @@ class BackgroundJobRepository(Protocol):
         max_attempts: int = 3,
         timeout_seconds: int = 900,
         retry_of_job_id: str | None = None,
+        available_at: datetime | None = None,
+    ) -> BackgroundJobRecord: ...
+
+    async def enqueue_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        job_id: str,
+        kind: str,
+        resource_type: str,
+        resource_id: str,
+        payload: JsonDict | None = None,
+        max_attempts: int = 3,
+        timeout_seconds: int = 900,
         available_at: datetime | None = None,
     ) -> BackgroundJobRecord: ...
 
