@@ -58,6 +58,14 @@ AutoClosureValidity = Literal[
     "INFRA_INVALID",
     "MANUAL_REVIEW",
 ]
+ClosureMetricStage = Literal[
+    "detection",
+    "diagnosis",
+    "recovery",
+    "verification",
+    "resolved",
+    "total",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +209,17 @@ class AutoClosureStateRepository(Protocol):
     ) -> AutoClosureState: ...
 
 
+class AutoClosureMetrics(Protocol):
+    def record_stage_latency(
+        self,
+        stage: ClosureMetricStage,
+        *,
+        latency_ms: float,
+    ) -> None: ...
+
+    def record_verification(self, status: Literal["passed", "failed"]) -> None: ...
+
+
 class PersistedDiagnosticOutcomeLoader:
     """Rebuild a trusted artifact from records, never from report prose."""
 
@@ -320,8 +339,11 @@ class OrderPoolAutoClosureOrchestrator:
         recovery_coordinator: RecoveryCoordinator,
         evidence_preparer: EvidencePreparer | None = None,
         state_repository: AutoClosureStateRepository | None = None,
+        metrics: AutoClosureMetrics | None = None,
+        progress: Callable[[str], None] | None = None,
         budgets: AutoClosureBudgets | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         self._owner_user_id = owner_user_id
         self._source_id = source_id
@@ -332,8 +354,11 @@ class OrderPoolAutoClosureOrchestrator:
         self._recovery_coordinator = recovery_coordinator
         self._evidence_preparer = evidence_preparer
         self._state_repository = state_repository
+        self._metrics = metrics
+        self._progress_callback = progress
         self._budgets = budgets or AutoClosureBudgets()
         self._sleep = sleep
+        self._clock = clock
 
     async def run(
         self,
@@ -344,6 +369,7 @@ class OrderPoolAutoClosureOrchestrator:
     ) -> LiveAutoClosureResult:
         if scenario_id != SCENARIO_ID:
             raise ValueError("Automatic closure supports only the order-pool scenario.")
+        run_started = self._clock()
         identity = validate_run_id(run_id)
         observation: LiveFaultObservation | None = None
         evidence_context: LiveEvidenceContext | None = None
@@ -367,9 +393,11 @@ class OrderPoolAutoClosureOrchestrator:
                 if state is None:
                     await self._driver.preflight(identity)
                     await self._driver.baseline(identity)
+                    self._progress("fixture_ready")
                     state = await self._create_state(identity)
                 if observation is None:
                     observation = await self._driver.inject(identity)
+                    self._progress("fault_injected")
                     state = await self._advance_state(
                         identity,
                         state,
@@ -382,6 +410,7 @@ class OrderPoolAutoClosureOrchestrator:
                     validity="INFRA_INVALID",
                     authorization_code="fixture_infrastructure_failed",
                     observation=observation,
+                    started_at=run_started,
                 )
             if not observation.confirmed:
                 return await self._finish(
@@ -389,12 +418,14 @@ class OrderPoolAutoClosureOrchestrator:
                     validity="VALID_FAIL",
                     authorization_code="fault_observation_incomplete",
                     observation=observation,
+                    started_at=run_started,
                 )
             if self._evidence_preparer is not None:
                 evidence_context = await self._evidence_preparer.prepare(
                     identity,
                     observation,
                 )
+            detection_started = self._clock()
             lifecycle = await self._wait_lifecycle(
                 run_id,
                 seconds=self._budgets.detection_seconds,
@@ -406,13 +437,17 @@ class OrderPoolAutoClosureOrchestrator:
                     validity="INFRA_INVALID",
                     authorization_code="prometheus_detection_timeout",
                     observation=observation,
+                    started_at=run_started,
                 )
+            self._record_stage_latency("detection", detection_started)
+            self._progress("alert_detected")
             state = await self._advance_state(
                 identity,
                 state,
                 stage="alert_detected",
                 correlation=_lifecycle_payload(lifecycle),
             )
+            diagnosis_started = self._clock()
             lifecycle = await self._wait_lifecycle(
                 run_id,
                 seconds=self._budgets.diagnosis_seconds,
@@ -424,7 +459,10 @@ class OrderPoolAutoClosureOrchestrator:
                     validity="VALID_FAIL",
                     authorization_code="diagnostic_report_timeout",
                     observation=observation,
+                    started_at=run_started,
                 )
+            self._record_stage_latency("diagnosis", diagnosis_started)
+            self._progress("diagnosis_completed")
             state = await self._advance_state(
                 identity,
                 state,
@@ -456,6 +494,7 @@ class OrderPoolAutoClosureOrchestrator:
                     lifecycle=lifecycle,
                     observation=observation,
                     outcome=outcome,
+                    started_at=run_started,
                 )
 
             async def recover_once() -> dict[str, object]:
@@ -488,6 +527,7 @@ class OrderPoolAutoClosureOrchestrator:
                 stage="recovery_dispatched",
                 recovery_execution_key=recovery_intent_id,
             )
+            recovery_started = self._clock()
             try:
                 coordinated = await self._recovery_coordinator.run_once(
                     execution_identity,
@@ -503,6 +543,7 @@ class OrderPoolAutoClosureOrchestrator:
                     observation=observation,
                     outcome=outcome,
                     recovery_intent_id=recovery_intent_id,
+                    started_at=run_started,
                 )
             except Exception:
                 return await self._finish(
@@ -513,8 +554,11 @@ class OrderPoolAutoClosureOrchestrator:
                     observation=observation,
                     outcome=outcome,
                     recovery_intent_id=recovery_intent_id,
+                    started_at=run_started,
                 )
             recovery = _recovery_from_payload(coordinated.output)
+            self._record_stage_latency("recovery", recovery_started)
+            self._progress("recovery_completed")
             if recovery.executed:
                 self._driver.mark_recovery_completed(identity)
             state = await self._advance_state(
@@ -534,7 +578,9 @@ class OrderPoolAutoClosureOrchestrator:
                     outcome=outcome,
                     recovery=recovery,
                     recovery_intent_id=recovery_intent_id,
+                    started_at=run_started,
                 )
+            verification_started = self._clock()
             verification = await self._driver.verify(identity)
             await self._lifecycles.record_verification(
                 owner_user_id=self._owner_user_id,
@@ -551,15 +597,24 @@ class OrderPoolAutoClosureOrchestrator:
                 stage="verification_recorded",
                 verification_payload=_verification_payload(verification),
             )
+            self._record_stage_latency("verification", verification_started)
             if not verification.passed:
+                if self._metrics is not None:
+                    self._metrics.record_verification("failed")
                 validity = "VALID_FAIL"
                 authorization_code = "independent_verification_failed"
             else:
+                self._progress("verification_passed")
+                resolved_started = self._clock()
                 lifecycle = await self._wait_resolved(identity.run_id)
                 if lifecycle is None:
                     validity = "VALID_FAIL"
                     authorization_code = "alert_resolved_timeout"
                 else:
+                    self._record_stage_latency("resolved", resolved_started)
+                    if self._metrics is not None:
+                        self._metrics.record_verification("passed")
+                    self._progress("alert_resolved")
                     validity = "VALID_PASS"
                     authorization_code = "verified_closed"
                     state = await self._advance_state(
@@ -581,6 +636,7 @@ class OrderPoolAutoClosureOrchestrator:
             recovery=recovery,
             verification=verification,
             recovery_intent_id=recovery_intent_id,
+            started_at=run_started,
         )
 
     async def _load_state(self, identity: LiveRunIdentity) -> AutoClosureState | None:
@@ -655,7 +711,7 @@ class OrderPoolAutoClosureOrchestrator:
         seconds: float,
         require_report: bool,
     ) -> LiveAlertLifecycle | None:
-        deadline = monotonic() + max(0, seconds)
+        deadline = self._clock() + max(0, seconds)
         while True:
             lifecycle = await self._lifecycles.get_live_lifecycle(
                 owner_user_id=self._owner_user_id,
@@ -667,12 +723,12 @@ class OrderPoolAutoClosureOrchestrator:
                 not require_report or lifecycle.report_id is not None
             ):
                 return lifecycle
-            if monotonic() >= deadline:
+            if self._clock() >= deadline:
                 return None
             await self._sleep(self._budgets.poll_seconds)
 
     async def _wait_resolved(self, run_id: str) -> LiveAlertLifecycle | None:
-        deadline = monotonic() + max(0, self._budgets.resolved_seconds)
+        deadline = self._clock() + max(0, self._budgets.resolved_seconds)
         while True:
             lifecycle = await self._lifecycles.get_live_lifecycle(
                 owner_user_id=self._owner_user_id,
@@ -682,7 +738,7 @@ class OrderPoolAutoClosureOrchestrator:
             )
             if lifecycle is not None and lifecycle.closed_verified:
                 return lifecycle
-            if monotonic() >= deadline:
+            if self._clock() >= deadline:
                 return None
             await self._sleep(self._budgets.poll_seconds)
 
@@ -698,6 +754,7 @@ class OrderPoolAutoClosureOrchestrator:
         recovery: LiveRecoveryRecord | None = None,
         verification: LiveVerification | None = None,
         recovery_intent_id: str | None = None,
+        started_at: float | None = None,
     ) -> LiveAutoClosureResult:
         cleanup: LiveCleanupResult | None = None
         try:
@@ -709,6 +766,10 @@ class OrderPoolAutoClosureOrchestrator:
         if cleanup is not None and not cleanup.passed and validity == "VALID_PASS":
             validity = "VALID_FAIL"
             authorization_code = "cleanup_failed"
+        if cleanup is not None:
+            self._progress("cleanup_completed")
+        if started_at is not None:
+            self._record_stage_latency("total", started_at)
         correlation = AutoClosureCorrelation(
             incident_id=lifecycle.incident_id if lifecycle else None,
             diagnostic_task_id=lifecycle.diagnostic_task_id if lifecycle else None,
@@ -737,6 +798,21 @@ class OrderPoolAutoClosureOrchestrator:
             verification=verification,
             cleanup=cleanup,
         )
+
+    def _record_stage_latency(
+        self,
+        stage: ClosureMetricStage,
+        started_at: float,
+    ) -> None:
+        if self._metrics is not None:
+            self._metrics.record_stage_latency(
+                stage,
+                latency_ms=max(0.0, (self._clock() - started_at) * 1000),
+            )
+
+    def _progress(self, stage: str) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(stage)
 
 
 def _recovery_payload(record: LiveRecoveryRecord) -> dict[str, object]:

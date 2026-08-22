@@ -230,6 +230,18 @@ class StateRepository:
         return self.state
 
 
+class ClosureMetrics:
+    def __init__(self) -> None:
+        self.latencies: list[tuple[str, float]] = []
+        self.verifications: list[str] = []
+
+    def record_stage_latency(self, stage, *, latency_ms) -> None:
+        self.latencies.append((stage, latency_ms))
+
+    def record_verification(self, status) -> None:
+        self.verifications.append(status)
+
+
 class EvidencePreparer:
     def __init__(self) -> None:
         self.calls = 0
@@ -318,6 +330,48 @@ async def test_resume_restores_state_and_reuses_completed_recovery() -> None:
     assert recovery.calls == 1
     assert resumed_driver.calls == ["restore", "verify", "cleanup"]
     assert states.state is not None and states.state.stage == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_success_records_bounded_stage_metrics_and_progress() -> None:
+    metrics = ClosureMetrics()
+    progress: list[str] = []
+    orchestrator = OrderPoolAutoClosureOrchestrator(
+        owner_user_id="owner",
+        source_id="local-alertmanager",
+        driver=Driver(),
+        lifecycles=LifecycleRepository(),
+        diagnostic_loader=Loader(),
+        recovery=Recovery(),
+        recovery_coordinator=Coordinator(),
+        metrics=metrics,
+        progress=progress.append,
+        budgets=AutoClosureBudgets(poll_seconds=0),
+    )
+
+    result = await orchestrator.run(SCENARIO_ID, run_id="auto-metrics")
+
+    assert result.validity == "VALID_PASS"
+    assert [stage for stage, _ in metrics.latencies] == [
+        "detection",
+        "diagnosis",
+        "recovery",
+        "verification",
+        "resolved",
+        "total",
+    ]
+    assert all(latency >= 0 for _, latency in metrics.latencies)
+    assert metrics.verifications == ["passed"]
+    assert progress == [
+        "fixture_ready",
+        "fault_injected",
+        "alert_detected",
+        "diagnosis_completed",
+        "recovery_completed",
+        "verification_passed",
+        "alert_resolved",
+        "cleanup_completed",
+    ]
 
 
 @pytest.mark.asyncio
