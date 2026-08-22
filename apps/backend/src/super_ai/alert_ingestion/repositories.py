@@ -42,6 +42,7 @@ class IngestionWrite:
     starts_at: datetime | None
     scenario_id: str | None = None
     run_id: str | None = None
+    task_input_payload: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

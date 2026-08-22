@@ -240,7 +240,10 @@ class SQLAlchemyAlertIngestionRepository:
                 owner_user_id=write.owner_user_id,
                 status="accepted",
                 query=write.query,
-                input_payload={"query": write.query, "alert": write.safe_alert},
+                input_payload=(
+                    write.task_input_payload
+                    or {"query": write.query, "alert": write.safe_alert}
+                ),
                 result_payload={},
                 created_at=write.received_at,
                 updated_at=write.received_at,
