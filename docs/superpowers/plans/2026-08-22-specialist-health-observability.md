@@ -31,6 +31,9 @@
 - `apps/backend/tests/test_aiops_specialist_contracts.py`: unit contract/checksum/backward compatibility tests.
 - `apps/backend/tests/test_aiops_specialist_model_roles.py`: executor semantics, retry guard, prompt contract, and deadline tests.
 - `apps/backend/tests/test_aiops_multi_agent_runtime.py`: aggregation, LangGraph persistence, replay, and unchanged safety tests.
+- `apps/backend/tests/test_aiops_evidence_packets.py`: update Specialist fixtures and preserve packet aggregation behavior.
+- `apps/backend/tests/test_aiops_network_resume.py`: update Specialist fixtures and preserve replay/resume behavior.
+- `apps/backend/tests/test_aiops_v4_workflow.py`: update Specialist fixtures and preserve central V4 workflow behavior.
 - `apps/backend/tests/test_evaluation_artifacts.py`: safe projection and historical artifact tests.
 - `apps/backend/tests/test_evaluation_recording.py`: PostgreSQL reconstruction tests.
 - `apps/backend/tests/test_live_evaluation_scoring.py`: Live success/failure metric projection and unchanged score tests.
@@ -42,9 +45,12 @@
 **Files:**
 - Modify: `apps/backend/src/super_ai/aiops/specialists.py`
 - Modify: `apps/backend/tests/test_aiops_specialist_contracts.py`
+- Modify: `apps/backend/tests/test_aiops_evidence_packets.py`
+- Modify: `apps/backend/tests/test_aiops_network_resume.py`
+- Modify: `apps/backend/tests/test_aiops_v4_workflow.py`
 
 **Interfaces:**
-- Produces: `SpecialistEvidenceStatus`, `SpecialistAnalysisStatus`, `SpecialistAnalysisErrorCode`, and `derive_specialist_terminal_status(evidence_status, analysis_status) -> SpecialistTerminalStatus`.
+- Produces: `SpecialistEvidenceStatus`, `SpecialistAnalysisStatus`, `SpecialistAnalysisErrorCode`, `derive_specialist_terminal_status(evidence_status, analysis_status) -> SpecialistTerminalStatus`, and `specialist_result_legacy_checksum(result) -> str`.
 - Produces: new `SpecialistResult.create(...)` keyword parameters `evidence_status`, `analysis_status`, `analysis_error_code`, `analysis_attempt_count`, `soft_deadline_exceeded`, `hard_deadline_exceeded`, and `expected_tool_count`.
 - Preserves: `terminal_status`, `completed_steps`, `model_call_count`, `duration_ms`, and deterministic `result_checksum`.
 
@@ -134,13 +140,15 @@ def derive_specialist_terminal_status(
     return "inconclusive"
 ```
 
-Add fields to `SpecialistResult`, validate `0 <= analysis_attempt_count <= 2`, `0 <= expected_tool_count <= 3`, `len(completed_steps) <= expected_tool_count`, and require `analysis_error_code is None` for `analysis_status == "complete"`. Derive `completed_tool_count` and `follow_up_question_count` as properties. Reject a caller-provided `terminal_status` that differs from the derivation. Include every new persisted field in `_calculate_result_checksum()`.
+Add fields to `SpecialistResult`, validate `0 <= analysis_attempt_count <= 2`, `0 <= expected_tool_count <= 3`, `len(completed_steps) <= expected_tool_count`, and require `analysis_error_code is None` for `analysis_status == "complete"`. Derive `completed_tool_count` and `follow_up_question_count` as properties. Reject a caller-provided `terminal_status` that differs from the derivation. Include every new persisted field in `_calculate_result_checksum()`. Preserve the former checksum material verbatim in `specialist_result_legacy_checksum(result)` so Task 3 can authenticate old payloads before migration.
+
+Update every existing `SpecialistResult.create()` call in `test_aiops_evidence_packets.py`, `test_aiops_network_resume.py`, and `test_aiops_v4_workflow.py` with internally consistent explicit health fields. Do not add permissive production defaults merely to keep fixtures compiling.
 
 - [ ] **Step 4: Run contract tests and static checks**
 
 ```powershell
-uv run pytest tests/test_aiops_specialist_contracts.py -q
-uv run ruff check src/super_ai/aiops/specialists.py tests/test_aiops_specialist_contracts.py
+uv run pytest tests/test_aiops_specialist_contracts.py tests/test_aiops_evidence_packets.py tests/test_aiops_network_resume.py tests/test_aiops_v4_workflow.py -q
+uv run ruff check src/super_ai/aiops/specialists.py tests/test_aiops_specialist_contracts.py tests/test_aiops_evidence_packets.py tests/test_aiops_network_resume.py tests/test_aiops_v4_workflow.py
 uv run pyright src/super_ai/aiops/specialists.py
 ```
 
@@ -149,7 +157,7 @@ Expected: all commands exit 0; contract tests pass and checksum mismatch remains
 - [ ] **Step 5: Commit the contract slice**
 
 ```powershell
-git add apps/backend/src/super_ai/aiops/specialists.py apps/backend/tests/test_aiops_specialist_contracts.py
+git add apps/backend/src/super_ai/aiops/specialists.py apps/backend/tests/test_aiops_specialist_contracts.py apps/backend/tests/test_aiops_evidence_packets.py apps/backend/tests/test_aiops_network_resume.py apps/backend/tests/test_aiops_v4_workflow.py
 git commit -m "feat(aiops): separate specialist evidence and analysis health"
 ```
 
@@ -164,7 +172,8 @@ git commit -m "feat(aiops): separate specialist evidence and analysis health"
 
 **Interfaces:**
 - Consumes: Task 1 health types and derivation.
-- Produces: optional `retry_guard: Callable[[], bool] | None` on `invoke_bounded_structured_role`; a false guard returns `error_code="retry_skipped_insufficient_deadline"` after the first invalid structured response without a second provider call.
+- Produces: optional `retry_guard: Callable[[], bool] | None` and `attempt_timeout_seconds: float | None` on `invoke_bounded_structured_role`; defaults preserve existing callers, while a false guard returns `error_code="retry_skipped_insufficient_deadline"` without a second provider call.
+- Produces: private typed `SpecialistRoleInvocation[_RoleOutput]` from `_run_role()` carrying `value`, `error_category`, `error_code`, `attempt_count`, `error_phase`, `retryable`, and `http_status_class` without raw provider data.
 - Produces: `SpecialistExecutor._result(...)` parameters for both health dimensions and safe audit fields.
 
 - [ ] **Step 1: Write failing retry and executor semantic tests**
@@ -182,6 +191,7 @@ async def test_bounded_role_skips_correction_when_retry_guard_is_false() -> None
         correction_prompt="correct",
         role="evidence_analysis",
         retry_guard=lambda: False,
+        attempt_timeout_seconds=30.0,
     )
     assert outcome.value is None
     assert outcome.attempts == 1
@@ -224,7 +234,7 @@ Expected: FAIL on the absent `retry_guard` and absent health fields; existing st
 
 - [ ] **Step 3: Add the shared retry guard without changing default behavior**
 
-Change only the correction branch in `invoke_bounded_structured_role`:
+Add an optional per-attempt timeout and change only the invocation/correction branches in `invoke_bounded_structured_role`:
 
 ```python
 StructuredRoleRetryGuard = Callable[[], bool]
@@ -233,7 +243,15 @@ async def invoke_bounded_structured_role(
     *,
     # existing parameters unchanged
     retry_guard: StructuredRoleRetryGuard | None = None,
+    attempt_timeout_seconds: float | None = None,
 ) -> BoundedStructuredRoleOutcome[_StructuredRoleModel]:
+    response = (
+        await invoker.ainvoke(current_prompt)
+        if attempt_timeout_seconds is None
+        else await asyncio.wait_for(
+            invoker.ainvoke(current_prompt), timeout=attempt_timeout_seconds
+        )
+    )
     # ... after an invalid response and before the correction call
     if attempt < maximum_attempts:
         if retry_guard is not None and not retry_guard():
@@ -250,7 +268,7 @@ async def invoke_bounded_structured_role(
         continue
 ```
 
-The default `None` preserves Validator, Planner, and all existing callers exactly.
+Classify the new `TimeoutError` through the existing safe model-failure path as `error_code="timeout"`; persist no exception text. Both defaults are `None`, preserving Validator, Planner, and all existing callers exactly.
 
 - [ ] **Step 4: Implement executor health classification and the explicit JSON contract**
 
@@ -263,7 +281,11 @@ def _evidence_status(*, expected: int, completed: int) -> SpecialistEvidenceStat
     return "complete" if completed == expected else "partial"
 ```
 
-Map allowlisted structured failure metadata rather than exception text: `retry_exhausted -> degraded`, provider timeout/deadline -> `timeout`, provider 4xx/5xx -> `failed`, insufficient budget/deadline before a call -> `skipped`, and scope rejection -> `failed` with `scope_rejected`. Pass a retry guard that requires `remaining_hard_seconds >= role_timeout_seconds + scheduling_margin_seconds`; define both values from existing runtime timeouts rather than adding configuration or a dependency.
+Normalize shared invoker metadata through one private `_specialist_analysis_failure(invocation) -> tuple[SpecialistAnalysisStatus, SpecialistAnalysisErrorCode]`: structured parse exhaustion -> `degraded/retry_exhausted`; a skipped correction after one invalid attempt -> `degraded/retry_skipped_insufficient_deadline`; `error_code="timeout"` -> `timeout/provider_timeout`; HTTP class `4xx` or `5xx` -> `failed/provider_4xx` or `failed/provider_5xx`; scope validation -> `failed/scope_rejected`; insufficient budget/deadline before any analysis call -> `skipped/specialist_model_budget_exhausted` or the corresponding deadline code. Do not persist lower-level auth/rate-limit/connection strings outside this normalization.
+
+Add `evidence_analysis_attempt_timeout_seconds: float = 30.0` and `retry_scheduling_margin_seconds: float = 1.0` keyword-only constructor parameters to `SpecialistExecutor`; validate both as positive and pass the attempt timeout to the shared helper. The retry guard is exactly `self._remaining_hard_seconds(context, assignment) >= self._evidence_analysis_attempt_timeout_seconds + self._retry_scheduling_margin_seconds`.
+
+Change `_run_role()` to return `SpecialistRoleInvocation` rather than `(value, errorCategory)`. Serialize and restore `attempts`, `errorCategory`, `errorCode`, `errorPhase`, `retryable`, and `httpStatusClass` in the existing idempotency coordinator output, validating them against the shared safe types. This makes attempt counts and normalized errors reliable after replay.
 
 Append to the Evidence Analysis prompt an explicit public contract and synthetic example:
 
@@ -330,7 +352,7 @@ assert aggregated.specialist_statuses == {
 }
 ```
 
-Add an async LangGraph test asserting the `evidence_aggregator` Diagnostic Step, checkpoint, and `aiops.specialist_aggregation` event include only these safe maps and per-role counts. Add a historical checkpoint payload test where `_specialist_result_from_payload()` receives only old fields and uses a documented compatibility mapping (`completed -> complete/complete`, evidence-bearing `inconclusive -> partial/degraded`, evidence-free `timeout -> none/timeout`, other failures -> none/failed`) without changing its old `terminalStatus`. This mapping is only for executable checkpoint recovery; immutable historical evaluation artifacts remain unknown in Task 4. Add a replay test proving the same Specialist checksum and audit event are reused once.
+Add an async LangGraph test asserting the `evidence_aggregator` Diagnostic Step, checkpoint, and `aiops.specialist_aggregation` event include only these safe maps and per-role counts. Add a historical checkpoint payload test where `_specialist_result_from_payload()` receives only old fields, first verifies `resultChecksum` with `specialist_result_legacy_checksum()`, then returns a migrated result with a newly calculated checksum. The compatibility mapping is: Evidence exists and completed steps equal expected count -> `complete`; Evidence exists but fewer steps completed -> `partial`; no Evidence -> `none`; `completed -> analysis complete`, evidence-bearing `inconclusive -> analysis degraded`, timeouts -> analysis timeout, other failures -> analysis failed. Preserve evidence-bearing failed/timeout branches. Add a tampered legacy-checksum rejection test and a replay test proving the same migrated Specialist checksum and audit event are reused once.
 
 - [ ] **Step 2: Run Multi-Agent runtime tests and confirm RED**
 
@@ -360,7 +382,7 @@ Extend `_specialist_result_payload()`, `_failed_specialist_result()`, and `_spec
 }
 ```
 
-For old checkpoint payloads only, apply the compatibility mapping from Step 1 and set `expectedToolCount=len(completedSteps)` when the old terminal status is `completed`; otherwise use `max(len(completedSteps), legacy_expected_tool_count or 0)` from the reconstructed assignment. Do not rewrite old archive artifacts, and do not include raw follow-up text in aggregation summary or SSE.
+For old checkpoint payloads only, validate the old checksum before constructing the migrated result. Set `expectedToolCount=len(completedSteps)` for old `completed` results; otherwise use `max(len(completedSteps), legacy_expected_tool_count or 0)` from the reconstructed assignment. Derive evidence health by comparing completed/expected counts only after confirming Evidence IDs are present. The migrated in-memory result receives the new checksum and is used only for resumed execution. Do not rewrite old archive artifacts, and do not include raw follow-up text in aggregation summary or SSE.
 
 - [ ] **Step 4: Preserve central decision and safety with regression assertions**
 
@@ -416,7 +438,7 @@ assert runtime.completed_tool_count == runtime.expected_tool_count == 3
 assert runtime.follow_up_question_count == 0
 ```
 
-Inject an unknown role, unknown status/error code, negative counts, counts above 16, raw questions, `prompt`, `rawResponse`, `exception`, credentials, and Oracle keys; assert these are rejected/dropped using the existing artifact safety behavior and never appear in `repr(artifact)` or terminal JSON. Add a historical test proving an old artifact is readable with all new per-role fields set to `None`/unknown rather than success.
+Inject an unknown role, unknown status/error code, negative counts, counts above 16, raw questions, `prompt`, `rawResponse`, `exception`, credentials, and Oracle keys; assert these are rejected/dropped using the existing artifact safety behavior and never appear in `repr(artifact)` or terminal JSON. Add a historical test proving an old artifact is readable with every new field—including attempt/question/tool counts and deadline flags—set to `None`/unknown rather than zero/false/success. Assert historical roles are excluded from every new basis-point denominator.
 
 - [ ] **Step 2: Write failing PostgreSQL and Live metric tests**
 
@@ -448,12 +470,12 @@ Extend `SpecialistRoleAudit` with optional historical-safe fields and allowlist 
 evidence_status: str | None = None
 analysis_status: str | None = None
 analysis_error_code: str | None = None
-analysis_attempt_count: int = 0
-follow_up_question_count: int = 0
-soft_deadline_exceeded: bool = False
-hard_deadline_exceeded: bool = False
-completed_tool_count: int = 0
-expected_tool_count: int = 0
+analysis_attempt_count: int | None = None
+follow_up_question_count: int | None = None
+soft_deadline_exceeded: bool | None = None
+hard_deadline_exceeded: bool | None = None
+completed_tool_count: int | None = None
+expected_tool_count: int | None = None
 ```
 
 Parse only known roles, `complete|partial|none`, `complete|degraded|timeout|failed|skipped`, the design's safe error codes, booleans, attempts `0..2`, and tool/question counts `0..16`. Never copy the role dictionary wholesale.
@@ -473,12 +495,12 @@ specialistDeadlineHitBasisPoints
 specialistStructuredRetryBasisPoints
 ```
 
-Compute basis points deterministically over present known roles only; if no role has the new fields, retain an unknown/absent projection instead of emitting zero as a claim of failure.
+Compute basis points deterministically over roles whose complete new health metadata is present only; if no role has the new fields, omit the new metric maps/rates from the envelope instead of emitting zero as a claim of failure. `_required_*` PostgreSQL readers become optional readers for these new keys only; old required metrics stay required.
 
 - [ ] **Step 5: Run evaluation tests and static checks**
 
 ```powershell
-uv run pytest tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py -q
+uv run pytest tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py tests/test_aiops_evidence_packets.py tests/test_aiops_network_resume.py tests/test_aiops_v4_workflow.py -q
 uv run ruff check src/super_ai/evaluation/artifacts.py src/super_ai/evaluation/recording.py src/super_ai/evaluation/history.py src/super_ai/evaluation/live/cli.py tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py
 uv run pyright src/super_ai/evaluation/artifacts.py src/super_ai/evaluation/recording.py src/super_ai/evaluation/history.py src/super_ai/evaluation/live/cli.py
 ```
@@ -509,7 +531,7 @@ git commit -m "feat(eval): record specialist evidence and analysis health"
 From `apps/backend`:
 
 ```powershell
-uv run pytest tests/test_aiops_specialist_contracts.py tests/test_aiops_specialist_model_roles.py tests/test_aiops_multi_agent_runtime.py tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py -q
+uv run pytest tests/test_aiops_specialist_contracts.py tests/test_aiops_specialist_model_roles.py tests/test_aiops_multi_agent_runtime.py tests/test_aiops_evidence_packets.py tests/test_aiops_network_resume.py tests/test_aiops_v4_workflow.py tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py -q
 ```
 
 Expected: all focused tests pass. Do not run the full pytest suite unless a cross-module failure indicates a high-risk regression.
@@ -517,7 +539,7 @@ Expected: all focused tests pass. Do not run the full pytest suite unless a cros
 - [ ] **Step 2: Run focused lint and type checking**
 
 ```powershell
-uv run ruff check src/super_ai/aiops/specialists.py src/super_ai/aiops/decision_validation.py src/super_ai/aiops/investigation_runtime.py src/super_ai/aiops/evidence_aggregation.py src/super_ai/aiops/diagnostics.py src/super_ai/evaluation/artifacts.py src/super_ai/evaluation/recording.py src/super_ai/evaluation/history.py src/super_ai/evaluation/live/cli.py tests/test_aiops_specialist_contracts.py tests/test_aiops_specialist_model_roles.py tests/test_aiops_multi_agent_runtime.py tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py
+uv run ruff check src/super_ai/aiops/specialists.py src/super_ai/aiops/decision_validation.py src/super_ai/aiops/investigation_runtime.py src/super_ai/aiops/evidence_aggregation.py src/super_ai/aiops/diagnostics.py src/super_ai/evaluation/artifacts.py src/super_ai/evaluation/recording.py src/super_ai/evaluation/history.py src/super_ai/evaluation/live/cli.py tests/test_aiops_specialist_contracts.py tests/test_aiops_specialist_model_roles.py tests/test_aiops_multi_agent_runtime.py tests/test_aiops_evidence_packets.py tests/test_aiops_network_resume.py tests/test_aiops_v4_workflow.py tests/test_evaluation_artifacts.py tests/test_evaluation_recording.py tests/test_live_evaluation_scoring.py
 uv run pyright src/super_ai/aiops/specialists.py src/super_ai/aiops/decision_validation.py src/super_ai/aiops/investigation_runtime.py src/super_ai/aiops/evidence_aggregation.py src/super_ai/aiops/diagnostics.py src/super_ai/evaluation/artifacts.py src/super_ai/evaluation/recording.py src/super_ai/evaluation/history.py src/super_ai/evaluation/live/cli.py
 ```
 
@@ -559,7 +581,7 @@ Also verify no prompt, raw response, exception body, raw CLS log, credential, Gr
 If the canary required no code change, do not create an empty commit. If a localized correction was required, rerun Steps 1-2 and commit only that correction:
 
 ```powershell
-git add apps/backend/src/super_ai/aiops/specialists.py apps/backend/src/super_ai/aiops/decision_validation.py apps/backend/src/super_ai/aiops/investigation_runtime.py apps/backend/src/super_ai/aiops/evidence_aggregation.py apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/evaluation/artifacts.py apps/backend/src/super_ai/evaluation/recording.py apps/backend/src/super_ai/evaluation/history.py apps/backend/src/super_ai/evaluation/live/cli.py apps/backend/tests/test_aiops_specialist_contracts.py apps/backend/tests/test_aiops_specialist_model_roles.py apps/backend/tests/test_aiops_multi_agent_runtime.py apps/backend/tests/test_evaluation_artifacts.py apps/backend/tests/test_evaluation_recording.py apps/backend/tests/test_live_evaluation_scoring.py
+git add apps/backend/src/super_ai/aiops/specialists.py apps/backend/src/super_ai/aiops/decision_validation.py apps/backend/src/super_ai/aiops/investigation_runtime.py apps/backend/src/super_ai/aiops/evidence_aggregation.py apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/evaluation/artifacts.py apps/backend/src/super_ai/evaluation/recording.py apps/backend/src/super_ai/evaluation/history.py apps/backend/src/super_ai/evaluation/live/cli.py apps/backend/tests/test_aiops_specialist_contracts.py apps/backend/tests/test_aiops_specialist_model_roles.py apps/backend/tests/test_aiops_multi_agent_runtime.py apps/backend/tests/test_aiops_evidence_packets.py apps/backend/tests/test_aiops_network_resume.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_evaluation_artifacts.py apps/backend/tests/test_evaluation_recording.py apps/backend/tests/test_live_evaluation_scoring.py
 git commit -m "fix(aiops): harden specialist health canary projection"
 ```
 
