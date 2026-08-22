@@ -52,8 +52,7 @@ if ($LASTEXITCODE -ne 0) {
 $readiness = @(
     'http://127.0.0.1:8000/health',
     'http://127.0.0.1:9093/-/ready',
-    'http://127.0.0.1:18082/health',
-    'http://127.0.0.1:9090/-/ready'
+    'http://127.0.0.1:18082/health'
 )
 foreach ($uri in $readiness) {
     $ready = $false
@@ -72,6 +71,19 @@ foreach ($uri in $readiness) {
     if (-not $ready) {
         throw "Required local service is not ready: $uri"
     }
+}
+
+$prometheusReady = $false
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    & docker compose -f $composeFile --profile live-eval exec -T prometheus wget -q -O - http://127.0.0.1:9090/-/ready *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $prometheusReady = $true
+        break
+    }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $prometheusReady) {
+    throw 'Prometheus is not ready inside the isolated Compose network.'
 }
 
 $arguments = @(
