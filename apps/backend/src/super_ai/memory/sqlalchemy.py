@@ -2157,6 +2157,9 @@ def create_sqlalchemy_memory_repositories(
         SQLAlchemyOutboxEventRepository,
         SQLAlchemyUserFeedbackRepository,
     )
+    from super_ai.memory.pending_actions_sqlalchemy import (
+        SQLAlchemyPendingChatActionRepository,
+    )
 
     return MemoryRepositories(
         chat=SQLAlchemyChatMemoryRepository(session_factory),
@@ -2176,6 +2179,7 @@ def create_sqlalchemy_memory_repositories(
         chat_runs=SQLAlchemyChatRunRepository(session_factory),
         chat_tool_executions=SQLAlchemyChatToolExecutionRepository(session_factory),
         recovery_approvals=SQLAlchemyRecoveryApprovalRequestRepository(session_factory),
+        pending_chat_actions=SQLAlchemyPendingChatActionRepository(session_factory),
     )
 
 

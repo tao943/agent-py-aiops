@@ -58,6 +58,10 @@ class ChatMessageRecord:
 ChatRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 ChatToolExecutionStatus = Literal["running", "completed", "failed", "uncertain"]
 ChatToolClaimAction = Literal["acquired", "wait", "reuse", "manual_review"]
+PendingChatActionType = Literal["start_diagnostic", "create_recovery_approval"]
+PendingChatActionStatus = Literal[
+    "pending", "confirmed", "executed", "cancelled", "expired", "manual_review"
+]
 
 
 class ChatRunIdempotencyConflict(RuntimeError):
@@ -161,6 +165,38 @@ class RecoveryApprovalRequestRecord:
             "status": "pending",
             "executionPermitted": False,
             "reused": self.reused,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PendingChatActionRecord:
+    id: str
+    owner_user_id: str
+    session_id: str
+    chat_run_id: str | None
+    action_type: PendingChatActionType
+    target_resource_id: str
+    public_arguments: JsonDict
+    action_fingerprint: str
+    status: PendingChatActionStatus
+    expires_at: datetime
+    confirmed_at: datetime | None
+    execution_result_id: str | None
+    background_job_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    def to_payload(self) -> JsonDict:
+        return {
+            "id": self.id,
+            "sessionId": self.session_id,
+            "actionType": self.action_type,
+            "targetResourceId": self.target_resource_id,
+            "publicArguments": self.public_arguments,
+            "status": self.status,
+            "expiresAt": self.expires_at.isoformat(),
+            "backgroundJobId": self.background_job_id,
+            "executionResultId": self.execution_result_id,
         }
 
 
@@ -1380,6 +1416,51 @@ class RecoveryApprovalRequestRepository(Protocol):
     ) -> RecoveryApprovalRequestRecord: ...
 
 
+class PendingChatActionRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        action_id: str,
+        owner_user_id: str,
+        session_id: str,
+        chat_run_id: str | None,
+        action_type: PendingChatActionType,
+        target_resource_id: str,
+        public_arguments: JsonDict,
+        action_fingerprint: str,
+        expires_at: datetime,
+    ) -> PendingChatActionRecord: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, action_id: str
+    ) -> PendingChatActionRecord | None: ...
+
+    async def list_pending(
+        self, *, owner_user_id: str, session_id: str
+    ) -> list[PendingChatActionRecord]: ...
+
+    async def confirm_and_enqueue(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord | None: ...
+
+    async def cancel(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord | None: ...
+
+    async def mark_executed(
+        self,
+        *,
+        owner_user_id: str,
+        action_id: str,
+        execution_result_id: str,
+        now: datetime,
+    ) -> PendingChatActionRecord: ...
+
+    async def mark_manual_review(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord: ...
+
+
 class BackgroundJobRepository(Protocol):
     """Repository contract for durable leased jobs and their event log."""
 
@@ -1742,3 +1823,4 @@ class MemoryRepositories:
     chat_runs: ChatRunRepository | None = None
     chat_tool_executions: ChatToolExecutionRepository | None = None
     recovery_approvals: RecoveryApprovalRequestRepository | None = None
+    pending_chat_actions: PendingChatActionRepository | None = None

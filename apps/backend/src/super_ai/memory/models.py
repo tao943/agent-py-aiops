@@ -616,6 +616,64 @@ class RecoveryApprovalRequestModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PendingChatActionModel(Base):
+    """Owner-scoped confirmation state for one frozen chat write intent."""
+
+    __tablename__ = "pending_chat_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ('start_diagnostic','create_recovery_approval')",
+            name="ck_pending_chat_actions_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','confirmed','executed','cancelled','expired','manual_review')",
+            name="ck_pending_chat_actions_status",
+        ),
+        CheckConstraint(
+            "char_length(action_fingerprint) = 64",
+            name="ck_pending_chat_actions_fingerprint",
+        ),
+        Index(
+            "ix_pending_chat_actions_owner_session_status",
+            "owner_user_id",
+            "session_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "uq_pending_chat_actions_active_fingerprint",
+            "owner_user_id",
+            "action_fingerprint",
+            unique=True,
+            postgresql_where=text("status IN ('pending','confirmed')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    chat_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    action_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_resource_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    public_arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    action_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_result_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    background_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("background_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AgentToolCallAuditModel(Base):
     """Persisted tenant-scoped Agent tool invocation audit entry."""
 
