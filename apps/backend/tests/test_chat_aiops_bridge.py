@@ -7,11 +7,13 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from super_ai.alert_ingestion.repositories import AlertIncidentRecord
+from super_ai.alert_ingestion.repositories import AlertIncidentRecord, IncidentNotActive
 from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
 from super_ai.chat.aiops_bridge import (
     AiopsBridgeService,
     BridgeResourceNotFound,
+    RecoveryApprovalNotAllowed,
+    RecoveryApprovalRequest,
     build_aiops_bridge_tools,
 )
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -133,10 +135,54 @@ class FakeDiagnostics:
         ]
 
 
+class FakeScheduler:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def schedule_for_incident(
+        self, *, owner_user_id: str, incident_id: str, note: str | None
+    ) -> object:
+        from super_ai.chat.aiops_bridge import DiagnosticScheduleResult
+
+        del owner_user_id, incident_id, note
+        self.calls += 1
+        return DiagnosticScheduleResult(
+            diagnostic_task_id="diagnostic_a",
+            background_job_id="job_a",
+            reused=self.calls > 1,
+        )
+
+
+class FakeApprovalRequests:
+    def __init__(self) -> None:
+        self.created = 0
+
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        diagnostic_task_id: str,
+        proposal_fingerprint: str,
+        request_reason: str,
+        chat_run_id: str | None,
+    ) -> RecoveryApprovalRequest:
+        del proposal_fingerprint, request_reason, chat_run_id
+        self.created += 1
+        return RecoveryApprovalRequest(
+            id="approval_a",
+            owner_user_id=owner_user_id,
+            diagnostic_task_id=diagnostic_task_id,
+            status="pending",
+            execution_permitted=False,
+            reused=self.created > 1,
+        )
+
 def _bridge() -> AiopsBridgeService:
     return AiopsBridgeService(
         incidents=FakeIncidentQueries(),
         diagnostics=FakeDiagnostics(),  # type: ignore[arg-type]
+        scheduler=FakeScheduler(),  # type: ignore[arg-type]
+        approval_requests=FakeApprovalRequests(),
     )
 
 
@@ -193,6 +239,82 @@ async def test_bound_tool_cannot_read_other_owner_incident() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_diagnostic_returns_bounded_scheduler_result() -> None:
+    bridge = _bridge()
+
+    first = await bridge.start_incident_diagnostic(
+        owner_user_id="owner_a", incident_id="incident_a", note="check current state"
+    )
+    second = await bridge.start_incident_diagnostic(
+        owner_user_id="owner_a", incident_id="incident_a", note=None
+    )
+
+    assert first.diagnostic_task_id == second.diagnostic_task_id == "diagnostic_a"
+    assert first.background_job_id == second.background_job_id == "job_a"
+    assert first.reused is False
+    assert second.reused is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_request_only_creates_pending_non_executable_approval() -> None:
+    bridge = _bridge()
+
+    result = await bridge.create_recovery_approval_request(
+        owner_user_id="owner_a",
+        task_id="diagnostic_a",
+        reason="Please have an operator review the proposal.",
+        chat_run_id="run_a",
+    )
+
+    assert result.status == "pending"
+    assert result.execution_permitted is False
+    assert "approve" not in result.to_payload()
+    assert "execute" not in result.to_payload()
+
+
+@pytest.mark.asyncio
+async def test_recovery_request_without_proposal_is_rejected() -> None:
+    class NoActionDiagnostics(FakeDiagnostics):
+        async def list_reports(
+            self, *, owner_user_id: str, task_id: str
+        ) -> list[DiagnosticReportRecord]:
+            reports = await super().list_reports(
+                owner_user_id=owner_user_id, task_id=task_id
+            )
+            report = reports[0]
+            return [
+                DiagnosticReportRecord(
+                    id=report.id,
+                    owner_user_id=report.owner_user_id,
+                    task_id=report.task_id,
+                    title=report.title,
+                    content=report.content,
+                    payload={
+                        **report.payload,
+                        "recoveryPlan": {"mode": "no_action"},
+                        "recoveryPolicy": {"executionPermitted": False},
+                    },
+                    created_at=report.created_at,
+                )
+            ]
+
+    bridge = AiopsBridgeService(
+        incidents=FakeIncidentQueries(),
+        diagnostics=NoActionDiagnostics(),  # type: ignore[arg-type]
+        scheduler=FakeScheduler(),  # type: ignore[arg-type]
+        approval_requests=FakeApprovalRequests(),
+    )
+
+    with pytest.raises(RecoveryApprovalNotAllowed):
+        await bridge.create_recovery_approval_request(
+            owner_user_id="owner_a",
+            task_id="diagnostic_a",
+            reason="review",
+            chat_run_id=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_postgresql_incident_query_is_owner_scoped(
     migrated_database_url: str,
 ) -> None:
@@ -212,7 +334,50 @@ async def test_postgresql_incident_query_is_owner_scoped(
     assert other is None
 
 
-async def _seed_incidents(session_factory: async_sessionmaker[AsyncSession]) -> None:
+@pytest.mark.asyncio
+async def test_postgresql_scheduler_reuses_one_task_and_job(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_incidents(session_factory)
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    try:
+        first = await repository.schedule_for_incident(
+            owner_user_id="owner_a", incident_id="incident_a", note=None
+        )
+        second = await repository.schedule_for_incident(
+            owner_user_id="owner_a", incident_id="incident_a", note="retry"
+        )
+    finally:
+        await engine.dispose()
+
+    assert first.diagnostic_task_id == second.diagnostic_task_id
+    assert first.background_job_id == second.background_job_id
+    assert first.reused is False
+    assert second.reused is True
+
+
+@pytest.mark.asyncio
+async def test_postgresql_scheduler_rejects_resolved_incident(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_incidents(session_factory, status="resolved")
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    try:
+        with pytest.raises(IncidentNotActive):
+            await repository.schedule_for_incident(
+                owner_user_id="owner_a", incident_id="incident_a", note=None
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _seed_incidents(
+    session_factory: async_sessionmaker[AsyncSession], *, status: str = "active"
+) -> None:
     async with session_factory() as session, session.begin():
         session.add_all(
             [
@@ -233,13 +398,13 @@ async def _seed_incidents(session_factory: async_sessionmaker[AsyncSession]) -> 
                     owner_user_id=f"owner_{suffix}",
                     source_id="test",
                     group_key_hash=suffix * 64,
-                    status="active",
+                    status=status,
                     alert_name="HighLatency",
                     service="order-service",
                     severity="critical",
                     starts_at=NOW,
                     last_seen_at=NOW,
-                    resolved_at=None,
+                    resolved_at=NOW if status == "resolved" else None,
                     delivery_count=1,
                     diagnostic_task_id=None,
                     created_at=NOW,

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from hashlib import sha256
+from typing import Any, Protocol, cast
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,12 +15,50 @@ from pydantic import BaseModel, ConfigDict, Field
 from super_ai.alert_ingestion.repositories import (
     AlertIncidentQueryRepository,
     AlertIncidentRecord,
+    DiagnosticScheduleResult,
+    IncidentDiagnosticScheduler,
+    IncidentUnavailable,
 )
 from super_ai.memory.repositories import DiagnosticMemoryRepository, JsonDict
 
 
 class BridgeResourceNotFound(LookupError):
     """The requested owner-scoped resource is absent or inaccessible."""
+
+
+class RecoveryApprovalNotAllowed(RuntimeError):
+    """The diagnostic has no proposal eligible for human approval."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryApprovalRequest:
+    id: str
+    owner_user_id: str
+    diagnostic_task_id: str
+    status: str
+    execution_permitted: bool
+    reused: bool
+
+    def to_payload(self) -> JsonDict:
+        return {
+            "id": self.id,
+            "diagnosticTaskId": self.diagnostic_task_id,
+            "status": self.status,
+            "executionPermitted": False,
+            "reused": self.reused,
+        }
+
+
+class RecoveryApprovalRequestRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        diagnostic_task_id: str,
+        proposal_fingerprint: str,
+        request_reason: str,
+        chat_run_id: str | None,
+    ) -> RecoveryApprovalRequest: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,9 +159,13 @@ class AiopsBridgeService:
         *,
         incidents: AlertIncidentQueryRepository,
         diagnostics: DiagnosticMemoryRepository,
+        scheduler: IncidentDiagnosticScheduler | None = None,
+        approval_requests: RecoveryApprovalRequestRepository | None = None,
     ) -> None:
         self._incidents = incidents
         self._diagnostics = diagnostics
+        self._scheduler = scheduler
+        self._approval_requests = approval_requests
 
     async def list_active_incidents(
         self, *, owner_user_id: str, limit: int = 10
@@ -207,6 +251,67 @@ class AiopsBridgeService:
             for record in bounded
         )
 
+    async def start_incident_diagnostic(
+        self,
+        *,
+        owner_user_id: str,
+        incident_id: str,
+        note: str | None,
+    ) -> DiagnosticScheduleResult:
+        if self._scheduler is None:
+            raise RuntimeError("Incident diagnostic scheduling is unavailable.")
+        try:
+            return await self._scheduler.schedule_for_incident(
+                owner_user_id=owner_user_id,
+                incident_id=incident_id,
+                note=(note or "").strip()[:1000] or None,
+            )
+        except IncidentUnavailable as exc:
+            raise BridgeResourceNotFound("Incident is unavailable.") from exc
+
+    async def create_recovery_approval_request(
+        self,
+        *,
+        owner_user_id: str,
+        task_id: str,
+        reason: str,
+        chat_run_id: str | None,
+    ) -> RecoveryApprovalRequest:
+        if self._approval_requests is None:
+            raise RuntimeError("Recovery approval persistence is unavailable.")
+        report = await self.get_diagnostic_report(
+            owner_user_id=owner_user_id, task_id=task_id
+        )
+        if (
+            not report.human_approval_required
+            or report.recovery_mode == "no_action"
+            or report.execution_permitted
+        ):
+            raise RecoveryApprovalNotAllowed(
+                "Diagnostic recovery proposal is not eligible for approval."
+            )
+        bounded_reason = reason.strip()[:1000]
+        if not bounded_reason:
+            raise ValueError("Recovery approval reason is required.")
+        canonical = json.dumps(
+            {
+                "taskId": report.task_id,
+                "recoveryMode": report.recovery_mode,
+                "rootCause": report.root_cause,
+                "evidenceIds": report.evidence_ids,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return await self._approval_requests.create_or_get(
+            owner_user_id=owner_user_id,
+            diagnostic_task_id=task_id,
+            proposal_fingerprint=sha256(canonical.encode("utf-8")).hexdigest(),
+            request_reason=bounded_reason,
+            chat_run_id=chat_run_id,
+        )
+
     async def _require_task(self, owner_user_id: str, task_id: str) -> Any:
         task = await self._diagnostics.get_task(
             owner_user_id=owner_user_id, task_id=task_id
@@ -236,8 +341,20 @@ class DiagnosticEvidenceInput(DiagnosticTaskInput):
     limit: int = Field(default=20, ge=1, le=50)
 
 
+class StartIncidentDiagnosticInput(_StrictInput):
+    incident_id: str = Field(min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class CreateRecoveryApprovalInput(DiagnosticTaskInput):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 def build_aiops_bridge_tools(
-    *, owner_user_id: str, service: AiopsBridgeService
+    *,
+    owner_user_id: str,
+    service: AiopsBridgeService,
+    chat_run_id: str | None = None,
 ) -> dict[str, StructuredTool]:
     """Bind authenticated owner identity outside every model-visible schema."""
 
@@ -274,6 +391,30 @@ def build_aiops_bridge_tools(
         )
         return {"items": [item.to_payload() for item in items]}
 
+    async def start_incident_diagnostic(
+        incident_id: str, note: str | None = None
+    ) -> JsonDict:
+        result = await service.start_incident_diagnostic(
+            owner_user_id=owner_user_id, incident_id=incident_id, note=note
+        )
+        return {
+            "diagnosticTaskId": result.diagnostic_task_id,
+            "backgroundJobId": result.background_job_id,
+            "reused": result.reused,
+        }
+
+    async def create_recovery_approval_request(
+        task_id: str, reason: str
+    ) -> JsonDict:
+        return (
+            await service.create_recovery_approval_request(
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                reason=reason,
+                chat_run_id=chat_run_id,
+            )
+        ).to_payload()
+
     definitions = (
         (
             "list_active_incidents",
@@ -299,6 +440,18 @@ def build_aiops_bridge_tools(
             "Get public evidence for one owned diagnostic.",
             get_diagnostic_evidence,
             DiagnosticEvidenceInput,
+        ),
+        (
+            "start_incident_diagnostic",
+            "Create or reuse a diagnostic for one owned active incident.",
+            start_incident_diagnostic,
+            StartIncidentDiagnosticInput,
+        ),
+        (
+            "create_recovery_approval_request",
+            "Create a pending human approval request; never execute recovery.",
+            create_recovery_approval_request,
+            CreateRecoveryApprovalInput,
         ),
     )
     return {

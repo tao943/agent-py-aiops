@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
 
@@ -21,6 +22,9 @@ from .repositories import (
     AlertDisposition,
     AlertIncidentRecord,
     AlertPersistenceError,
+    DiagnosticScheduleResult,
+    IncidentNotActive,
+    IncidentUnavailable,
     IngestionResult,
     IngestionWrite,
 )
@@ -59,6 +63,104 @@ class SQLAlchemyAlertIngestionRepository:
         async with self._session_factory() as session:
             row = (await session.scalars(statement)).one_or_none()
         return _incident_record(row) if row is not None else None
+
+    async def schedule_for_incident(
+        self,
+        *,
+        owner_user_id: str,
+        incident_id: str,
+        note: str | None,
+    ) -> DiagnosticScheduleResult:
+        now = _utc_now()
+        try:
+            async with self._session_factory() as session, session.begin():
+                incident = (
+                    await session.scalars(
+                        select(AlertIncidentModel)
+                        .where(
+                            AlertIncidentModel.id == incident_id,
+                            AlertIncidentModel.owner_user_id == owner_user_id,
+                        )
+                        .with_for_update()
+                    )
+                ).one_or_none()
+                if incident is None:
+                    raise IncidentUnavailable("Incident is unavailable.")
+                if incident.status != "active":
+                    raise IncidentNotActive("Incident is not active.")
+                if incident.diagnostic_task_id is not None:
+                    job = (
+                        await session.scalars(
+                            select(BackgroundJobModel).where(
+                                BackgroundJobModel.owner_user_id == owner_user_id,
+                                BackgroundJobModel.resource_type == "aiops_diagnostic",
+                                BackgroundJobModel.resource_id
+                                == incident.diagnostic_task_id,
+                            )
+                        )
+                    ).one_or_none()
+                    if job is None:
+                        raise AlertPersistenceError(
+                            "Incident diagnostic job is unavailable."
+                        )
+                    return DiagnosticScheduleResult(
+                        incident.diagnostic_task_id, job.id, True
+                    )
+                suffix = uuid4().hex
+                task_id = f"diagnostic_{suffix}"
+                job_id = f"job_{suffix}"
+                query = _incident_query(incident, note)
+                session.add(
+                    DiagnosticTaskModel(
+                        id=task_id,
+                        owner_user_id=owner_user_id,
+                        status="accepted",
+                        query=query,
+                        input_payload={
+                            "query": query,
+                            "alert": {
+                                "id": incident.id,
+                                "alertName": incident.alert_name,
+                                "service": incident.service,
+                                "severity": incident.severity,
+                            },
+                        },
+                        result_payload={},
+                        created_at=now,
+                        updated_at=now,
+                        completed_at=None,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    BackgroundJobModel(
+                        id=job_id,
+                        owner_user_id=owner_user_id,
+                        kind="aiops_diagnosis",
+                        resource_type="aiops_diagnostic",
+                        resource_id=task_id,
+                        status="queued",
+                        payload={"diagnosticId": task_id},
+                        attempt=0,
+                        max_attempts=3,
+                        timeout_seconds=1800,
+                        available_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        cancel_requested_at=None,
+                        retry_of_job_id=None,
+                        error_message=None,
+                        created_at=now,
+                        updated_at=now,
+                        started_at=None,
+                        completed_at=None,
+                    )
+                )
+                incident.diagnostic_task_id = task_id
+                incident.updated_at = now
+                return DiagnosticScheduleResult(task_id, job_id, False)
+        except SQLAlchemyError as exc:
+            raise AlertPersistenceError("Alert persistence is unavailable.") from exc
 
     async def apply(self, write: IngestionWrite) -> IngestionResult:
         try:
@@ -274,3 +376,16 @@ def _incident_record(row: AlertIncidentModel) -> AlertIncidentRecord:
         last_seen_at=row.last_seen_at,
         diagnostic_task_id=row.diagnostic_task_id,
     )
+
+
+def _incident_query(incident: AlertIncidentModel, note: str | None) -> str:
+    query = (
+        f"Investigate {incident.alert_name} affecting {incident.service}. "
+        f"Severity: {incident.severity}."
+    )
+    bounded_note = (note or "").strip()[:1000]
+    return f"{query} Operator note: {bounded_note}" if bounded_note else query
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
