@@ -15,7 +15,6 @@ from typing import cast
 
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity, ExecutionResult
 from super_ai.aiops.investigation import StrategyMode
-from super_ai.alert_ingestion.config import load_alert_ingestion_settings
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
 from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
 from super_ai.evaluation.archive import EvaluationArchive
@@ -444,7 +443,6 @@ async def _run_auto_closure_command(
     config_path = cast(str | None, arguments.config)
     evidence_source = cast(EvidenceSource, arguments.evidence_source)
     owner_user_id = cast(str, arguments.owner_user_id)
-    knowledge_base_id = cast(str, arguments.knowledge_base_id)
     archive = EvaluationArchive.from_config(config_path=config_path)
     existing = None
     if bool(arguments.resume):
@@ -501,20 +499,10 @@ async def _run_auto_closure_command(
         runtime_provider = repositories.aiops_runtime
         if runtime_provider is None:
             raise RuntimeError("AIOps runtime repository is required for auto closure.")
-        alert_settings = load_alert_ingestion_settings(config_path)
-        matching_sources = [
-            source
-            for source in alert_settings.sources.values()
-            if source.owner_user_id == owner_user_id
-            and source.knowledge_base_id == knowledge_base_id
-        ]
-        if len(matching_sources) != 1:
-            raise RuntimeError("A unique alert source is required for auto closure.")
-        source = matching_sources[0]
         closure_metrics = AlertIngestionMetrics()
         orchestrator = OrderPoolAutoClosureOrchestrator(
             owner_user_id=owner_user_id,
-            source_id=source.id,
+            source_id="local-alertmanager",
             driver=driver,
             lifecycles=SQLAlchemyAlertIngestionRepository(session_factory),
             diagnostic_loader=PersistedDiagnosticOutcomeLoader(repositories),
@@ -1488,3 +1476,7 @@ def _sanitize_stored_report(payload: Mapping[str, object]) -> dict[str, object]:
         status=cast(str, status),
         result=result,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
