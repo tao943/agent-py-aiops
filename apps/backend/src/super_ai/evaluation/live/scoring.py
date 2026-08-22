@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 from super_ai.aiops.investigation import StrategyMode
-from super_ai.evaluation.artifacts import InvestigationBenchmarkMetrics, RunArtifact
+from super_ai.evaluation.artifacts import (
+    InvestigationBenchmarkMetrics,
+    RunArtifact,
+    SpecialistRoleAudit,
+)
 from super_ai.evaluation.domain import ScenarioOracle
 from super_ai.evaluation.live.domain import (
     EvidenceSource,
@@ -178,6 +184,27 @@ def _investigation_metrics(
         evidence_source=evidence_source,
         fallback=evidence_recall_basis_points,
     )
+    health_roles = tuple(
+        role
+        for role in audit.roles
+        if role.evidence_status is not None
+        and role.analysis_status is not None
+        and role.analysis_attempt_count is not None
+        and role.follow_up_question_count is not None
+        and role.soft_deadline_exceeded is not None
+        and role.hard_deadline_exceeded is not None
+    )
+    health_denominator = len(health_roles)
+
+    def health_basis_points(predicate: Callable[[SpecialistRoleAudit], bool]) -> int | None:
+        if health_denominator == 0:
+            return None
+        return round(
+            sum(1 for role in health_roles if predicate(role))
+            * 10_000
+            / health_denominator
+        )
+
     return InvestigationBenchmarkMetrics(
         strategy=requested_strategy,
         effective_strategy=audit.effective_strategy or audit.strategy,
@@ -203,6 +230,47 @@ def _investigation_metrics(
         ),
         role_evidence_counts=tuple(
             (item.role, len(item.evidence_ids)) for item in audit.roles
+        ),
+        role_evidence_statuses=tuple(
+            (item.role, item.evidence_status)
+            for item in health_roles
+            if item.evidence_status is not None
+        ),
+        role_analysis_statuses=tuple(
+            (item.role, item.analysis_status)
+            for item in health_roles
+            if item.analysis_status is not None
+        ),
+        role_analysis_error_codes=tuple(
+            (item.role, item.analysis_error_code)
+            for item in health_roles
+            if item.analysis_error_code is not None
+        ),
+        role_analysis_attempt_counts=tuple(
+            (item.role, item.analysis_attempt_count)
+            for item in health_roles
+            if item.analysis_attempt_count is not None
+        ),
+        role_follow_up_question_counts=tuple(
+            (item.role, item.follow_up_question_count)
+            for item in health_roles
+            if item.follow_up_question_count is not None
+        ),
+        specialist_evidence_completion_basis_points=health_basis_points(
+            lambda role: role.evidence_status == "complete"
+        ),
+        specialist_analysis_completion_basis_points=health_basis_points(
+            lambda role: role.analysis_status == "complete"
+        ),
+        specialist_degradation_basis_points=health_basis_points(
+            lambda role: role.analysis_status != "complete"
+        ),
+        specialist_deadline_hit_basis_points=health_basis_points(
+            lambda role: role.soft_deadline_exceeded is True
+            or role.hard_deadline_exceeded is True
+        ),
+        specialist_structured_retry_basis_points=health_basis_points(
+            lambda role: cast(int, role.analysis_attempt_count) > 1
         ),
         source_group_count=audit.source_group_count,
         duplicate_evidence_count=duplicate_count,

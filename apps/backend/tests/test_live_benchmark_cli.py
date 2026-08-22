@@ -496,6 +496,16 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
                 role_model_call_counts=(("log", 2), ("runtime", 2)),
                 role_tool_call_counts=(("log", 1), ("runtime", 3)),
                 role_evidence_counts=(("log", 1), ("runtime", 3)),
+                role_evidence_statuses=(("log", "complete"), ("runtime", "complete")),
+                role_analysis_statuses=(("log", "complete"), ("runtime", "degraded")),
+                role_analysis_error_codes=(("runtime", "retry_exhausted"),),
+                role_analysis_attempt_counts=(("log", 1), ("runtime", 2)),
+                role_follow_up_question_counts=(("log", 1), ("runtime", 0)),
+                specialist_evidence_completion_basis_points=10000,
+                specialist_analysis_completion_basis_points=5000,
+                specialist_degradation_basis_points=5000,
+                specialist_deadline_hit_basis_points=0,
+                specialist_structured_retry_basis_points=5000,
                 source_group_count=4,
                 duplicate_evidence_count=0,
                 conflict_count=1,
@@ -539,6 +549,18 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
         "log": 1,
         "runtime": 3,
     }
+    assert envelope.metrics["specialistEvidenceStatuses"] == {
+        "log": "complete",
+        "runtime": "complete",
+    }
+    assert envelope.metrics["specialistAnalysisStatuses"] == {
+        "log": "complete",
+        "runtime": "degraded",
+    }
+    assert envelope.metrics["specialistAnalysisErrorCodes"] == {
+        "runtime": "retry_exhausted"
+    }
+    assert envelope.metrics["specialistAnalysisCompletionBasisPoints"] == 5000
     assert envelope.metrics["toolCallCount"] == 4
     assert envelope.metrics["sourceGroupCount"] == 4
     assert envelope.metrics["duplicateEvidenceCount"] == 0

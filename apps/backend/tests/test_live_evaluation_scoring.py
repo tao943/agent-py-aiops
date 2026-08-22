@@ -613,6 +613,42 @@ def test_live_evaluator_projects_safe_investigation_metrics() -> None:
             conflict_count=1,
             missing_domains=(),
             aggregation_checksum="a" * 64,
+            roles=(
+                SpecialistRoleAudit(
+                    role="runtime",
+                    status="inconclusive",
+                    duration_ms=60,
+                    model_call_count=2,
+                    tool_call_count=2,
+                    evidence_ids=("ev-session",),
+                    evidence_status="complete",
+                    analysis_status="degraded",
+                    analysis_error_code="retry_exhausted",
+                    analysis_attempt_count=2,
+                    follow_up_question_count=0,
+                    soft_deadline_exceeded=False,
+                    hard_deadline_exceeded=False,
+                    completed_tool_count=2,
+                    expected_tool_count=2,
+                ),
+                SpecialistRoleAudit(
+                    role="log",
+                    status="completed",
+                    duration_ms=40,
+                    model_call_count=2,
+                    tool_call_count=1,
+                    evidence_ids=("ev-graph",),
+                    evidence_status="complete",
+                    analysis_status="complete",
+                    analysis_error_code=None,
+                    analysis_attempt_count=1,
+                    follow_up_question_count=1,
+                    soft_deadline_exceeded=False,
+                    hard_deadline_exceeded=False,
+                    completed_tool_count=1,
+                    expected_tool_count=1,
+                ),
+            ),
         ),
         model_call_count=3,
     )
@@ -639,6 +675,19 @@ def test_live_evaluator_projects_safe_investigation_metrics() -> None:
     assert result.investigation_metrics.source_group_count == 2
     assert result.investigation_metrics.conflict_count == 1
     assert result.investigation_metrics.aggregation_checksum == "a" * 64
+    assert result.investigation_metrics.role_evidence_statuses == (
+        ("runtime", "complete"),
+        ("log", "complete"),
+    )
+    assert result.investigation_metrics.role_analysis_statuses == (
+        ("runtime", "degraded"),
+        ("log", "complete"),
+    )
+    assert result.investigation_metrics.specialist_evidence_completion_basis_points == 10000
+    assert result.investigation_metrics.specialist_analysis_completion_basis_points == 5000
+    assert result.investigation_metrics.specialist_degradation_basis_points == 5000
+    assert result.investigation_metrics.specialist_deadline_hit_basis_points == 0
+    assert result.investigation_metrics.specialist_structured_retry_basis_points == 5000
 
 
 def test_equivalent_single_and_multi_decisions_receive_identical_score() -> None:

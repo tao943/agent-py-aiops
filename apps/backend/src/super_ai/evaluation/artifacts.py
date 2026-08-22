@@ -31,6 +31,15 @@ class SpecialistRoleAudit:
     model_call_count: int
     tool_call_count: int
     evidence_ids: tuple[str, ...]
+    evidence_status: str | None = None
+    analysis_status: str | None = None
+    analysis_error_code: str | None = None
+    analysis_attempt_count: int | None = None
+    follow_up_question_count: int | None = None
+    soft_deadline_exceeded: bool | None = None
+    hard_deadline_exceeded: bool | None = None
+    completed_tool_count: int | None = None
+    expected_tool_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +83,16 @@ class InvestigationBenchmarkMetrics:
     role_model_call_counts: tuple[tuple[str, int], ...] = ()
     role_tool_call_counts: tuple[tuple[str, int], ...] = ()
     role_evidence_counts: tuple[tuple[str, int], ...] = ()
+    role_evidence_statuses: tuple[tuple[str, str], ...] = ()
+    role_analysis_statuses: tuple[tuple[str, str], ...] = ()
+    role_analysis_error_codes: tuple[tuple[str, str], ...] = ()
+    role_analysis_attempt_counts: tuple[tuple[str, int], ...] = ()
+    role_follow_up_question_counts: tuple[tuple[str, int], ...] = ()
+    specialist_evidence_completion_basis_points: int | None = None
+    specialist_analysis_completion_basis_points: int | None = None
+    specialist_degradation_basis_points: int | None = None
+    specialist_deadline_hit_basis_points: int | None = None
+    specialist_structured_retry_basis_points: int | None = None
     source_group_count: int = 0
     duplicate_evidence_count: int = 0
     conflict_count: int = 0
@@ -445,6 +464,25 @@ _SPECIALIST_ROLES = frozenset({"runtime", "log", "change", "knowledge"})
 _SPECIALIST_STATUSES = frozenset(
     {"completed", "inconclusive", "failed", "timeout", "cancelled", "missing"}
 )
+_SPECIALIST_EVIDENCE_STATUSES = frozenset({"complete", "partial", "none"})
+_SPECIALIST_ANALYSIS_STATUSES = frozenset(
+    {"complete", "degraded", "timeout", "failed", "skipped"}
+)
+_SPECIALIST_ANALYSIS_ERROR_CODES = frozenset(
+    {
+        "parse_error",
+        "schema_validation_failed",
+        "scope_rejected",
+        "provider_4xx",
+        "provider_5xx",
+        "provider_timeout",
+        "retry_exhausted",
+        "retry_skipped_insufficient_deadline",
+        "specialist_soft_deadline_expired",
+        "specialist_hard_deadline_expired",
+        "specialist_model_budget_exhausted",
+    }
+)
 _SAFE_EVIDENCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -509,6 +547,33 @@ def _specialist_roles_from_payload(
             model_call_count=cast(int, model_call_count),
             tool_call_count=len(unique_evidence_ids),
             evidence_ids=unique_evidence_ids,
+            evidence_status=_allowlisted_text(
+                item.get("evidenceStatus"), _SPECIALIST_EVIDENCE_STATUSES
+            ),
+            analysis_status=_allowlisted_text(
+                item.get("analysisStatus"), _SPECIALIST_ANALYSIS_STATUSES
+            ),
+            analysis_error_code=_allowlisted_text(
+                item.get("analysisErrorCode"), _SPECIALIST_ANALYSIS_ERROR_CODES
+            ),
+            analysis_attempt_count=_optional_bounded_int(
+                item.get("analysisAttemptCount"), maximum=2
+            ),
+            follow_up_question_count=_optional_bounded_int(
+                item.get("followUpQuestionCount"), maximum=16
+            ),
+            soft_deadline_exceeded=_optional_bool(
+                item.get("softDeadlineExceeded")
+            ),
+            hard_deadline_exceeded=_optional_bool(
+                item.get("hardDeadlineExceeded")
+            ),
+            completed_tool_count=_optional_bounded_int(
+                item.get("completedToolCount"), maximum=16
+            ),
+            expected_tool_count=_optional_bounded_int(
+                item.get("expectedToolCount"), maximum=16
+            ),
         )
     duplicate_count = len(all_evidence_ids) - len(set(all_evidence_ids))
     return tuple(roles[role] for role in sorted(roles)), duplicate_count
@@ -524,6 +589,14 @@ def _valid_bounded_int(value: object, *, maximum: int) -> bool:
 
 def _bounded_int(value: object, *, maximum: int) -> int:
     return cast(int, value) if _valid_bounded_int(value, maximum=maximum) else 0
+
+
+def _optional_bounded_int(value: object, *, maximum: int) -> int | None:
+    return cast(int, value) if _valid_bounded_int(value, maximum=maximum) else None
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _hypothesis_assessments_from_steps(

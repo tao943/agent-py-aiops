@@ -41,6 +41,25 @@ _SPECIALIST_ROLES = frozenset({"runtime", "log", "change", "knowledge"})
 _SPECIALIST_STATUSES = frozenset(
     {"completed", "inconclusive", "failed", "timeout", "cancelled", "missing"}
 )
+_SPECIALIST_EVIDENCE_STATUSES = frozenset({"complete", "partial", "none"})
+_SPECIALIST_ANALYSIS_STATUSES = frozenset(
+    {"complete", "degraded", "timeout", "failed", "skipped"}
+)
+_SPECIALIST_ANALYSIS_ERROR_CODES = frozenset(
+    {
+        "parse_error",
+        "schema_validation_failed",
+        "scope_rejected",
+        "provider_4xx",
+        "provider_5xx",
+        "provider_timeout",
+        "retry_exhausted",
+        "retry_skipped_insufficient_deadline",
+        "specialist_soft_deadline_expired",
+        "specialist_hard_deadline_expired",
+        "specialist_model_budget_exhausted",
+    }
+)
 
 
 class EvaluationArchiveWriter(Protocol):
@@ -158,6 +177,42 @@ def investigation_metrics_from_persisted_result(
         role_evidence_counts=_required_role_counts(
             metrics, "specialistRoleEvidenceCounts", maximum=16
         ),
+        role_evidence_statuses=_optional_role_choices(
+            metrics,
+            "specialistEvidenceStatuses",
+            allowed=_SPECIALIST_EVIDENCE_STATUSES,
+        ),
+        role_analysis_statuses=_optional_role_choices(
+            metrics,
+            "specialistAnalysisStatuses",
+            allowed=_SPECIALIST_ANALYSIS_STATUSES,
+        ),
+        role_analysis_error_codes=_optional_role_choices(
+            metrics,
+            "specialistAnalysisErrorCodes",
+            allowed=_SPECIALIST_ANALYSIS_ERROR_CODES,
+        ),
+        role_analysis_attempt_counts=_optional_role_counts(
+            metrics, "specialistAnalysisAttemptCounts", maximum=2
+        ),
+        role_follow_up_question_counts=_optional_role_counts(
+            metrics, "specialistFollowUpQuestionCounts", maximum=16
+        ),
+        specialist_evidence_completion_basis_points=_optional_bounded_int(
+            metrics, "specialistEvidenceCompletionBasisPoints", maximum=10_000
+        ),
+        specialist_analysis_completion_basis_points=_optional_bounded_int(
+            metrics, "specialistAnalysisCompletionBasisPoints", maximum=10_000
+        ),
+        specialist_degradation_basis_points=_optional_bounded_int(
+            metrics, "specialistDegradationBasisPoints", maximum=10_000
+        ),
+        specialist_deadline_hit_basis_points=_optional_bounded_int(
+            metrics, "specialistDeadlineHitBasisPoints", maximum=10_000
+        ),
+        specialist_structured_retry_basis_points=_optional_bounded_int(
+            metrics, "specialistStructuredRetryBasisPoints", maximum=10_000
+        ),
         source_group_count=_required_bounded_int(
             metrics, "sourceGroupCount", maximum=64
         ),
@@ -231,6 +286,41 @@ def _required_role_counts(
     return tuple(counts)
 
 
+def _optional_role_choices(
+    values: dict[str, object],
+    key: str,
+    *,
+    allowed: frozenset[str],
+) -> tuple[tuple[str, str], ...]:
+    raw = values.get(key)
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    safe = cast(Mapping[object, object], raw)
+    if len(safe) > 4:
+        raise ValueError(f"Investigation metric {key} is invalid.")
+    choices: list[tuple[str, str]] = []
+    for role, value in sorted(safe.items(), key=lambda item: str(item[0])):
+        if (
+            not isinstance(role, str)
+            or role not in _SPECIALIST_ROLES
+            or not isinstance(value, str)
+            or value not in allowed
+        ):
+            raise ValueError(f"Investigation metric {key} is invalid.")
+        choices.append((role, value))
+    return tuple(choices)
+
+
+def _optional_role_counts(
+    values: dict[str, object], key: str, *, maximum: int
+) -> tuple[tuple[str, int], ...]:
+    if values.get(key) is None:
+        return ()
+    return _required_role_counts(values, key, maximum=maximum)
+
+
 def _required_missing_domains(values: dict[str, object]) -> tuple[str, ...]:
     raw = values.get("missingDomains")
     if not isinstance(raw, list):
@@ -296,3 +386,11 @@ def _required_bounded_int(
     if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= maximum:
         raise ValueError(f"Investigation metric {key} is invalid.")
     return value
+
+
+def _optional_bounded_int(
+    values: dict[str, object], key: str, *, maximum: int
+) -> int | None:
+    if values.get(key) is None:
+        return None
+    return _required_bounded_int(values, key, maximum=maximum)
