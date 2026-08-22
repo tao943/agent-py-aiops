@@ -86,6 +86,38 @@ def test_summary_detects_all_checksum_reconciliation_states() -> None:
     assert summary.reconciliation.conflicts == 1
 
 
+def test_summary_reports_conversation_model_route_accuracy_separately() -> None:
+    now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    running = running_envelope(
+        run_id="conversation-model-summary",
+        evaluation_kind="conversation_model",
+        scenario_id="conversation-model-suite",
+        suite_version="conversation-model-v1",
+        metadata={
+            "workflowVersion": "conversation-model-v1",
+            "scenarioVersion": "conversation-model-v1",
+            "modelConfiguration": {"model": "fake"},
+        },
+        created_at=now,
+        started_at=now,
+    )
+    completed = terminal_envelope(
+        running=running,
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={"routeAccuracy": 1.0},
+        result_payload={"failures": []},
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=now,
+    )
+
+    summary = build_history_summary([completed], database_checksums={})
+
+    assert "Conversation Route Accuracy 平均值：1.0000" in summary.markdown
+
+
 def _investigation_run(
     run_id: str,
     *,

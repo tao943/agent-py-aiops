@@ -17,7 +17,7 @@ from super_ai.evaluation.live.failure_diagnostics import (
 )
 from super_ai.memory.repositories import JsonDict
 
-EvaluationKind = Literal["snapshot", "retrieval", "live"]
+EvaluationKind = Literal["snapshot", "retrieval", "live", "conversation_model"]
 EvaluationStatus = Literal[
     "running",
     "passed",
@@ -28,9 +28,10 @@ EvaluationStatus = Literal[
 ]
 EvaluationProvenance = Literal["native", "imported", "reconstructed"]
 
-ARTIFACT_SCHEMA_VERSION = "v1"
+ARTIFACT_SCHEMA_VERSION = "v2"
 
-_KINDS = frozenset({"snapshot", "retrieval", "live"})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({"v1", "v2"})
+_KINDS = frozenset({"snapshot", "retrieval", "live", "conversation_model"})
 _STATUSES = frozenset(
     {"running", "passed", "failed", "agent_failed", "infra_invalid", "interrupted"}
 )
@@ -69,6 +70,15 @@ _METADATA_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "acceptanceCampaignId",
             "investigationStrategy",
             "investigationPolicyVersion",
+            "importSource",
+        }
+    ),
+    "conversation_model": frozenset(
+        {
+            "gitSha",
+            "workflowVersion",
+            "modelConfiguration",
+            "scenarioVersion",
             "importSource",
         }
     ),
@@ -169,6 +179,17 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "terminalFailureCategory",
         }
     ),
+    "conversation_model": frozenset(
+        {
+            "scenarioCount",
+            "passedScenarioCount",
+            "routeAccuracy",
+            "structuredInterpretationAccuracy",
+            "degradedFallbackAccuracy",
+            "promptInjectionSafety",
+            "modelCallCount",
+        }
+    ),
 }
 _RESULT_KEYS: dict[EvaluationKind, frozenset[str]] = {
     "snapshot": frozenset({"failures", "scoreReasons", "hardGate"}),
@@ -184,6 +205,9 @@ _RESULT_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "failedChecks",
             "safeFacts",
         }
+    ),
+    "conversation_model": frozenset(
+        {"failures", "scenarioResults", "safetyCategories"}
     ),
 }
 
@@ -297,10 +321,11 @@ def running_envelope(
     created_at: datetime,
     started_at: datetime,
     provenance: EvaluationProvenance = "native",
+    artifact_schema_version: str = ARTIFACT_SCHEMA_VERSION,
 ) -> EvaluationRunEnvelope:
     """Create a validated running record before external evaluation work begins."""
     envelope = EvaluationRunEnvelope(
-        artifact_schema_version=ARTIFACT_SCHEMA_VERSION,
+        artifact_schema_version=artifact_schema_version,
         run_id=run_id,
         evaluation_kind=evaluation_kind,
         scenario_id=scenario_id,
@@ -333,6 +358,7 @@ def running_from_terminal(envelope: EvaluationRunEnvelope) -> EvaluationRunEnvel
         created_at=envelope.created_at,
         started_at=envelope.started_at,
         provenance=envelope.provenance,
+        artifact_schema_version=envelope.artifact_schema_version,
     )
 
 
@@ -421,8 +447,13 @@ def validate_run_id(run_id: str) -> str:
 
 
 def _validate_envelope(envelope: EvaluationRunEnvelope) -> None:
-    if envelope.artifact_schema_version != ARTIFACT_SCHEMA_VERSION:
+    if envelope.artifact_schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError("Unsupported evaluation artifact schema version.")
+    if (
+        envelope.artifact_schema_version == "v1"
+        and envelope.evaluation_kind == "conversation_model"
+    ):
+        raise ValueError("Unsupported evaluation artifact schema version for kind.")
     validate_run_id(envelope.run_id)
     if not envelope.scenario_id.strip() or not envelope.suite_version.strip():
         raise ValueError("Evaluation identity fields must be non-empty.")
@@ -455,7 +486,10 @@ def _validate_envelope(envelope: EvaluationRunEnvelope) -> None:
     if envelope.status in {"agent_failed", "infra_invalid", "interrupted"} and envelope.passed:
         raise ValueError("Invalid evaluation state cannot be passed.")
     _validate_container(envelope.metadata, _METADATA_KEYS[envelope.evaluation_kind], "metadata")
-    _validate_container(envelope.metrics, _METRIC_KEYS[envelope.evaluation_kind], "metrics")
+    metric_keys = _METRIC_KEYS[envelope.evaluation_kind]
+    if envelope.artifact_schema_version == "v2" and envelope.evaluation_kind == "live":
+        metric_keys = metric_keys | frozenset({"conversationMetrics"})
+    _validate_container(envelope.metrics, metric_keys, "metrics")
     _validate_container(
         envelope.result_payload,
         _RESULT_KEYS[envelope.evaluation_kind],

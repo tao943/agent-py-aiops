@@ -283,6 +283,13 @@ def _markdown(
         for value in (item.metrics.get("recallAt1"),)
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     ]
+    conversation_route_values = [
+        float(value)
+        for item in envelopes
+        if item.evaluation_kind == "conversation_model"
+        for value in (item.metrics.get("routeAccuracy"),)
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
     lines = [
         "# Evaluation History",
         "",
@@ -295,6 +302,11 @@ def _markdown(
     ]
     if recall_values:
         lines.append(f"- Recall@1 平均值：{sum(recall_values) / len(recall_values):.4f}")
+    if conversation_route_values:
+        lines.append(
+            "- Conversation Route Accuracy 平均值："
+            f"{sum(conversation_route_values) / len(conversation_route_values):.4f}"
+        )
     lines.extend(
         [
             "",
