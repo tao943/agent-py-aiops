@@ -13,8 +13,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ConfigPath,
 
-    [ValidateSet('local', 'cls')]
-    [string]$EvidenceSource = 'local',
+    [ValidateSet('cls')]
+    [string]$EvidenceSource = 'cls',
 
     [switch]$Resume
 )

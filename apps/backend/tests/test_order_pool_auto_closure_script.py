@@ -18,3 +18,6 @@ def test_acceptance_script_uses_real_alert_path_without_secret_output() -> None:
     assert "prometheus" in script
     assert "    'http://127.0.0.1:9090/-/ready'" not in script
     assert "exec -T prometheus wget -q -O - http://127.0.0.1:9090/-/ready" in script
+    assert "[ValidateSet('cls')]" in script
+    assert "[string]$EvidenceSource = 'cls'" in script
+    assert "[ValidateSet('local', 'cls')]" not in script
