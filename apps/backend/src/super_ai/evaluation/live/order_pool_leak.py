@@ -414,6 +414,11 @@ class OrderPoolLeakScenarioDriver:
         identity: LiveRunIdentity,
         state: Mapping[str, object],
     ) -> None:
+        if set(state) != {
+            "originalGeneration",
+            "unrelatedSessionFingerprints",
+        }:
+            raise ValueError("order_pool_resume_state_invalid")
         generation = state.get("originalGeneration")
         fingerprints = state.get("unrelatedSessionFingerprints")
         if (
