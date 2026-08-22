@@ -1,7 +1,7 @@
 # Chat Turn Execution、上下文与 ReAct 优化设计
 
 **日期：** 2026-08-22
-**状态：** 待用户书面审阅
+**状态：** 已批准，待实施
 **前置设计：** `2026-08-22-conversation-aiops-copilot-design.md`
 
 ## 1. 目标
@@ -210,6 +210,10 @@ Structured Memory 字段：
 - `throughMessageId`；
 - `summaryVersion`。
 
+每条记忆必须携带 source message IDs、citation IDs 和 trust 分类；`confirmedFacts` 只接受用户
+明确确认或工具证据支持的条目。现有自由文本 `memory_summary` 在首次结构化重压缩前作为
+`legacy_untrusted` 兼容输入，不能作为 system instruction；结构化 CAS 成功后才停止注入。
+
 禁止进入 Structured Memory：reasoning、Prompt、完整日志、工具原始输出、凭据和可能变化的
 AIOps 安全状态。安全状态每次从最新 Report 读取。
 
@@ -253,6 +257,11 @@ pending → confirmed → executed
 默认 15 分钟过期。确认接口重新检查 owner、目标当前状态和 fingerprint；状态变化时旧 Action
 失效，返回新的预检结果。重复或并发确认通过 PostgreSQL 唯一约束和行锁返回同一结果。
 
+确认事务只把 Action 改为 `confirmed` 并原子创建稳定 ID 的 `pending_chat_action` Background
+Job，不在 HTTP 请求内执行副作用。leased Worker 执行幂等 Scheduler/Approval 写入；崩溃重试
+读取同一业务结果，无法证明结果时进入 `manual_review`。active fingerprint 使用 partial unique
+index，不让 cancelled/expired 历史阻塞新 Action。
+
 ```text
 POST /chat/actions/{action_id}/confirm
 POST /chat/actions/{action_id}/cancel
@@ -292,6 +301,8 @@ Serializer；Bridge 与 ReAct 使用受控 fake Adapter。Fixture 不向 runner 
 
 手动运行真实主模型与 fake Bridge，验证模糊路由、结构化结果解读、解读超时降级和 Prompt
 injection。它不调用 CLS，因为这些能力不需要日志，且需要隔离模型问题与外部诊断问题。
+Evaluation Artifact 使用向后兼容的 v2 schema；reader/import/audit 继续接受现有 v1，并为
+`conversation_model` 与 live 的独立 `conversationMetrics` 增加严格 allowlist。
 
 ### 12.3 Chat → AIOps Live Eval
 
@@ -301,7 +312,8 @@ PostgreSQL 保存和 Single/Multi 模式。只增加 Chat 入口 Adapter：
 ```text
 Live Alert / Incident
   → Chat 查询 Incident
-  → Chat 启动或复用 Diagnostic
+  → Chat 请求启动并得到 Pending Chat Action
+  → 用户确认后幂等启动或复用 Diagnostic
   → AIOps Agent 调用 CLS/诊断工具
   → Evidence / Report / Validator / Policy Gate
   → Chat 查询并解读 Report
