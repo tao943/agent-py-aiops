@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from hashlib import sha256
+from typing import Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -14,14 +16,18 @@ from super_ai.memory.models import (
     AlertEventModel,
     AlertIncidentModel,
     BackgroundJobModel,
+    DiagnosticReportModel,
     DiagnosticTaskModel,
 )
 
 from .repositories import (
     AlertDisposition,
     AlertPersistenceError,
+    IncidentStatus,
     IngestionResult,
     IngestionWrite,
+    LiveAlertLifecycle,
+    VerificationStatus,
 )
 
 
@@ -46,6 +52,139 @@ class SQLAlchemyAlertIngestionRepository:
         except SQLAlchemyError as exc:
             raise AlertPersistenceError("Alert persistence is unavailable.") from exc
 
+    async def get_live_lifecycle(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+    ) -> LiveAlertLifecycle | None:
+        try:
+            async with self._session_factory() as session:
+                incident = await self._incident_by_correlation(
+                    session,
+                    owner_user_id=owner_user_id,
+                    source_id=source_id,
+                    scenario_id=scenario_id,
+                    run_id=run_id,
+                    for_update=False,
+                )
+                if incident is None:
+                    return None
+                return await self._to_lifecycle(session, incident)
+        except SQLAlchemyError as exc:
+            raise AlertPersistenceError("Alert persistence is unavailable.") from exc
+
+    async def record_verification(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+        status: Literal["passed", "failed"],
+        summary: str,
+        verified_at: datetime,
+    ) -> LiveAlertLifecycle:
+        if verified_at.tzinfo is None:
+            raise ValueError("Verification timestamp must be timezone-aware.")
+        safe_summary = summary.strip()
+        if not safe_summary or len(safe_summary) > 512:
+            raise ValueError("Verification summary must contain 1 to 512 characters.")
+        try:
+            async with self._session_factory() as session, session.begin():
+                incident = await self._incident_by_correlation(
+                    session,
+                    owner_user_id=owner_user_id,
+                    source_id=source_id,
+                    scenario_id=scenario_id,
+                    run_id=run_id,
+                    for_update=True,
+                )
+                if incident is None:
+                    raise AlertPersistenceError("Live alert lifecycle was not found.")
+                if incident.verification_status == "not_applicable":
+                    raise AlertPersistenceError("Live alert lifecycle is not verifiable.")
+                if incident.verification_status == "failed" and status != "failed":
+                    raise AlertPersistenceError("Failed verification requires explicit resume.")
+                if incident.verification_status != status:
+                    incident.verification_status = status
+                    incident.verified_at = verified_at
+                    incident.verification_summary = safe_summary
+                    incident.updated_at = verified_at
+                return await self._to_lifecycle(session, incident)
+        except SQLAlchemyError as exc:
+            raise AlertPersistenceError("Alert persistence is unavailable.") from exc
+
+    async def _incident_by_correlation(
+        self,
+        session: AsyncSession,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+        for_update: bool,
+    ) -> AlertIncidentModel | None:
+        statement = (
+            select(AlertIncidentModel)
+            .where(
+                AlertIncidentModel.owner_user_id == owner_user_id,
+                AlertIncidentModel.source_id == source_id,
+                AlertIncidentModel.scenario_id == scenario_id,
+                AlertIncidentModel.run_id == run_id,
+            )
+            .order_by(AlertIncidentModel.created_at.desc())
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return (await session.scalars(statement)).one_or_none()
+
+    async def _to_lifecycle(
+        self,
+        session: AsyncSession,
+        incident: AlertIncidentModel,
+    ) -> LiveAlertLifecycle:
+        task_id = incident.diagnostic_task_id
+        if task_id is None:
+            raise AlertPersistenceError("Live alert lifecycle has no diagnostic task.")
+        job_id = await session.scalar(
+            select(BackgroundJobModel.id)
+            .where(
+                BackgroundJobModel.owner_user_id == incident.owner_user_id,
+                BackgroundJobModel.resource_type == "aiops_diagnostic",
+                BackgroundJobModel.resource_id == task_id,
+            )
+            .order_by(BackgroundJobModel.created_at.desc())
+            .limit(1)
+        )
+        if job_id is None:
+            raise AlertPersistenceError("Live alert lifecycle has no background job.")
+        report_id = await session.scalar(
+            select(DiagnosticReportModel.id)
+            .where(
+                DiagnosticReportModel.owner_user_id == incident.owner_user_id,
+                DiagnosticReportModel.task_id == task_id,
+            )
+            .order_by(
+                DiagnosticReportModel.created_at.desc(),
+                DiagnosticReportModel.id.desc(),
+            )
+            .limit(1)
+        )
+        return LiveAlertLifecycle(
+            incident_id=incident.id,
+            diagnostic_task_id=task_id,
+            background_job_id=job_id,
+            report_id=report_id,
+            status=cast(IncidentStatus, incident.status),
+            verification_status=cast(VerificationStatus, incident.verification_status),
+            verified_at=incident.verified_at,
+            verification_summary=incident.verification_summary,
+        )
+
     async def _create_or_update_duplicate(
         self,
         session: AsyncSession,
@@ -59,6 +198,8 @@ class SQLAlchemyAlertIngestionRepository:
                 owner_user_id=write.owner_user_id,
                 source_id=write.source_id,
                 group_key_hash=write.group_key_hash,
+                run_id=write.run_id,
+                scenario_id=write.scenario_id,
                 status="active",
                 alert_name=write.alert_name,
                 service=write.service,
@@ -66,6 +207,9 @@ class SQLAlchemyAlertIngestionRepository:
                 starts_at=write.starts_at,
                 last_seen_at=write.received_at,
                 resolved_at=None,
+                verification_status=("pending" if write.scenario_id else "not_applicable"),
+                verified_at=None,
+                verification_summary=None,
                 delivery_count=1,
                 diagnostic_task_id=None,
                 created_at=write.received_at,
