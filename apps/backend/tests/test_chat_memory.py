@@ -5,7 +5,11 @@ from typing import cast
 
 import pytest
 
-from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService
+from super_ai.chat.memory import (
+    ChatContextLimitReached,
+    ChatMemoryService,
+    normalize_memory_mode,
+)
 from super_ai.llm import LlmProvider
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -31,8 +35,23 @@ class FakeProvider:
 
     def create_chat_model(self) -> FakeChatModel:
         return self.model
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("adaptive", "adaptive"),
+        ("every_30_turns", "adaptive"),
+        ("context_70_percent", "adaptive"),
+        ("manual", "manual"),
+    ],
+)
+def test_normalize_memory_mode_keeps_one_legacy_compatibility_window(
+    raw: str, expected: str
+) -> None:
+    assert normalize_memory_mode(raw) == expected
 @pytest.mark.asyncio
-async def test_thirty_turn_mode_compacts_without_deleting_history(
+async def test_adaptive_mode_no_longer_uses_the_legacy_thirty_turn_trigger(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
@@ -75,10 +94,11 @@ async def test_thirty_turn_mode_compacts_without_deleting_history(
     finally:
         await engine.dispose()
 
-    assert len(provider.model.inputs) == 1
-    assert prepared.session.compacted_message_count == 60
-    assert prepared.session.memory_summary is not None
-    assert len(prepared.messages) == 1
+    assert provider.model.inputs == []
+    assert prepared.session.memory_mode == "adaptive"
+    assert prepared.session.compacted_message_count == 0
+    assert prepared.session.memory_summary is None
+    assert len(prepared.messages) == 61
     assert len(persisted) == 60
 
 

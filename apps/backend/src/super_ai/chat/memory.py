@@ -16,8 +16,12 @@ from super_ai.memory.repositories import (
     MemoryRepositories,
 )
 
-ChatMemoryMode = Literal["every_30_turns", "context_70_percent", "manual"]
-SUPPORTED_CHAT_MEMORY_MODES: tuple[ChatMemoryMode, ...] = (
+ChatMemoryMode = Literal["adaptive", "manual"]
+ChatMemoryModeInput = Literal[
+    "adaptive", "manual", "every_30_turns", "context_70_percent"
+]
+SUPPORTED_CHAT_MEMORY_MODES: tuple[ChatMemoryModeInput, ...] = (
+    "adaptive",
     "every_30_turns",
     "context_70_percent",
     "manual",
@@ -28,6 +32,15 @@ HARD_CONTEXT_THRESHOLD_PERCENT = 95.0
 
 class ChatContextLimitReached(RuntimeError):
     """Raised before persistence when a candidate message exceeds the hard budget."""
+
+
+def normalize_memory_mode(value: str) -> ChatMemoryMode:
+    """Normalize one-release legacy automatic modes to the adaptive policy."""
+    if value in {"adaptive", "every_30_turns", "context_70_percent"}:
+        return "adaptive"
+    if value == "manual":
+        return "manual"
+    raise ValueError(f"Unsupported chat memory mode: {value}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,17 +148,18 @@ class ChatMemoryService:
         *,
         owner_user_id: str,
         session: ChatSessionRecord,
-        mode: ChatMemoryMode,
+        mode: ChatMemoryModeInput,
         history: list[ChatMessageRecord],
         system_prompt: str,
     ) -> ChatSessionRecord:
+        normalized_mode = normalize_memory_mode(mode)
         updated = await self._repositories.chat.update_memory_state(
             owner_user_id=owner_user_id,
             session_id=session.id,
-            memory_mode=mode,
+            memory_mode=normalized_mode,
         )
         current = updated or session
-        if mode == "manual":
+        if normalized_mode == "manual":
             return await self.compact(
                 owner_user_id=owner_user_id,
                 session=current,
@@ -240,7 +254,7 @@ def estimate_context_tokens(
 
 def memory_payload(session: ChatSessionRecord, context_window_tokens: int) -> dict[str, object]:
     return {
-        "mode": session.memory_mode,
+        "mode": normalize_memory_mode(session.memory_mode),
         "contextTokens": session.context_tokens,
         "contextWindowTokens": context_window_tokens,
         "contextUsagePercent": _usage_percent(

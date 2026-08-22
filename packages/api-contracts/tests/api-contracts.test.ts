@@ -49,6 +49,12 @@ import {
 } from "../src";
 
 describe("HTTP response contracts", () => {
+  it("publishes only adaptive and manual chat memory modes", () => {
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.mode).toEqual({
+      enum: ["adaptive", "manual"]
+    });
+  });
+
   it("wraps successful responses with metadata", () => {
     const response: ApiSuccessResponse<{ id: string }> = buildSuccessResponse(
       { id: "chat_123" },

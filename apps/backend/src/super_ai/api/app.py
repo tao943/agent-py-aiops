@@ -215,7 +215,7 @@ class StreamChatMessageRequest(BaseModel):
 
 
 class UpdateChatMemoryRequest(BaseModel):
-    mode: Literal["every_30_turns", "context_70_percent", "manual"]
+    mode: Literal["adaptive", "manual", "every_30_turns", "context_70_percent"]
 
 
 class UpdateChatAssemblyConfigurationRequest(BaseModel):

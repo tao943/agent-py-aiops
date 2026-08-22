@@ -133,6 +133,39 @@ async def test_chat_sessions_are_ordered_by_recent_updates(migrated_database_url
 
 
 @pytest.mark.asyncio
+async def test_chat_memory_defaults_to_adaptive_and_normalizes_legacy_modes(
+    migrated_database_url: str,
+) -> None:
+    transport = httpx.ASGITransport(app=create_app(database_url=migrated_database_url))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        user = await _register(client, "adaptive-memory@example.com", "Adaptive Memory")
+        headers = _auth_headers(user["accessToken"])
+        created = await client.post("/chat/sessions", headers=headers, json={})
+        session_id = created.json()["data"]["id"]
+
+        legacy_turns = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "every_30_turns"},
+        )
+        legacy_threshold = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "context_70_percent"},
+        )
+        manual = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "manual"},
+        )
+
+    assert created.json()["data"]["memory"]["mode"] == "adaptive"
+    assert legacy_turns.json()["data"]["memory"]["mode"] == "adaptive"
+    assert legacy_threshold.json()["data"]["memory"]["mode"] == "adaptive"
+    assert manual.json()["data"]["memory"]["mode"] == "manual"
+
+
+@pytest.mark.asyncio
 async def test_chat_session_access_is_scoped_to_current_user(
     migrated_database_url: str,
 ) -> None:

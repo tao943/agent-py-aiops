@@ -2414,6 +2414,9 @@ def _chat_session_record(row: ChatSessionModel) -> ChatSessionRecord:
         updated_at=_ensure_utc(row.updated_at),
         memory_mode=row.memory_mode,
         memory_summary=row.memory_summary,
+        structured_memory=_json_dict(row.structured_memory),
+        memory_summary_version=row.memory_summary_version,
+        memory_through_message_id=row.memory_through_message_id,
         compacted_message_count=row.compacted_message_count,
         context_tokens=row.context_tokens,
         last_compacted_at=(

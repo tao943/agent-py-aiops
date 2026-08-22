@@ -33,7 +33,7 @@ const sessions: readonly ChatSessionSummary[] = [
     createdAt: "2026-07-10T00:00:00.000Z",
     updatedAt: "2026-07-10T00:01:00.000Z",
     memory: {
-      mode: "every_30_turns",
+      mode: "adaptive",
       contextTokens: 1200,
       contextWindowTokens: 131072,
       contextUsagePercent: 0.9,
@@ -180,9 +180,9 @@ describe("chat components", () => {
     expect(wrapper.text()).toContain("上下文已达到 95%，请执行手动压缩");
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
 
-    await wrapper.get("select").setValue("context_70_percent");
+    await wrapper.get("select").setValue("manual");
     await wrapper.get(".chat-composer__apply").trigger("click");
-    expect(wrapper.emitted("applyMemory")).toEqual([["context_70_percent"]]);
+    expect(wrapper.emitted("applyMemory")).toEqual([["manual"]]);
   });
 
   it("marks the selected session and emits session commands", async () => {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -37,8 +37,11 @@ class ChatSessionRecord:
     title: str | None
     created_at: datetime
     updated_at: datetime
-    memory_mode: ChatMemoryMode = "every_30_turns"
+    memory_mode: ChatMemoryMode = "adaptive"
     memory_summary: str | None = None
+    structured_memory: JsonDict = field(default_factory=lambda: dict[str, object]())
+    memory_summary_version: int = 0
+    memory_through_message_id: str | None = None
     compacted_message_count: int = 0
     context_tokens: int = 0
     last_compacted_at: datetime | None = None

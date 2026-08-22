@@ -20,7 +20,7 @@ const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummar
   createdAt: "2026-07-10T00:00:00.000Z",
   updatedAt: "2026-07-10T00:01:00.000Z",
   memory: {
-    mode: "every_30_turns",
+    mode: "adaptive",
     contextTokens: 1200,
     contextWindowTokens: 131072,
     contextUsagePercent: 0.9,

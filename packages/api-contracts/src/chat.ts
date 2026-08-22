@@ -55,7 +55,7 @@ export interface CreateChatSessionRequest {
   readonly title?: string | null;
 }
 
-export type ChatMemoryMode = "every_30_turns" | "context_70_percent" | "manual";
+export type ChatMemoryMode = "adaptive" | "manual";
 
 export interface ChatMemoryState {
   readonly mode: ChatMemoryMode;

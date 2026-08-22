@@ -1314,7 +1314,7 @@ export const OPENAPI_CONTRACT = {
           "canCompact"
         ],
         properties: {
-          mode: { enum: ["every_30_turns", "context_70_percent", "manual"] },
+          mode: { enum: ["adaptive", "manual"] },
           contextTokens: { type: "integer" },
           contextWindowTokens: { type: "integer" },
           contextUsagePercent: { type: "number" },

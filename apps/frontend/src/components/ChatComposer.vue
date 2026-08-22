@@ -16,7 +16,7 @@ const props = defineProps<{
   readonly memory: ChatMemoryState | null;
 }>();
 const content = ref("");
-const selectedMode = ref<ChatMemoryMode>(props.memory?.mode ?? "every_30_turns");
+const selectedMode = ref<ChatMemoryMode>(props.memory?.mode ?? "adaptive");
 const isHardLimited = computed(() => (props.memory?.contextUsagePercent ?? 0) >= 95);
 const inputDisabled = computed(() => props.disabled || props.isSending || isHardLimited.value);
 
@@ -57,8 +57,7 @@ function handleKeydown(event: KeyboardEvent): void {
         <progress :value="memory?.contextUsagePercent ?? 0" max="100" aria-label="上下文窗口占用" />
         <div class="chat-composer__memory-actions">
           <select v-model="selectedMode" aria-label="记忆模式" :disabled="!memory || isUpdatingMemory">
-            <option value="every_30_turns">每 30 轮压缩</option>
-            <option value="context_70_percent">占用 70% 自动压缩</option>
+            <option value="adaptive">自适应压缩</option>
             <option value="manual">手动压缩</option>
           </select>
           <button
