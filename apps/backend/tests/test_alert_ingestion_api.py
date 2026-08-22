@@ -150,6 +150,7 @@ async def test_unknown_source_is_404_without_revealing_token_state() -> None:
 
     assert response.status_code == 404
     assert service.calls == 0
+    assert metrics.snapshot()["webhookReceivedTotal"] == 1
     assert metrics.snapshot()["ingestionFailedTotal"] == 0
 
 
@@ -208,6 +209,7 @@ async def test_runtime_wakeup_failure_remains_safe_202_after_commit() -> None:
     assert service.calls == 1
     assert runtime.start_count == 1
     assert metrics.snapshot()["ingestionFailedTotal"] == 0
+    assert metrics.snapshot()["runtimeWakeFailedTotal"] == 1
     assert "private-group" not in response.text
 
 

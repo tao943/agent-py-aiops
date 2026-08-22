@@ -146,6 +146,11 @@ def test_metrics_have_exact_request_failure_and_latency_semantics() -> None:
     metrics.record_success("incident_resolved", "primary", latency_ms=3.0)
     metrics.record_success("orphan_resolved", "primary", latency_ms=1.0)
     metrics.record_success("filtered", "degraded", latency_ms=5.0)
+    metrics.record_runtime_wake_failure()
+    metrics.record_verification("passed")
+    metrics.record_verification("failed")
+    metrics.record_stage_latency("detection", latency_ms=7.0)
+    metrics.record_stage_latency("recovery", latency_ms=8.0)
 
     snapshot = metrics.snapshot()
 
@@ -157,8 +162,19 @@ def test_metrics_have_exact_request_failure_and_latency_semantics() -> None:
     assert snapshot["orphanResolvedTotal"] == 1
     assert snapshot["filteredTotal"] == 1
     assert snapshot["redisDegradedTotal"] == 1
+    assert snapshot["runtimeWakeFailedTotal"] == 1
+    assert snapshot["verifiedClosureTotal"] == 1
+    assert snapshot["verificationFailedTotal"] == 1
     assert snapshot["ingestionLatencyMs"] == {"count": 6, "sum": 21.0, "max": 6.0}
     assert snapshot["diagnosisEnqueueLatencyMs"] == {"count": 1, "sum": 6.0, "max": 6.0}
+    assert snapshot["autoClosureStageLatencyMs"] == {
+        "detection": {"count": 1, "sum": 7.0, "max": 7.0},
+        "diagnosis": {"count": 0, "sum": 0.0, "max": 0.0},
+        "recovery": {"count": 1, "sum": 8.0, "max": 8.0},
+        "verification": {"count": 0, "sum": 0.0, "max": 0.0},
+        "resolved": {"count": 0, "sum": 0.0, "max": 0.0},
+        "total": {"count": 0, "sum": 0.0, "max": 0.0},
+    }
 
 
 async def test_lease_is_released_when_repository_fails() -> None:

@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock
+from typing import Literal
 
 from .repositories import AlertDisposition, RedisMode
+
+AutoClosureStage = Literal[
+    "detection",
+    "diagnosis",
+    "recovery",
+    "verification",
+    "resolved",
+    "total",
+]
 
 
 @dataclass(slots=True)
@@ -41,9 +51,23 @@ class AlertIngestionMetrics:
             "orphanResolvedTotal": 0,
             "ingestionFailedTotal": 0,
             "redisDegradedTotal": 0,
+            "runtimeWakeFailedTotal": 0,
+            "verifiedClosureTotal": 0,
+            "verificationFailedTotal": 0,
         }
         self._ingestion_latency = _Latency()
         self._enqueue_latency = _Latency()
+        self._auto_closure_latency = {
+            stage: _Latency()
+            for stage in (
+                "detection",
+                "diagnosis",
+                "recovery",
+                "verification",
+                "resolved",
+                "total",
+            )
+        }
         self._lock = Lock()
 
     def record_received(self) -> None:
@@ -54,6 +78,26 @@ class AlertIngestionMetrics:
         with self._lock:
             self._counts["ingestionFailedTotal"] += 1
             self._ingestion_latency.add(latency_ms)
+
+    def record_runtime_wake_failure(self) -> None:
+        with self._lock:
+            self._counts["runtimeWakeFailedTotal"] += 1
+
+    def record_verification(self, status: Literal["passed", "failed"]) -> None:
+        counter = (
+            "verifiedClosureTotal" if status == "passed" else "verificationFailedTotal"
+        )
+        with self._lock:
+            self._counts[counter] += 1
+
+    def record_stage_latency(
+        self,
+        stage: AutoClosureStage,
+        *,
+        latency_ms: float,
+    ) -> None:
+        with self._lock:
+            self._auto_closure_latency[stage].add(latency_ms)
 
     def record_success(
         self,
@@ -83,5 +127,9 @@ class AlertIngestionMetrics:
                 **self._counts,
                 "ingestionLatencyMs": self._ingestion_latency.payload(),
                 "diagnosisEnqueueLatencyMs": self._enqueue_latency.payload(),
+                "autoClosureStageLatencyMs": {
+                    stage: latency.payload()
+                    for stage, latency in self._auto_closure_latency.items()
+                },
             }
 
