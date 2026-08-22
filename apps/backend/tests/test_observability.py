@@ -44,6 +44,18 @@ async def test_request_observability_preserves_correlation_and_aggregates_metric
     assert response.headers["X-Request-ID"] == "request-test"
     assert denied.status_code == 401
     assert metrics.json()["data"]["requestCount"] >= 1
+    assert metrics.json()["data"]["alertIngestion"] == {
+        "webhookReceivedTotal": 0,
+        "incidentCreatedTotal": 0,
+        "duplicateSuppressedTotal": 0,
+        "filteredTotal": 0,
+        "resolvedTotal": 0,
+        "orphanResolvedTotal": 0,
+        "ingestionFailedTotal": 0,
+        "redisDegradedTotal": 0,
+        "ingestionLatencyMs": {"count": 0, "sum": 0.0, "max": 0.0},
+        "diagnosisEnqueueLatencyMs": {"count": 0, "sum": 0.0, "max": 0.0},
+    }
     events = [
         json.loads(record.message) for record in caplog.records if record.message.startswith("{")
     ]

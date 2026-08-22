@@ -59,7 +59,10 @@ services:
       - "9093:9093"
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets/alert_webhook_token:/run/secrets/alert_webhook_token:ro
       - alertmanager-data:/alertmanager
+    depends_on:
+      - nginx
     restart: unless-stopped
 
   etcd:

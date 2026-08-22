@@ -30,6 +30,15 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
+from super_ai.alert_ingestion.config import load_alert_ingestion_settings
+from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
+from super_ai.alert_ingestion.redis_runtime import AlertLeaseManager, RedisLeaseClient
+from super_ai.alert_ingestion.routes import (
+    AlertIngestionHandler,
+    create_alert_ingestion_router,
+)
+from super_ai.alert_ingestion.service import AlertIngestionService, AlertLeaseProvider
+from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
 from super_ai.alerts import (
     ActiveAlert,
     ActiveAlertProvider,
@@ -353,6 +362,8 @@ def create_app(
     redis_relay: RedisRelayLifecycle | None = None,
     redis_publisher: JobEventPublisher | None = None,
     rate_limit_service: RateLimitService | None = None,
+    alert_ingestion_service: AlertIngestionHandler | None = None,
+    alert_lease_manager: AlertLeaseProvider | None = None,
 ) -> FastAPI:
     """Create the backend API application."""
     resolved_project_config_path = (
@@ -497,6 +508,27 @@ def create_app(
     )
     app.state.index_task_scheduler = index_task_scheduler or DurableDocumentIndexTaskScheduler(app)
     app.state.request_metrics = RequestMetrics()
+    alert_ingestion_settings = load_alert_ingestion_settings(resolved_project_config_path)
+    alert_ingestion_metrics = AlertIngestionMetrics()
+    composed_alert_leases = alert_lease_manager or AlertLeaseManager(
+        cast(RedisLeaseClient | None, composed_redis_client),
+        lease_ms=alert_ingestion_settings.redis_lease_milliseconds,
+    )
+    composed_alert_ingestion = alert_ingestion_service or AlertIngestionService(
+        SQLAlchemyAlertIngestionRepository(session_factory),
+        composed_alert_leases,
+        alert_ingestion_metrics,
+    )
+    app.state.alert_ingestion_metrics = alert_ingestion_metrics
+    if alert_ingestion_settings.enabled:
+        app.include_router(
+            create_alert_ingestion_router(
+                alert_ingestion_settings,
+                composed_alert_ingestion,
+                background_runtime,
+                alert_ingestion_metrics,
+            )
+        )
 
     @app.middleware("http")
     async def observe_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -577,6 +609,7 @@ def create_app(
                 "failureCount": snapshot.failure_count,
                 "averageLatencyMs": round(average, 3),
                 "redisFeatures": request.app.state.redis_feature_metrics.snapshot(),
+                "alertIngestion": request.app.state.alert_ingestion_metrics.snapshot(),
             },
         )
 

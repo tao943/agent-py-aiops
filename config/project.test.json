@@ -126,6 +126,13 @@
     "mcp.tool_call": {"capacity": 30, "refillTokens": 1, "refillPeriodSeconds": 2, "failureMode": "local_fallback"},
     "recovery.execute": {"capacity": 1, "refillTokens": 1, "refillPeriodSeconds": 60, "failureMode": "fail_closed"}
   },
+  "alertIngestion": {
+    "enabled": false,
+    "maxBodyBytes": 262144,
+    "maxAlertsPerDelivery": 50,
+    "redisLeaseMilliseconds": 2000,
+    "sources": []
+  },
   "minio": {
     "accessKey": "minioadmin",
     "secretKey": "minioadmin"

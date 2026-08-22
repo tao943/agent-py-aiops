@@ -2,7 +2,16 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: discard
+  receiver: agent-py-webhook
+  group_by: [alertname, service, environment, run_id]
 
 receivers:
-  - name: discard
+  - name: agent-py-webhook
+    webhook_configs:
+      - url: http://nginx/aiops/alerts/webhook/alertmanager/local-alertmanager
+        send_resolved: true
+        max_alerts: 50
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /run/secrets/alert_webhook_token

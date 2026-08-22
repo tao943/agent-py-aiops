@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -522,6 +523,92 @@ class DiagnosticTaskModel(Base):
         default=utc_now,
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AlertIncidentModel(Base):
+    """One owner-scoped Alertmanager group lifecycle."""
+
+    __tablename__ = "aiops_alert_incidents"
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'resolved')", name="ck_alert_incidents_status"),
+        CheckConstraint("delivery_count >= 1", name="ck_alert_incidents_delivery_count"),
+        CheckConstraint(
+            "char_length(group_key_hash) = 64",
+            name="ck_alert_incidents_group_key_hash",
+        ),
+        Index(
+            "uq_aiops_alert_incidents_active_group",
+            "owner_user_id",
+            "source_id",
+            "group_key_hash",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_aiops_alert_incidents_owner_status_updated",
+            "owner_user_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    group_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    alert_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    service: Mapped[str] = mapped_column(String(256), nullable=False)
+    severity: Mapped[str] = mapped_column(String(256), nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    diagnostic_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AlertEventModel(Base):
+    """Deduplicated audit event for one authenticated Alertmanager delivery."""
+
+    __tablename__ = "aiops_alert_events"
+    __table_args__ = (
+        CheckConstraint("status IN ('firing', 'resolved')", name="ck_alert_events_status"),
+        CheckConstraint(
+            "disposition IN ('incident_created', 'duplicate_updated', "
+            "'incident_resolved', 'filtered', 'orphan_resolved')",
+            name="ck_alert_events_disposition",
+        ),
+        CheckConstraint(
+            "char_length(payload_sha256) = 64",
+            name="ck_alert_events_payload_sha256",
+        ),
+        Index(
+            "ix_aiops_alert_events_owner_source_received",
+            "owner_user_id",
+            "source_id",
+            "received_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    incident_id: Mapped[str | None] = mapped_column(
+        ForeignKey("aiops_alert_incidents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    disposition: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class EvaluationRunModel(Base):
