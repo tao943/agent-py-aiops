@@ -18,9 +18,9 @@ describe("frontend contract consumption", () => {
   it("uses shared SSE event contracts", () => {
     expect(getRequiredSseEventTypes()).toEqual([
       "content.delta",
-      "reasoning.delta",
       "tool.call",
       "reference.source",
+      "diagnostic.result",
       "task.status",
       "report",
       "complete",

@@ -2,9 +2,9 @@ import type { ApiErrorMessage } from "./responses";
 
 export const SSE_EVENT_TYPES = [
   "content.delta",
-  "reasoning.delta",
   "tool.call",
   "reference.source",
+  "diagnostic.result",
   "task.status",
   "report",
   "complete",
@@ -26,11 +26,6 @@ export interface ContentDeltaSseEvent extends SseEventBase<"content.delta"> {
   readonly sequence: number;
 }
 
-export interface ReasoningDeltaSseEvent extends SseEventBase<"reasoning.delta"> {
-  readonly delta: string;
-  readonly sequence: number;
-}
-
 export interface ToolCallSseEvent extends SseEventBase<"tool.call"> {
   readonly toolCall: {
     readonly id: string;
@@ -38,6 +33,19 @@ export interface ToolCallSseEvent extends SseEventBase<"tool.call"> {
     readonly status: "started" | "delta" | "completed" | "failed";
     readonly input?: unknown;
     readonly output?: unknown;
+  };
+}
+
+export interface DiagnosticResultSseEvent extends SseEventBase<"diagnostic.result"> {
+  readonly diagnostic: {
+    readonly taskId: string;
+    readonly reportId: string;
+    readonly rootCause: Record<string, unknown>;
+    readonly recoveryMode: string;
+    readonly executionPermitted: boolean;
+    readonly humanApprovalRequired: boolean;
+    readonly validatorStatus: string;
+    readonly evidenceIds: readonly string[];
   };
 }
 
@@ -93,9 +101,9 @@ export interface ErrorSseEvent extends SseEventBase<"error"> {
 
 export type SseEvent =
   | ContentDeltaSseEvent
-  | ReasoningDeltaSseEvent
   | ToolCallSseEvent
   | ReferenceSourceSseEvent
+  | DiagnosticResultSseEvent
   | TaskStatusSseEvent
   | ReportSseEvent
   | CompleteSseEvent

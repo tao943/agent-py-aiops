@@ -6,6 +6,7 @@ import type {
   ChatAssemblyConfigurationResponse,
   ChatSessionSummary,
   ChatMemoryMode,
+  DiagnosticResultSseEvent,
   ReferenceSourceSseEvent,
   ToolCallAudit
 } from "@agent-py/api-contracts";
@@ -26,7 +27,6 @@ export interface LiveToolCall {
 }
 
 let clientFactory: () => ChatClient = createChatClient;
-export const CHAT_TYPEWRITER_DELAY_MS = 28;
 
 export function setChatClientFactoryForTests(factory: (() => ChatClient) | null): void {
   clientFactory = factory ?? createChatClient;
@@ -40,6 +40,7 @@ export const useChatStore = defineStore("chat", () => {
   const toolAudits = ref<readonly ToolCallAudit[]>([]);
   const liveToolCalls = ref<readonly LiveToolCall[]>([]);
   const references = ref<readonly ChatReference[]>([]);
+  const diagnosticResults = ref<readonly DiagnosticResultSseEvent["diagnostic"][]>([]);
   const isLoading = ref(false);
   const isSending = ref(false);
   const isUpdatingMemory = ref(false);
@@ -94,6 +95,7 @@ export const useChatStore = defineStore("chat", () => {
     toolAudits.value = [];
     liveToolCalls.value = [];
     references.value = [];
+    diagnosticResults.value = [];
     errorMessage.value = null;
     configuration.value = null;
     isSavingConfiguration.value = false;
@@ -107,6 +109,7 @@ export const useChatStore = defineStore("chat", () => {
     activeSession,
     errorMessage,
     configuration,
+    diagnosticResults,
     isSavingConfiguration,
     isLoading,
     isSending,
@@ -129,6 +132,7 @@ export const useChatStore = defineStore("chat", () => {
           messages.value = [];
           toolAudits.value = [];
           references.value = [];
+          diagnosticResults.value = [];
         }
       } catch (error) {
         reportError(error);
@@ -146,6 +150,7 @@ export const useChatStore = defineStore("chat", () => {
         toolAudits.value = [];
         liveToolCalls.value = [];
         references.value = [];
+        diagnosticResults.value = [];
         return created;
       } catch (error) {
         reportError(error);
@@ -154,6 +159,7 @@ export const useChatStore = defineStore("chat", () => {
     },
     selectSession: async (sessionId: string): Promise<void> => {
       isLoading.value = true;
+      diagnosticResults.value = [];
       try {
         await loadSession(sessionId);
       } catch (error) {
@@ -174,6 +180,7 @@ export const useChatStore = defineStore("chat", () => {
             messages.value = [];
             toolAudits.value = [];
             references.value = [];
+            diagnosticResults.value = [];
           } else {
             await loadSession(nextSession.id);
           }
@@ -306,25 +313,26 @@ export const useChatStore = defineStore("chat", () => {
         isSending.value = true;
         errorMessage.value = null;
         references.value = [];
+        diagnosticResults.value = [];
         const optimisticUser = createOptimisticMessage(targetSessionId, "user", content);
         const draftId = `message_draft_${Date.now()}`;
         messages.value = [...messages.value, optimisticUser];
         let finished = false;
         for await (const event of client.streamMessage(targetSessionId, { content })) {
           if (event.type === "content.delta") {
-            for (const character of event.delta) {
-              updateAssistantDraft(targetSessionId, draftId, character, messages);
-              await waitForTypewriterTick();
-            }
-          }
-          if (event.type === "reasoning.delta") {
-            updateAssistantReasoning(targetSessionId, draftId, event.delta, messages);
+            updateAssistantDraft(targetSessionId, draftId, event.delta, messages);
           }
           if (event.type === "reference.source") {
             references.value = uniqueReferences([...references.value, event.reference]);
           }
           if (event.type === "tool.call") {
             updateLiveToolCall(event.toolCall, liveToolCalls);
+          }
+          if (event.type === "diagnostic.result") {
+            diagnosticResults.value = [
+              event.diagnostic,
+              ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
+            ];
           }
           if (event.type === "error") {
             throw new ApiClientError(event.error);
@@ -395,31 +403,6 @@ function updateAssistantDraft(
     : target.value.map((item) => (item.id === draftId ? draft : item));
 }
 
-function updateAssistantReasoning(
-  sessionId: string,
-  draftId: string,
-  delta: string,
-  target: { value: readonly ChatMessage[] }
-): void {
-  const existing = target.value.find((item) => item.id === draftId);
-  const draft: ChatMessage = {
-    id: draftId,
-    ownerUserId: "current",
-    sessionId,
-    role: "assistant",
-    content: existing?.content ?? "",
-    metadata: {
-      ...existing?.metadata,
-      citations: existing?.metadata.citations ?? [],
-      reasoning: [...(existing?.metadata.reasoning ?? []), delta]
-    },
-    createdAt: existing?.createdAt ?? new Date().toISOString()
-  };
-  target.value = existing === undefined
-    ? [...target.value, draft]
-    : target.value.map((item) => (item.id === draftId ? draft : item));
-}
-
 function updateLiveToolCall(
   next: LiveToolCall,
   target: { value: readonly LiveToolCall[] }
@@ -452,8 +435,3 @@ function referenceScore(reference: ChatReference): number {
   return reference.rerankScore ?? reference.score ?? Number.NEGATIVE_INFINITY;
 }
 
-function waitForTypewriterTick(): Promise<void> {
-  return new Promise((resolve) => {
-    globalThis.setTimeout(resolve, CHAT_TYPEWRITER_DELAY_MS);
-  });
-}

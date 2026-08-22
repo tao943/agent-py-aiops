@@ -4,7 +4,6 @@ export type ChatMessageRole = "user" | "assistant";
 
 export interface ChatMessageMetadata {
   readonly citations?: readonly ReferenceSourceSseEvent["reference"][];
-  readonly reasoning?: readonly string[];
   readonly toolCallIds?: readonly string[];
   readonly custom?: Record<string, unknown>;
 }

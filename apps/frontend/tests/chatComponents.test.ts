@@ -4,7 +4,12 @@ import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ChatMessage, ChatSessionSummary, ToolCallAudit } from "@agent-py/api-contracts";
+import type {
+  ChatMessage,
+  ChatSessionSummary,
+  DiagnosticResultSseEvent,
+  ToolCallAudit
+} from "@agent-py/api-contracts";
 
 import ChatComposer from "../src/components/ChatComposer.vue";
 import ChatSessionList from "../src/components/ChatSessionList.vue";
@@ -65,8 +70,7 @@ const assistantMessage: ChatMessage = {
         rerankScore: 0.94
       }
     ],
-    toolCallIds: ["tool_1"],
-    reasoning: ["先确认运行手册，再给出结论。"]
+    toolCallIds: ["tool_1"]
   },
   createdAt: "2026-07-10T00:01:00.000Z"
 };
@@ -89,11 +93,25 @@ const audits: readonly ToolCallAudit[] = [
   }
 ];
 
+const diagnosticResults: readonly DiagnosticResultSseEvent["diagnostic"][] = [
+  {
+    taskId: "diagnostic_1",
+    reportId: "report_1",
+    rootCause: { primaryCause: "database_lock" },
+    recoveryMode: "manual_review",
+    executionPermitted: false,
+    humanApprovalRequired: true,
+    validatorStatus: "deterministic_grounded_fallback",
+    evidenceIds: ["evidence_1"]
+  }
+];
+
 describe("chat components", () => {
   it("leaves an empty conversation blank without helper copy or an accent mark", () => {
     const wrapper = mount(ChatTranscript, {
       props: {
         isLoading: false,
+        diagnosticResults: [],
         liveToolCalls: [],
         messages: [],
         references: [],
@@ -169,6 +187,7 @@ describe("chat components", () => {
     const wrapper = mount(ChatTranscript, {
       props: {
         isLoading: false,
+        diagnosticResults,
         liveToolCalls: [],
         messages: [assistantMessage],
         references: assistantMessage.metadata.citations ?? [],
@@ -180,8 +199,10 @@ describe("chat components", () => {
     expect(wrapper.text()).toContain("Restart runbook");
     expect(wrapper.text()).toContain("Found 1 relevant chunk.");
     expect(wrapper.text()).toContain("工具调用");
-    expect(wrapper.text()).toContain("深度思考");
-    expect(wrapper.text()).toContain("先确认运行手册，再给出结论。");
+    expect(wrapper.text()).not.toContain("深度思考");
+    expect(wrapper.text()).toContain("禁止自动执行");
+    expect(wrapper.text()).toContain("人工复核");
+    expect(wrapper.text()).toContain("database_lock");
     expect(wrapper.text()).toContain("向量#2 · 87%");
     expect(wrapper.text()).toContain("BM25#1 · 4.210");
     expect(wrapper.text()).toContain("精排#1 · 94%");

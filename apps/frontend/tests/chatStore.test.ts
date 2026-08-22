@@ -8,11 +8,7 @@ import type {
   ToolCallAudit
 } from "@agent-py/api-contracts";
 
-import {
-  CHAT_TYPEWRITER_DELAY_MS,
-  setChatClientFactoryForTests,
-  useChatStore
-} from "../src/stores/chat";
+import { setChatClientFactoryForTests, useChatStore } from "../src/stores/chat";
 import type { ChatClient } from "../src/chat/chatClient";
 
 const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummary => ({
@@ -130,6 +126,22 @@ describe("chat store", () => {
       },
       {
         id: "event_5",
+        type: "diagnostic.result",
+        channel: "chat",
+        timestamp: "2026-07-10T00:00:02.500Z",
+        diagnostic: {
+          taskId: "diagnostic_1",
+          reportId: "report_1",
+          rootCause: { primaryCause: "database_lock" },
+          recoveryMode: "manual_review",
+          executionPermitted: false,
+          humanApprovalRequired: true,
+          validatorStatus: "deterministic_grounded_fallback",
+          evidenceIds: ["evidence_1"]
+        }
+      },
+      {
+        id: "event_6",
         type: "complete",
         channel: "chat",
         timestamp: "2026-07-10T00:00:03.000Z",
@@ -184,6 +196,11 @@ describe("chat store", () => {
     ]);
     expect(store.toolAudits).toEqual([audit()]);
     expect(store.liveToolCalls).toEqual([]);
+    expect(store.diagnosticResults[0]).toMatchObject({
+      taskId: "diagnostic_1",
+      executionPermitted: false,
+      recoveryMode: "manual_review"
+    });
   });
 
   it("sorts live references by rerank score and keeps only five", async () => {
@@ -285,8 +302,8 @@ describe("chat store", () => {
     expect(store.references).toEqual([]);
   });
 
-  it("renders model content one character per typewriter tick", async () => {
-    vi.useFakeTimers();
+  it("appends one server content chunk without typewriter timers", async () => {
+    const timeout = vi.spyOn(globalThis, "setTimeout");
     const streamed: SseEvent[] = [
       {
         id: "event_content_typewriter",
@@ -312,20 +329,10 @@ describe("chat store", () => {
     const store = useChatStore();
     await store.initialize();
 
-    const sending = store.send("type slowly");
-    await Promise.resolve();
-    await Promise.resolve();
-    const draftContent = (): string | undefined =>
-      store.messages.find((item) => item.id.startsWith("message_draft_"))?.content;
+    await store.send("render one chunk");
 
-    expect(draftContent()).toBe("A");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    expect(draftContent()).toBe("AB");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    expect(draftContent()).toBe("ABC");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    await sending;
     expect(store.messages[0]?.content).toBe("ABC");
+    expect(timeout).not.toHaveBeenCalled();
   });
 
   it("clears visible conversation state on logout without deleting server sessions", async () => {

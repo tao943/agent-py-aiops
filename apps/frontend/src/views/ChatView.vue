@@ -43,6 +43,7 @@ function saveChatConfiguration(systemPromptId: string, skillIds: readonly string
     <div class="chat-view__conversation">
       <header><p>当前对话</p><h2>{{ activeTitle }}</h2></header>
       <ChatTranscript
+        :diagnostic-results="chat.diagnosticResults"
         :is-loading="chat.isLoading"
         :live-tool-calls="chat.liveToolCalls"
         :messages="chat.messages"

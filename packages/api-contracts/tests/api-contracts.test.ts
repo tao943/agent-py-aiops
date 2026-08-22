@@ -493,14 +493,17 @@ describe("SSE event contracts", () => {
   it("defines every required event type", () => {
     expect(SSE_EVENT_TYPES).toEqual([
       "content.delta",
-      "reasoning.delta",
       "tool.call",
       "reference.source",
+      "diagnostic.result",
       "task.status",
       "report",
       "complete",
       "error"
     ]);
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMessageMetadata?.properties).not.toHaveProperty(
+      "reasoning"
+    );
   });
 
   it("reuses structured errors for streaming failures", () => {

@@ -1034,10 +1034,6 @@ export const OPENAPI_CONTRACT = {
             type: "array",
             items: { type: "string" }
           },
-          reasoning: {
-            type: "array",
-            items: { type: "string" }
-          },
           custom: {
             type: "object",
             additionalProperties: true
@@ -2066,9 +2062,9 @@ export const OPENAPI_CONTRACT = {
       SseEvent: {
         oneOf: [
           { $ref: "#/components/schemas/ContentDeltaEvent" },
-          { $ref: "#/components/schemas/ReasoningDeltaEvent" },
           { $ref: "#/components/schemas/ToolCallEvent" },
           { $ref: "#/components/schemas/ReferenceSourceEvent" },
+          { $ref: "#/components/schemas/DiagnosticResultEvent" },
           { $ref: "#/components/schemas/TaskStatusEvent" },
           { $ref: "#/components/schemas/ReportEvent" },
           { $ref: "#/components/schemas/CompleteEvent" },
@@ -2076,8 +2072,40 @@ export const OPENAPI_CONTRACT = {
         ]
       },
       ContentDeltaEvent: { type: "object" },
-      ReasoningDeltaEvent: { type: "object" },
       ToolCallEvent: { type: "object" },
+      DiagnosticResultEvent: {
+        type: "object",
+        required: ["id", "type", "channel", "timestamp", "diagnostic"],
+        properties: {
+          id: { type: "string" },
+          type: { enum: ["diagnostic.result"] },
+          channel: { enum: ["chat", "aiops"] },
+          timestamp: { type: "string" },
+          diagnostic: {
+            type: "object",
+            required: [
+              "taskId",
+              "reportId",
+              "rootCause",
+              "recoveryMode",
+              "executionPermitted",
+              "humanApprovalRequired",
+              "validatorStatus",
+              "evidenceIds"
+            ],
+            properties: {
+              taskId: { type: "string" },
+              reportId: { type: "string" },
+              rootCause: { type: "object", additionalProperties: true },
+              recoveryMode: { type: "string" },
+              executionPermitted: { type: "boolean" },
+              humanApprovalRequired: { type: "boolean" },
+              validatorStatus: { type: "string" },
+              evidenceIds: { type: "array", items: { type: "string" } }
+            }
+          }
+        }
+      },
       ReferenceSourceEvent: {
         type: "object",
         properties: {
