@@ -15,6 +15,7 @@ from super_ai.aiops.evidence_aggregation import (
 from super_ai.aiops.investigation import EvidenceClaim, EvidencePacket
 from super_ai.aiops.specialists import (
     PublicAssessmentSignal,
+    SpecialistAnalysisErrorCode,
     SpecialistAssignment,
     SpecialistResult,
 )
@@ -423,7 +424,7 @@ def _specialist_result(
     status: str = "completed",
     value: object = True,
     analysis_status: str | None = None,
-    analysis_error_code: str | None = None,
+    analysis_error_code: SpecialistAnalysisErrorCode | None = None,
     unresolved_questions: tuple[str, ...] | None = None,
 ) -> SpecialistResult:
     facts = (

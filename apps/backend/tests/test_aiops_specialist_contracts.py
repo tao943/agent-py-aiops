@@ -12,13 +12,16 @@ from super_ai.aiops.investigation import EvidenceClaim, JsonValue
 from super_ai.aiops.specialists import (
     PublicAssessmentSignal,
     SharedRunContext,
+    SpecialistAnalysisStatus,
     SpecialistAssignment,
     SpecialistEvidenceAnalysisOutput,
+    SpecialistEvidenceStatus,
     SpecialistLocalPlanOutput,
     SpecialistPlanStep,
     SpecialistResult,
     SpecialistRole,
     SpecialistState,
+    SpecialistTerminalStatus,
     derive_specialist_terminal_status,
     specialist_execution_key,
     specialist_result_checksum,
@@ -165,11 +168,11 @@ def _result(**overrides: object) -> SpecialistResult:
     ),
 )
 def test_specialist_health_derives_legacy_terminal_status(
-    evidence_status: str,
-    analysis_status: str,
-    expected: str,
+    evidence_status: SpecialistEvidenceStatus,
+    analysis_status: SpecialistAnalysisStatus,
+    expected: SpecialistTerminalStatus,
 ) -> None:
-    assert derive_specialist_terminal_status(  # type: ignore[arg-type]
+    assert derive_specialist_terminal_status(
         evidence_status,
         analysis_status,
     ) == expected
