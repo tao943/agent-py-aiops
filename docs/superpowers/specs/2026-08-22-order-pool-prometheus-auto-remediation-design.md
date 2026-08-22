@@ -225,6 +225,11 @@ All recovery and write-capable tools remain outside this client and outside ordi
 They can only be reached after Deterministic Validator, Policy Gate, and the existing Recovery
 Coordinator authorize a code-owned action and target.
 
+An automatic Live Task is identified from the backend-created `benchmarkMode=live` and exact
+`benchmarkScenarioId`, before parsing `liveEvidenceScope`. Therefore a missing or malformed scope
+cannot be mistaken for an ordinary Task and cannot fall back to the owner's full MCP client; it gets
+an empty MCP client and fails closed.
+
 ### 6.3 Resident runtime evidence sources
 
 The resident backend must not reuse the CLI process's `LiveFaultObservation`; that object is neither
@@ -290,6 +295,13 @@ driver owns the matching LiveRunIdentity
 LLM semantic validation may add confidence but cannot replace a failed deterministic predicate.
 An unavailable or failed semantic validator does not grant execution. Any mismatch produces a
 non-executing `VALID_FAIL` or `MANUAL_REVIEW` result with a safe authorization code.
+
+The persisted diagnostic artifact must also contain the Task's final Policy Gate handoff. For this
+isolated external coordinator the only acceptable handoff is `status=deferred`,
+`authorizationCode=external_policy_required`, and `executionPermitted=false`: the Agent-side Policy
+Gate explicitly refuses direct execution and delegates revalidation to the external deterministic
+policy. The artifact Task ID must equal the correlated alert lifecycle Task ID. Missing, rejected,
+directly-permitted, cross-Task, or report-prose-only policy claims do not reach Recovery Coordinator.
 
 The stable recovery execution key includes the diagnostic Task, graph/workflow version, scenario,
 action, fixed target, logical attempt, and canonical input fingerprint. The side-effecting execution
@@ -404,6 +416,14 @@ an alert disappearance, or a generated proposal as executed recovery.
 - The resident Single-Agent plan receives one exact CLS `SearchLog` binding for the matching run.
 - LLM arguments, foreign run IDs, traversal, non-CLS tools, and concurrent Tasks cannot alter or
   share the trusted scope.
+- An automatic Live Task with a missing or malformed scope receives an empty MCP set and never falls
+  back to the owner client.
+- Persisted evidence has four distinct Evidence IDs and source fingerprints for CLS, pool state,
+  database sessions, and health/probe; concurrent Tasks share none of them.
+- Metrics parsing rejects duplicate or extra-label series, NaN/Inf, negative or non-integral values,
+  contradictory pool values, oversized bodies, redirects, and timeouts.
+- Recovery requires the same Task's persisted `external_policy_required` Policy Gate handoff; missing,
+  rejected, cross-Task, forged, or directly-permitted policy results fail closed.
 
 ### 14.2 PostgreSQL and API integration
 

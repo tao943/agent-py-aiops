@@ -763,7 +763,10 @@ Expected: FAIL because the route and scoped client modules do not exist.
 - [ ] **Step 3: Implement the minimal immutable route and composite client**
 
 `route_task_read_only_tools` parses only the five exact `liveEvidenceScope` fields already persisted
-by alert ingestion. It returns the four-tool allowlist only for the exact Order Pool scenario and
+by alert ingestion. It first recognizes an automatic Live Task from the backend-created
+`benchmarkMode=live` plus exact `benchmarkScenarioId`; such a Task is always scoped even when the
+scope is absent or malformed, so it can never fall back to the owner MCP client. It returns the
+four-tool allowlist only for the exact Order Pool scenario and
 identity relation `incident_id == f"{scenario_id}-{run_id}"`. `ScopedCompositeMcpClient` receives
 explicit `(client, allowed_names)` sources, validates discovered definitions against the trusted
 registry and allowed server names, and routes calls only after successful discovery.
@@ -810,6 +813,17 @@ async def test_resident_client_builds_three_independent_live_observations() -> N
 async def test_metrics_reader_rejects_foreign_run_or_incomplete_snapshot() -> None:
     with pytest.raises(McpClientError):
         await _reader(_metrics_for("run-b")).snapshot("run-a")
+
+@pytest.mark.parametrize("body", [
+    DUPLICATE_EXACT_SERIES,
+    NAN_OR_INFINITY_SERIES,
+    NEGATIVE_OR_NON_INTEGER_SERIES,
+    CONTRADICTORY_POOL_SERIES,
+    EXTRA_LABEL_SERIES,
+])
+async def test_metrics_reader_fails_closed_on_ambiguous_values(body: str) -> None:
+    with pytest.raises(McpClientError):
+        await _reader(body).snapshot("run-a")
 ```
 
 - [ ] **Step 2: Verify red**
@@ -830,7 +844,11 @@ business_probe_timed_out = business_probe_success == 0
 ```
 
 Use only `database_reachable`, `run_scoped_session_count`, and `lock_wait_observed` from the existing
-parameterized PostgreSQL observer. Reject all tool arguments and unknown tools.
+parameterized PostgreSQL observer. Reject all tool arguments and unknown tools. Configure the HTTP
+client with a three-second total timeout, `follow_redirects=False`, `trust_env=False`, and a bounded
+256 KiB streamed response; reject redirects, non-200 responses, oversized bodies, duplicate exact
+series, extra labels, non-finite/non-integral/negative values, and contradictory count relations
+`checked_out + free != capacity` or `checked_out > capacity`.
 
 - [ ] **Step 4: Verify green**
 
@@ -875,6 +893,17 @@ async def test_concurrent_tasks_do_not_share_run_scope() -> None:
     first, second = await asyncio.gather(_run("run-a"), _run("run-b"))
     assert first.runtime_run_ids == {"run-a"}
     assert second.runtime_run_ids == {"run-b"}
+
+async def test_automatic_task_without_valid_scope_gets_empty_client() -> None:
+    result = await _run_order_pool_task_without_scope(owner_tools=ALL_USER_TOOLS)
+    assert result.planner_mcp_tools == frozenset()
+
+async def test_persisted_sources_have_distinct_ids_fingerprints_and_task_scope() -> None:
+    first, second = await asyncio.gather(_run("run-a"), _run("run-b"))
+    assert len(first.evidence_ids) == len(set(first.evidence_ids)) == 4
+    assert len(first.source_fingerprints) == len(set(first.source_fingerprints)) == 4
+    assert set(first.evidence_ids).isdisjoint(second.evidence_ids)
+    assert set(first.source_fingerprints).isdisjoint(second.source_fingerprints)
 ```
 
 - [ ] **Step 2: Verify red**
@@ -890,6 +919,12 @@ metrics reader. Change every Single-Agent MCP discovery/call site to resolve fro
 validate calls against the persisted filtered definitions before dispatch. Keep ordinary non-Live
 Tasks behavior-compatible.
 
+Project the persisted `policy_gate` step into a typed `RecoveryPolicyAudit` on `RunArtifact`. The
+automatic recovery authorizer accepts only the correlated Task's final
+`status=deferred / authorizationCode=external_policy_required / executionPermitted=false` handoff.
+It rejects missing policy state, `denied`, `allowed`, direct execution permission, mismatched Task ID,
+and policy text present only in a report.
+
 - [ ] **Step 4: Verify green and focused security regression**
 
 Run:
@@ -899,6 +934,9 @@ uv run --project apps/backend pytest apps/backend/tests/test_aiops_task_tool_rou
 ```
 
 Expected: PASS; the trusted Order Pool pattern still requires four distinct evidence sources.
+Also run `apps/backend/tests/test_live_auto_closure.py` and
+`apps/backend/tests/test_evaluation_artifacts.py`; expected PASS for the Policy Gate projection and
+external handoff authorization matrix.
 
 - [ ] **Step 5: Run static checks and commit**
 
@@ -930,7 +968,9 @@ FastAPI.
 
 Run `scripts/run_order_pool_auto_closure.ps1` with a new validated run ID, `-EvidenceSource cls`, and
 Single-Agent. Expected: four distinct tool Evidence IDs, trusted-pattern match, deterministic
-authorization, exactly one restart, six verification checks, automatic resolved lifecycle,
+Validator pass, persisted same-Task `external_policy_required` Policy Gate handoff, deterministic
+external authorization, exactly one Recovery Coordinator dispatch/restart, six verification checks,
+automatic resolved lifecycle,
 `verification_status=passed`, and persisted `VALID_PASS`.
 
 - [ ] **Step 4: Execute exact-run Resume**
