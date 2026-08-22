@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,7 +9,7 @@ from super_ai.alert_ingestion.domain import AlertmanagerDelivery, NormalizedAler
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
 from super_ai.alert_ingestion.redis_runtime import AlertLease
 from super_ai.alert_ingestion.repositories import IngestionResult, IngestionWrite, RedisMode
-from super_ai.alert_ingestion.service import AlertIngestionService
+from super_ai.alert_ingestion.service import AlertIngestionService, _live_task_input
 
 
 def _delivery(
@@ -225,3 +225,46 @@ def test_service_builds_exact_live_correlation_without_webhook_authority() -> No
     assert write.task_input_payload["workflowVersion"] == "evidence-driven-v4"
     assert write.task_input_payload["graphVersion"] == "aiops-diagnostic-v3"
     assert "decisionVocabulary" in write.task_input_payload
+    scope = write.task_input_payload["liveEvidenceScope"]
+    starts_at = datetime(2026, 8, 22, 1, 0, tzinfo=timezone.utc)
+    assert scope == {
+        "runId": "closure-001",
+        "scenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+        "incidentId": "APY-LIVE-ORDER-POOL-LEAK-001-closure-001",
+        "fromMs": int((starts_at - timedelta(minutes=5)).timestamp() * 1000),
+        "toMs": int((starts_at + timedelta(minutes=30)).timestamp() * 1000),
+    }
+    serialized = str(write.task_input_payload)
+    for forbidden in (
+        "Region",
+        "TopicId",
+        "SecretId",
+        "SecretKey",
+        "recoveryTarget",
+        "ground_truth",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "run_id", "starts_at"),
+    [
+        ("../APY-LIVE-ORDER-POOL-LEAK-001", "closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-PG-LOCK-001", "closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-ORDER-POOL-LEAK-001", "../closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-ORDER-POOL-LEAK-001", "closure-001", "not-a-time"),
+    ],
+)
+def test_live_task_input_rejects_untrusted_scope_components(
+    scenario_id: str,
+    run_id: str,
+    starts_at: str,
+) -> None:
+    with pytest.raises(ValueError, match="Live evidence scope"):
+        _live_task_input(
+            scenario_id=scenario_id,
+            run_id=run_id,
+            starts_at=starts_at,
+            query="Investigate the alert.",
+            safe_alert={},
+        )

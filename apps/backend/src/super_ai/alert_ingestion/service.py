@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Protocol
@@ -16,6 +17,8 @@ from .repositories import AlertIngestionRepository, IngestionResult, IngestionWr
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 _LIVE_SCENARIO_ROOT = _REPOSITORY_ROOT / "benchmarks" / "agentpy" / "live"
+_LIVE_SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
+_LIVE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 
 class AlertLeaseProvider(Protocol):
@@ -70,6 +73,8 @@ class AlertIngestionService:
         safe_alert = _safe_alert(first)
         task_input_payload = _live_task_input(
             scenario_id=first.labels.get("scenario_id"),
+            run_id=first.labels.get("run_id"),
+            starts_at=first.starts_at,
             query=delivery.query,
             safe_alert=safe_alert,
         )
@@ -101,22 +106,40 @@ class AlertIngestionService:
 def _live_task_input(
     *,
     scenario_id: str | None,
+    run_id: str | None,
+    starts_at: str | None,
     query: str,
     safe_alert: dict[str, object],
 ) -> dict[str, object] | None:
     if scenario_id is None:
         return None
+    started = _parse_datetime(starts_at)
+    if (
+        scenario_id != _LIVE_SCENARIO_ID
+        or run_id is None
+        or not _LIVE_RUN_ID.fullmatch(run_id)
+        or ".." in run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or started is None
+    ):
+        raise ValueError("Live evidence scope is invalid.")
     from super_ai.evaluation.live.diagnostics import build_live_diagnostic_input
     from super_ai.evaluation.live.scenarios import (
         load_live_scenario,
         resolve_live_scenario_directory,
     )
 
-    scenario_directory = resolve_live_scenario_directory(
-        _LIVE_SCENARIO_ROOT,
-        scenario_id,
-    )
-    scenario = load_live_scenario(scenario_directory)
+    try:
+        scenario_directory = resolve_live_scenario_directory(
+            _LIVE_SCENARIO_ROOT,
+            scenario_id,
+        )
+        scenario = load_live_scenario(scenario_directory)
+    except ValueError as exc:
+        raise ValueError("Live evidence scope is invalid.") from exc
+    if scenario.id != _LIVE_SCENARIO_ID:
+        raise ValueError("Live evidence scope is invalid.")
     payload = build_live_diagnostic_input(
         scenario,
         workflow_version="evidence-driven-v4",
@@ -124,6 +147,13 @@ def _live_task_input(
     )
     payload["query"] = query
     payload["alert"] = safe_alert
+    payload["liveEvidenceScope"] = {
+        "runId": run_id,
+        "scenarioId": scenario_id,
+        "incidentId": f"{scenario_id}-{run_id}",
+        "fromMs": int((started - timedelta(minutes=5)).timestamp() * 1000),
+        "toMs": int((started + timedelta(minutes=30)).timestamp() * 1000),
+    }
     return payload
 
 
