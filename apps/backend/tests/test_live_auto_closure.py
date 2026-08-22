@@ -507,3 +507,41 @@ async def test_persisted_loader_rebuilds_artifact_without_reading_report_prose()
         "audits": ["audit"],
         "reports": [report],
     }
+
+
+@pytest.mark.asyncio
+async def test_persisted_loader_reads_structured_evidence_sufficiency_status() -> None:
+    task = SimpleNamespace(
+        id="diagnostic-structured",
+        result_payload={"evidenceSufficiency": {"status": "sufficient"}},
+    )
+
+    class Diagnostics:
+        async def get_task(self, **kwargs):
+            del kwargs
+            return task
+
+        async def list_steps(self, **kwargs):
+            del kwargs
+            return []
+
+        async def list_evidence(self, **kwargs):
+            del kwargs
+            return []
+
+        async def list_reports(self, **kwargs):
+            del kwargs
+            return []
+
+    repositories = SimpleNamespace(diagnostics=Diagnostics(), tool_call_audits=None)
+    loader = PersistedDiagnosticOutcomeLoader(
+        repositories,
+        artifact_builder=lambda *_args: _artifact(),
+    )
+
+    outcome = await loader.load(
+        owner_user_id="owner",
+        diagnostic_task_id="diagnostic-structured",
+    )
+
+    assert outcome.evidence_sufficiency == "sufficient"

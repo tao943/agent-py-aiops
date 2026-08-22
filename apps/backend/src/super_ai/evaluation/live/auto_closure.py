@@ -267,12 +267,19 @@ class PersistedDiagnosticOutcomeLoader:
             else []
         )
         artifact = self._artifact_builder(task, steps, evidence, audits, reports)
-        sufficiency = task.result_payload.get("evidenceSufficiency")
-        if sufficiency not in {"sufficient", "insufficient"} and reports:
-            sufficiency = reports[-1].payload.get("evidenceSufficiency")
-        if sufficiency not in {"sufficient", "insufficient"}:
+        sufficiency = _evidence_sufficiency_status(task.result_payload)
+        if sufficiency is None and reports:
+            sufficiency = _evidence_sufficiency_status(reports[-1].payload)
+        if sufficiency is None:
             sufficiency = "insufficient"
         return PersistedDiagnosticOutcome(artifact, sufficiency)
+
+
+def _evidence_sufficiency_status(payload: Mapping[str, object]) -> str | None:
+    raw = payload.get("evidenceSufficiency")
+    if isinstance(raw, Mapping):
+        raw = raw.get("status")
+    return raw if isinstance(raw, str) and raw in {"sufficient", "insufficient"} else None
 
 
 class RecoveryService(Protocol):
