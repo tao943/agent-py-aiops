@@ -33,6 +33,7 @@ _INTENTS: frozenset[str] = frozenset(
 _DIAGNOSTIC_ID = re.compile(r"(?<![A-Za-z0-9_-])(diagnostic_[A-Za-z0-9_-]+)")
 _INCIDENT_ID = re.compile(r"(?<![A-Za-z0-9_-])(incident_[A-Za-z0-9_-]+)")
 _START_WORDS = ("启动", "开始", "诊断", "排查", "处理", "investigate", "diagnose")
+_RECOVERY_WORDS = ("恢复", "审批", "approval", "recover", "remediation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,10 +82,10 @@ class KeywordRouterModel:
 
     async def route(self, content: str) -> Mapping[str, object]:
         lowered = content.casefold()
-        if any(word in lowered for word in ("如何", "怎么", "什么", "how", "what", "?", "？")):
-            intent: ChatIntent = "knowledge_question"
-        elif any(word in lowered for word in ("告警", "事故", "incident", "alert")):
-            intent = "incident_query"
+        if any(word in lowered for word in ("告警", "事故", "incident", "alert")):
+            intent: ChatIntent = "incident_query"
+        elif any(word in lowered for word in ("如何", "怎么", "什么", "how", "what")):
+            intent = "knowledge_question"
         else:
             intent = "general_chat"
         return {
@@ -116,8 +117,14 @@ class ChatIntentRouter:
 def _route_explicit_identifiers(content: str) -> ChatRoute | None:
     diagnostic_match = _DIAGNOSTIC_ID.search(content)
     if diagnostic_match is not None:
+        lowered = content.casefold()
+        intent: ChatIntent = (
+            "recovery_request"
+            if any(word in lowered for word in _RECOVERY_WORDS)
+            else "diagnostic_status"
+        )
         return ChatRoute(
-            "diagnostic_status",
+            intent,
             1.0,
             "rule",
             diagnostic_task_id=diagnostic_match.group(1),

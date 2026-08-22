@@ -44,6 +44,20 @@ async def test_explicit_diagnostic_task_id_routes_without_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_recovery_request_beats_diagnostic_status_rule() -> None:
+    model = FakeRouterModel(AssertionError("model must not run"))
+
+    route = await ChatIntentRouter(model).route(
+        "为 diagnostic_owner_008 的恢复方案创建人工审批"
+    )
+
+    assert route.intent == "recovery_request"
+    assert route.diagnostic_task_id == "diagnostic_owner_008"
+    assert route.source == "rule"
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_low_confidence_model_route_requires_clarification() -> None:
     model = FakeRouterModel(
         {

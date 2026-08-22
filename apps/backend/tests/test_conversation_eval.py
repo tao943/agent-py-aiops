@@ -10,15 +10,20 @@ import pytest
 from super_ai.chat.evaluation import (
     ConversationEvalObservation,
     ConversationEvalScenario,
+    FixtureConversationEvalBridge,
+    IntegratedConversationEvalRunner,
     load_conversation_eval_fixtures,
     run_conversation_eval,
 )
+from super_ai.chat.intent import ChatIntentRouter, ChatRoute, KeywordRouterModel
 
 FIXTURES = Path(__file__).parent / "fixtures" / "conversation_eval.json"
 
 
 class SafeFakeConversationRunner:
-    def evaluate(self, scenario: ConversationEvalScenario) -> ConversationEvalObservation:
+    async def evaluate(
+        self, scenario: ConversationEvalScenario
+    ) -> ConversationEvalObservation:
         expected_safety = scenario.available_resources.get("expectedSafety")
         safety = (
             dict(cast(Mapping[str, object], expected_safety))
@@ -50,8 +55,10 @@ class MutatingRunner(SafeFakeConversationRunner):
     def __init__(self, gate: str) -> None:
         self.gate = gate
 
-    def evaluate(self, scenario: ConversationEvalScenario) -> ConversationEvalObservation:
-        observation = super().evaluate(scenario)
+    async def evaluate(
+        self, scenario: ConversationEvalScenario
+    ) -> ConversationEvalObservation:
+        observation = await super().evaluate(scenario)
         if scenario.id != "CHAT-SEC-002":
             return observation
         if self.gate == "cross_tenant":
@@ -75,8 +82,10 @@ class MutatingRunner(SafeFakeConversationRunner):
 
 
 class SafetyMismatchRunner(SafeFakeConversationRunner):
-    def evaluate(self, scenario: ConversationEvalScenario) -> ConversationEvalObservation:
-        observation = super().evaluate(scenario)
+    async def evaluate(
+        self, scenario: ConversationEvalScenario
+    ) -> ConversationEvalObservation:
+        observation = await super().evaluate(scenario)
         if scenario.id == "CHAT-REC-001":
             return replace(
                 observation,
@@ -93,8 +102,15 @@ def load_scenarios() -> tuple[ConversationEvalScenario, ...]:
     return load_conversation_eval_fixtures(FIXTURES)
 
 
-def test_eval_passes_twelve_bounded_scenarios() -> None:
-    result = run_conversation_eval(load_scenarios(), runner=SafeFakeConversationRunner())
+@pytest.mark.asyncio
+async def test_eval_passes_twelve_bounded_scenarios() -> None:
+    result = await run_conversation_eval(
+        load_scenarios(),
+        runner=IntegratedConversationEvalRunner(
+            router=ChatIntentRouter(KeywordRouterModel()),
+            bridge=FixtureConversationEvalBridge(),
+        ),
+    )
 
     assert result.scenario_count == 12
     assert result.category_counts == {
@@ -125,19 +141,41 @@ def test_eval_passes_twelve_bounded_scenarios() -> None:
     "gate",
     ["cross_tenant", "forbidden_tool", "reasoning", "recovery_execution"],
 )
-def test_any_security_gate_failure_fails_suite(gate: str) -> None:
-    result = run_conversation_eval(load_scenarios(), runner=MutatingRunner(gate))
+@pytest.mark.asyncio
+async def test_any_security_gate_failure_fails_suite(gate: str) -> None:
+    result = await run_conversation_eval(load_scenarios(), runner=MutatingRunner(gate))
 
     assert result.passed is False
     assert gate in result.failed_hard_gates
 
 
-def test_structured_safety_mismatch_is_a_hard_gate() -> None:
-    result = run_conversation_eval(load_scenarios(), runner=SafetyMismatchRunner())
+@pytest.mark.asyncio
+async def test_structured_safety_mismatch_is_a_hard_gate() -> None:
+    result = await run_conversation_eval(load_scenarios(), runner=SafetyMismatchRunner())
 
     assert result.passed is False
     assert result.structured_safety_mismatch_count == 1
     assert "safety_mismatch" in result.failed_hard_gates
+
+
+class AlwaysGeneralRouter:
+    async def route(self, content: str) -> ChatRoute:
+        del content
+        return ChatRoute("general_chat", 1.0, "model")
+
+
+@pytest.mark.asyncio
+async def test_integrated_eval_observes_real_router_failure() -> None:
+    result = await run_conversation_eval(
+        load_scenarios(),
+        runner=IntegratedConversationEvalRunner(
+            router=AlwaysGeneralRouter(),
+            bridge=FixtureConversationEvalBridge(),
+        ),
+    )
+
+    assert result.intent_accuracy < 1.0
+    assert result.passed is False
 
 
 def test_fixture_loader_rejects_wrong_distribution(tmp_path: Path) -> None:

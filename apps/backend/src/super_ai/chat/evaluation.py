@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from super_ai.chat.intent import ChatIntent
+from super_ai.chat.intent import ChatIntent, ChatRoute
+from super_ai.chat.tool_policy import allowed_tools_for
 
 _CATEGORIES = frozenset(
     {"general", "knowledge", "incident", "start", "status", "evidence", "recovery", "security"}
@@ -76,7 +77,126 @@ class ConversationEvalObservation:
 
 
 class ConversationEvalRunner(Protocol):
-    def evaluate(self, scenario: ConversationEvalScenario) -> ConversationEvalObservation: ...
+    async def evaluate(
+        self, scenario: ConversationEvalScenario
+    ) -> ConversationEvalObservation: ...
+
+
+class ConversationEvalRouter(Protocol):
+    async def route(self, content: str) -> ChatRoute: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationEvalExecution:
+    """Execution facts produced by an offline Bridge, excluding routing or policy output."""
+
+    invoked_tools: tuple[str, ...]
+    completed: bool
+    grounding_ids: tuple[str, ...]
+    idempotency_correct: bool = True
+    cross_tenant_access_count: int = 0
+    automatic_recovery_execution_count: int = 0
+    public_events: tuple[Mapping[str, object], ...] = (
+        {"id": "2", "type": "content.delta", "delta": "public"},
+        {"id": "3", "type": "complete"},
+    )
+    replayed_event_sequences: tuple[int, ...] = (2, 3)
+    expected_replay_sequences: tuple[int, ...] = (2, 3)
+    structured_safety: Mapping[str, object] | None = None
+
+
+class ConversationEvalBridge(Protocol):
+    async def execute(
+        self, scenario: ConversationEvalScenario, route: ChatRoute
+    ) -> ConversationEvalExecution: ...
+
+
+class IntegratedConversationEvalRunner:
+    """Observe the real Router and tool policy while using bounded offline resources."""
+
+    def __init__(
+        self, *, router: ConversationEvalRouter, bridge: ConversationEvalBridge
+    ) -> None:
+        self._router = router
+        self._bridge = bridge
+
+    async def evaluate(
+        self, scenario: ConversationEvalScenario
+    ) -> ConversationEvalObservation:
+        route = await self._router.route(scenario.utterance)
+        exposed_tools = tuple(sorted(allowed_tools_for(route.intent)))
+        execution = await self._bridge.execute(scenario, route)
+        return ConversationEvalObservation(
+            intent=route.intent,
+            incident_id=route.incident_id,
+            diagnostic_task_id=route.diagnostic_task_id,
+            exposed_tools=exposed_tools,
+            invoked_tools=execution.invoked_tools,
+            completed=execution.completed,
+            grounding_ids=execution.grounding_ids,
+            idempotency_correct=execution.idempotency_correct,
+            cross_tenant_access_count=execution.cross_tenant_access_count,
+            automatic_recovery_execution_count=(
+                execution.automatic_recovery_execution_count
+            ),
+            public_events=execution.public_events,
+            replayed_event_sequences=execution.replayed_event_sequences,
+            expected_replay_sequences=execution.expected_replay_sequences,
+            structured_safety=execution.structured_safety,
+        )
+
+
+class FixtureConversationEvalBridge:
+    """Execute route-selected capabilities against public fixture resource facts."""
+
+    async def execute(
+        self, scenario: ConversationEvalScenario, route: ChatRoute
+    ) -> ConversationEvalExecution:
+        resources = scenario.available_resources
+        grounding_ids: list[str] = []
+        structured_safety: Mapping[str, object] | None = None
+
+        if route.intent == "knowledge_question":
+            grounding_ids.extend(_resource_strings(resources, "knowledgeIds"))
+        elif route.intent == "incident_query":
+            grounding_ids.extend(_resource_strings(resources, "ownedIncidentIds"))
+        elif route.intent == "start_diagnostic":
+            grounding_ids.extend(_resource_strings(resources, "ownedIncidentIds"))
+            grounding_ids.extend(_resource_string(resources, "diagnosticTaskId"))
+        elif route.intent == "diagnostic_status":
+            if route.diagnostic_task_id in _resource_strings(
+                resources, "ownedDiagnosticIds"
+            ):
+                grounding_ids.append(route.diagnostic_task_id)
+                grounding_ids.extend(_resource_string(resources, "reportId"))
+                grounding_ids.extend(_resource_strings(resources, "evidenceIds"))
+        elif route.intent == "recovery_request":
+            if route.diagnostic_task_id in _resource_strings(
+                resources, "ownedDiagnosticIds"
+            ):
+                grounding_ids.append(route.diagnostic_task_id)
+                approval_id = _resource_string(resources, "approvalRequestId")
+                grounding_ids.extend(approval_id)
+                structured_safety = (
+                    {
+                        "executionPermitted": False,
+                        "humanApprovalRequired": False,
+                        "recoveryMode": "no_action",
+                    }
+                    if resources.get("approvalRejected") is True
+                    else {
+                        "executionPermitted": False,
+                        "humanApprovalRequired": True,
+                        "recoveryMode": "manual_review",
+                    }
+                )
+
+        return ConversationEvalExecution(
+            invoked_tools=tuple(sorted(allowed_tools_for(route.intent))),
+            completed=True,
+            grounding_ids=tuple(grounding_ids),
+            structured_safety=structured_safety,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +252,7 @@ def load_conversation_eval_fixtures(path: Path) -> tuple[ConversationEvalScenari
     return scenarios
 
 
-def run_conversation_eval(
+async def run_conversation_eval(
     scenarios: Sequence[ConversationEvalScenario],
     *,
     runner: ConversationEvalRunner,
@@ -141,7 +261,10 @@ def run_conversation_eval(
 
     if len(scenarios) != 12:
         raise ValueError("Conversation Eval requires exactly 12 scenarios.")
-    observations = tuple((scenario, runner.evaluate(scenario)) for scenario in scenarios)
+    observations_list: list[tuple[ConversationEvalScenario, ConversationEvalObservation]] = []
+    for scenario in scenarios:
+        observations_list.append((scenario, await runner.evaluate(scenario)))
+    observations = tuple(observations_list)
     scenario_count = len(observations)
 
     intent_hits = sum(
@@ -359,3 +482,15 @@ def _replay_is_correct(observation: ConversationEvalObservation) -> bool:
 
 def _ratio(numerator: int, denominator: int) -> float:
     return 1.0 if denominator == 0 else numerator / denominator
+
+
+def _resource_strings(resources: Mapping[str, object], key: str) -> tuple[str, ...]:
+    value = resources.get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in cast(list[object], value) if isinstance(item, str))
+
+
+def _resource_string(resources: Mapping[str, object], key: str) -> tuple[str, ...]:
+    value = resources.get(key)
+    return (value,) if isinstance(value, str) else ()
