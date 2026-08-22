@@ -167,6 +167,13 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "missingDomains",
             "aggregationChecksum",
             "terminalFailureCategory",
+            "closedVerified",
+            "mttdMs",
+            "diagnosisMs",
+            "recoveryMs",
+            "verificationMs",
+            "resolvedMs",
+            "mttrMs",
         }
     ),
 }
@@ -183,6 +190,9 @@ _RESULT_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "checkResults",
             "failedChecks",
             "safeFacts",
+            "correlation",
+            "recoveryIntentId",
+            "closedVerified",
         }
     ),
 }

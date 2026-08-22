@@ -15,6 +15,10 @@ from super_ai.evaluation.artifacts import (
     SpecialistRoleAudit,
 )
 from super_ai.evaluation.live import cli as live_cli
+from super_ai.evaluation.live.auto_closure import (
+    AutoClosureCorrelation,
+    LiveAutoClosureResult,
+)
 from super_ai.evaluation.live.cli import (
     LIVE_SCENARIO_ROOT,
     build_live_evidence_runtime,
@@ -130,6 +134,62 @@ def live_recorder(tmp_path: Path) -> tuple[EvaluationRunRecorder, EvaluationArch
         ),
         archive,
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_closure_manual_review_persists_correlation_and_timings(
+    tmp_path: Path,
+) -> None:
+    recorder, archive = live_recorder(tmp_path)
+
+    async def execute() -> LiveAutoClosureResult:
+        return LiveAutoClosureResult(
+            validity="MANUAL_REVIEW",
+            strategy="single_agent",
+            authorization_code="uncertain_previous_attempt",
+            correlation=AutoClosureCorrelation(
+                incident_id="incident-1",
+                diagnostic_task_id="diagnostic-1",
+                background_job_id="job-1",
+                report_id="report-1",
+            ),
+            recovery_intent_id="a" * 64,
+            closed_verified=False,
+            cleanup=LiveCleanupResult((LiveCheck("cleanup", True),)),
+        )
+
+    payload, exit_code = await live_cli._run_auto_closure_once(  # pyright: ignore[reportPrivateUsage]
+        scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+        run_id="auto-manual-review",
+        evidence_source="local",
+        execute=execute,
+        score=lambda result: None,
+        stage_metrics=lambda: {
+            "detection": 10,
+            "diagnosis": 20,
+            "recovery": 30,
+            "verification": 0,
+            "resolved": 0,
+            "total": 60,
+        },
+        recorder=recorder,
+    )
+
+    envelope = archive.load("auto-manual-review")
+    assert exit_code == 1
+    assert payload["status"] == "failed"
+    assert envelope.validity == "MANUAL_REVIEW"
+    assert envelope.metadata["investigationStrategy"] == "single"
+    assert envelope.diagnostic_task_id == "diagnostic-1"
+    assert envelope.metrics["mttdMs"] == 10
+    assert envelope.metrics["mttrMs"] == 60
+    assert envelope.result_payload["correlation"] == {
+        "incidentId": "incident-1",
+        "diagnosticTaskId": "diagnostic-1",
+        "backgroundJobId": "job-1",
+        "reportId": "report-1",
+    }
+    assert envelope.result_payload["recoveryIntentId"] == "a" * 64
 
 
 @pytest.mark.asyncio
