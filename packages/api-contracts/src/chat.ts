@@ -1,6 +1,24 @@
 import type { ReferenceSourceSseEvent } from "./sse";
 
 export type ChatMessageRole = "user" | "assistant";
+export type ChatRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface CreateChatRunRequest {
+  readonly content: string;
+  readonly metadata?: ChatMessageMetadata;
+  readonly clientRequestId: string;
+}
+
+export interface ChatRun {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly clientRequestId: string;
+  readonly status: ChatRunStatus;
+  readonly lastEventSequence: number;
+  readonly errorCode: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
 
 export interface ChatMessageMetadata {
   readonly citations?: readonly ReferenceSourceSseEvent["reference"][];
@@ -90,6 +108,10 @@ export interface ChatToolCallAuditListResponse {
 export interface ChatSessionMutationResponse {
   readonly session: ChatSessionSummary;
   readonly message?: ChatMessage;
+}
+
+export interface ChatRunCreateResponse {
+  readonly run: ChatRun;
 }
 
 export interface ChatStreamCompleteResult {

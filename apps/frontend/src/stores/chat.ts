@@ -6,6 +6,7 @@ import type {
   ChatAssemblyConfigurationResponse,
   ChatSessionSummary,
   ChatMemoryMode,
+  ChatRun,
   DiagnosticResultSseEvent,
   ReferenceSourceSseEvent,
   ToolCallAudit
@@ -41,6 +42,7 @@ export const useChatStore = defineStore("chat", () => {
   const liveToolCalls = ref<readonly LiveToolCall[]>([]);
   const references = ref<readonly ChatReference[]>([]);
   const diagnosticResults = ref<readonly DiagnosticResultSseEvent["diagnostic"][]>([]);
+  const activeRunId = ref<string | null>(null);
   const isLoading = ref(false);
   const isSending = ref(false);
   const isUpdatingMemory = ref(false);
@@ -64,7 +66,7 @@ export const useChatStore = defineStore("chat", () => {
     references.value = uniqueReferences(latestAssistant?.metadata.citations ?? []);
   }
 
-  async function loadSession(sessionId: string): Promise<void> {
+  async function loadSession(sessionId: string, resumeActiveRun = true): Promise<void> {
     const [detail, audits] = await Promise.all([
       client.getSession(sessionId),
       client.listToolCallAudits(sessionId)
@@ -75,6 +77,70 @@ export const useChatStore = defineStore("chat", () => {
     liveToolCalls.value = [];
     setReferencesFromMessages(detail.messages);
     upsertSession(detail.session);
+    if (
+      resumeActiveRun &&
+      client.getActiveRun !== undefined &&
+      client.streamRunEvents !== undefined
+    ) {
+      const activeRun = await client.getActiveRun(sessionId);
+      if (activeRun !== null) {
+        await resumeRun(sessionId, activeRun);
+      }
+    }
+  }
+
+  async function resumeRun(sessionId: string, run: ChatRun): Promise<void> {
+    if (client.streamRunEvents === undefined || client.getRun === undefined) return;
+    activeRunId.value = run.id;
+    isSending.value = true;
+    const draftId = `message_draft_${run.id}`;
+    let afterSequence = 0;
+    let reconnectDelay = 200;
+    try {
+      for (;;) {
+        let completed = false;
+        try {
+          for await (const event of client.streamRunEvents(sessionId, run.id, afterSequence)) {
+            const sequence = Number.parseInt(event.id, 10);
+            if (Number.isFinite(sequence)) afterSequence = Math.max(afterSequence, sequence);
+            if (event.type === "run.restarted") {
+              messages.value = messages.value.filter((item) => item.id !== draftId);
+            }
+            if (event.type === "content.delta") {
+              updateAssistantDraft(sessionId, draftId, event.delta, messages);
+            }
+            if (event.type === "reference.source") {
+              references.value = uniqueReferences([...references.value, event.reference]);
+            }
+            if (event.type === "tool.call") updateLiveToolCall(event.toolCall, liveToolCalls);
+            if (event.type === "diagnostic.result") {
+              diagnosticResults.value = [
+                event.diagnostic,
+                ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
+              ];
+            }
+            if (event.type === "complete") completed = true;
+            if (event.type === "error") throw new ApiClientError(event.error);
+          }
+          if (completed) break;
+        } catch (error) {
+          if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) throw error;
+        }
+        const current = await client.getRun(sessionId, run.id);
+        if (current.status === "succeeded") break;
+        if (["failed", "cancelled"].includes(current.status)) {
+          throw new Error(current.errorCode ?? "对话任务执行失败。");
+        }
+        await waitForReconnect(reconnectDelay);
+        reconnectDelay = Math.min(5000, reconnectDelay * 2);
+      }
+      await loadSession(sessionId, false);
+      await reloadSessions();
+    } finally {
+      activeRunId.value = null;
+      isSending.value = false;
+      liveToolCalls.value = [];
+    }
   }
 
   function upsertSession(nextSession: ChatSessionSummary): void {
@@ -91,6 +157,7 @@ export const useChatStore = defineStore("chat", () => {
   function reset(): void {
     sessions.value = [];
     activeSessionId.value = null;
+    activeRunId.value = null;
     messages.value = [];
     toolAudits.value = [];
     liveToolCalls.value = [];
@@ -106,6 +173,7 @@ export const useChatStore = defineStore("chat", () => {
 
   return {
     activeSessionId,
+    activeRunId,
     activeSession,
     errorMessage,
     configuration,
@@ -268,6 +336,10 @@ export const useChatStore = defineStore("chat", () => {
       }
     },
     reset,
+    resumeRun: async (sessionId: string, runId: string): Promise<void> => {
+      if (client.getRun === undefined) return;
+      await resumeRun(sessionId, await client.getRun(sessionId, runId));
+    },
     updateMemoryMode: async (mode: ChatMemoryMode): Promise<void> => {
       const sessionId = activeSessionId.value;
       if (sessionId === null || isUpdatingMemory.value) return;
@@ -317,6 +389,18 @@ export const useChatStore = defineStore("chat", () => {
         const optimisticUser = createOptimisticMessage(targetSessionId, "user", content);
         const draftId = `message_draft_${Date.now()}`;
         messages.value = [...messages.value, optimisticUser];
+        if (
+          client.createRun !== undefined &&
+          client.streamRunEvents !== undefined &&
+          client.getRun !== undefined
+        ) {
+          const run = await client.createRun(targetSessionId, {
+            content,
+            clientRequestId: globalThis.crypto.randomUUID()
+          });
+          await resumeRun(targetSessionId, run);
+          return;
+        }
         let finished = false;
         for await (const event of client.streamMessage(targetSessionId, { content })) {
           if (event.type === "content.delta") {
@@ -433,5 +517,9 @@ function uniqueReferences(items: readonly ChatReference[]): readonly ChatReferen
 
 function referenceScore(reference: ChatReference): number {
   return reference.rerankScore ?? reference.score ?? Number.NEGATIVE_INFINITY;
+}
+
+function waitForReconnect(delayMs: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
 }
 

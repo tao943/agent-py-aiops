@@ -21,6 +21,8 @@ describe("frontend contract consumption", () => {
       "tool.call",
       "reference.source",
       "diagnostic.result",
+      "run.status",
+      "run.restarted",
       "task.status",
       "report",
       "complete",

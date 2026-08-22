@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ChatMessage,
+  ChatRun,
   ChatSessionSummary,
   SseEvent,
   ToolCallAudit
@@ -361,6 +362,39 @@ describe("chat store", () => {
     await store.compactMemory();
     expect(store.activeSession?.memory.contextUsagePercent).toBe(0.2);
     expect(store.isUpdatingMemory).toBe(false);
+  });
+
+  it("uses durable runs and clears tentative content after a worker restart", async () => {
+    const client = fakeClient({ historyMessage: message({ content: "new answer" }) });
+    const run: ChatRun = {
+      id: "run_1",
+      sessionId: "chat_1",
+      clientRequestId: "request_1",
+      status: "queued",
+      lastEventSequence: 0,
+      errorCode: null,
+      createdAt: "2026-08-22T00:00:00Z",
+      updatedAt: "2026-08-22T00:00:00Z"
+    };
+    client.createRun = async () => run;
+    client.getRun = async () => ({ ...run, status: "succeeded", lastEventSequence: 4 });
+    client.getActiveRun = async () => null;
+    client.streamRunEvents = async function* (): AsyncIterable<SseEvent> {
+      yield { id: "1", type: "content.delta", channel: "chat", timestamp: run.createdAt, delta: "old", sequence: 1 };
+      yield { id: "2", type: "run.restarted", channel: "chat", timestamp: run.createdAt, runId: run.id, attempt: 2 };
+      yield { id: "3", type: "content.delta", channel: "chat", timestamp: run.createdAt, delta: "new", sequence: 2 };
+      yield { id: "4", type: "complete", channel: "chat", timestamp: run.createdAt };
+    };
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+    await store.initialize();
+
+    await store.send("diagnose");
+
+    expect(store.messages.at(-1)?.content).toBe("new answer");
+    expect(store.messages.some((item) => item.content.includes("old"))).toBe(false);
+    expect(store.activeRunId).toBeNull();
   });
 });
 

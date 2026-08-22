@@ -5,6 +5,8 @@ export const SSE_EVENT_TYPES = [
   "tool.call",
   "reference.source",
   "diagnostic.result",
+  "run.status",
+  "run.restarted",
   "task.status",
   "report",
   "complete",
@@ -47,6 +49,18 @@ export interface DiagnosticResultSseEvent extends SseEventBase<"diagnostic.resul
     readonly validatorStatus: string;
     readonly evidenceIds: readonly string[];
   };
+}
+
+export interface RunStatusSseEvent extends SseEventBase<"run.status"> {
+  readonly run: {
+    readonly id: string;
+    readonly status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  };
+}
+
+export interface RunRestartedSseEvent extends SseEventBase<"run.restarted"> {
+  readonly runId: string;
+  readonly attempt: number;
 }
 
 export interface ReferenceSourceSseEvent extends SseEventBase<"reference.source"> {
@@ -104,6 +118,8 @@ export type SseEvent =
   | ToolCallSseEvent
   | ReferenceSourceSseEvent
   | DiagnosticResultSseEvent
+  | RunStatusSseEvent
+  | RunRestartedSseEvent
   | TaskStatusSseEvent
   | ReportSseEvent
   | CompleteSseEvent

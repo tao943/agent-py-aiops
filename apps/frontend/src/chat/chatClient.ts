@@ -7,6 +7,8 @@ import type {
   ChatPromptResponse,
   ChatSkillUploadResponse,
   ChatMemoryMode,
+  ChatRun,
+  CreateChatRunRequest,
   CreateChatSessionRequest,
   CreateChatPromptRequest,
   DeleteChatPromptResponse,
@@ -39,6 +41,10 @@ export interface ChatClient {
   uploadSkill?(file: File): Promise<ChatSkillUploadResponse>;
   deleteSkill?(skillId: string): Promise<DeleteChatSkillResponse>;
   streamMessage(sessionId: string, request: StreamChatMessageRequest): AsyncIterable<SseEvent>;
+  createRun?(sessionId: string, request: CreateChatRunRequest): Promise<ChatRun>;
+  getRun?(sessionId: string, runId: string): Promise<ChatRun>;
+  getActiveRun?(sessionId: string): Promise<ChatRun | null>;
+  streamRunEvents?(sessionId: string, runId: string, afterSequence: number): AsyncIterable<SseEvent>;
 }
 
 export interface CreateChatClientOptions {
@@ -108,6 +114,21 @@ export function createChatClient(options: CreateChatClientOptions = {}): ChatCli
       sse.stream(`/chat/sessions/${sessionId}/messages:stream`, {
         body: JSON.stringify(request),
         method: "POST"
-      })
+      }),
+    createRun: (sessionId, request) =>
+      api.request<ChatRun>(`/chat/sessions/${sessionId}/runs`, {
+        body: JSON.stringify(request),
+        method: "POST"
+      }),
+    getRun: (sessionId, runId) =>
+      api.request<ChatRun>(`/chat/sessions/${sessionId}/runs/${runId}`),
+    getActiveRun: (sessionId) =>
+      api.request<ChatRun | null>(`/chat/sessions/${sessionId}/runs/active`),
+    streamRunEvents: (sessionId, runId, afterSequence) =>
+      sse.stream(
+        `/chat/sessions/${sessionId}/runs/${runId}/events`,
+        {},
+        { lastEventId: afterSequence }
+      )
   };
 }

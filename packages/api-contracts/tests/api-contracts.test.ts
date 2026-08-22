@@ -5,6 +5,7 @@ import {
   DOCUMENT_UPLOAD_POLICY,
   OPENAPI_CONTRACT,
   SSE_EVENT_TYPES,
+  type ChatRun,
   type AuthTokenResponse,
   type AuthUser,
   type AppendChatMessageRequest,
@@ -496,6 +497,8 @@ describe("SSE event contracts", () => {
       "tool.call",
       "reference.source",
       "diagnostic.result",
+      "run.status",
+      "run.restarted",
       "task.status",
       "report",
       "complete",
@@ -504,6 +507,22 @@ describe("SSE event contracts", () => {
     expect(OPENAPI_CONTRACT.components.schemas.ChatMessageMetadata?.properties).not.toHaveProperty(
       "reasoning"
     );
+  });
+
+  it("defines durable chat run contracts and routes", () => {
+    const run: ChatRun = {
+      id: "run_1",
+      sessionId: "session_1",
+      clientRequestId: "request_1",
+      status: "queued",
+      lastEventSequence: 0,
+      errorCode: null,
+      createdAt: "2026-08-22T00:00:00Z",
+      updatedAt: "2026-08-22T00:00:00Z"
+    };
+    expect(run.status).toBe("queued");
+    expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs"]).toBeDefined();
+    expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs/active"]).toBeDefined();
   });
 
   it("reuses structured errors for streaming failures", () => {

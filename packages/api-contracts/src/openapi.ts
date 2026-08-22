@@ -219,6 +219,58 @@ export const OPENAPI_CONTRACT = {
         }
       }
     },
+    "/chat/sessions/{session_id}/runs": {
+      post: {
+        operationId: "createChatRun",
+        summary: "Create an idempotent durable chat run",
+        tags: ["chat"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/CreateChatRunRequest")
+        },
+        responses: {
+          "202": okResponse("#/components/schemas/ChatRunApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/chat/sessions/{session_id}/runs/active": {
+      get: {
+        operationId: "getActiveChatRun",
+        summary: "Read the latest active chat run",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/ChatRunApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/chat/sessions/{session_id}/runs/{run_id}": {
+      get: {
+        operationId: "getChatRun",
+        summary: "Read an owned chat run",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/ChatRunApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/chat/sessions/{session_id}/runs/{run_id}/events": {
+      get: {
+        operationId: "streamChatRunEvents",
+        summary: "Replay and follow public chat run events",
+        tags: ["chat"],
+        security: bearerSecurity,
+        responses: {
+          "200": { description: "SSE event stream", content: eventStreamContent },
+          ...protectedErrorResponses
+        }
+      }
+    },
     "/chat/configuration": {
       get: {
         operationId: "getChatAssemblyConfiguration",
@@ -2065,12 +2117,24 @@ export const OPENAPI_CONTRACT = {
           { $ref: "#/components/schemas/ToolCallEvent" },
           { $ref: "#/components/schemas/ReferenceSourceEvent" },
           { $ref: "#/components/schemas/DiagnosticResultEvent" },
+          { $ref: "#/components/schemas/RunStatusEvent" },
+          { $ref: "#/components/schemas/RunRestartedEvent" },
           { $ref: "#/components/schemas/TaskStatusEvent" },
           { $ref: "#/components/schemas/ReportEvent" },
           { $ref: "#/components/schemas/CompleteEvent" },
           { $ref: "#/components/schemas/ErrorEvent" }
         ]
       },
+      CreateChatRunRequest: {
+        type: "object",
+        required: ["content", "clientRequestId"],
+        properties: {
+          content: { type: "string" },
+          clientRequestId: { type: "string" },
+          metadata: { $ref: "#/components/schemas/ChatMessageMetadata" }
+        }
+      },
+      ChatRunApiResponse: { type: "object" },
       ContentDeltaEvent: { type: "object" },
       ToolCallEvent: { type: "object" },
       DiagnosticResultEvent: {
@@ -2106,6 +2170,8 @@ export const OPENAPI_CONTRACT = {
           }
         }
       },
+      RunStatusEvent: { type: "object" },
+      RunRestartedEvent: { type: "object" },
       ReferenceSourceEvent: {
         type: "object",
         properties: {
