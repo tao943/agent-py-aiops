@@ -1,6 +1,6 @@
 # Alertmanager Auto Ingestion Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For the primary agent:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. After the completed plan-review gate, the primary Agent implements and verifies alone; do not spawn implementation or review subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a reliable Alertmanager v4 webhook that atomically creates one incident and one durable AIOps diagnostic job per active `groupKey` lifecycle.
 
@@ -21,6 +21,7 @@
 - Duplicate firing updates the incident but starts no Agent; resolved closes the incident but never cancels or adds an LLM call.
 - Automatic ingestion must not set `executionPermitted` or bypass the existing recovery Policy Gate.
 - Webhook responses never wait for Agent, LLM, CLS, RAG, or report completion.
+- Alertmanager groups by `alertname`, `service`, `environment`, and `run_id`; firing and resolved deliveries for one lifecycle use the identical grouping label set.
 - Production source configuration remains disabled until the service account, knowledge base, and secret are provisioned.
 - Use TDD for every production behavior and run focused tests only; no full pytest or full Benchmark is required.
 
@@ -371,39 +372,43 @@ Expected: import failure for `SQLAlchemyAlertIngestionRepository`.
 ```python
 class SQLAlchemyAlertIngestionRepository:
     async def apply(self, write: IngestionWrite) -> IngestionResult:
-        async with self._session_factory() as session, session.begin():
-            active = await self._active_for_update(session, write)
-            if write.filtered:
-                return await self._record_terminal_event(session, write, "filtered")
-            if write.status == "resolved":
-                return await self._resolve_or_record_orphan(session, active, write)
-            if active is not None:
-                return await self._update_duplicate(session, active, write)
-            created = await self._insert_active_on_conflict_do_nothing(session, write)
-            if created is None:
+        try:
+            async with self._session_factory() as session, session.begin():
                 active = await self._active_for_update(session, write)
-                assert active is not None
-                return await self._update_duplicate(session, active, write)
-            task_id, job_id = self._stable_work_ids(created.id)
-            session.add(DiagnosticTaskModel(
-                id=task_id, owner_user_id=write.owner_user_id, status="accepted",
-                query=write.query, input_payload={"query": write.query, "alert": write.safe_alert},
-                result_payload={}, created_at=write.received_at,
-                updated_at=write.received_at, completed_at=None,
-            ))
-            session.add(BackgroundJobModel(
-                id=job_id, owner_user_id=write.owner_user_id, kind="aiops_diagnosis",
-                resource_type="aiops_diagnostic", resource_id=task_id, status="queued",
-                payload={"diagnosticId": task_id}, attempt=0, max_attempts=3,
-                timeout_seconds=1800, available_at=write.received_at,
-                created_at=write.received_at, updated_at=write.received_at,
-            ))
-            created.diagnostic_task_id = task_id
-            await self._insert_event_on_conflict_do_nothing(session, write, created.id)
-            return self._result(created, task_id, job_id, "incident_created")
+                if write.filtered:
+                    return await self._record_terminal_event(session, write, "filtered")
+                if write.status == "resolved":
+                    return await self._resolve_or_record_orphan(session, active, write)
+                if active is not None:
+                    return await self._update_duplicate(session, active, write)
+                created = await self._insert_active_on_conflict_do_nothing(session, write)
+                if created is None:
+                    active = await self._active_for_update(session, write)
+                    assert active is not None
+                    return await self._update_duplicate(session, active, write)
+                task_id, job_id = self._stable_work_ids(created.id)
+                session.add(DiagnosticTaskModel(
+                    id=task_id, owner_user_id=write.owner_user_id, status="accepted",
+                    query=write.query,
+                    input_payload={"query": write.query, "alert": write.safe_alert},
+                    result_payload={}, created_at=write.received_at,
+                    updated_at=write.received_at, completed_at=None,
+                ))
+                session.add(BackgroundJobModel(
+                    id=job_id, owner_user_id=write.owner_user_id, kind="aiops_diagnosis",
+                    resource_type="aiops_diagnostic", resource_id=task_id, status="queued",
+                    payload={"diagnosticId": task_id}, attempt=0, max_attempts=3,
+                    timeout_seconds=1800, available_at=write.received_at,
+                    created_at=write.received_at, updated_at=write.received_at,
+                ))
+                created.diagnostic_task_id = task_id
+                await self._insert_event_on_conflict_do_nothing(session, write, created.id)
+                return self._result(created, task_id, job_id, "incident_created")
+        except SQLAlchemyError as exc:
+            raise AlertPersistenceError("alert persistence unavailable") from exc
 ```
 
-Use PostgreSQL `insert(...).on_conflict_do_nothing().returning(...)`; never catch `IntegrityError` inside a poisoned transaction. Event ID is SHA-256 of owner/source/status/payload hash with an `alert_event_` prefix. Every authenticated delivery increments `delivery_count`, even when event insertion conflicts.
+Use PostgreSQL `insert(...).on_conflict_do_nothing().returning(...)`; never catch `IntegrityError` inside a poisoned transaction. The outer `SQLAlchemyError` boundary includes connection, flush, and `session.begin()` exit/commit failures and exposes only `AlertPersistenceError`. Add a real failing-commit/`OperationalError` test proving rollback, zero partial incident/task/job rows, a 503 at the API boundary, and no Runtime wakeup. Event ID is SHA-256 of owner/source/status/payload hash with an `alert_event_` prefix. Every authenticated delivery increments `delivery_count`, even when event insertion conflicts.
 
 - [ ] **Step 4: Verify GREEN under real PostgreSQL concurrency**
 
@@ -499,6 +504,7 @@ git commit -m "feat(alerts): add optional redis ingestion lease"
 **Interfaces:**
 - Produces `AlertIngestionMetrics.snapshot()`, `AlertIngestionService.ingest(source, delivery) -> IngestionResult`.
 - Service always releases an acquired lease and records one bounded disposition/latency sample.
+- Metric semantics are exact: `webhookReceivedTotal` increments at route entry for every request, including 401/404; 401/404 do not increment `ingestionFailedTotal`; 413/422/503 increment `ingestionFailedTotal`; a committed disposition increments exactly its matching success counter; Redis fallback additionally increments `redisDegradedTotal`; a post-commit Runtime wake failure is logged but is not an ingestion failure.
 
 - [ ] **Step 1: Write RED orchestration tests**
 
@@ -544,7 +550,7 @@ async def ingest(self, source: AlertSourceConfig, delivery: AlertmanagerDelivery
     return replace(result, redis_mode=lease.mode)
 ```
 
-Use a `threading.Lock` like existing observability primitives. Metrics expose exact camelCase keys from the spec and no labels derived from payload data.
+Use a `threading.Lock` like existing observability primitives. Define `record_received()`, `record_request_failure()`, `record_success(...)`, and `record_redis_degraded()` so the route and service share one metrics instance. Metrics expose exact camelCase keys from the spec and no labels derived from payload data. Add table-driven assertions for 401, 404, 413, 422, 503, Redis degradation, every committed disposition, and post-commit Runtime wake failure.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -566,7 +572,7 @@ git commit -m "feat(alerts): orchestrate incident ingestion safely"
 - Test: `apps/backend/tests/test_alert_ingestion_api.py`
 
 **Interfaces:**
-- Produces `create_alert_ingestion_router(settings, service, runtime) -> APIRouter`.
+- Produces `create_alert_ingestion_router(settings, service, runtime, metrics) -> APIRouter`.
 - Success response keys are exactly `status`, `incidentId`, `diagnosticTaskId`, `duplicate`, `filtered`, and `redisMode`.
 
 - [ ] **Step 1: Write API RED tests**
@@ -624,6 +630,7 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes:
 
 @router.post("/{source_id}", status_code=202)
 async def receive(source_id: str, request: Request) -> JSONResponse:
+    metrics.record_received()
     source = settings.sources.get(source_id)
     if source is None:
         raise HTTPException(status_code=404)
@@ -633,8 +640,10 @@ async def receive(source_id: str, request: Request) -> JSONResponse:
         delivery = parse_alertmanager_delivery(raw, max_alerts=settings.max_alerts_per_delivery)
         result = await service.ingest(source, delivery)
     except AlertPayloadError as exc:
+        metrics.record_request_failure()
         raise HTTPException(status_code=422) from exc
     except AlertPersistenceError as exc:
+        metrics.record_request_failure()
         raise HTTPException(status_code=503) from exc
     if result.disposition == "incident_created":
         try:
@@ -644,7 +653,7 @@ async def receive(source_id: str, request: Request) -> JSONResponse:
     return JSONResponse(status_code=202, content=result.safe_response())
 ```
 
-Authenticate before parsing. Ensure errors never interpolate exception messages that may contain database or payload values.
+The bounded body reader calls `record_request_failure()` before each 413. Authenticate before parsing. Ensure errors never interpolate exception messages that may contain database or payload values. Runtime wake failure remains a successful committed ingestion and therefore does not increment `ingestionFailedTotal`.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -754,6 +763,7 @@ def test_webhook_has_independent_gateway_budget() -> None:
 
 def test_alertmanager_uses_bearer_secret_file() -> None:
     config = read("infra/alertmanager/alertmanager.yml")
+    assert "group_by: [alertname, service, environment, run_id]" in config
     assert "http://nginx/aiops/alerts/webhook/alertmanager/local-alertmanager" in config
     assert "credentials_file: /run/secrets/alert_webhook_token" in config
 ```
@@ -780,6 +790,10 @@ location ~ ^/aiops/alerts/webhook/alertmanager/[A-Za-z0-9._-]+$ {
 ```
 
 ```yaml
+route:
+  receiver: agent-py-webhook
+  group_by: [alertname, service, environment, run_id]
+
 receivers:
   - name: agent-py-webhook
     webhook_configs:
@@ -826,7 +840,7 @@ def test_resolved_publication_sets_ends_at_and_preserves_labels(monkeypatch) -> 
     assert request.alerts[0]["labels"]["run_id"] == "demo"
 ```
 
-Also test firing has no past `endsAt`, invalid status fails argument parsing, and logs omit Authorization/secret values.
+Also test firing has no past `endsAt`, invalid status fails argument parsing, firing and resolved preserve the identical `alertname/service/environment/run_id` grouping labels, changing `--group-key` changes only `run_id`, and logs omit Authorization/secret values. The CLI name `--group-key` is a developer-facing lifecycle handle; it does not directly set Alertmanager's Webhook `groupKey`. Alertmanager derives the actual top-level `groupKey` from the configured `group_by` labels.
 
 - [ ] **Step 2: Verify RED**
 
@@ -963,7 +977,7 @@ Expected: incident `delivery_count` increases; diagnostic-task/job counts remain
 
 Run: `uv run --project apps/backend python apps/backend/scripts/publish_ecommerce_quant_alert.py --status resolved --group-key alert-ingestion-acceptance-<same-timestamp>`
 
-Expected: incident becomes resolved, the existing diagnosis is not cancelled, and no additional diagnostic task/job or LLM call appears.
+Expected: incident becomes resolved and the existing diagnosis is not cancelled. Attribute model usage by `diagnostic_task_id`/background-job ID: resolved creates no new diagnostic task/job and triggers no calls under a new diagnostic ID; calls from the already-running original diagnosis may continue naturally.
 
 - [ ] **Step 7: Prove a new lifecycle after resolution**
 
