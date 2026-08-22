@@ -3985,12 +3985,16 @@ class AiopsDiagnosticService:
                     cache_state["hit"] = coordinated.cache_hit
                 else:
                     runtime_output = (await invoke_tool())["output"]
+                public_output = canonicalize_public_tool_output(
+                    tool_name,
+                    runtime_output,
+                )
                 return DiagnosticToolExecutionResult(
                     status="completed",
                     evidence_id=evidence_id,
                     tool_call_id=audit_id,
-                    safe_output=runtime_output,
-                    safe_summary=_tool_result_summary(tool_name, runtime_output),
+                    safe_output=public_output,
+                    safe_summary=_tool_result_summary(tool_name, public_output),
                     events=(),
                 )
 
@@ -8645,6 +8649,14 @@ def _tool_result_summary(tool_name: str, output: object) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def canonicalize_public_tool_output(tool_name: str, output: object) -> object:
+    """Project official CLS output into the mapping consumed by public fact extraction."""
+    safe_output = _safe_value(output)
+    if tool_name != "SearchLog":
+        return safe_output
+    return {"records": _search_log_records(safe_output)}
 
 
 def _search_log_records(output: object) -> list[JsonDict]:

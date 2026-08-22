@@ -15,10 +15,12 @@ from super_ai.aiops.diagnostics import (
     build_generic_live_plan,
     build_grounded_fallback_decision,
     build_task_local_trusted_tool_arguments,
+    canonicalize_public_tool_output,
     merge_live_log_plan_step,
     merge_trusted_live_hypothesis_bindings,
     plan_matches_tool_contracts,
 )
+from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.investigation import (
     TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     InvestigationRoute,
@@ -825,6 +827,33 @@ def test_diagnostic_service_keeps_task_scopes_out_of_singleton_state() -> None:
 
     assert first != second
     assert service._trusted_tool_arguments == {}  # pyright: ignore[reportPrivateUsage]
+
+
+def test_official_cls_output_is_canonicalized_before_fact_extraction() -> None:
+    records = [
+        {"LogJson": json.dumps({"event": "connection_checkout", "component": "order-api"})},
+        {"LogJson": json.dumps({"event": "order_update_failed", "component": "order-api"})},
+        {"LogJson": json.dumps({"event": "pool_acquire_timeout", "component": "order-api"})},
+    ]
+    official_output = [{"type": "text", "text": json.dumps(records)}]
+
+    canonical = canonicalize_public_tool_output("SearchLog", official_output)
+    facts = extract_public_facts(
+        (
+            PublicToolObservation(
+                tool_name="SearchLog",
+                evidence_id="evidence-cls",
+                output=cast(Mapping[str, object], canonical),
+            ),
+        )
+    )
+
+    event_fact = next(fact for fact in facts if fact.key == "SearchLog.records.event")
+    assert event_fact.value == (
+        "connection_checkout",
+        "order_update_failed",
+        "pool_acquire_timeout",
+    )
 
 
 @pytest.mark.asyncio
