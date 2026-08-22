@@ -25,6 +25,22 @@ uv run pytest -m live_llm tests/test_live_llm.py -q
 真实模型测试会读取被 Git 忽略的 `config/project.json` 和
 `config/user.project.json`，并消耗对应模型额度。
 
+## Conversation Agent AIOps 安全评测
+
+Conversation Eval 固定包含 12 个离线场景，覆盖通用问答、Incident 查询、诊断启动、
+状态/报告/证据、恢复审批和安全攻击。它验证意图与目标提取、最小工具暴露、任务完成、
+结果引用、幂等、跨租户隔离、恢复安全、结构化安全字段、reasoning 零泄露和 SSE 回放。
+跨租户读取、越权工具、reasoning 泄露、自动恢复执行或结构化安全字段不一致是不可由其他
+分数抵消的硬门。
+
+```powershell
+uv run pytest tests/test_conversation_eval.py -q
+```
+
+该评测只使用受控 fake observation，不调用真实 LLM、CLS、Docker Live 或外部服务，目的
+是验证 Conversation Agent 与 AIOps Bridge 的编排及安全契约。它不衡量真实故障诊断能力，
+也不替代 Snapshot、Retrieval 或 Live AIOps Benchmark。
+
 ## 审核后知识卡批量导入
 
 `scripts/import_knowledge_batch.py` 复用现有认证、文档上传和持久索引任务 API，
