@@ -845,3 +845,40 @@ Live 满分 100：故障确认 10、必要证据 20、多候选差分排查 15�
 CLS 接入不增加分数。有效的 CLS 运行继续使用相同 100 分模型，但必需证据和引用审计必须
 同时包含 CLS 与 PostgreSQL 来源。云端或审计基础设施失败标记为 `INFRA_INVALID`；Agent
 未调用工具、查询范围错误或未引用证据标记为 `VALID_FAIL`。
+
+## Conversation 三层 Eval 与 Chat Live 入口
+
+Conversation 与 AIOps 使用三层、职责分离的验收方式：
+
+| 层级 | 真实模型 | CLS / Docker | 验证目标 |
+| --- | --- | --- | --- |
+| Offline Conversation Eval | 否 | 否 | 路由、最小工具、确认、幂等、隔离、预算与安全硬门 |
+| Conversation Model Eval | 是 | 否，AIOps Bridge 为 fake | 模糊路由、结构化解释、超时降级、Prompt Injection |
+| Chat→AIOps Live Eval | 是 | 是 | 从对话确认入口复用完整 Live 诊断、恢复和评分闭环 |
+
+Chat Live 的执行顺序固定为：Live harness 注入故障并准备 scoped CLS → Chat 创建 Pending
+Action → 人工确认 → evaluation-only durable worker → 现有
+`ApplicationLiveDiagnosticAdapter` → AIOps CLS/RAG/LangGraph/Recovery/Scorer。Chat 的工具
+列表不包含 CLS；显式 Incident ID 可确定性路由，因此 Conversation 侧模型调用数允许为 0，
+但确认后的 AIOps 诊断仍使用原场景、原证据上下文和原评分器。
+
+手动命令从 `apps/backend` 执行：
+
+```powershell
+uv run python scripts/run_conversation_model_eval.py --confirm-real-model
+uv run python scripts/run_chat_aiops_live_eval.py --scenario APY-LIVE-PG-LOCK-001 --owner-user-id <owner-id> --knowledge-base-id <kb-id> --confirm-real-model --confirm-live-cls
+```
+
+Chat Live 同时要求 `--confirm-real-model` 和 `--confirm-live-cls`，场景 ID 只接受 registry 中的
+`APY-LIVE-*` 标识并拒绝路径穿越。两类 CLI 的退出码为 `0` 达标、`1` 有效但未达标、`2`
+授权/配置/基础设施/持久化无效、`130` 中断。每次有效或失败结果先写 Evaluation Archive，
+再幂等同步 PostgreSQL；`--output` 仅作为兼容导出。
+
+Artifact v2 为 `conversation_model` 提供独立类型，并允许 Live 在嵌套
+`conversationMetrics` 中并列保存路由、目标、确认、任务复用、工具与时延指标。Conversation
+指标不能覆盖或提高 AIOps `total`、`rawTotal` 和 pass/fail；v1 历史 Artifact 仍可读取、导入、
+审计和汇总。任何 Artifact 都禁止保存 Prompt、私有推理、原始模型响应、Ground Truth、Oracle
+或原始 CLS 日志。
+
+本轮实现只完成离线 fake-provider、CLI 合同与聚焦回归，没有运行真实模型、CLS 或 Docker
+Live；真实验收必须由操作员重新明确批准额度与外部资源后单独执行。

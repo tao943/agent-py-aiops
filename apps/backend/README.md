@@ -41,6 +41,38 @@ uv run pytest tests/test_conversation_eval.py -q
 是验证 Conversation Agent 与 AIOps Bridge 的编排及安全契约。它不衡量真实故障诊断能力，
 也不替代 Snapshot、Retrieval 或 Live AIOps Benchmark。
 
+Conversation 相关评测分为三层，不能用后一层的分数补偿前一层安全失败：
+
+1. **Offline Conversation Eval**：上述 12 个离线场景，适合普通 CI。
+2. **Conversation Model Eval**：保留 fake AIOps Bridge，只把对话模型替换为真实模型，验证
+   模糊路由、结构化解释、超时降级和 Prompt Injection；必须显式授权额度：
+
+   ```powershell
+   uv run python scripts/run_conversation_model_eval.py --confirm-real-model
+   ```
+
+3. **Chat→AIOps Live Eval**：Live harness 先注入故障并准备 CLS，再由 Chat 创建 Pending
+   Action；人工确认后才把原始 `LiveScenario`、`LiveFaultObservation` 和
+   `LiveEvidenceContext` 交给现有 AIOps Live 链路：
+
+   ```powershell
+   uv run python scripts/run_chat_aiops_live_eval.py --scenario APY-LIVE-PG-LOCK-001 --owner-user-id <owner-id> --knowledge-base-id <kb-id> --confirm-real-model --confirm-live-cls
+   ```
+
+Conversation Agent 本身永远不获得 CLS Tool。CLS、RAG、LangGraph 诊断、恢复策略与原
+AIOps scorer 仍归 AIOps Agent；Conversation 只负责入口路由、确认、任务复用和公开报告读取。
+Live Artifact 把既有 AIOps 分数和 `conversationMetrics` 分开保存，后者不能修改 AIOps
+`total`、`rawTotal` 或 pass/fail。
+
+两个真实评测命令都不属于普通 CI，会使用本机被 Git 忽略的配置并可能消耗模型、CLS、
+Milvus 和 Docker 资源。退出码统一为：`0` 有效且达标、`1` 有效但未达标、`2` 缺少显式
+授权/配置错误/基础设施无效或数据库待同步、`130` 操作员中断。`--output` 只是兼容导出；
+正式结果先进入 Evaluation Archive，再幂等同步 PostgreSQL。
+
+新结果使用 Artifact v2；历史 v1 Snapshot、Retrieval 和 Live Artifact 继续可读取、导入、
+审计和汇总。归档只保存允许列表内的模型名、Git SHA、场景版本、聚合指标、调用计数和安全
+错误类别，不保存 Prompt、私有推理、原始模型响应、Ground Truth 或原始 CLS 日志。
+
 ## 审核后知识卡批量导入
 
 `scripts/import_knowledge_batch.py` 复用现有认证、文档上传和持久索引任务 API，

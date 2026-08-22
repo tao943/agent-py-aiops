@@ -522,6 +522,11 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
         execute=execute,
         recorder=recorder,
         investigation_strategy="multi",
+        conversation_metrics={
+            "routeAccuracy": 1.0,
+            "confirmationAccuracy": 1.0,
+            "modelCallCount": 0,
+        },
     )
 
     envelope = archive.load("live-success-task-link")
@@ -568,6 +573,11 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
     assert envelope.metrics["missingDomains"] == []
     assert envelope.metrics["aggregationChecksum"] == "a" * 64
     assert envelope.metrics["terminalFailureCategory"] is None
+    assert envelope.metrics["conversationMetrics"] == {
+        "routeAccuracy": 1.0,
+        "confirmationAccuracy": 1.0,
+        "modelCallCount": 0,
+    }
 
 
 def test_cli_rejects_missing_identity() -> None:

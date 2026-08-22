@@ -6,7 +6,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from super_ai.chat.aiops_bridge import IncidentSummary, PublicDiagnosticReport
-from super_ai.evaluation.live.chat_entry import ChatLiveEntryAdapter
+from super_ai.evaluation import ArtifactEvidence, RunArtifact
+from super_ai.evaluation.live.chat_entry import (
+    ChatEntryLiveDiagnosticAdapter,
+    ChatLiveEntryAdapter,
+)
+from super_ai.evaluation.live.domain import (
+    LiveCheck,
+    LiveEvidenceContext,
+    LiveFaultObservation,
+    LiveScenario,
+)
 from super_ai.memory.repositories import PendingChatActionRecord
 
 NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
@@ -177,3 +187,147 @@ def test_chat_live_entry_never_exposes_cls_tools() -> None:
         {"SearchLog", "search_log", "search_cls_logs", "cls_search"}
     )
     assert "start_incident_diagnostic" in adapter.exposed_tools
+
+
+class PendingRepository:
+    def __init__(self) -> None:
+        self.action: PendingChatActionRecord | None = None
+
+    async def create_or_get(self, **values: object) -> PendingChatActionRecord:
+        if self.action is None:
+            self.action = PendingChatActionRecord(
+                id=str(values["action_id"]),
+                owner_user_id=str(values["owner_user_id"]),
+                session_id=str(values["session_id"]),
+                chat_run_id=str(values["chat_run_id"]),
+                action_type="start_diagnostic",
+                target_resource_id=str(values["target_resource_id"]),
+                public_arguments={"incidentId": str(values["target_resource_id"])},
+                action_fingerprint=str(values["action_fingerprint"]),
+                status="pending",
+                expires_at=NOW + timedelta(minutes=15),
+                confirmed_at=None,
+                execution_result_id=None,
+                background_job_id=None,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        return self.action
+
+    async def get_owned(
+        self, *, owner_user_id: str, action_id: str
+    ) -> PendingChatActionRecord | None:
+        if (
+            self.action is not None
+            and self.action.owner_user_id == owner_user_id
+            and self.action.id == action_id
+        ):
+            return self.action
+        return None
+
+    async def list_pending(self, **values: object) -> list[PendingChatActionRecord]:
+        del values
+        return [self.action] if self.action is not None else []
+
+    async def confirm_and_enqueue(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord | None:
+        action = await self.get_owned(owner_user_id=owner_user_id, action_id=action_id)
+        if action is not None and action.status == "pending":
+            self.action = replace(
+                action,
+                status="confirmed",
+                confirmed_at=now,
+                background_job_id="chat-live-job",
+            )
+        return self.action
+
+    async def cancel(self, **values: object) -> PendingChatActionRecord | None:
+        del values
+        return self.action
+
+    async def mark_executed(
+        self,
+        *,
+        owner_user_id: str,
+        action_id: str,
+        execution_result_id: str,
+        now: datetime,
+    ) -> PendingChatActionRecord:
+        del owner_user_id, action_id, now
+        assert self.action is not None
+        self.action = replace(
+            self.action,
+            status="executed",
+            execution_result_id=execution_result_id,
+        )
+        return self.action
+
+    async def mark_manual_review(self, **values: object) -> PendingChatActionRecord:
+        del values
+        raise AssertionError("manual review is not expected")
+
+
+class DiagnosticDelegate:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def diagnose(self, **values: object) -> RunArtifact:
+        self.calls += 1
+        scenario = values["scenario"]
+        assert isinstance(scenario, LiveScenario)
+        return RunArtifact(
+            scenario_id=scenario.id,
+            mode="live",
+            completed=True,
+            report_produced=True,
+            decision=None,
+            evidence=(
+                ArtifactEvidence("evidence_live_1", "claim-1", True),
+                ArtifactEvidence("evidence_live_2", "claim-2", True),
+            ),
+            hypothesis_states=(),
+            observation_decisions=(),
+            tool_calls=(),
+            plan_step_count=1,
+            duration_ms=10,
+            safety_events=(),
+            diagnostic_task_id="diagnostic_live_1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_diagnostic_adapter_delegates_to_aiops_and_keeps_scores_separate() -> None:
+    repository = PendingRepository()
+    delegate = DiagnosticDelegate()
+    adapter = ChatEntryLiveDiagnosticAdapter(
+        owner_user_id="owner-live",
+        pending_repository=repository,
+        report_bridge=Bridge(),
+        diagnostic_delegate=delegate,
+    )
+    scenario = LiveScenario(
+        id="APY-LIVE-PG-LOCK-001",
+        title="lock wait",
+        symptom_family="database_lock",
+        difficulty="medium",
+        modes=("live",),
+        driver="postgres_lock_wait",
+        alert={"alertname": "PostgresLockWait", "service": "order-service"},
+        hypotheses=(),
+    )
+
+    artifact = await adapter.diagnose(
+        run_id="chat-live-run-1",
+        scenario=scenario,
+        observation=LiveFaultObservation(
+            scenario_id=scenario.id,
+            checks=(LiveCheck("fault_present", True),),
+        ),
+        evidence_context=LiveEvidenceContext.local(incident_id="incident-live-1"),
+    )
+
+    assert delegate.calls == 1
+    assert artifact.diagnostic_task_id == "diagnostic_live_1"
+    assert adapter.conversation_metrics()["confirmationAccuracy"] == 1.0
+    assert "total" not in adapter.conversation_metrics()
