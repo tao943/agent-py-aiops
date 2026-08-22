@@ -57,10 +57,11 @@ def load_alert_ingestion_settings(
     sources_value = section.get("sources")
     if not isinstance(sources_value, list):
         raise ProjectConfigurationError("alertIngestion.sources must be an array")
+    raw_sources = cast(list[object], sources_value)
     environment = environ if environ is not None else os.environ
     sources: dict[str, AlertSourceConfig] = {}
     seen_ids: set[str] = set()
-    for source_value in sources_value:
+    for source_value in raw_sources:
         source = _mapping(source_value, "alertIngestion source")
         source_id = _non_empty_string(source, "id", maximum=120)
         if not _SOURCE_ID.fullmatch(source_id):
@@ -138,9 +139,10 @@ def _allowed_labels(value: object) -> dict[str, frozenset[str]]:
     for key, values in raw.items():
         if not key or len(key) > 64 or not isinstance(values, list) or not values:
             raise ProjectConfigurationError("allowedLabels entry is invalid")
-        if len(values) > 20 or any(
-            not isinstance(item, str) or not item or len(item) > 256 for item in values
+        typed_values = cast(list[object], values)
+        if len(typed_values) > 20 or any(
+            not isinstance(item, str) or not item or len(item) > 256 for item in typed_values
         ):
             raise ProjectConfigurationError("allowedLabels values are invalid")
-        result[key] = frozenset(cast(list[str], values))
+        result[key] = frozenset(cast(list[str], typed_values))
     return result

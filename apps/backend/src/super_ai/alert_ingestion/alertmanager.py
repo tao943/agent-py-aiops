@@ -45,9 +45,12 @@ def parse_alertmanager_delivery(
     if not isinstance(group_key, str) or not group_key.strip():
         raise AlertPayloadError("Alertmanager groupKey is required.")
     raw_alerts = raw.get("alerts")
-    if not isinstance(raw_alerts, list) or not 1 <= len(raw_alerts) <= max_alerts:
+    if not isinstance(raw_alerts, list):
         raise AlertPayloadError("Alertmanager alerts count is invalid.")
-    alerts = tuple(_normalize_alert(value) for value in raw_alerts)
+    typed_alerts = cast(list[object], raw_alerts)
+    if not 1 <= len(typed_alerts) <= max_alerts:
+        raise AlertPayloadError("Alertmanager alerts count is invalid.")
+    alerts = tuple(_normalize_alert(value) for value in typed_alerts)
     external_origin = _safe_origin(raw.get("externalURL"))
     receiver, receiver_truncated = _bounded(raw.get("receiver"), 256)
     truncated_alerts = _non_negative_int(raw.get("truncatedAlerts", 0))
@@ -113,10 +116,11 @@ def _allowlisted_map(
 ) -> tuple[dict[str, str], bool]:
     if not isinstance(value, dict):
         return {}, False
+    mapping = cast(Mapping[str, object], value)
     result: dict[str, str] = {}
     truncated = False
     for key in sorted(allowed_keys):
-        item = value.get(key)
+        item = mapping.get(key)
         if not isinstance(item, str):
             continue
         result[key], item_truncated = _bounded(item, limit)
