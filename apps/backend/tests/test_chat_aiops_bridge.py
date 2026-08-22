@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.alert_ingestion.repositories import AlertIncidentRecord, IncidentNotActive
@@ -220,10 +221,12 @@ async def test_report_and_evidence_exclude_checkpoint_and_reasoning() -> None:
 def test_structured_tool_schema_cannot_accept_owner_identity() -> None:
     tools = build_aiops_bridge_tools(owner_user_id="owner_a", service=_bridge())
     tool = tools["get_incident"]
+    assert isinstance(tool.args_schema, type)
+    args_schema = cast(type[BaseModel], tool.args_schema)
 
-    assert "owner_user_id" not in json.dumps(tool.args_schema.model_json_schema())
+    assert "owner_user_id" not in json.dumps(args_schema.model_json_schema())
     with pytest.raises(ValidationError):
-        tool.args_schema.model_validate(
+        args_schema.model_validate(
             {"incident_id": "incident_b", "owner_user_id": "owner_b"}
         )
 
