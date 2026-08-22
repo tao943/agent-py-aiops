@@ -17,3 +17,4 @@ coverage/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 .worktrees/
+infra/secrets/*
