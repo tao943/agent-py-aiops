@@ -153,6 +153,7 @@ class OrderApiRuntime:
         self._active_run_id: str | None = None
         self._fault_token: str | None = None
         self._held_connections: list[ConnectionBoundary] = []
+        self._fault_request_ids: set[str] = set()
         self._events: list[dict[str, str]] = []
         self._waiters_observed = False
 
@@ -181,6 +182,7 @@ class OrderApiRuntime:
         self._active_run_id = run_id
         self._fault_token = fault_token
         self._waiters_observed = False
+        self._fault_request_ids.clear()
         self._events.clear()
 
     async def baseline_update(self, run_id: str, request_id: str) -> None:
@@ -192,7 +194,14 @@ class OrderApiRuntime:
         _validate_identifier(request_id, "request_id_invalid")
         if not secrets.compare_digest(self._fault_token or "", fault_token):
             raise OrderApiAccessError("fault_token_invalid")
-        connection = await self._pool.acquire(timeout=1.0)
+        if request_id in self._fault_request_ids:
+            return
+        self._fault_request_ids.add(request_id)
+        try:
+            connection = await self._pool.acquire(timeout=1.0)
+        except Exception:
+            self._fault_request_ids.discard(request_id)
+            raise
         await connection.execute(
             "SELECT set_config('application_name', $1, false)",
             _session_application_name(run_id, self._generation),
@@ -279,6 +288,7 @@ class OrderApiRuntime:
             await self._pool.release(connection)
         self._active_run_id = None
         self._fault_token = None
+        self._fault_request_ids.clear()
         self._waiters_observed = False
         self._events.clear()
 

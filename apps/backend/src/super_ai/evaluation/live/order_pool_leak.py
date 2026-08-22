@@ -382,7 +382,7 @@ class OrderPoolLiveRunAudit:
 class _OrderPoolRun:
     fault_token: str
     original_generation: str
-    unrelated_sessions_before: frozenset[str]
+    unrelated_session_fingerprints: frozenset[str]
     recovery_started: bool = False
     recovery_completed: bool = False
 
@@ -399,6 +399,45 @@ class OrderPoolLeakScenarioDriver:
         self._api = api
         self._postgres = postgres
         self._runs: dict[str, _OrderPoolRun] = {}
+
+    def export_resume_state(self, identity: LiveRunIdentity) -> dict[str, object]:
+        run = self._runs[identity.run_id]
+        return {
+            "originalGeneration": run.original_generation,
+            "unrelatedSessionFingerprints": sorted(
+                run.unrelated_session_fingerprints
+            ),
+        }
+
+    def restore(
+        self,
+        identity: LiveRunIdentity,
+        state: Mapping[str, object],
+    ) -> None:
+        generation = state.get("originalGeneration")
+        fingerprints = state.get("unrelatedSessionFingerprints")
+        if (
+            not isinstance(generation, str)
+            or not generation
+            or len(generation) > 96
+            or not isinstance(fingerprints, list)
+            or len(fingerprints) > 128
+            or any(
+                not isinstance(item, str)
+                or len(item) != 64
+                or any(character not in "0123456789abcdef" for character in item)
+                for item in fingerprints
+            )
+        ):
+            raise ValueError("order_pool_resume_state_invalid")
+        fault_token = hashlib.sha256(
+            f"{identity.run_token}:order-pool-fault".encode()
+        ).hexdigest()
+        self._runs[identity.run_id] = _OrderPoolRun(
+            fault_token=fault_token,
+            original_generation=generation,
+            unrelated_session_fingerprints=frozenset(cast(Sequence[str], fingerprints)),
+        )
 
     async def preflight(self, identity: LiveRunIdentity) -> None:
         health = await self._api.health()
@@ -422,7 +461,9 @@ class OrderPoolLeakScenarioDriver:
         self._runs[identity.run_id] = _OrderPoolRun(
             fault_token=fault_token,
             original_generation=generation,
-            unrelated_sessions_before=await self._postgres.unrelated_sessions(),
+            unrelated_session_fingerprints=_fingerprint_sessions(
+                await self._postgres.unrelated_sessions()
+            ),
         )
 
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
@@ -501,7 +542,9 @@ class OrderPoolLeakScenarioDriver:
                 LiveCheck("postgres_healthy", await self._postgres.database_reachable()),
                 LiveCheck(
                     "unrelated_sessions_preserved",
-                    run.unrelated_sessions_before.issubset(unrelated_after),
+                    run.unrelated_session_fingerprints.issubset(
+                        _fingerprint_sessions(unrelated_after)
+                    ),
                 ),
                 LiveCheck("scoped_recovery_recorded", run.recovery_completed),
             )
@@ -701,3 +744,10 @@ def _count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RuntimeError("order_pool_count_invalid")
     return value
+
+
+def _fingerprint_sessions(values: Sequence[str] | frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        hashlib.sha256(f"order-pool-session:{value}".encode()).hexdigest()
+        for value in values
+    )

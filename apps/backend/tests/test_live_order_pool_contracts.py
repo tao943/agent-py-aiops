@@ -314,6 +314,28 @@ async def test_driver_confirms_pool_saturation_without_claiming_the_cause() -> N
 
 
 @pytest.mark.asyncio
+async def test_driver_resume_state_is_safe_and_restores_recovery_identity() -> None:
+    driver, api, postgres = _driver()
+    identity = validate_run_id("order-pool-resume")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+
+    resume_state = driver.export_resume_state(identity)
+    restored = OrderPoolLeakScenarioDriver(
+        driver._config,  # noqa: SLF001 - verifies a new-process driver instance
+        api=api,
+        postgres=postgres,
+    )
+    restored.restore(identity, resume_state)
+
+    serialized = str(resume_state)
+    assert "stable-a" not in serialized
+    assert "stable-b" not in serialized
+    assert resume_state["originalGeneration"] == "gen-1"
+    assert restored.recovery_eligible(identity)
+
+
+@pytest.mark.asyncio
 async def test_recovery_restarts_only_owned_isolated_instance_once() -> None:
     driver, api, _ = _driver()
     restarter = FakeRestarter(api)

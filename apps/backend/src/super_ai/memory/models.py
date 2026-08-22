@@ -664,6 +664,39 @@ class EvaluationRunModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class LiveAutoClosureStateModel(Base):
+    """Trusted resumable state for one isolated Live auto-closure run."""
+
+    __tablename__ = "aiops_live_auto_closure_states"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('baseline_ready','fault_injected','alert_detected',"
+            "'diagnosis_completed','recovery_dispatched','recovery_completed',"
+            "'verification_recorded','resolved')",
+            name="ck_live_auto_closure_states_stage",
+        ),
+        CheckConstraint("version >= 0", name="ck_live_auto_closure_states_version"),
+        Index(
+            "ix_live_auto_closure_states_updated_at",
+            "updated_at",
+        ),
+    )
+
+    owner_user_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    scenario_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
+
 class EvaluationResultModel(Base):
     """Deterministic scorecard associated one-to-one with an evaluation run."""
 

@@ -16,6 +16,7 @@ from super_ai.evaluation.live.auto_closure import (
     PersistedDiagnosticOutcomeLoader,
     authorize_order_pool_recovery,
 )
+from super_ai.evaluation.live.auto_closure_state import AutoClosureState
 from super_ai.evaluation.live.domain import (
     LiveCheck,
     LiveCleanupResult,
@@ -104,12 +105,26 @@ class Driver:
     async def baseline(self, identity) -> None:
         self.calls.append("baseline")
 
+    def export_resume_state(self, identity) -> dict[str, object]:
+        del identity
+        return {
+            "originalGeneration": "generation-1",
+            "unrelatedSessionFingerprints": ["a" * 64],
+        }
+
+    def restore(self, identity, state) -> None:
+        del identity, state
+        self.calls.append("restore")
+
     async def inject(self, identity) -> LiveFaultObservation:
         self.calls.append("inject")
         return _observation()
 
     def recovery_eligible(self, identity) -> bool:
         return True
+
+    def mark_recovery_completed(self, identity) -> None:
+        del identity
 
     async def verify(self, identity) -> LiveVerification:
         self.calls.append("verify")
@@ -180,6 +195,41 @@ class Coordinator:
         return ExecutionResult(await operation(), False, 1)
 
 
+class CachingCoordinator:
+    def __init__(self) -> None:
+        self.outputs: dict[str, dict[str, object]] = {}
+
+    async def run_once(self, identity, operation, *, outcome_known_on_error):
+        assert not outcome_known_on_error
+        if identity.execution_key in self.outputs:
+            return ExecutionResult(self.outputs[identity.execution_key], True, 1)
+        output = await operation()
+        self.outputs[identity.execution_key] = output
+        return ExecutionResult(output, False, 1)
+
+
+class StateRepository:
+    def __init__(self) -> None:
+        self.state: AutoClosureState | None = None
+
+    async def create(self, **kwargs) -> AutoClosureState:
+        driver_state = kwargs["driver_state"]
+        if self.state is None:
+            self.state = AutoClosureState("baseline_ready", driver_state)
+        return self.state
+
+    async def load(self, **kwargs) -> AutoClosureState | None:
+        del kwargs
+        return self.state
+
+    async def save(self, **kwargs) -> AutoClosureState:
+        state = kwargs["state"]
+        assert self.state is not None
+        assert state.version == self.state.version
+        self.state = replace(state, version=state.version + 1)
+        return self.state
+
+
 class EvidencePreparer:
     def __init__(self) -> None:
         self.calls = 0
@@ -223,6 +273,51 @@ async def test_automatic_closure_waits_for_report_recovers_once_and_closes_verif
     assert result.diagnostic_artifact.live_evidence.source == "local"
     assert repository.verification_calls == 1
     assert driver.calls == ["preflight", "baseline", "inject", "verify", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_state_and_reuses_completed_recovery() -> None:
+    states = StateRepository()
+    coordinator = CachingCoordinator()
+    recovery = Recovery()
+    lifecycle = LifecycleRepository()
+    first_driver = Driver()
+    first = OrderPoolAutoClosureOrchestrator(
+        owner_user_id="owner",
+        source_id="local-alertmanager",
+        driver=first_driver,
+        lifecycles=lifecycle,
+        diagnostic_loader=Loader(),
+        recovery=recovery,
+        recovery_coordinator=coordinator,
+        state_repository=states,
+        budgets=AutoClosureBudgets(poll_seconds=0),
+    )
+    first_result = await first.run(SCENARIO_ID, run_id="auto-resume")
+
+    resumed_driver = Driver()
+    resumed = OrderPoolAutoClosureOrchestrator(
+        owner_user_id="owner",
+        source_id="local-alertmanager",
+        driver=resumed_driver,
+        lifecycles=lifecycle,
+        diagnostic_loader=Loader(),
+        recovery=recovery,
+        recovery_coordinator=coordinator,
+        state_repository=states,
+        budgets=AutoClosureBudgets(poll_seconds=0),
+    )
+    resumed_result = await resumed.run(
+        SCENARIO_ID,
+        run_id="auto-resume",
+        resume=True,
+    )
+
+    assert first_result.validity == resumed_result.validity == "VALID_PASS"
+    assert first_result.recovery_intent_id == resumed_result.recovery_intent_id
+    assert recovery.calls == 1
+    assert resumed_driver.calls == ["restore", "verify", "cleanup"]
+    assert states.state is not None and states.state.stage == "resolved"
 
 
 @pytest.mark.asyncio

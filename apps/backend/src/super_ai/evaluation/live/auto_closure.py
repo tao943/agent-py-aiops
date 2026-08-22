@@ -16,6 +16,11 @@ from super_ai.aiops.execution import (
 )
 from super_ai.alert_ingestion.repositories import LiveAlertLifecycle
 from super_ai.evaluation.artifacts import RunArtifact, build_run_artifact
+from super_ai.evaluation.live.auto_closure_state import (
+    AutoClosureStage,
+    AutoClosureState,
+    stage_at_least,
+)
 from super_ai.evaluation.live.diagnostics import append_live_evidence_context
 from super_ai.evaluation.live.domain import (
     LiveCleanupResult,
@@ -106,9 +111,19 @@ class AutoClosureDriver(Protocol):
 
     async def baseline(self, identity: LiveRunIdentity) -> None: ...
 
+    def export_resume_state(self, identity: LiveRunIdentity) -> dict[str, object]: ...
+
+    def restore(
+        self,
+        identity: LiveRunIdentity,
+        state: Mapping[str, object],
+    ) -> None: ...
+
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation: ...
 
     def recovery_eligible(self, identity: LiveRunIdentity) -> bool: ...
+
+    def mark_recovery_completed(self, identity: LiveRunIdentity) -> None: ...
 
     async def verify(self, identity: LiveRunIdentity) -> LiveVerification: ...
 
@@ -153,6 +168,37 @@ class EvidencePreparer(Protocol):
         identity: LiveRunIdentity,
         observation: LiveFaultObservation,
     ) -> LiveEvidenceContext: ...
+
+
+class AutoClosureStateRepository(Protocol):
+    async def create(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+        driver_state: dict[str, object],
+    ) -> AutoClosureState: ...
+
+    async def load(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+    ) -> AutoClosureState | None: ...
+
+    async def save(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+        state: AutoClosureState,
+    ) -> AutoClosureState: ...
 
 
 class PersistedDiagnosticOutcomeLoader:
@@ -273,6 +319,7 @@ class OrderPoolAutoClosureOrchestrator:
         recovery: RecoveryService,
         recovery_coordinator: RecoveryCoordinator,
         evidence_preparer: EvidencePreparer | None = None,
+        state_repository: AutoClosureStateRepository | None = None,
         budgets: AutoClosureBudgets | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -284,6 +331,7 @@ class OrderPoolAutoClosureOrchestrator:
         self._recovery = recovery
         self._recovery_coordinator = recovery_coordinator
         self._evidence_preparer = evidence_preparer
+        self._state_repository = state_repository
         self._budgets = budgets or AutoClosureBudgets()
         self._sleep = sleep
 
@@ -294,7 +342,6 @@ class OrderPoolAutoClosureOrchestrator:
         run_id: str,
         resume: bool = False,
     ) -> LiveAutoClosureResult:
-        del resume
         if scenario_id != SCENARIO_ID:
             raise ValueError("Automatic closure supports only the order-pool scenario.")
         identity = validate_run_id(run_id)
@@ -307,15 +354,27 @@ class OrderPoolAutoClosureOrchestrator:
         recovery_intent_id: str | None = None
         validity: AutoClosureValidity = "INFRA_INVALID"
         authorization_code = "preflight_failed"
+        state = await self._load_state(identity)
+        if resume:
+            if self._state_repository is None or state is None:
+                raise ValueError("Automatic closure resume state does not exist.")
+            self._driver.restore(identity, state.driver_state)
+            observation = state.observation
+        elif state is not None:
+            raise ValueError("Automatic closure run exists; use resume.")
         try:
             try:
-                await self._driver.preflight(identity)
-                await self._driver.baseline(identity)
-                observation = await self._driver.inject(identity)
-                if observation.confirmed and self._evidence_preparer is not None:
-                    evidence_context = await self._evidence_preparer.prepare(
+                if state is None:
+                    await self._driver.preflight(identity)
+                    await self._driver.baseline(identity)
+                    state = await self._create_state(identity)
+                if observation is None:
+                    observation = await self._driver.inject(identity)
+                    state = await self._advance_state(
                         identity,
-                        observation,
+                        state,
+                        stage="fault_injected",
+                        observation=observation,
                     )
             except Exception:
                 return await self._finish(
@@ -331,6 +390,11 @@ class OrderPoolAutoClosureOrchestrator:
                     authorization_code="fault_observation_incomplete",
                     observation=observation,
                 )
+            if self._evidence_preparer is not None:
+                evidence_context = await self._evidence_preparer.prepare(
+                    identity,
+                    observation,
+                )
             lifecycle = await self._wait_lifecycle(
                 run_id,
                 seconds=self._budgets.detection_seconds,
@@ -343,6 +407,12 @@ class OrderPoolAutoClosureOrchestrator:
                     authorization_code="prometheus_detection_timeout",
                     observation=observation,
                 )
+            state = await self._advance_state(
+                identity,
+                state,
+                stage="alert_detected",
+                correlation=_lifecycle_payload(lifecycle),
+            )
             lifecycle = await self._wait_lifecycle(
                 run_id,
                 seconds=self._budgets.diagnosis_seconds,
@@ -355,6 +425,12 @@ class OrderPoolAutoClosureOrchestrator:
                     authorization_code="diagnostic_report_timeout",
                     observation=observation,
                 )
+            state = await self._advance_state(
+                identity,
+                state,
+                stage="diagnosis_completed",
+                correlation=_lifecycle_payload(lifecycle),
+            )
             outcome = await self._diagnostic_loader.load(
                 owner_user_id=self._owner_user_id,
                 diagnostic_task_id=lifecycle.diagnostic_task_id,
@@ -406,6 +482,12 @@ class OrderPoolAutoClosureOrchestrator:
                 side_effecting=True,
             )
             recovery_intent_id = execution_identity.execution_key
+            state = await self._advance_state(
+                identity,
+                state,
+                stage="recovery_dispatched",
+                recovery_execution_key=recovery_intent_id,
+            )
             try:
                 coordinated = await self._recovery_coordinator.run_once(
                     execution_identity,
@@ -433,6 +515,15 @@ class OrderPoolAutoClosureOrchestrator:
                     recovery_intent_id=recovery_intent_id,
                 )
             recovery = _recovery_from_payload(coordinated.output)
+            if recovery.executed:
+                self._driver.mark_recovery_completed(identity)
+            state = await self._advance_state(
+                identity,
+                state,
+                stage="recovery_completed",
+                recovery_execution_key=recovery_intent_id,
+                recovery_payload=_recovery_payload(recovery),
+            )
             if not (recovery.authorized and recovery.executed):
                 return await self._finish(
                     identity,
@@ -454,6 +545,12 @@ class OrderPoolAutoClosureOrchestrator:
                 summary=_verification_summary(verification),
                 verified_at=datetime.now(timezone.utc),
             )
+            state = await self._advance_state(
+                identity,
+                state,
+                stage="verification_recorded",
+                verification_payload=_verification_payload(verification),
+            )
             if not verification.passed:
                 validity = "VALID_FAIL"
                 authorization_code = "independent_verification_failed"
@@ -465,6 +562,12 @@ class OrderPoolAutoClosureOrchestrator:
                 else:
                     validity = "VALID_PASS"
                     authorization_code = "verified_closed"
+                    state = await self._advance_state(
+                        identity,
+                        state,
+                        stage="resolved",
+                        correlation=_lifecycle_payload(lifecycle),
+                    )
         except Exception:
             validity = "VALID_FAIL"
             authorization_code = "orchestration_failed"
@@ -478,6 +581,71 @@ class OrderPoolAutoClosureOrchestrator:
             recovery=recovery,
             verification=verification,
             recovery_intent_id=recovery_intent_id,
+        )
+
+    async def _load_state(self, identity: LiveRunIdentity) -> AutoClosureState | None:
+        if self._state_repository is None:
+            return None
+        return await self._state_repository.load(
+            owner_user_id=self._owner_user_id,
+            source_id=self._source_id,
+            scenario_id=SCENARIO_ID,
+            run_id=identity.run_id,
+        )
+
+    async def _create_state(self, identity: LiveRunIdentity) -> AutoClosureState | None:
+        if self._state_repository is None:
+            return None
+        return await self._state_repository.create(
+            owner_user_id=self._owner_user_id,
+            source_id=self._source_id,
+            scenario_id=SCENARIO_ID,
+            run_id=identity.run_id,
+            driver_state=self._driver.export_resume_state(identity),
+        )
+
+    async def _advance_state(
+        self,
+        identity: LiveRunIdentity,
+        state: AutoClosureState | None,
+        *,
+        stage: AutoClosureStage,
+        observation: LiveFaultObservation | None = None,
+        correlation: dict[str, str | None] | None = None,
+        recovery_execution_key: str | None = None,
+        recovery_payload: dict[str, object] | None = None,
+        verification_payload: dict[str, object] | None = None,
+    ) -> AutoClosureState | None:
+        if self._state_repository is None or state is None:
+            return state
+        target_stage = state.stage if stage_at_least(state.stage, stage) else stage
+        candidate = replace(
+            state,
+            stage=target_stage,
+            observation=observation if observation is not None else state.observation,
+            correlation=correlation if correlation is not None else state.correlation,
+            recovery_execution_key=(
+                recovery_execution_key
+                if recovery_execution_key is not None
+                else state.recovery_execution_key
+            ),
+            recovery_payload=(
+                recovery_payload if recovery_payload is not None else state.recovery_payload
+            ),
+            verification_payload=(
+                verification_payload
+                if verification_payload is not None
+                else state.verification_payload
+            ),
+        )
+        if candidate == state:
+            return state
+        return await self._state_repository.save(
+            owner_user_id=self._owner_user_id,
+            source_id=self._source_id,
+            scenario_id=SCENARIO_ID,
+            run_id=identity.run_id,
+            state=candidate,
         )
 
     async def _wait_lifecycle(
@@ -599,3 +767,22 @@ def _recovery_from_payload(payload: Mapping[str, object]) -> LiveRecoveryRecord:
 def _verification_summary(verification: LiveVerification) -> str:
     passed = sum(check.passed for check in verification.checks)
     return f"{passed}/{len(verification.checks)} independent checks passed"
+
+
+def _verification_payload(verification: LiveVerification) -> dict[str, object]:
+    return {
+        "checks": [
+            {"name": check.name, "passed": check.passed}
+            for check in verification.checks
+        ],
+        "passed": verification.passed,
+    }
+
+
+def _lifecycle_payload(lifecycle: LiveAlertLifecycle) -> dict[str, str | None]:
+    return {
+        "incidentId": lifecycle.incident_id,
+        "diagnosticTaskId": lifecycle.diagnostic_task_id,
+        "backgroundJobId": lifecycle.background_job_id,
+        "reportId": lifecycle.report_id,
+    }

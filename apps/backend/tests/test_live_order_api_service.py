@@ -118,6 +118,22 @@ async def test_fault_path_keeps_checked_out_connection_and_records_real_lifecycl
 
 
 @pytest.mark.asyncio
+async def test_fault_request_retry_is_idempotent() -> None:
+    module = _load_order_api()
+    pool = FakePool(max_size=3)
+    runtime = _runtime(module, pool)
+
+    await runtime.start_run("run-1", "fault-token")
+    await runtime.execute_fault("run-1", "fault-token", "request-1")
+    await runtime.execute_fault("run-1", "fault-token", "request-1")
+
+    assert (await runtime.state("run-1"))["checkedOut"] == 1
+    assert [item["event"] for item in await runtime.events("run-1")].count(
+        "connection_checkout"
+    ) == 1
+
+
+@pytest.mark.asyncio
 async def test_normal_probe_returns_connection_and_updates_run_scoped_order() -> None:
     module = _load_order_api()
     pool = FakePool(max_size=3)
