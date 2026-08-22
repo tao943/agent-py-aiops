@@ -15,7 +15,11 @@ from typing import cast
 from super_ai.aiops.execution import ExecutionCoordinator
 from super_ai.aiops.investigation import StrategyMode
 from super_ai.evaluation.archive import EvaluationArchive
-from super_ai.evaluation.artifacts import InvestigationAudit
+from super_ai.evaluation.artifacts import (
+    InvestigationAudit,
+    InvestigationBenchmarkMetrics,
+    SpecialistRoleAudit,
+)
 from super_ai.evaluation.history import (
     EvaluationStatus,
     running_envelope,
@@ -462,6 +466,7 @@ async def _run_live_once(
                 ),
             }
         )
+        metrics.update(_investigation_health_metrics(investigation_metrics))
     terminal = terminal_envelope(
         running=running,
         status=cast(EvaluationStatus, status),
@@ -504,7 +509,7 @@ def _investigation_process_metrics(
     if audit is None:
         return {}
     roles = audit.roles
-    return {
+    metrics: dict[str, object] = {
         "durationMs": sum(role.duration_ms for role in roles),
         "modelCallCount": sum(role.model_call_count for role in roles),
         "fallbackReason": audit.fallback_reason,
@@ -533,6 +538,112 @@ def _investigation_process_metrics(
         "missingDomains": list(audit.missing_domains),
         "aggregationChecksum": audit.aggregation_checksum,
         "terminalFailureCategory": audit.terminal_failure_category,
+    }
+    metrics.update(_audit_specialist_health_metrics(roles))
+    return metrics
+
+
+def _investigation_health_metrics(
+    metrics: InvestigationBenchmarkMetrics,
+) -> dict[str, object]:
+    if not metrics.role_evidence_statuses or not metrics.role_analysis_statuses:
+        return {}
+    projected: dict[str, object] = {
+        "specialistEvidenceStatuses": dict(metrics.role_evidence_statuses),
+        "specialistAnalysisStatuses": dict(metrics.role_analysis_statuses),
+        "specialistAnalysisErrorCodes": dict(metrics.role_analysis_error_codes),
+        "specialistAnalysisAttemptCounts": dict(
+            metrics.role_analysis_attempt_counts
+        ),
+        "specialistFollowUpQuestionCounts": dict(
+            metrics.role_follow_up_question_counts
+        ),
+    }
+    for key, value in (
+        (
+            "specialistEvidenceCompletionBasisPoints",
+            metrics.specialist_evidence_completion_basis_points,
+        ),
+        (
+            "specialistAnalysisCompletionBasisPoints",
+            metrics.specialist_analysis_completion_basis_points,
+        ),
+        (
+            "specialistDegradationBasisPoints",
+            metrics.specialist_degradation_basis_points,
+        ),
+        (
+            "specialistDeadlineHitBasisPoints",
+            metrics.specialist_deadline_hit_basis_points,
+        ),
+        (
+            "specialistStructuredRetryBasisPoints",
+            metrics.specialist_structured_retry_basis_points,
+        ),
+    ):
+        if value is not None:
+            projected[key] = value
+    return projected
+
+
+def _audit_specialist_health_metrics(
+    roles: tuple[SpecialistRoleAudit, ...],
+) -> dict[str, object]:
+    health_roles = tuple(
+        role
+        for role in roles
+        if role.evidence_status is not None
+        and role.analysis_status is not None
+        and role.analysis_attempt_count is not None
+        and role.follow_up_question_count is not None
+        and role.soft_deadline_exceeded is not None
+        and role.hard_deadline_exceeded is not None
+    )
+    if not health_roles:
+        return {}
+    denominator = len(health_roles)
+
+    def basis_points(predicate: Callable[[SpecialistRoleAudit], bool]) -> int:
+        return round(
+            sum(1 for role in health_roles if predicate(role))
+            * 10_000
+            / denominator
+        )
+
+    return {
+        "specialistEvidenceStatuses": {
+            role.role: role.evidence_status for role in health_roles
+        },
+        "specialistAnalysisStatuses": {
+            role.role: role.analysis_status for role in health_roles
+        },
+        "specialistAnalysisErrorCodes": {
+            role.role: role.analysis_error_code
+            for role in health_roles
+            if role.analysis_error_code is not None
+        },
+        "specialistAnalysisAttemptCounts": {
+            role.role: role.analysis_attempt_count for role in health_roles
+        },
+        "specialistFollowUpQuestionCounts": {
+            role.role: role.follow_up_question_count for role in health_roles
+        },
+        "specialistEvidenceCompletionBasisPoints": basis_points(
+            lambda role: role.evidence_status == "complete"
+        ),
+        "specialistAnalysisCompletionBasisPoints": basis_points(
+            lambda role: role.analysis_status == "complete"
+        ),
+        "specialistDegradationBasisPoints": basis_points(
+            lambda role: role.analysis_status != "complete"
+        ),
+        "specialistDeadlineHitBasisPoints": basis_points(
+            lambda role: role.soft_deadline_exceeded is True
+            or role.hard_deadline_exceeded is True
+        ),
+        "specialistStructuredRetryBasisPoints": basis_points(
+            lambda role: cast(int, role.analysis_attempt_count) > 1
+        ),
     }
 
 

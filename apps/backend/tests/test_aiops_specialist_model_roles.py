@@ -121,6 +121,31 @@ async def test_bounded_role_reports_retry_exhaustion_without_raw_output() -> Non
     assert "secret" not in str(outcome)
 
 
+@pytest.mark.asyncio
+async def test_bounded_role_skips_correction_when_deadline_window_is_too_short() -> None:
+    model = StructuredQueueModel(
+        [
+            {"parsed": None, "parsing_error": ValueError("private output")},
+            {"parsed": TinyOutput(value="too-late"), "parsing_error": None},
+        ]
+    )
+
+    outcome = await invoke_bounded_structured_role(
+        model=cast(Any, model),
+        schema=TinyOutput,
+        prompt="public prompt",
+        correction_prompt="format correction",
+        role="evidence_analysis",
+        retry_guard=lambda: False,
+        attempt_timeout_seconds=30.0,
+    )
+
+    assert outcome.value is None
+    assert outcome.attempts == 1
+    assert outcome.error_code == "retry_skipped_insufficient_deadline"
+    assert len(model.prompts) == 1
+
+
 class RecordingRuntime:
     def __init__(self) -> None:
         self.prepared: list[PreparedDiagnosticToolExecution] = []
@@ -209,11 +234,17 @@ class SpecialistRoleModel:
         altered_log_scope: bool = False,
         require_schema_prompt: bool = False,
         require_evidence_prompt: bool = False,
+        log_plan: bool = False,
+        analysis_questions: tuple[str, ...] = (),
+        invalid_analysis: bool = False,
     ) -> None:
         self.runtime = runtime
         self.altered_log_scope = altered_log_scope
         self.require_schema_prompt = require_schema_prompt
         self.require_evidence_prompt = require_evidence_prompt
+        self.log_plan = log_plan
+        self.analysis_questions = analysis_questions
+        self.invalid_analysis = invalid_analysis
         self.prompts: list[str] = []
         self.schema: type[BaseModel] | None = None
         self.structured_output_methods: list[object] = []
@@ -243,6 +274,23 @@ class SpecialistRoleModel:
                         "proposed_arguments": {"Region": "other"},
                     }
                 ]
+            elif self.log_plan:
+                steps = [
+                    {
+                        "step_id": "log-1",
+                        "tool_name": "SearchLog",
+                        "tested_hypotheses": ["lifecycle_failure"],
+                        "causal_intent": "trigger",
+                        "proposed_arguments": {
+                            "Region": "ap-guangzhou",
+                            "TopicId": "topic-safe",
+                            "From": 10,
+                            "To": 20,
+                            "Query": 'incident_id:"safe"',
+                            "Limit": 20,
+                        },
+                    }
+                ]
             else:
                 steps = [
                     {
@@ -264,6 +312,8 @@ class SpecialistRoleModel:
                 {"steps": steps}
             )
         else:
+            if self.invalid_analysis:
+                return {"parsed": None, "parsing_error": ValueError("private")}
             if self.require_evidence_prompt:
                 assert '"safeEvidence"' in str(input)
                 assert '"healthy": true' in str(input)
@@ -277,7 +327,7 @@ class SpecialistRoleModel:
                     ],
                     "fact_candidates": [],
                     "proposed_assessments": [],
-                    "unresolved_questions": [],
+                    "unresolved_questions": list(self.analysis_questions),
                 }
             )
             assert evidence_ids
@@ -376,6 +426,10 @@ async def test_specialist_runs_two_model_roles_and_serial_tools() -> None:
     result = await executor.execute(_context(now), _assignment(now))
 
     assert result.terminal_status == "completed"
+    assert result.evidence_status == "complete"
+    assert result.analysis_status == "complete"
+    assert result.analysis_attempt_count == 1
+    assert result.completed_tool_count == result.expected_tool_count == 2
     assert result.model_call_count == 2
     assert [item.tool_name for item in runtime.prepared] == [
         "InspectOrderPoolState",
@@ -385,6 +439,54 @@ async def test_specialist_runs_two_model_roles_and_serial_tools() -> None:
     assert len(result.evidence_ids) == 2
     assert coordinator.operations == 2
     assert model.structured_output_methods == ["json_mode", "json_mode"]
+
+
+@pytest.mark.asyncio
+async def test_log_follow_up_questions_do_not_degrade_successful_analysis() -> None:
+    now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+    runtime = RecordingRuntime()
+    model = SpecialistRoleModel(
+        runtime,
+        log_plan=True,
+        analysis_questions=("Which deploy first changed checkout latency?",),
+    )
+    executor = SpecialistExecutor(
+        runtime=runtime,
+        model=cast(Any, model),
+        structured_output_method="json_mode",
+        execution_coordinator=cast(Any, InMemoryCoordinator()),
+        now=lambda: now,
+    )
+
+    result = await executor.execute(_context(now), _assignment(now, role="log"))
+
+    assert result.evidence_status == "complete"
+    assert result.analysis_status == "complete"
+    assert result.terminal_status == "completed"
+    assert result.follow_up_question_count == 1
+
+
+@pytest.mark.asyncio
+async def test_analysis_retry_exhaustion_preserves_complete_evidence() -> None:
+    now = datetime(2026, 8, 21, 6, 0, tzinfo=timezone.utc)
+    runtime = RecordingRuntime()
+    model = SpecialistRoleModel(runtime, invalid_analysis=True)
+    executor = SpecialistExecutor(
+        runtime=runtime,
+        model=cast(Any, model),
+        structured_output_method="json_mode",
+        execution_coordinator=cast(Any, InMemoryCoordinator()),
+        now=lambda: now,
+    )
+
+    result = await executor.execute(_context(now), _assignment(now))
+
+    assert result.evidence_status == "complete"
+    assert result.analysis_status == "degraded"
+    assert result.analysis_error_code == "retry_exhausted"
+    assert result.analysis_attempt_count == 2
+    assert result.terminal_status == "inconclusive"
+    assert result.completed_tool_count == result.expected_tool_count == 2
 
 
 @pytest.mark.asyncio

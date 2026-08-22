@@ -156,6 +156,16 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
             "specialistRoleModelCallCounts": {"log": 2, "runtime": 2},
             "specialistRoleToolCallCounts": {"log": 1, "runtime": 3},
             "specialistRoleEvidenceCounts": {"log": 1, "runtime": 3},
+            "specialistEvidenceStatuses": {"log": "complete", "runtime": "complete"},
+            "specialistAnalysisStatuses": {"log": "complete", "runtime": "degraded"},
+            "specialistAnalysisErrorCodes": {"runtime": "retry_exhausted"},
+            "specialistAnalysisAttemptCounts": {"log": 1, "runtime": 2},
+            "specialistFollowUpQuestionCounts": {"log": 1, "runtime": 0},
+            "specialistEvidenceCompletionBasisPoints": 10000,
+            "specialistAnalysisCompletionBasisPoints": 5000,
+            "specialistDegradationBasisPoints": 5000,
+            "specialistDeadlineHitBasisPoints": 0,
+            "specialistStructuredRetryBasisPoints": 5000,
             "sourceGroupCount": 4,
             "duplicateEvidenceCount": 0,
             "conflictCount": 1,
@@ -203,6 +213,16 @@ async def test_investigation_metrics_rebuild_from_postgresql_terminal_records(
     assert metrics.role_model_call_counts == (("log", 2), ("runtime", 2))
     assert metrics.role_tool_call_counts == (("log", 1), ("runtime", 3))
     assert metrics.role_evidence_counts == (("log", 1), ("runtime", 3))
+    assert metrics.role_evidence_statuses == (
+        ("log", "complete"),
+        ("runtime", "complete"),
+    )
+    assert metrics.role_analysis_statuses == (
+        ("log", "complete"),
+        ("runtime", "degraded"),
+    )
+    assert metrics.role_analysis_error_codes == (("runtime", "retry_exhausted"),)
+    assert metrics.specialist_analysis_completion_basis_points == 5000
     assert metrics.source_group_count == 4
     assert metrics.duplicate_evidence_count == 0
     assert metrics.conflict_count == 1

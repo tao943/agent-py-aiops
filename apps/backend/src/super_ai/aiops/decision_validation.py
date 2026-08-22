@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
@@ -208,6 +209,7 @@ class _AsyncInvoker(Protocol):
 
 StructuredValidationInvoke = Callable[[_AsyncInvoker, object], Awaitable[object]]
 StructuredValidationRetryGuard = Callable[[], bool]
+StructuredRoleRetryGuard = Callable[[], bool]
 
 
 async def _invoke_direct(invoker: _AsyncInvoker, input: object) -> object:
@@ -260,10 +262,14 @@ async def invoke_bounded_structured_role(
     role: str,
     maximum_attempts: int = 2,
     structured_output_method: StructuredOutputMethod = "function_calling",
+    retry_guard: StructuredRoleRetryGuard | None = None,
+    attempt_timeout_seconds: float | None = None,
 ) -> BoundedStructuredRoleOutcome[_StructuredRoleModel]:
     """Invoke one bounded model role with at most one format-only correction."""
     if maximum_attempts not in {1, 2}:
         raise ValueError("Bounded structured roles allow one or two attempts.")
+    if attempt_timeout_seconds is not None and attempt_timeout_seconds <= 0:
+        raise ValueError("Structured role attempt timeout must be positive.")
     try:
         structured = _structured_invoker(
             model,
@@ -289,7 +295,14 @@ async def invoke_bounded_structured_role(
     for attempt in range(1, maximum_attempts + 1):
         started = time.perf_counter()
         try:
-            response = await invoker.ainvoke(current_prompt)
+            response = (
+                await invoker.ainvoke(current_prompt)
+                if attempt_timeout_seconds is None
+                else await asyncio.wait_for(
+                    invoker.ainvoke(current_prompt),
+                    timeout=attempt_timeout_seconds,
+                )
+            )
         except Exception as exc:
             failure = classify_model_failure(exc, phase="model_invoke")
             audits.append(
@@ -326,6 +339,16 @@ async def invoke_bounded_structured_role(
                 )
             )
             if attempt < maximum_attempts:
+                if retry_guard is not None and not retry_guard():
+                    return BoundedStructuredRoleOutcome(
+                        value=None,
+                        error_category="retry_exhausted",
+                        attempts=attempt,
+                        audits=tuple(audits),
+                        error_code="retry_skipped_insufficient_deadline",
+                        error_phase="structured_parse",
+                        retryable=False,
+                    )
                 current_prompt = f"{prompt}\n\n{correction_prompt}"
                 continue
             return BoundedStructuredRoleOutcome(

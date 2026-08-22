@@ -24,6 +24,7 @@ from super_ai.aiops.specialists import (
     SpecialistEvidenceAnalysisOutput,
     SpecialistLocalPlanOutput,
     SpecialistResult,
+    specialist_result_legacy_checksum,
 )
 from super_ai.mcp_client import McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
@@ -643,7 +644,6 @@ def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
             },
         )
     ) == "manual_review"
-
     assert service._route_after_deterministic_validation_v4(  # pyright: ignore[reportPrivateUsage]
         cast(
             Any,
@@ -654,6 +654,56 @@ def test_aggregation_fallback_is_budgeted_and_fail_closed() -> None:
         )
     ) == "manual_review"
 
+
+def test_legacy_specialist_checkpoint_checksum_is_verified_before_migration() -> None:
+    result = SpecialistResult.create(
+        role="runtime",
+        terminal_status="completed",
+        evidence_status="complete",
+        analysis_status="complete",
+        analysis_error_code=None,
+        analysis_attempt_count=1,
+        soft_deadline_exceeded=False,
+        hard_deadline_exceeded=False,
+        expected_tool_count=1,
+        tested_hypotheses=("pool_lifecycle_failure",),
+        evidence_ids=("evidence-runtime",),
+        fact_candidates=(),
+        proposed_assessments=(),
+        unresolved_questions=(),
+        completed_steps=("runtime-1",),
+        model_call_count=2,
+        duration_ms=20,
+    )
+    payload = diagnostics_module._specialist_result_payload(result)  # pyright: ignore[reportPrivateUsage]
+    for key in (
+        "evidenceStatus",
+        "analysisStatus",
+        "analysisErrorCode",
+        "analysisAttemptCount",
+        "softDeadlineExceeded",
+        "hardDeadlineExceeded",
+        "expectedToolCount",
+    ):
+        payload.pop(key)
+    legacy_checksum = specialist_result_legacy_checksum(result)
+    payload["resultChecksum"] = legacy_checksum
+
+    migrated = diagnostics_module._specialist_result_from_payload(  # pyright: ignore[reportPrivateUsage]
+        payload,
+        legacy_expected_tool_count=1,
+    )
+
+    assert migrated.evidence_status == "complete"
+    assert migrated.analysis_status == "complete"
+    assert migrated.terminal_status == "completed"
+    assert migrated.result_checksum != legacy_checksum
+    payload["resultChecksum"] = "0" * 64
+    with pytest.raises(ValueError, match="checksum"):
+        diagnostics_module._specialist_result_from_payload(  # pyright: ignore[reportPrivateUsage]
+            payload,
+            legacy_expected_tool_count=1,
+        )
 
 @pytest.mark.asyncio
 async def test_specialist_aggregation_releases_budget_and_preserves_partial_evidence(
@@ -713,6 +763,13 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
         runtime_result = SpecialistResult.create(
             role="runtime",
             terminal_status="completed",
+            evidence_status="complete",
+            analysis_status="complete",
+            analysis_error_code=None,
+            analysis_attempt_count=1,
+            soft_deadline_exceeded=False,
+            hard_deadline_exceeded=False,
+            expected_tool_count=1,
             tested_hypotheses=("pool_lifecycle_failure",),
             evidence_ids=(evidence.id,),
             fact_candidates=(claim,),
@@ -725,6 +782,13 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
         log_result = SpecialistResult.create(
             role="log",
             terminal_status="timeout",
+            evidence_status="none",
+            analysis_status="timeout",
+            analysis_error_code="specialist_soft_deadline_expired",
+            analysis_attempt_count=0,
+            soft_deadline_exceeded=True,
+            hard_deadline_exceeded=False,
+            expected_tool_count=0,
             tested_hypotheses=("pool_lifecycle_failure",),
             evidence_ids=(),
             fact_candidates=(),
@@ -823,6 +887,17 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
     assert aggregation["failedPacketCount"] == 1
     assert aggregation["missingDomains"] == ["log"]
     assert aggregation["fallbackPermitted"] is False
+    assert aggregation["specialistEvidenceStatuses"] == {
+        "log": "none",
+        "runtime": "complete",
+    }
+    assert aggregation["specialistAnalysisStatuses"] == {
+        "log": "timeout",
+        "runtime": "complete",
+    }
+    assert aggregation["specialistAnalysisErrorCodes"] == {
+        "log": "specialist_soft_deadline_expired"
+    }
     assert update["model_call_count"] == 3
     assert update["evidence_ids"] == [evidence.id]
     aggregated_facts = cast(list[dict[str, object]], update["aggregated_facts"])
@@ -840,6 +915,13 @@ async def test_specialist_aggregation_releases_budget_and_preserves_partial_evid
     assert "runtime" in persisted_text
     assert "evidence-specialist-runtime" in persisted_text
     assert "modelcallcount" in persisted_text
+    assert "evidencestatus" in persisted_text
+    assert "analysisstatus" in persisted_text
+    assert "analysiserrorcode" in persisted_text
+    event_text = json.dumps(update["events"], ensure_ascii=False).casefold()
+    assert "specialistanalysisattemptcounts" in event_text
+    assert "specialistfollowupquestioncounts" in event_text
+    assert "specialistcompletedtoolcounts" in event_text
     assert not any(
         forbidden in persisted_text
         for forbidden in ("rawresponse", "privatereasoning", "credential")

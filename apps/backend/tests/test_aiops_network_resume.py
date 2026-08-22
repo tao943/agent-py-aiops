@@ -261,6 +261,13 @@ async def test_specialist_checkpoints_replay_without_duplicate_evidence(
         specialist = SpecialistResult.create(
             role="runtime",
             terminal_status="completed",
+            evidence_status="complete",
+            analysis_status="complete",
+            analysis_error_code=None,
+            analysis_attempt_count=1,
+            soft_deadline_exceeded=False,
+            hard_deadline_exceeded=False,
+            expected_tool_count=1,
             tested_hypotheses=("pool_lifecycle_failure",),
             evidence_ids=(evidence.id,),
             fact_candidates=(claim,),

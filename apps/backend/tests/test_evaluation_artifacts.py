@@ -441,6 +441,15 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
                         {
                             "role": "runtime",
                             "terminalStatus": "completed",
+                            "evidenceStatus": "complete",
+                            "analysisStatus": "degraded",
+                            "analysisErrorCode": "retry_exhausted",
+                            "analysisAttemptCount": 2,
+                            "followUpQuestionCount": 0,
+                            "softDeadlineExceeded": False,
+                            "hardDeadlineExceeded": False,
+                            "completedToolCount": 3,
+                            "expectedToolCount": 3,
                             "evidenceIds": ["ev-runtime", "ev-runtime"],
                             "modelCallCount": 2,
                             "durationMs": 1250,
@@ -449,6 +458,15 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
                         {
                             "role": "log",
                             "terminalStatus": "timeout",
+                            "evidenceStatus": "none",
+                            "analysisStatus": "timeout",
+                            "analysisErrorCode": "specialist_hard_deadline_expired",
+                            "analysisAttemptCount": 1,
+                            "followUpQuestionCount": 1,
+                            "softDeadlineExceeded": False,
+                            "hardDeadlineExceeded": True,
+                            "completedToolCount": 0,
+                            "expectedToolCount": 1,
                             "evidenceIds": ["ev-log"],
                             "modelCallCount": 1,
                             "durationMs": 180000,
@@ -494,6 +512,12 @@ def test_artifact_projects_safe_investigation_routing_audit() -> None:
     assert runtime.model_call_count == 2
     assert runtime.tool_call_count == 1
     assert runtime.evidence_ids == ("ev-runtime",)
+    assert runtime.evidence_status == "complete"
+    assert runtime.analysis_status == "degraded"
+    assert runtime.analysis_error_code == "retry_exhausted"
+    assert runtime.analysis_attempt_count == 2
+    assert runtime.completed_tool_count == runtime.expected_tool_count == 3
+    assert runtime.follow_up_question_count == 0
     assert artifact.investigation_audit.source_group_count == 2
     assert artifact.investigation_audit.duplicate_evidence_count == 1
     assert artifact.investigation_audit.conflict_count == 1
@@ -559,6 +583,16 @@ def test_artifact_rejects_unbounded_or_private_specialist_metrics() -> None:
     ]
     assert all(item.duration_ms == 0 for item in artifact.investigation_audit.roles)
     assert all(item.evidence_ids == () for item in artifact.investigation_audit.roles)
+    assert all(item.evidence_status is None for item in artifact.investigation_audit.roles)
+    assert all(item.analysis_status is None for item in artifact.investigation_audit.roles)
+    assert all(
+        item.analysis_attempt_count is None
+        for item in artifact.investigation_audit.roles
+    )
+    assert all(
+        item.hard_deadline_exceeded is None
+        for item in artifact.investigation_audit.roles
+    )
     assert artifact.investigation_audit.missing_domains == ("log",)
     assert artifact.investigation_audit.conflict_count == 0
     assert artifact.investigation_audit.source_group_count == 0

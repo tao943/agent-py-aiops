@@ -8,12 +8,18 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
 
 from super_ai.aiops.causal_intents import allowed_causal_intents
-from super_ai.aiops.decision_validation import invoke_bounded_structured_role
+from super_ai.aiops.decision_validation import (
+    DecisionValidationErrorCategory,
+    ValidationErrorCode,
+    ValidationErrorPhase,
+    ValidationHttpStatusClass,
+    invoke_bounded_structured_role,
+)
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity
 from super_ai.aiops.investigation import (
     EvidenceClaim,
@@ -25,11 +31,15 @@ from super_ai.aiops.investigation import (
 from super_ai.aiops.specialists import (
     PublicAssessmentSignal,
     SharedRunContext,
+    SpecialistAnalysisErrorCode,
+    SpecialistAnalysisStatus,
     SpecialistAssignment,
     SpecialistEvidenceAnalysisOutput,
+    SpecialistEvidenceStatus,
     SpecialistLocalPlanOutput,
     SpecialistPlanStep,
     SpecialistResult,
+    derive_specialist_terminal_status,
 )
 from super_ai.llm import ChatModel
 from super_ai.llm.config import StructuredOutputMethod
@@ -439,6 +449,17 @@ class InvestigatorExecutor:
 _RoleOutput = TypeVar("_RoleOutput", bound=BaseModel)
 
 
+@dataclass(frozen=True, slots=True)
+class SpecialistRoleInvocation(Generic[_RoleOutput]):
+    value: _RoleOutput | None
+    error_category: DecisionValidationErrorCategory | None
+    error_code: ValidationErrorCode | None
+    attempt_count: int
+    error_phase: ValidationErrorPhase | None
+    retryable: bool | None
+    http_status_class: ValidationHttpStatusClass | None
+
+
 class SpecialistExecutor:
     """Run one source-scoped Specialist with two bounded model roles."""
 
@@ -450,6 +471,8 @@ class SpecialistExecutor:
         structured_output_method: StructuredOutputMethod,
         execution_coordinator: ExecutionCoordinator,
         now: Callable[[], datetime] | None = None,
+        evidence_analysis_attempt_timeout_seconds: float = 30.0,
+        retry_scheduling_margin_seconds: float = 1.0,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -458,6 +481,14 @@ class SpecialistExecutor:
         )
         self._execution_coordinator = execution_coordinator
         self._now = now or (lambda: datetime.now(timezone.utc))
+        if evidence_analysis_attempt_timeout_seconds <= 0:
+            raise ValueError("Evidence Analysis attempt timeout must be positive.")
+        if retry_scheduling_margin_seconds <= 0:
+            raise ValueError("Specialist retry scheduling margin must be positive.")
+        self._evidence_analysis_attempt_timeout_seconds = (
+            evidence_analysis_attempt_timeout_seconds
+        )
+        self._retry_scheduling_margin_seconds = retry_scheduling_margin_seconds
 
     async def execute(
         self,
@@ -470,19 +501,23 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_hard_deadline_expired",
+                hard_deadline_exceeded=True,
                 unresolved_questions=("specialist_hard_deadline_expired",),
             )
         if self._soft_expired(context, assignment):
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_soft_deadline_expired",
+                soft_deadline_exceeded=True,
                 unresolved_questions=("specialist_soft_deadline_expired",),
             )
 
         try:
-            local_plan, plan_error = await asyncio.wait_for(
+            plan_invocation = await asyncio.wait_for(
                 self._run_role(
                     context=context,
                     assignment=assignment,
@@ -500,16 +535,22 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_hard_deadline_expired",
+                analysis_attempt_count=1,
+                hard_deadline_exceeded=True,
                 unresolved_questions=("specialist_hard_deadline_expired",),
                 model_call_count=1,
             )
+        local_plan = plan_invocation.value
         if local_plan is None:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="failed",
-                unresolved_questions=(plan_error or "specialist_local_plan_failed",),
+                analysis_status="skipped",
+                unresolved_questions=(
+                    plan_invocation.error_category or "specialist_local_plan_failed",
+                ),
                 model_call_count=1,
             )
 
@@ -519,7 +560,7 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="failed",
+                analysis_status="skipped",
                 unresolved_questions=("specialist_plan_scope_rejected",),
                 model_call_count=1,
             )
@@ -576,7 +617,10 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_hard_deadline_expired",
+                hard_deadline_exceeded=True,
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
@@ -587,7 +631,10 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="inconclusive" if evidence_ids else "timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_soft_deadline_expired",
+                soft_deadline_exceeded=True,
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
@@ -599,7 +646,8 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="failed",
+                analysis_status="skipped",
+                expected_tool_count=len(steps),
                 unresolved_questions=tuple(unresolved),
                 completed_steps=tuple(completed_steps),
                 model_call_count=1,
@@ -610,7 +658,9 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="inconclusive",
+                analysis_status="skipped",
+                analysis_error_code="specialist_model_budget_exhausted",
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
@@ -619,7 +669,7 @@ class SpecialistExecutor:
             )
 
         try:
-            analysis, analysis_error = await asyncio.wait_for(
+            analysis_invocation = await asyncio.wait_for(
                 self._run_role(
                     context=context,
                     assignment=assignment,
@@ -636,6 +686,14 @@ class SpecialistExecutor:
                         "Return only the required Evidence Analysis schema using "
                         "owned Evidence IDs."
                     ),
+                    retry_guard=lambda: self._remaining_hard_seconds(
+                        context, assignment
+                    )
+                    >= self._evidence_analysis_attempt_timeout_seconds
+                    + self._retry_scheduling_margin_seconds,
+                    attempt_timeout_seconds=(
+                        self._evidence_analysis_attempt_timeout_seconds
+                    ),
                 ),
                 timeout=self._remaining_hard_seconds(context, assignment),
             )
@@ -644,19 +702,32 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="inconclusive" if evidence_ids else "timeout",
+                analysis_status="timeout",
+                analysis_error_code="specialist_hard_deadline_expired",
+                analysis_attempt_count=1,
+                hard_deadline_exceeded=True,
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
                 completed_steps=tuple(completed_steps),
                 model_call_count=2,
             )
+        analysis = analysis_invocation.value
         if analysis is None:
-            unresolved.append(analysis_error or "specialist_evidence_analysis_failed")
+            analysis_status, analysis_error_code = _specialist_analysis_failure(
+                analysis_invocation
+            )
+            unresolved.append(
+                analysis_error_code or "specialist_evidence_analysis_failed"
+            )
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="inconclusive" if evidence_ids else "failed",
+                analysis_status=analysis_status,
+                analysis_error_code=analysis_error_code,
+                analysis_attempt_count=analysis_invocation.attempt_count,
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
@@ -674,7 +745,10 @@ class SpecialistExecutor:
             return self._result(
                 assignment=assignment,
                 started_at=started_at,
-                terminal_status="inconclusive" if evidence_ids else "failed",
+                analysis_status="failed",
+                analysis_error_code="scope_rejected",
+                analysis_attempt_count=analysis_invocation.attempt_count,
+                expected_tool_count=len(steps),
                 evidence_ids=tuple(evidence_ids),
                 fact_candidates=tuple(tool_claims),
                 unresolved_questions=tuple(unresolved),
@@ -682,11 +756,12 @@ class SpecialistExecutor:
                 model_call_count=2,
             )
         unresolved.extend(analysis.unresolved_questions)
-        terminal_status = "completed" if not unresolved else "inconclusive"
         return self._result(
             assignment=assignment,
             started_at=started_at,
-            terminal_status=terminal_status,
+            analysis_status="complete",
+            analysis_attempt_count=analysis_invocation.attempt_count,
+            expected_tool_count=len(steps),
             evidence_ids=tuple(evidence_ids),
             fact_candidates=facts or tuple(tool_claims),
             proposed_assessments=assessments,
@@ -705,7 +780,9 @@ class SpecialistExecutor:
         schema: type[_RoleOutput],
         prompt: str,
         correction_prompt: str,
-    ) -> tuple[_RoleOutput | None, str | None]:
+        retry_guard: Callable[[], bool] | None = None,
+        attempt_timeout_seconds: float | None = None,
+    ) -> SpecialistRoleInvocation[_RoleOutput]:
         effective_prompt = self._structured_role_prompt(prompt, schema=schema)
         prompt_fingerprint = hashlib.sha256(
             effective_prompt.encode("utf-8")
@@ -719,6 +796,8 @@ class SpecialistExecutor:
                 correction_prompt=correction_prompt,
                 role=role_name,
                 structured_output_method=self._structured_output_method,
+                retry_guard=retry_guard,
+                attempt_timeout_seconds=attempt_timeout_seconds,
             )
             return {
                 "status": "completed" if outcome.value is not None else "failed",
@@ -730,6 +809,9 @@ class SpecialistExecutor:
                 "attempts": outcome.attempts,
                 "errorCategory": outcome.error_category,
                 "errorCode": outcome.error_code,
+                "errorPhase": outcome.error_phase,
+                "retryable": outcome.retryable,
+                "httpStatusClass": outcome.http_status_class,
             }
 
         execution = await self._execution_coordinator.run_once(
@@ -743,19 +825,85 @@ class SpecialistExecutor:
                     "roleName": role_name,
                     "promptFingerprint": prompt_fingerprint,
                     "structuredOutputMethod": self._structured_output_method,
+                    "attemptTimeoutSeconds": attempt_timeout_seconds,
                 },
             ),
             operation,
         )
         payload = execution.output
         value = payload.get("value")
+        error_category = payload.get("errorCategory")
+        error_code = payload.get("errorCode")
+        error_phase = payload.get("errorPhase")
+        http_status_class = payload.get("httpStatusClass")
+        attempts = payload.get("attempts")
+        retryable = payload.get("retryable")
+        safe_invocation = SpecialistRoleInvocation[_RoleOutput](
+            value=None,
+            error_category=cast(
+                DecisionValidationErrorCategory | None,
+                error_category
+                if error_category
+                in {
+                    "candidate_missing",
+                    "deterministic_gap",
+                    "model_call_failed",
+                    "invalid_model_output",
+                    "model_rejected",
+                    "retry_exhausted",
+                }
+                else None,
+            ),
+            error_code=cast(
+                ValidationErrorCode | None,
+                error_code
+                if error_code
+                in {
+                    "timeout",
+                    "connection",
+                    "authentication",
+                    "permission_denied",
+                    "rate_limit",
+                    "provider_4xx",
+                    "provider_5xx",
+                    "structured_output_unsupported",
+                    "model_call_budget_exhausted",
+                    "hard_deadline_exceeded",
+                    "retry_skipped_insufficient_deadline",
+                    "unknown",
+                }
+                else None,
+            ),
+            attempt_count=(
+                attempts
+                if isinstance(attempts, int)
+                and not isinstance(attempts, bool)
+                and 0 <= attempts <= 2
+                else 0
+            ),
+            error_phase=cast(
+                ValidationErrorPhase | None,
+                error_phase
+                if error_phase
+                in {"structured_invoker_setup", "model_invoke", "structured_parse"}
+                else None,
+            ),
+            retryable=retryable if isinstance(retryable, bool) else None,
+            http_status_class=cast(
+                ValidationHttpStatusClass | None,
+                http_status_class if http_status_class in {"4xx", "5xx"} else None,
+            ),
+        )
         if payload.get("status") != "completed" or value is None:
-            error = payload.get("errorCategory")
-            return None, str(error) if isinstance(error, str) else None
+            return safe_invocation
         try:
-            return schema.model_validate(value), None
+            return replace(safe_invocation, value=schema.model_validate(value))
         except ValueError:
-            return None, "specialist_checkpoint_invalid"
+            return replace(
+                safe_invocation,
+                error_category="invalid_model_output",
+                error_phase="structured_parse",
+            )
 
     def _structured_role_prompt(
         self,
@@ -915,8 +1063,16 @@ class SpecialistExecutor:
                 for claim in fact_candidates
             ],
         }
-        return "Analyze only these public Specialist evidence summaries:\n" + json.dumps(
-            payload, ensure_ascii=False, sort_keys=True
+        return (
+            "Analyze only these public Specialist evidence summaries. Return exactly "
+            "tested_hypotheses, fact_candidates, proposed_assessments, and "
+            "unresolved_questions as one JSON object with no wrapper or extra fields. "
+            "Every Evidence ID must occur in ownedEvidenceIds and every hypothesis "
+            "must occur in hypotheses. unresolved_questions is optional advice and "
+            "does not mean evidence collection failed. Valid shape example: "
+            '{"tested_hypotheses":["hypothesis-a"],"fact_candidates":[],'
+            '"proposed_assessments":[],"unresolved_questions":[]}\n'
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
 
     def _soft_expired(
@@ -948,9 +1104,12 @@ class SpecialistExecutor:
         *,
         assignment: SpecialistAssignment,
         started_at: datetime,
-        terminal_status: Literal[
-            "completed", "inconclusive", "failed", "timeout", "cancelled"
-        ],
+        analysis_status: SpecialistAnalysisStatus,
+        analysis_error_code: SpecialistAnalysisErrorCode | None = None,
+        analysis_attempt_count: int = 0,
+        soft_deadline_exceeded: bool = False,
+        hard_deadline_exceeded: bool = False,
+        expected_tool_count: int = 0,
         evidence_ids: tuple[str, ...] = (),
         fact_candidates: tuple[EvidenceClaim, ...] = (),
         proposed_assessments: tuple[PublicAssessmentSignal, ...] = (),
@@ -959,9 +1118,24 @@ class SpecialistExecutor:
         model_call_count: int = 0,
     ) -> SpecialistResult:
         duration = max(0, int((self._now() - started_at).total_seconds() * 1000))
+        evidence_status = _specialist_evidence_status(
+            evidence_ids=evidence_ids,
+            completed_tool_count=len(completed_steps),
+            expected_tool_count=expected_tool_count,
+        )
         return SpecialistResult.create(
             role=assignment.role,
-            terminal_status=terminal_status,
+            terminal_status=derive_specialist_terminal_status(
+                evidence_status,
+                analysis_status,
+            ),
+            evidence_status=evidence_status,
+            analysis_status=analysis_status,
+            analysis_error_code=analysis_error_code,
+            analysis_attempt_count=analysis_attempt_count,
+            soft_deadline_exceeded=soft_deadline_exceeded,
+            hard_deadline_exceeded=hard_deadline_exceeded,
+            expected_tool_count=expected_tool_count,
             tested_hypotheses=assignment.hypotheses_to_test,
             evidence_ids=evidence_ids,
             fact_candidates=fact_candidates,
@@ -971,6 +1145,46 @@ class SpecialistExecutor:
             model_call_count=model_call_count,
             duration_ms=duration,
         )
+
+
+def _specialist_evidence_status(
+    *,
+    evidence_ids: tuple[str, ...],
+    completed_tool_count: int,
+    expected_tool_count: int,
+) -> SpecialistEvidenceStatus:
+    if not evidence_ids:
+        return "none"
+    if expected_tool_count > 0 and completed_tool_count == expected_tool_count:
+        return "complete"
+    return "partial"
+
+
+def _specialist_analysis_failure(
+    invocation: SpecialistRoleInvocation[_RoleOutput],
+) -> tuple[SpecialistAnalysisStatus, SpecialistAnalysisErrorCode | None]:
+    if invocation.error_code == "retry_skipped_insufficient_deadline":
+        return "degraded", "retry_skipped_insufficient_deadline"
+    if invocation.error_category == "retry_exhausted":
+        return "degraded", "retry_exhausted"
+    if invocation.error_code in {"timeout", "hard_deadline_exceeded"}:
+        return "timeout", "provider_timeout"
+    if invocation.http_status_class == "4xx" or invocation.error_code in {
+        "authentication",
+        "permission_denied",
+        "rate_limit",
+        "structured_output_unsupported",
+    }:
+        return "failed", "provider_4xx"
+    if invocation.http_status_class == "5xx" or invocation.error_code in {
+        "connection",
+        "provider_5xx",
+        "unknown",
+    }:
+        return "failed", "provider_5xx"
+    if invocation.error_phase == "structured_parse":
+        return "degraded", "schema_validation_failed"
+    return "failed", None
 
 
 def _claim_from_result(
