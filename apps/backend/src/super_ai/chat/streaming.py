@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import import_module
 from time import monotonic
-from typing import Any, Literal, Protocol, TypedDict, cast
+from typing import Any, Literal, Protocol, TypedDict, TypeVar, cast
 from uuid import uuid4
 
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    ToolCallLimitMiddleware,
+)
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from super_ai.chat.aiops_bridge import AiopsBridgeService, build_aiops_bridge_tools
@@ -23,6 +32,7 @@ from super_ai.chat.configuration import (
     SelectedChatSkill,
     build_chat_system_prompt,
 )
+from super_ai.chat.execution_policy import ChatExecutionBudget
 from super_ai.chat.intent import ChatIntentRouter, ChatRoute
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
 from super_ai.chat.tool_policy import allowed_tools_for
@@ -45,6 +55,97 @@ from super_ai.retrieval import (
 
 ToolCallStatus = Literal["started", "delta", "completed", "failed"]
 logger = logging.getLogger(__name__)
+_AsyncItem = TypeVar("_AsyncItem")
+
+
+class RepeatedToolCallError(RuntimeError):
+    """The Agent attempted the same logical tool call twice in one run."""
+
+
+class ChatExecutionDeadlineExceeded(TimeoutError):
+    """The total ReAct execution deadline expired."""
+
+
+def chat_execution_error_code(error: Exception) -> str:
+    """Map bounded execution failures without depending on private provider details."""
+
+    if isinstance(error, (RepeatedToolCallError, ChatExecutionDeadlineExceeded)) or (
+        error.__class__.__name__
+        in {"ModelCallLimitExceededError", "ToolCallLimitExceededError"}
+    ):
+        return "CHAT_EXECUTION_BUDGET_EXHAUSTED"
+    return "SYSTEM_INTERNAL_ERROR"
+
+
+class RepeatedToolCallMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Reject a repeated tool name and canonical argument pair before execution."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[
+            [ToolCallRequest], Awaitable[ToolMessage | Command[Any]]
+        ],
+    ) -> ToolMessage | Command[Any]:
+        tool_call = request.tool_call
+        canonical = json.dumps(
+            {
+                "name": tool_call.get("name"),
+                "args": tool_call.get("args", {}),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if canonical in self._seen:
+            raise RepeatedToolCallError(
+                f"Repeated tool call blocked: {tool_call.get('name', 'unknown')}"
+            )
+        self._seen.add(canonical)
+        return await handler(request)
+
+
+def build_agent_middleware(
+    budget: ChatExecutionBudget,
+) -> tuple[AgentMiddleware[Any, Any, Any], ...]:
+    """Create request-scoped official call limits plus the fingerprint guard."""
+
+    return (
+        ModelCallLimitMiddleware(
+            run_limit=budget.max_model_calls,
+            exit_behavior="error",
+        ),
+        ToolCallLimitMiddleware(
+            run_limit=budget.max_tool_calls,
+            exit_behavior="error",
+        ),
+        RepeatedToolCallMiddleware(),
+    )
+
+
+async def iterate_with_deadline(
+    iterator: AsyncIterator[_AsyncItem], seconds: float
+) -> AsyncIterator[_AsyncItem]:
+    """Apply one monotonic deadline to an async iterator, not per-event timeouts."""
+
+    deadline = monotonic() + seconds
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ChatExecutionDeadlineExceeded("Chat execution deadline exceeded.")
+        try:
+            item = await asyncio.wait_for(anext(iterator), timeout=remaining)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            raise ChatExecutionDeadlineExceeded(
+                "Chat execution deadline exceeded."
+            ) from None
+        yield item
 
 
 class SsePayload(TypedDict):
@@ -122,6 +223,7 @@ class ChatAgentRequest:
     route: ChatRoute = ChatRoute("general_chat", 0.0, "fallback")
     tool_names: tuple[str, ...] = ()
     skills: tuple[SelectedChatSkill, ...] = ()
+    execution_budget: ChatExecutionBudget = ChatExecutionBudget(2, 2, 120.0)
 
 
 class LoadSkillInput(BaseModel):
@@ -415,7 +517,7 @@ class ChatStreamingService:
             )
             if raise_errors:
                 raise
-            yield _error_event("SYSTEM_INTERNAL_ERROR")
+            yield _error_event(chat_execution_error_code(exc))
             return
 
     async def build_system_prompt(self, *, owner_user_id: str) -> str:
@@ -626,6 +728,7 @@ class LangChainChatAgentRunner:
             model=cast(Any, self._llm_provider.create_chat_model()),
             tools=tools,
             system_prompt=(request.system_prompt),
+            middleware=build_agent_middleware(request.execution_budget),
         )
         messages = [
             {"role": message.role, "content": message.content}
@@ -633,9 +736,12 @@ class LangChainChatAgentRunner:
             if message.role in {"user", "assistant"}
         ]
 
-        async for raw_event in agent.astream_events(
-            cast(Any, {"messages": messages}),
-            version="v2",
+        raw_events = agent.astream_events(
+            cast(Any, {"messages": messages}), version="v2"
+        )
+        async for raw_event in iterate_with_deadline(
+            cast(AsyncIterator[object], raw_events),
+            request.execution_budget.deadline_seconds,
         ):
             parsed = _agent_event_from_langchain_event(cast(Mapping[str, object], raw_event))
             if parsed is None:
