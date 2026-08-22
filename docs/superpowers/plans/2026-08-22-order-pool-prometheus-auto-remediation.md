@@ -131,10 +131,10 @@ Use `prom/prometheus:v3.14.0`, two-second scrape/evaluation intervals, one targe
 
 - [ ] **Step 4: Validate YAML, rules, and rendered Compose**
 
-Run: `docker run --rm -v "${PWD}/infra/prometheus:/etc/prometheus:ro" prom/prometheus:v3.14.0 promtool check config /etc/prometheus/prometheus.yml`
+Run: `docker run --rm --entrypoint promtool -v "${PWD}/infra/prometheus:/etc/prometheus:ro" prom/prometheus:v3.14.0 check config /etc/prometheus/prometheus.yml`
 Expected: `SUCCESS`.
 
-Run: `docker run --rm -v "${PWD}/infra/prometheus:/etc/prometheus:ro" prom/prometheus:v3.14.0 promtool check rules /etc/prometheus/rules/live-eval-order-pool.yml`
+Run: `docker run --rm --entrypoint promtool -v "${PWD}/infra/prometheus:/etc/prometheus:ro" prom/prometheus:v3.14.0 check rules /etc/prometheus/rules/live-eval-order-pool.yml`
 Expected: `SUCCESS`.
 
 Run: `docker compose -f infra/compose.yaml --profile live-eval config --quiet`

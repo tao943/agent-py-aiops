@@ -3,7 +3,7 @@ global:
 
 route:
   receiver: agent-py-webhook
-  group_by: [alertname, service, environment, run_id]
+  group_by: [alertname, service, environment, scenario_id, run_id]
 
 receivers:
   - name: agent-py-webhook

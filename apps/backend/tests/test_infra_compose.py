@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INFRA_DIR = REPO_ROOT / "infra"
 
@@ -47,7 +49,7 @@ def test_compose_configures_milvus_stack_without_mcp_runtime() -> None:
     assert "cls-mcp-server" not in compose
 
 
-def test_compose_configures_local_alertmanager_without_a_full_monitoring_stack() -> None:
+def test_compose_configures_local_alertmanager_and_live_eval_prometheus() -> None:
     compose = _read("compose.yaml")
 
     assert "alertmanager:" in compose
@@ -55,13 +57,16 @@ def test_compose_configures_local_alertmanager_without_a_full_monitoring_stack()
     assert '"9093:9093"' in compose
     assert "./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" in compose
     assert (INFRA_DIR / "alertmanager" / "alertmanager.yml").is_file()
+    assert "prometheus:" in compose
+    assert "prom/prometheus:v3.14.0" in compose
+    assert "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" in compose
+    assert "./prometheus/rules:/etc/prometheus/rules:ro" in compose
 
 
 def test_compose_excludes_external_observability_and_upload_startup() -> None:
     compose = _read("compose.yaml").lower()
 
     for excluded in (
-        "prometheus:",
         "grafana:",
         "jaeger:",
         "loki:",
@@ -99,15 +104,57 @@ def test_live_eval_profile_is_disabled_by_default_and_isolated() -> None:
         "live-eval-upstream:",
         "live-eval-order-api:",
         "live-eval-nginx:",
+        "prometheus:",
     ):
         assert service in compose
-    assert compose.count('profiles: ["live-eval"]') == 4
+    assert compose.count('profiles: ["live-eval"]') == 5
     assert '"127.0.0.1:16379:6379"' in compose
     assert '"127.0.0.1:18080:80"' in compose
     assert '"--maxclients", "16"' in compose
     assert "docker.sock" not in compose.lower()
     assert (INFRA_DIR / "live-eval" / "nginx.conf").is_file()
     assert (INFRA_DIR / "live-eval" / "upstream.py").is_file()
+
+
+def test_prometheus_rule_requires_complete_order_pool_fault_state() -> None:
+    configuration = yaml.safe_load(
+        (INFRA_DIR / "prometheus" / "rules" / "live-eval-order-pool.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    rules = configuration["groups"][0]["rules"]
+    rule = next(item for item in rules if item["alert"] == "OrderApiConnectionPoolExhausted")
+    expression = rule["expr"]
+
+    for metric in (
+        "agentpy_order_pool_capacity",
+        "agentpy_order_pool_checked_out",
+        "agentpy_order_pool_free",
+        "agentpy_order_pool_waiter_observed",
+        "agentpy_order_pool_fault_active",
+        "agentpy_order_business_probe_success",
+    ):
+        assert metric in expression
+    assert rule["labels"] == {
+        "severity": "critical",
+        "service": "order-api",
+        "environment": "live-eval",
+        "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+    }
+
+
+def test_prometheus_scrapes_only_the_isolated_order_api() -> None:
+    configuration = yaml.safe_load(
+        (INFRA_DIR / "prometheus" / "prometheus.yml").read_text(encoding="utf-8")
+    )
+    scrape_configs = configuration["scrape_configs"]
+
+    assert scrape_configs == [
+        {
+            "job_name": "live-eval-order-api",
+            "static_configs": [{"targets": ["live-eval-order-api:8082"]}],
+        }
+    ]
 
 
 def test_compose_configures_isolated_order_api_for_live_eval_only() -> None:
