@@ -175,9 +175,7 @@ class AiopsBridgeService:
         )
         return tuple(_incident_summary(record) for record in records)
 
-    async def get_incident(
-        self, *, owner_user_id: str, incident_id: str
-    ) -> IncidentSummary:
+    async def get_incident(self, *, owner_user_id: str, incident_id: str) -> IncidentSummary:
         record = await self._incidents.get_owned(
             owner_user_id=owner_user_id, incident_id=incident_id
         )
@@ -185,22 +183,16 @@ class AiopsBridgeService:
             raise BridgeResourceNotFound("Incident is unavailable.")
         return _incident_summary(record)
 
-    async def get_diagnostic_status(
-        self, *, owner_user_id: str, task_id: str
-    ) -> DiagnosticStatus:
+    async def get_diagnostic_status(self, *, owner_user_id: str, task_id: str) -> DiagnosticStatus:
         task = await self._require_task(owner_user_id, task_id)
-        reports = await self._diagnostics.list_reports(
-            owner_user_id=owner_user_id, task_id=task_id
-        )
+        reports = await self._diagnostics.list_reports(owner_user_id=owner_user_id, task_id=task_id)
         return DiagnosticStatus(task.id, task.status, task.completed_at, bool(reports))
 
     async def get_diagnostic_report(
         self, *, owner_user_id: str, task_id: str
     ) -> PublicDiagnosticReport:
         await self._require_task(owner_user_id, task_id)
-        reports = await self._diagnostics.list_reports(
-            owner_user_id=owner_user_id, task_id=task_id
-        )
+        reports = await self._diagnostics.list_reports(owner_user_id=owner_user_id, task_id=task_id)
         if not reports:
             raise BridgeResourceNotFound("Diagnostic report is unavailable.")
         report = reports[-1]
@@ -279,9 +271,7 @@ class AiopsBridgeService:
     ) -> RecoveryApprovalRequest:
         if self._approval_requests is None:
             raise RuntimeError("Recovery approval persistence is unavailable.")
-        report = await self.get_diagnostic_report(
-            owner_user_id=owner_user_id, task_id=task_id
-        )
+        report = await self.get_diagnostic_report(owner_user_id=owner_user_id, task_id=task_id)
         if (
             not report.human_approval_required
             or report.recovery_mode == "no_action"
@@ -313,9 +303,7 @@ class AiopsBridgeService:
         )
 
     async def _require_task(self, owner_user_id: str, task_id: str) -> Any:
-        task = await self._diagnostics.get_task(
-            owner_user_id=owner_user_id, task_id=task_id
-        )
+        task = await self._diagnostics.get_task(owner_user_id=owner_user_id, task_id=task_id)
         if task is None:
             raise BridgeResourceNotFound("Diagnostic task is unavailable.")
         return task
@@ -359,30 +347,22 @@ def build_aiops_bridge_tools(
     """Bind authenticated owner identity outside every model-visible schema."""
 
     async def list_active_incidents(limit: int = 10) -> JsonDict:
-        items = await service.list_active_incidents(
-            owner_user_id=owner_user_id, limit=limit
-        )
+        items = await service.list_active_incidents(owner_user_id=owner_user_id, limit=limit)
         return {"items": [item.to_payload() for item in items]}
 
     async def get_incident(incident_id: str) -> JsonDict:
         return (
-            await service.get_incident(
-                owner_user_id=owner_user_id, incident_id=incident_id
-            )
+            await service.get_incident(owner_user_id=owner_user_id, incident_id=incident_id)
         ).to_payload()
 
     async def get_diagnostic_status(task_id: str) -> JsonDict:
         return (
-            await service.get_diagnostic_status(
-                owner_user_id=owner_user_id, task_id=task_id
-            )
+            await service.get_diagnostic_status(owner_user_id=owner_user_id, task_id=task_id)
         ).to_payload()
 
     async def get_diagnostic_report(task_id: str) -> JsonDict:
         return (
-            await service.get_diagnostic_report(
-                owner_user_id=owner_user_id, task_id=task_id
-            )
+            await service.get_diagnostic_report(owner_user_id=owner_user_id, task_id=task_id)
         ).to_payload()
 
     async def get_diagnostic_evidence(task_id: str, limit: int = 20) -> JsonDict:
@@ -391,9 +371,7 @@ def build_aiops_bridge_tools(
         )
         return {"items": [item.to_payload() for item in items]}
 
-    async def start_incident_diagnostic(
-        incident_id: str, note: str | None = None
-    ) -> JsonDict:
+    async def start_incident_diagnostic(incident_id: str, note: str | None = None) -> JsonDict:
         result = await service.start_incident_diagnostic(
             owner_user_id=owner_user_id, incident_id=incident_id, note=note
         )
@@ -403,9 +381,7 @@ def build_aiops_bridge_tools(
             "reused": result.reused,
         }
 
-    async def create_recovery_approval_request(
-        task_id: str, reason: str
-    ) -> JsonDict:
+    async def create_recovery_approval_request(task_id: str, reason: str) -> JsonDict:
         return (
             await service.create_recovery_approval_request(
                 owner_user_id=owner_user_id,

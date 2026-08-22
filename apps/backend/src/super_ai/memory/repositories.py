@@ -55,6 +55,115 @@ class ChatMessageRecord:
     created_at: datetime
 
 
+ChatRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+ChatToolExecutionStatus = Literal["running", "completed", "failed", "uncertain"]
+ChatToolClaimAction = Literal["acquired", "wait", "reuse", "manual_review"]
+
+
+class ChatRunIdempotencyConflict(RuntimeError):
+    """A client request key was reused with different request content."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunRecord:
+    id: str
+    owner_user_id: str
+    session_id: str
+    client_request_id: str
+    request_fingerprint: str
+    user_message_id: str
+    assistant_message_id: str | None
+    background_job_id: str
+    status: ChatRunStatus
+    attempt_count: int
+    last_event_sequence: int
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunCreateResult:
+    run: ChatRunRecord
+    background_job_id: str
+    reused: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunEventRecord:
+    run_id: str
+    owner_user_id: str
+    sequence: int
+    event_type: str
+    public_payload: JsonDict
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionRecord:
+    tool_call_key: str
+    owner_user_id: str
+    chat_run_id: str
+    logical_step: str
+    tool_name: str
+    arguments_fingerprint: str
+    status: ChatToolExecutionStatus
+    attempt_count: int
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    side_effecting: bool
+    outcome_known: bool
+    public_result: JsonDict
+    safe_error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionClaim:
+    tool_call_key: str
+    owner_user_id: str
+    chat_run_id: str
+    logical_step: str
+    tool_name: str
+    arguments_fingerprint: str
+    lease_owner: str
+    lease_expires_at: datetime
+    side_effecting: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionClaimResult:
+    action: ChatToolClaimAction
+    execution: ChatToolExecutionRecord
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryApprovalRequestRecord:
+    id: str
+    owner_user_id: str
+    diagnostic_task_id: str
+    proposal_fingerprint: str
+    request_reason: str
+    chat_run_id: str | None
+    status: Literal["pending"]
+    execution_permitted: bool
+    reused: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def to_payload(self) -> JsonDict:
+        return {
+            "id": self.id,
+            "diagnosticTaskId": self.diagnostic_task_id,
+            "status": "pending",
+            "executionPermitted": False,
+            "reused": self.reused,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class UserChatConfigurationRecord:
     owner_user_id: str
@@ -1180,6 +1289,79 @@ class ToolCallAuditRepository(Protocol):
         ...
 
 
+class ChatRunRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        client_request_id: str,
+        request_fingerprint: str,
+        content: str,
+        metadata: JsonDict,
+    ) -> ChatRunCreateResult: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, session_id: str, run_id: str
+    ) -> ChatRunRecord | None: ...
+
+    async def get_active(self, *, owner_user_id: str, session_id: str) -> ChatRunRecord | None: ...
+
+    async def claim_attempt(self, *, owner_user_id: str, run_id: str) -> ChatRunRecord | None: ...
+
+    async def append_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        event_type: str,
+        public_payload: JsonDict,
+    ) -> ChatRunEventRecord: ...
+
+    async def list_events(
+        self, *, owner_user_id: str, run_id: str, after_sequence: int = 0
+    ) -> list[ChatRunEventRecord]: ...
+
+    async def complete(
+        self, *, owner_user_id: str, run_id: str, assistant_message_id: str
+    ) -> ChatRunRecord: ...
+
+    async def fail(self, *, owner_user_id: str, run_id: str, error_code: str) -> ChatRunRecord: ...
+
+
+class ChatToolExecutionRepository(Protocol):
+    async def claim(self, claim: ChatToolExecutionClaim) -> ChatToolExecutionClaimResult: ...
+
+    async def complete(
+        self, *, tool_call_key: str, lease_owner: str, public_result: JsonDict
+    ) -> ChatToolExecutionRecord: ...
+
+    async def fail(
+        self,
+        *,
+        tool_call_key: str,
+        lease_owner: str,
+        safe_error_code: str,
+        retryable: bool,
+    ) -> ChatToolExecutionRecord: ...
+
+    async def mark_uncertain(
+        self, *, tool_call_key: str, lease_owner: str, safe_error_code: str
+    ) -> ChatToolExecutionRecord: ...
+
+
+class RecoveryApprovalRequestRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        diagnostic_task_id: str,
+        proposal_fingerprint: str,
+        request_reason: str,
+        chat_run_id: str | None,
+    ) -> RecoveryApprovalRequestRecord: ...
+
+
 class BackgroundJobRepository(Protocol):
     """Repository contract for durable leased jobs and their event log."""
 
@@ -1496,13 +1678,9 @@ class AiopsExecutionRepository(Protocol):
 
 
 class LangGraphCheckpointRepository(Protocol):
-    async def get_tuple(
-        self, identity: CheckpointIdentity
-    ) -> StoredCheckpointTuple | None: ...
+    async def get_tuple(self, identity: CheckpointIdentity) -> StoredCheckpointTuple | None: ...
 
-    async def list_tuples(
-        self, query: CheckpointQuery
-    ) -> Sequence[StoredCheckpointTuple]: ...
+    async def list_tuples(self, query: CheckpointQuery) -> Sequence[StoredCheckpointTuple]: ...
 
     async def put_checkpoint(self, record: StoredCheckpoint) -> None: ...
 
@@ -1539,3 +1717,6 @@ class MemoryRepositories:
     aiops_executions: AiopsExecutionRepository | None = None
     langgraph_checkpoints: LangGraphCheckpointRepository | None = None
     aiops_runtime: AiopsRuntimeRepositoryProvider | None = None
+    chat_runs: ChatRunRepository | None = None
+    chat_tool_executions: ChatToolExecutionRepository | None = None
+    recovery_approvals: RecoveryApprovalRequestRepository | None = None

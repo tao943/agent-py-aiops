@@ -1503,11 +1503,7 @@ class SQLAlchemyDiagnosticMemoryRepository:
             await session.commit()
         async with self._session_factory() as session:
             row = await session.get(DiagnosticEvidenceModel, evidence_id)
-        if (
-            row is None
-            or row.owner_user_id != owner_user_id
-            or row.task_id != task_id
-        ):
+        if row is None or row.owner_user_id != owner_user_id or row.task_id != task_id:
             raise TenantScopeError("Diagnostic evidence identity is outside task scope.")
         return _diagnostic_evidence_record(row)
 
@@ -2080,9 +2076,7 @@ class SQLAlchemyEvaluationRepository:
 
                 existing = (
                     await session.scalars(
-                        select(EvaluationResultModel).where(
-                            EvaluationResultModel.run_id == run_id
-                        )
+                        select(EvaluationResultModel).where(EvaluationResultModel.run_id == run_id)
                     )
                 ).one_or_none()
                 if run.status == "completed":
@@ -2152,6 +2146,11 @@ def create_sqlalchemy_memory_repositories(
     from super_ai.memory.aiops_execution_sqlalchemy import (
         SQLAlchemyAiopsRuntimeRepositoryProvider,
     )
+    from super_ai.memory.chat_runs_sqlalchemy import (
+        SQLAlchemyChatRunRepository,
+        SQLAlchemyChatToolExecutionRepository,
+        SQLAlchemyRecoveryApprovalRequestRepository,
+    )
     from super_ai.memory.extended_sqlalchemy import (
         SQLAlchemyBackgroundJobRepository,
         SQLAlchemyMcpConnectionRepository,
@@ -2174,6 +2173,9 @@ def create_sqlalchemy_memory_repositories(
         mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
         evaluations=SQLAlchemyEvaluationRepository(session_factory),
         aiops_runtime=SQLAlchemyAiopsRuntimeRepositoryProvider(session_factory),
+        chat_runs=SQLAlchemyChatRunRepository(session_factory),
+        chat_tool_executions=SQLAlchemyChatToolExecutionRepository(session_factory),
+        recovery_approvals=SQLAlchemyRecoveryApprovalRequestRepository(session_factory),
     )
 
 

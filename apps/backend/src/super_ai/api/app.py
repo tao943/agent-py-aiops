@@ -62,7 +62,12 @@ from super_ai.chat import (
     LangChainChatAgentRunner,
     encode_sse,
 )
-from super_ai.chat.aiops_bridge import AiopsBridgeService
+from super_ai.chat.aiops_bridge import (
+    AiopsBridgeService,
+)
+from super_ai.chat.aiops_bridge import (
+    RecoveryApprovalRequestRepository as BridgeRecoveryApprovalRequestRepository,
+)
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
     DEFAULT_CHAT_PROMPT_LABEL,
@@ -441,6 +446,10 @@ def create_app(
         incidents=incident_repository,
         diagnostics=repositories.diagnostics,
         scheduler=incident_repository,
+        approval_requests=cast(
+            BridgeRecoveryApprovalRequestRepository | None,
+            repositories.recovery_approvals,
+        ),
     )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
         config_path=resolved_project_config_path
@@ -2480,9 +2489,7 @@ def _chat_agent_runner(request: Request) -> ChatAgentRunner:
             llm_provider=_llm_provider(request),
             retrieval_tool=retrieval_tool,
             mcp_client_provider=_mcp_connection_service(request),
-            aiops_bridge_service=cast(
-                AiopsBridgeService, request.app.state.aiops_bridge_service
-            ),
+            aiops_bridge_service=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
         )
         request.app.state.chat_agent_runner = runner
     return cast(ChatAgentRunner, runner)
@@ -2839,9 +2846,7 @@ _AIOPS_PRIVATE_PAYLOAD_KEYS = frozenset(
 _AIOPS_WORKFLOW_VERSIONS = frozenset(
     {"evidence-driven-v2", "evidence-driven-v3", "evidence-driven-v4"}
 )
-_AIOPS_MODEL_ROLES = frozenset(
-    {"planner", "adjudicator", "replanner", "validator", "report"}
-)
+_AIOPS_MODEL_ROLES = frozenset({"planner", "adjudicator", "replanner", "validator", "report"})
 
 
 def _safe_aiops_public_payload(value: object) -> object:
@@ -2926,11 +2931,7 @@ def _aiops_execution_observability(
             resume_count += 1
     return {
         "graphVersion": graph_version
-        or (
-            "aiops-diagnostic-v2"
-            if workflow_version == "evidence-driven-v4"
-            else None
-        ),
+        or ("aiops-diagnostic-v2" if workflow_version == "evidence-driven-v4" else None),
         "workflowVersion": workflow_version,
         "modelCallCount": model_call_count,
         "modelCalls": model_calls,
