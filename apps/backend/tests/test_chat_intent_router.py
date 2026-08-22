@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from super_ai.chat.intent import ChatIntentRouter
+from super_ai.chat.intent import ChatIntentRouter, LlmStructuredRouterModel
 from super_ai.chat.tool_policy import allowed_tools_for
 
 
@@ -19,6 +19,15 @@ class FakeRouterModel:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class FakeChatModel:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    async def ainvoke(self, input: object) -> object:
+        del input
+        return type("Response", (), {"content": self.content})()
 
 
 @pytest.mark.asyncio
@@ -97,3 +106,18 @@ def test_each_intent_has_a_bounded_tool_allowlist() -> None:
             "get_diagnostic_evidence",
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_llm_router_adapter_returns_only_decoded_json_object() -> None:
+    model = LlmStructuredRouterModel(
+        FakeChatModel(
+            '{"intent":"knowledge_question","confidence":0.88,'
+            '"incidentId":null,"diagnosticTaskId":null,"needsClarification":false}'
+        )
+    )
+
+    payload = await model.route("如何查看运行手册？")
+
+    assert payload["intent"] == "knowledge_question"
+    assert payload["confidence"] == 0.88

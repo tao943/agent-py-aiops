@@ -57,22 +57,26 @@ from super_ai.auth.service import AuthError, AuthResult, AuthService
 from super_ai.auth.sqlalchemy import SQLAlchemyAuthRepository
 from super_ai.chat import (
     ChatAgentRunner,
+    ChatIntentRouter,
     ChatStreamingService,
     LangChainChatAgentRunner,
     encode_sse,
 )
+from super_ai.chat.aiops_bridge import AiopsBridgeService
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
     DEFAULT_CHAT_PROMPT_LABEL,
     validate_chat_prompt_content,
     validate_skill_upload,
 )
+from super_ai.chat.intent import KeywordRouterModel, LlmStructuredRouterModel
 from super_ai.chat.memory import (
     SUPPORTED_CHAT_MEMORY_MODES,
     ChatContextLimitReached,
     ChatMemoryService,
     memory_payload,
 )
+from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.documents import (
     ALLOWED_DOCUMENT_EXTENSIONS,
     DEFAULT_CHUNK_OVERLAP,
@@ -352,6 +356,7 @@ def create_app(
     rerank_model: RerankModel | None = None,
     llm_provider: LlmProvider | None = None,
     chat_agent_runner: ChatAgentRunner | None = None,
+    chat_intent_router: ChatIntentRouter | None = None,
     aiops_diagnostic_runner: AiopsDiagnosticRunner | None = None,
     alert_provider: ActiveAlertProvider | None = None,
     index_task_scheduler: DocumentIndexTaskScheduler | None = None,
@@ -431,6 +436,12 @@ def create_app(
     app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
     repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
+    incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    app.state.aiops_bridge_service = AiopsBridgeService(
+        incidents=incident_repository,
+        diagnostics=repositories.diagnostics,
+        scheduler=incident_repository,
+    )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
         config_path=resolved_project_config_path
     )
@@ -438,6 +449,8 @@ def create_app(
     app.state.rerank_model = rerank_model
     app.state.llm_provider = llm_provider
     app.state.chat_agent_runner = chat_agent_runner
+    app.state.chat_agent_runner_injected = chat_agent_runner is not None
+    app.state.chat_intent_router = chat_intent_router
     app.state.aiops_diagnostic_runner = aiops_diagnostic_runner
     app.state.alert_provider = alert_provider
     if repositories.background_jobs is None:
@@ -515,7 +528,7 @@ def create_app(
         lease_ms=alert_ingestion_settings.redis_lease_milliseconds,
     )
     composed_alert_ingestion = alert_ingestion_service or AlertIngestionService(
-        SQLAlchemyAlertIngestionRepository(session_factory),
+        incident_repository,
         composed_alert_leases,
         alert_ingestion_metrics,
     )
@@ -1505,7 +1518,7 @@ def create_app(
             session_id=session.id,
             role=body.role,
             content=body.content,
-            metadata=body.metadata,
+            metadata=sanitize_chat_metadata(body.metadata),
         )
         updated_session = await _maybe_generate_chat_title(
             repositories,
@@ -1546,6 +1559,7 @@ def create_app(
             repositories=repositories,
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
+            intent_router=_chat_intent_router(request),
         )
 
         async def event_stream() -> AsyncIterator[str]:
@@ -2466,9 +2480,25 @@ def _chat_agent_runner(request: Request) -> ChatAgentRunner:
             llm_provider=_llm_provider(request),
             retrieval_tool=retrieval_tool,
             mcp_client_provider=_mcp_connection_service(request),
+            aiops_bridge_service=cast(
+                AiopsBridgeService, request.app.state.aiops_bridge_service
+            ),
         )
         request.app.state.chat_agent_runner = runner
     return cast(ChatAgentRunner, runner)
+
+
+def _chat_intent_router(request: Request) -> ChatIntentRouter:
+    router = cast(ChatIntentRouter | None, request.app.state.chat_intent_router)
+    if router is None:
+        model = (
+            KeywordRouterModel()
+            if bool(request.app.state.chat_agent_runner_injected)
+            else LlmStructuredRouterModel(_llm_provider(request).create_chat_model())
+        )
+        router = ChatIntentRouter(model)
+        request.app.state.chat_intent_router = router
+    return router
 
 
 def _mcp_client(request: Request) -> LocalMcpClient:
@@ -2601,7 +2631,7 @@ def _chat_message_payload(message: ChatMessageRecord) -> dict[str, object]:
         "sessionId": message.session_id,
         "role": message.role,
         "content": message.content,
-        "metadata": message.metadata,
+        "metadata": sanitize_chat_metadata(message.metadata),
         "createdAt": message.created_at.isoformat(),
     }
 

@@ -16,13 +16,16 @@ from uuid import uuid4
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from super_ai.chat.aiops_bridge import AiopsBridgeService, build_aiops_bridge_tools
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
     DEFAULT_CHAT_PROMPT_LABEL,
     SelectedChatSkill,
     build_chat_system_prompt,
 )
+from super_ai.chat.intent import ChatIntentRouter, ChatRoute
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
+from super_ai.chat.tool_policy import allowed_tools_for
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import LlmProvider
 from super_ai.mcp.cached_client import RuntimeMcpClient
@@ -115,6 +118,8 @@ class ChatAgentRequest:
     messages: Sequence[ChatMessageRecord]
     accessible_knowledge_base_ids: tuple[str, ...]
     system_prompt: str
+    route: ChatRoute = ChatRoute("general_chat", 0.0, "fallback")
+    tool_names: tuple[str, ...] = ()
     skills: tuple[SelectedChatSkill, ...] = ()
 
 
@@ -132,6 +137,33 @@ class ChatAgentRunner(Protocol):
         ...
 
 
+class ContentDeltaBuffer:
+    """Coalesce small model deltas into bounded user-visible SSE chunks."""
+
+    def __init__(self, *, character_limit: int = 32, flush_seconds: float = 0.05) -> None:
+        self._character_limit = character_limit
+        self._flush_seconds = flush_seconds
+        self._parts: list[str] = []
+        self._size = 0
+        self._last_flush = monotonic()
+
+    def push(self, delta: str, now: float) -> str | None:
+        self._parts.append(delta)
+        self._size += len(delta)
+        if self._size >= self._character_limit or now - self._last_flush >= self._flush_seconds:
+            return self.flush(now)
+        return None
+
+    def flush(self, now: float) -> str | None:
+        if not self._parts:
+            return None
+        value = "".join(self._parts)
+        self._parts = []
+        self._size = 0
+        self._last_flush = now
+        return value
+
+
 class ChatStreamingService:
     """Persist chat messages and translate Agent events into shared SSE payloads."""
 
@@ -141,10 +173,12 @@ class ChatStreamingService:
         repositories: MemoryRepositories,
         agent_runner: ChatAgentRunner,
         memory_service: ChatMemoryService | None = None,
+        intent_router: ChatIntentRouter | None = None,
     ) -> None:
         self._repositories = repositories
         self._agent_runner = agent_runner
         self._memory_service = memory_service
+        self._intent_router = intent_router
 
     async def stream_message(
         self,
@@ -186,13 +220,23 @@ class ChatStreamingService:
             system_prompt = prepared.system_prompt
             prepared_messages = prepared.messages
 
+        route = (
+            await self._intent_router.route(message_content)
+            if self._intent_router is not None
+            else ChatRoute("general_chat", 0.0, "fallback")
+        )
+        allowed_tools = allowed_tools_for(route.intent)
+        if route.needs_clarification:
+            allowed_tools = allowed_tools - frozenset(
+                {"start_incident_diagnostic", "create_recovery_approval_request"}
+            )
         user_message = await self._repositories.chat.append_message(
             owner_user_id=owner_user_id,
             message_id=f"message_{uuid4().hex}",
             session_id=session.id,
             role="user",
             content=message_content,
-            metadata=metadata or {},
+            metadata=sanitize_chat_metadata(metadata or {}),
         )
         await self._maybe_generate_chat_title(
             owner_user_id=owner_user_id,
@@ -212,12 +256,14 @@ class ChatStreamingService:
             messages=model_messages if model_messages else [user_message],
             accessible_knowledge_base_ids=tuple(accessible_knowledge_base_ids),
             system_prompt=system_prompt,
+            route=route,
+            tool_names=tuple(sorted(allowed_tools)),
             skills=selected_skills,
         )
         answer_parts: list[str] = []
         tool_call_ids: list[str] = []
         citations: list[dict[str, object]] = []
-        reasoning_parts: list[str] = []
+        content_buffer = ContentDeltaBuffer()
         sequence = 0
 
         try:
@@ -226,24 +272,25 @@ class ChatStreamingService:
                     if event.delta == "":
                         continue
                     answer_parts.append(event.delta)
-                    for character in event.delta:
+                    delta = content_buffer.push(event.delta, monotonic())
+                    if delta is not None:
                         sequence += 1
                         yield _sse_event(
                             "content.delta",
                             {
-                                "delta": character,
+                                "delta": delta,
                                 "sequence": sequence,
                             },
                         )
                 elif isinstance(event, ChatAgentReasoningDelta):
-                    if event.delta == "":
-                        continue
-                    reasoning_parts.append(event.delta)
-                    sequence += 1
-                    yield _sse_event(
-                        "reasoning.delta", {"delta": event.delta, "sequence": sequence}
-                    )
+                    continue
                 elif isinstance(event, ChatAgentToolCall):
+                    pending = content_buffer.flush(monotonic())
+                    if pending is not None:
+                        sequence += 1
+                        yield _sse_event(
+                            "content.delta", {"delta": pending, "sequence": sequence}
+                        )
                     await self._persist_tool_call_audit(
                         owner_user_id=owner_user_id,
                         session_id=session.id,
@@ -260,11 +307,28 @@ class ChatStreamingService:
                     if event.output is not None:
                         payload["output"] = event.output
                     yield _sse_event("tool.call", {"toolCall": payload})
+                    diagnostic = _diagnostic_result_payload(event)
+                    if diagnostic is not None:
+                        yield _sse_event(
+                            "diagnostic.result", {"diagnostic": diagnostic}
+                        )
                 else:
+                    pending = content_buffer.flush(monotonic())
+                    if pending is not None:
+                        sequence += 1
+                        yield _sse_event(
+                            "content.delta", {"delta": pending, "sequence": sequence}
+                        )
                     reference = _reference_payload(event)
                     citations.append(reference)
                     yield _sse_event("reference.source", {"reference": reference})
 
+            pending = content_buffer.flush(monotonic())
+            if pending is not None:
+                sequence += 1
+                yield _sse_event(
+                    "content.delta", {"delta": pending, "sequence": sequence}
+                )
             answer = "".join(answer_parts).strip()
             assistant_message = await self._repositories.chat.append_message(
                 owner_user_id=owner_user_id,
@@ -274,8 +338,15 @@ class ChatStreamingService:
                 content=answer,
                 metadata={
                     "citations": citations,
-                    "reasoning": reasoning_parts,
                     "toolCallIds": tool_call_ids,
+                    "route": {
+                        "intent": route.intent,
+                        "confidence": route.confidence,
+                        "source": route.source,
+                        "incidentId": route.incident_id,
+                        "diagnosticTaskId": route.diagnostic_task_id,
+                        "needsClarification": route.needs_clarification,
+                    },
                 },
             )
             refreshed_session = (
@@ -317,6 +388,12 @@ class ChatStreamingService:
                 durationMs=elapsed_ms(started_at),
             )
         except Exception as exc:
+            pending = content_buffer.flush(monotonic())
+            if pending is not None:
+                sequence += 1
+                yield _sse_event(
+                    "content.delta", {"delta": pending, "sequence": sequence}
+                )
             emit_event(
                 logger,
                 "agent.chat.failed",
@@ -501,11 +578,13 @@ class LangChainChatAgentRunner:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
+        aiops_bridge_service: AiopsBridgeService | None = None,
     ) -> None:
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._mcp_client = mcp_client
         self._mcp_client_provider = mcp_client_provider
+        self._aiops_bridge_service = aiops_bridge_service
 
     async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
         langchain_tool = create_langchain_knowledge_retrieval_tool(
@@ -513,17 +592,21 @@ class LangChainChatAgentRunner:
             owner_user_id=request.owner_user_id,
             accessible_knowledge_base_ids=request.accessible_knowledge_base_ids,
         )
-        tools = [langchain_tool, create_current_time_tool()]
+        tool_registry: dict[str, StructuredTool] = {
+            langchain_tool.name: langchain_tool,
+            "get_current_time": create_current_time_tool(),
+        }
         if request.skills:
-            tools.append(create_load_skill_tool(request.skills))
-        mcp_client = self._mcp_client
-        if self._mcp_client_provider is not None:
-            mcp_client = await self._mcp_client_provider.client_for_user(
-                owner_user_id=request.owner_user_id
+            load_skill = create_load_skill_tool(request.skills)
+            tool_registry[load_skill.name] = load_skill
+        if self._aiops_bridge_service is not None:
+            tool_registry.update(
+                build_aiops_bridge_tools(
+                    owner_user_id=request.owner_user_id,
+                    service=self._aiops_bridge_service,
+                )
             )
-        if mcp_client is not None:
-            await mcp_client.discover_tools()
-            tools.extend(await mcp_client.get_langchain_tools())
+        tools = [tool_registry[name] for name in request.tool_names if name in tool_registry]
         agent = _create_langchain_agent(
             model=cast(Any, self._llm_provider.create_chat_model()),
             tools=tools,
@@ -846,6 +929,59 @@ def _reference_payload(reference: ChatAgentReference) -> dict[str, object]:
     return payload
 
 
+def _diagnostic_result_payload(event: ChatAgentToolCall) -> dict[str, object] | None:
+    raw_output: object = event.output
+    if (
+        event.name != "get_diagnostic_report"
+        or event.status != "completed"
+        or not isinstance(raw_output, Mapping)
+    ):
+        return None
+    output = cast(Mapping[str, object], raw_output)
+    task_id = output.get("taskId")
+    report_id = output.get("id")
+    recovery_mode = output.get("recoveryMode")
+    execution_permitted = output.get("executionPermitted")
+    human_approval_required = output.get("humanApprovalRequired")
+    validator_status = output.get("validatorStatus")
+    if (
+        not isinstance(task_id, str)
+        or not isinstance(report_id, str)
+        or not isinstance(recovery_mode, str)
+        or not isinstance(execution_permitted, bool)
+        or not isinstance(human_approval_required, bool)
+        or not isinstance(validator_status, str)
+    ):
+        return None
+    root_cause = output.get("rootCause")
+    evidence_ids = output.get("evidenceIds")
+    bounded_evidence_ids = (
+        [item for item in cast(list[object], evidence_ids) if isinstance(item, str)]
+        if isinstance(evidence_ids, list)
+        else []
+    )
+    return {
+        "taskId": task_id,
+        "reportId": report_id,
+        "rootCause": _json_dict_or_empty(root_cause),
+        "recoveryMode": recovery_mode,
+        "executionPermitted": execution_permitted,
+        "humanApprovalRequired": human_approval_required,
+        "validatorStatus": validator_status,
+        "evidenceIds": bounded_evidence_ids,
+    }
+
+
+def sanitize_chat_metadata(metadata: Mapping[str, object]) -> dict[str, object]:
+    """Remove legacy/private reasoning fields before persistence or serialization."""
+
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key.casefold() not in {"reasoning", "reasoning_content"}
+    }
+
+
 def _chat_session_payload(
     record: ChatSessionRecord, context_window_tokens: int
 ) -> dict[str, object]:
@@ -866,7 +1002,7 @@ def _chat_message_payload(message: ChatMessageRecord) -> dict[str, object]:
         "sessionId": message.session_id,
         "role": message.role,
         "content": message.content,
-        "metadata": message.metadata,
+        "metadata": sanitize_chat_metadata(message.metadata),
         "createdAt": message.created_at.isoformat(),
     }
 

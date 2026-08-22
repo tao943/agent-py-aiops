@@ -38,6 +38,7 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
                 "role": "assistant",
                 "content": "Use the restart runbook.",
                 "metadata": {
+                    "reasoning": ["legacy private chain"],
                     "citations": [
                         {
                             "id": "chunk_1",
@@ -74,6 +75,9 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
         "tool_call_1"
     ]
     assert assistant_message_response.status_code == 201
+    assert "reasoning" not in assistant_message_response.json()["data"]["message"][
+        "metadata"
+    ]
     assert (
         assistant_message_response.json()["data"]["message"]["metadata"]["citations"][0][
             "chunkId"
@@ -85,6 +89,7 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
     assert detail_response.status_code == 200
     assert detail_payload["session"]["id"] == session_id
     assert [message["role"] for message in detail_payload["messages"]] == ["user", "assistant"]
+    assert "reasoning" not in detail_payload["messages"][1]["metadata"]
     assert list_response.status_code == 200
     assert list_response.json()["data"]["items"][0]["id"] == session_id
     assert clear_response.status_code == 200

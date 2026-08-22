@@ -181,39 +181,40 @@ async def test_streaming_chat_emits_sse_events_and_persists_messages(
     assert stream_response.status_code == 200
     assert stream_response.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse(stream_response.text)
-    assert [event["event"] for event in events[:4]] == [
-        "reasoning.delta",
+    assert [event["event"] for event in events[:3]] == [
         "tool.call",
         "tool.call",
         "reference.source",
     ]
     assert events[-1]["event"] == "complete"
-    assert events[0]["data"]["delta"] == "I will check the runbook first."
-    assert events[1]["data"]["toolCall"]["status"] == "started"
-    assert events[3]["data"]["reference"]["chunkId"] == "chunk_1"
-    assert events[3]["data"]["reference"]["knowledgeType"] == "sop"
-    assert events[3]["data"]["reference"]["excerpt"] == (
+    assert all(event["event"] != "reasoning.delta" for event in events)
+    assert events[0]["data"]["toolCall"]["status"] == "started"
+    assert events[2]["data"]["reference"]["chunkId"] == "chunk_1"
+    assert events[2]["data"]["reference"]["knowledgeType"] == "sop"
+    assert events[2]["data"]["reference"]["excerpt"] == (
         "Restart the API by applying the approved runbook."
     )
     content_events = [event for event in events if event["event"] == "content.delta"]
     assert "".join(event["data"]["delta"] for event in content_events) == (
         "Use the restart runbook."
     )
-    assert all(len(event["data"]["delta"]) == 1 for event in content_events)
-    assert [event["data"]["sequence"] for event in content_events] == list(
-        range(2, len(content_events) + 2)
-    )
+    assert [event["data"]["delta"] for event in content_events] == [
+        "Use the restart runbook."
+    ]
+    assert [event["data"]["sequence"] for event in content_events] == [1]
     assert events[-1]["data"]["result"]["message"]["content"] == "Use the restart runbook."
     assert runner.requests[0].owner_user_id == user["user"]["id"]
     assert runner.requests[0].accessible_knowledge_base_ids == (f"kb_{user['user']['id']}",)
     assert runner.requests[0].messages[-1].content == "How do I restart the API?"
+    assert runner.requests[0].route.intent == "knowledge_question"
+    assert runner.requests[0].tool_names == ("knowledge_retrieval", "load_skill")
 
     history = detail_response.json()["data"]["messages"]
     assert [message["role"] for message in history] == ["user", "assistant"]
     assert history[0]["content"] == "How do I restart the API?"
     assert history[1]["content"] == "Use the restart runbook."
     assert history[1]["metadata"]["toolCallIds"] == ["tool_call_1"]
-    assert history[1]["metadata"]["reasoning"] == ["I will check the runbook first."]
+    assert "reasoning" not in history[1]["metadata"]
     assert history[1]["metadata"]["citations"][0]["chunkId"] == "chunk_1"
     assert history[1]["metadata"]["citations"][0]["knowledgeType"] == "sop"
     assert audits_response.status_code == 200
@@ -234,6 +235,55 @@ async def test_streaming_chat_emits_sse_events_and_persists_messages(
     ]
     assert all(event["requestId"] == "chat-observe" for event in agent_events)
     assert "How do I restart the API?" not in "\n".join(record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_structured_diagnostic_result_cannot_be_overridden_by_model_text(
+    migrated_database_url: str,
+) -> None:
+    runner = FakeChatAgentRunner(
+        events=[
+            ChatAgentToolCall(
+                id="tool_report",
+                name="get_diagnostic_report",
+                status="completed",
+                output={
+                    "id": "report_a",
+                    "taskId": "diagnostic_a",
+                    "rootCause": {"primaryCause": "database_lock"},
+                    "recoveryMode": "manual_review",
+                    "executionPermitted": False,
+                    "humanApprovalRequired": True,
+                    "validatorStatus": "deterministic_grounded_fallback",
+                    "evidenceIds": ["evidence_a"],
+                },
+            ),
+            ChatAgentContentDelta("可以自动执行恢复。"),
+        ]
+    )
+    app = create_app(database_url=migrated_database_url, chat_agent_runner=runner)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        user = await _register(client, "safety-card@example.com", "Safety Card")
+        headers = _auth_headers(user["accessToken"])
+        session = (await client.post("/chat/sessions", headers=headers, json={})).json()[
+            "data"
+        ]
+        response = await client.post(
+            f"/chat/sessions/{session['id']}/messages:stream",
+            headers=headers,
+            json={"content": "查看 diagnostic_a 的恢复方案"},
+        )
+
+    events = _parse_sse(response.text)
+    diagnostic = next(
+        event["data"]["diagnostic"]
+        for event in events
+        if event["event"] == "diagnostic.result"
+    )
+    assert diagnostic["executionPermitted"] is False
+    assert diagnostic["recoveryMode"] == "manual_review"
+    assert diagnostic["validatorStatus"] == "deterministic_grounded_fallback"
 
 
 @pytest.mark.asyncio

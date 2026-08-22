@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+
+from super_ai.llm import ChatModel
 
 ChatIntent = Literal[
     "general_chat",
@@ -48,6 +51,49 @@ class StructuredRouterModel(Protocol):
     """Narrow structured-classification boundary used after deterministic rules."""
 
     async def route(self, content: str) -> Mapping[str, object]: ...
+
+
+class LlmStructuredRouterModel:
+    """Ask the configured Chat model for one bounded JSON routing object."""
+
+    def __init__(self, model: ChatModel) -> None:
+        self._model = model
+
+    async def route(self, content: str) -> Mapping[str, object]:
+        response = await self._model.ainvoke(
+            "Classify the user request for tool routing. Return one JSON object only with "
+            "intent, confidence, incidentId, diagnosticTaskId, needsClarification. "
+            "Allowed intents: general_chat, knowledge_question, incident_query, "
+            "start_diagnostic, diagnostic_status, recovery_request. Do not include reasoning. "
+            f"User request: {content[:4000]}"
+        )
+        raw_content = getattr(response, "content", response)
+        if not isinstance(raw_content, str):
+            raise ValueError("Router model response must be text JSON.")
+        decoded = json.loads(raw_content)
+        if not isinstance(decoded, dict):
+            raise ValueError("Router model response must be a JSON object.")
+        return cast(Mapping[str, object], decoded)
+
+
+class KeywordRouterModel:
+    """Offline deterministic classifier for injected test runners and degraded mode."""
+
+    async def route(self, content: str) -> Mapping[str, object]:
+        lowered = content.casefold()
+        if any(word in lowered for word in ("如何", "怎么", "什么", "how", "what", "?", "？")):
+            intent: ChatIntent = "knowledge_question"
+        elif any(word in lowered for word in ("告警", "事故", "incident", "alert")):
+            intent = "incident_query"
+        else:
+            intent = "general_chat"
+        return {
+            "intent": intent,
+            "confidence": 0.80,
+            "incidentId": None,
+            "diagnosticTaskId": None,
+            "needsClarification": False,
+        }
 
 
 class ChatIntentRouter:
