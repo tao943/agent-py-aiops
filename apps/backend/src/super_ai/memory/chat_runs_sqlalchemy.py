@@ -244,6 +244,24 @@ class SQLAlchemyChatRunRepository:
             error_code=None,
         )
 
+    async def complete_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        assistant_message_id: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord:
+        return await self._finish_with_event(
+            owner_user_id=owner_user_id,
+            run_id=run_id,
+            status="succeeded",
+            event_type="complete",
+            public_payload=public_payload,
+            assistant_message_id=assistant_message_id,
+            error_code=None,
+        )
+
     async def fail(self, *, owner_user_id: str, run_id: str, error_code: str) -> ChatRunRecord:
         return await self._finish(
             owner_user_id=owner_user_id,
@@ -252,6 +270,61 @@ class SQLAlchemyChatRunRepository:
             assistant_message_id=None,
             error_code=error_code,
         )
+
+    async def fail_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        error_code: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord:
+        return await self._finish_with_event(
+            owner_user_id=owner_user_id,
+            run_id=run_id,
+            status="failed",
+            event_type="error",
+            public_payload=public_payload,
+            assistant_message_id=None,
+            error_code=error_code,
+        )
+
+    async def _finish_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        status: ChatRunStatus,
+        event_type: str,
+        public_payload: JsonDict,
+        assistant_message_id: str | None,
+        error_code: str | None,
+    ) -> ChatRunRecord:
+        now = utc_now()
+        async with self._session_factory() as session, session.begin():
+            row = await _lock_owned_run(session, owner_user_id, run_id)
+            if row is None:
+                raise LookupError("owned chat run not found")
+            if row.status in {"succeeded", "failed", "cancelled"}:
+                return _chat_run_record(row)
+            row.last_event_sequence += 1
+            session.add(
+                ChatRunEventModel(
+                    run_id=run_id,
+                    owner_user_id=owner_user_id,
+                    sequence=row.last_event_sequence,
+                    event_type=event_type,
+                    public_payload=public_payload,
+                    created_at=now,
+                )
+            )
+            row.status = status
+            row.assistant_message_id = assistant_message_id or row.assistant_message_id
+            row.error_code = error_code
+            row.completed_at = now
+            row.updated_at = now
+            await session.flush()
+            return _chat_run_record(row)
 
     async def _finish(
         self,

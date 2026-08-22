@@ -1326,7 +1326,25 @@ class ChatRunRepository(Protocol):
         self, *, owner_user_id: str, run_id: str, assistant_message_id: str
     ) -> ChatRunRecord: ...
 
+    async def complete_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        assistant_message_id: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord: ...
+
     async def fail(self, *, owner_user_id: str, run_id: str, error_code: str) -> ChatRunRecord: ...
+
+    async def fail_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        error_code: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord: ...
 
 
 class ChatToolExecutionRepository(Protocol):
@@ -1443,6 +1461,10 @@ class BackgroundJobRepository(Protocol):
         worker_id: str,
         error_message: str,
         retry_at: datetime,
+    ) -> BackgroundJobRecord | None: ...
+
+    async def mark_failed(
+        self, *, job_id: str, worker_id: str, error_message: str
     ) -> BackgroundJobRecord | None: ...
 
     async def retry(

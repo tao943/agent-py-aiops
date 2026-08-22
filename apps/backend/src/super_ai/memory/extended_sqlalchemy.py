@@ -240,7 +240,6 @@ class SQLAlchemyBackgroundJobRepository:
             record = _background_job_event_record(row)
         return record
 
-
     async def list_events(
         self,
         *,
@@ -324,6 +323,22 @@ class SQLAlchemyBackgroundJobRepository:
             else:
                 row.status = "failed"
                 row.completed_at = now
+        return _background_job_record(row)
+
+    async def mark_failed(
+        self, *, job_id: str, worker_id: str, error_message: str
+    ) -> BackgroundJobRecord | None:
+        now = utc_now()
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(BackgroundJobModel, job_id, with_for_update=True)
+            if row is None or row.lease_owner != worker_id or row.status != "running":
+                return None
+            row.status = "failed"
+            row.error_message = error_message[:1000]
+            row.updated_at = now
+            row.completed_at = now
+            row.lease_owner = None
+            row.lease_expires_at = None
         return _background_job_record(row)
 
     async def retry(

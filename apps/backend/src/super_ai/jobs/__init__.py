@@ -1,5 +1,15 @@
 """Durable local background job runtime."""
 
-from .runtime import BackgroundJobContext, BackgroundJobRuntime, JobCancelled
+from .runtime import (
+    BackgroundJobContext,
+    BackgroundJobRuntime,
+    JobCancelled,
+    TerminalBackgroundJobError,
+)
 
-__all__ = ["BackgroundJobContext", "BackgroundJobRuntime", "JobCancelled"]
+__all__ = [
+    "BackgroundJobContext",
+    "BackgroundJobRuntime",
+    "JobCancelled",
+    "TerminalBackgroundJobError",
+]

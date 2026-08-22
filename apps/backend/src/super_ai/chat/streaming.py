@@ -188,6 +188,9 @@ class ChatStreamingService:
         content: str,
         metadata: JsonDict | None = None,
         accessible_knowledge_base_ids: Sequence[str],
+        existing_user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
+        raise_errors: bool = False,
     ) -> AsyncIterator[dict[str, object]]:
         started_at = monotonic()
         message_content = content.strip()
@@ -200,6 +203,20 @@ class ChatStreamingService:
             owner_user_id=owner_user_id,
             session_id=session.id,
         )
+        existing_user_message = (
+            await self._repositories.chat.get_message(
+                owner_user_id=owner_user_id,
+                message_id=existing_user_message_id,
+            )
+            if existing_user_message_id is not None
+            else None
+        )
+        if existing_user_message_id is not None and (
+            existing_user_message is None
+            or existing_user_message.session_id != session.id
+            or existing_user_message.role != "user"
+        ):
+            raise LookupError("owned chat run user message not found")
         system_prompt, selected_skills = await self.build_agent_configuration(
             owner_user_id=owner_user_id
         )
@@ -209,7 +226,9 @@ class ChatStreamingService:
                 prepared = await self._memory_service.prepare_message(
                     owner_user_id=owner_user_id,
                     session=session,
-                    history=history,
+                    history=[
+                        message for message in history if message.id != existing_user_message_id
+                    ],
                     system_prompt=system_prompt,
                     content=message_content,
                 )
@@ -230,7 +249,7 @@ class ChatStreamingService:
             allowed_tools = allowed_tools - frozenset(
                 {"start_incident_diagnostic", "create_recovery_approval_request"}
             )
-        user_message = await self._repositories.chat.append_message(
+        user_message = existing_user_message or await self._repositories.chat.append_message(
             owner_user_id=owner_user_id,
             message_id=f"message_{uuid4().hex}",
             session_id=session.id,
@@ -288,9 +307,7 @@ class ChatStreamingService:
                     pending = content_buffer.flush(monotonic())
                     if pending is not None:
                         sequence += 1
-                        yield _sse_event(
-                            "content.delta", {"delta": pending, "sequence": sequence}
-                        )
+                        yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
                     await self._persist_tool_call_audit(
                         owner_user_id=owner_user_id,
                         session_id=session.id,
@@ -309,16 +326,12 @@ class ChatStreamingService:
                     yield _sse_event("tool.call", {"toolCall": payload})
                     diagnostic = _diagnostic_result_payload(event)
                     if diagnostic is not None:
-                        yield _sse_event(
-                            "diagnostic.result", {"diagnostic": diagnostic}
-                        )
+                        yield _sse_event("diagnostic.result", {"diagnostic": diagnostic})
                 else:
                     pending = content_buffer.flush(monotonic())
                     if pending is not None:
                         sequence += 1
-                        yield _sse_event(
-                            "content.delta", {"delta": pending, "sequence": sequence}
-                        )
+                        yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
                     reference = _reference_payload(event)
                     citations.append(reference)
                     yield _sse_event("reference.source", {"reference": reference})
@@ -326,13 +339,11 @@ class ChatStreamingService:
             pending = content_buffer.flush(monotonic())
             if pending is not None:
                 sequence += 1
-                yield _sse_event(
-                    "content.delta", {"delta": pending, "sequence": sequence}
-                )
+                yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
             answer = "".join(answer_parts).strip()
             assistant_message = await self._repositories.chat.append_message(
                 owner_user_id=owner_user_id,
-                message_id=f"message_{uuid4().hex}",
+                message_id=assistant_message_id or f"message_{uuid4().hex}",
                 session_id=session.id,
                 role="assistant",
                 content=answer,
@@ -391,9 +402,7 @@ class ChatStreamingService:
             pending = content_buffer.flush(monotonic())
             if pending is not None:
                 sequence += 1
-                yield _sse_event(
-                    "content.delta", {"delta": pending, "sequence": sequence}
-                )
+                yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
             emit_event(
                 logger,
                 "agent.chat.failed",
@@ -401,6 +410,8 @@ class ChatStreamingService:
                 errorCategory=exc.__class__.__name__,
                 durationMs=elapsed_ms(started_at),
             )
+            if raise_errors:
+                raise
             yield _error_event("SYSTEM_INTERNAL_ERROR")
             return
 

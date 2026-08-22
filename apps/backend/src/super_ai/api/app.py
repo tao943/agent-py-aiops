@@ -81,6 +81,7 @@ from super_ai.chat.memory import (
     ChatMemoryService,
     memory_payload,
 )
+from super_ai.chat.runs import ChatRunJobHandler
 from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.documents import (
     ALLOWED_DOCUMENT_EXTENSIONS,
@@ -469,6 +470,7 @@ def create_app(
     background_runtime = BackgroundJobRuntime(repositories.background_jobs)
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
+    background_runtime.register("chat_agent_run", _chat_run_job_handler(app))
     app.state.background_job_runtime = background_runtime
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
@@ -2038,6 +2040,26 @@ def _document_index_job_handler(
         )
         if result.status != "succeeded":
             raise RuntimeError(result.failure_reason or "Document indexing failed.")
+
+    return handle
+
+
+def _chat_run_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        request = _request_for_app(app)
+        repositories = _memory_repositories(request)
+        streaming = ChatStreamingService(
+            repositories=repositories,
+            agent_runner=_chat_agent_runner(request),
+            memory_service=_chat_memory_service(request),
+            intent_router=_chat_intent_router(request),
+        )
+        await ChatRunJobHandler(
+            repositories=repositories,
+            streaming=streaming,
+        )(context)
 
     return handle
 
