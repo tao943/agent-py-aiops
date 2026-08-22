@@ -98,7 +98,9 @@ async def test_adaptive_mode_no_longer_uses_the_legacy_thirty_turn_trigger(
     assert prepared.session.memory_mode == "adaptive"
     assert prepared.session.compacted_message_count == 0
     assert prepared.session.memory_summary is None
-    assert len(prepared.messages) == 61
+    assert len(prepared.messages) == 13
+    assert prepared.messages[0].id == "message-24-user"
+    assert prepared.messages[-1].id == "candidate"
     assert len(persisted) == 60
 
 

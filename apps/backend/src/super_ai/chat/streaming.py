@@ -476,6 +476,16 @@ class ChatStreamingService:
         system_prompt, selected_skills = await self.build_agent_configuration(
             owner_user_id=owner_user_id
         )
+        route = (
+            await self._intent_router.route(message_content)
+            if self._intent_router is not None
+            else ChatRoute("general_chat", 0.0, "fallback")
+        )
+        allowed_tools = allowed_tools_for(route.intent)
+        if route.needs_clarification:
+            allowed_tools = allowed_tools - frozenset(
+                {"start_incident_diagnostic", "create_recovery_approval_request"}
+            )
         prepared_messages: Sequence[ChatMessageRecord] | None = None
         if self._memory_service is not None:
             try:
@@ -487,6 +497,7 @@ class ChatStreamingService:
                     ],
                     system_prompt=system_prompt,
                     content=message_content,
+                    tool_schemas=tuple(sorted(allowed_tools)),
                 )
             except ChatContextLimitReached:
                 yield _error_event("CHAT_CONTEXT_LIMIT_REACHED")
@@ -495,16 +506,6 @@ class ChatStreamingService:
             system_prompt = prepared.system_prompt
             prepared_messages = prepared.messages
 
-        route = (
-            await self._intent_router.route(message_content)
-            if self._intent_router is not None
-            else ChatRoute("general_chat", 0.0, "fallback")
-        )
-        allowed_tools = allowed_tools_for(route.intent)
-        if route.needs_clarification:
-            allowed_tools = allowed_tools - frozenset(
-                {"start_incident_diagnostic", "create_recovery_approval_request"}
-            )
         user_message = existing_user_message or await self._repositories.chat.append_message(
             owner_user_id=owner_user_id,
             message_id=f"message_{uuid4().hex}",

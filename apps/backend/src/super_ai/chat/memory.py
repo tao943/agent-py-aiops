@@ -27,7 +27,6 @@ SUPPORTED_CHAT_MEMORY_MODES: tuple[ChatMemoryModeInput, ...] = (
     "manual",
 )
 AUTO_CONTEXT_THRESHOLD_PERCENT = 70.0
-HARD_CONTEXT_THRESHOLD_PERCENT = 95.0
 
 
 class ChatContextLimitReached(RuntimeError):
@@ -74,6 +73,8 @@ class ChatMemoryService:
         history: list[ChatMessageRecord],
         system_prompt: str,
         content: str,
+        tool_schemas: Sequence[str] = (),
+        observations: Sequence[object] = (),
     ) -> PreparedChatContext:
         current = session
         uncompressed = history[current.compacted_message_count :]
@@ -106,11 +107,34 @@ class ChatMemoryService:
                 messages=candidate_messages,
             )
 
-        if (
-            _usage_percent(candidate_tokens, self.context_window_tokens)
-            >= HARD_CONTEXT_THRESHOLD_PERCENT
-        ):
-            raise ChatContextLimitReached
+        from super_ai.chat.context_envelope import (
+            ContextEnvelopeRequest,
+            ContextEnvelopeService,
+        )
+        from super_ai.chat.structured_memory import StructuredChatMemory
+
+        envelope = ContextEnvelopeService().prepare(
+            ContextEnvelopeRequest(
+                system_prompt=system_prompt,
+                messages=tuple(candidate_messages),
+                structured_memory=StructuredChatMemory.model_validate(
+                    current.structured_memory
+                ),
+                tool_schemas=tuple(tool_schemas),
+                observations=tuple(observations),
+                window_tokens=self.context_window_tokens,
+                configured_output_min_tokens=min(
+                    512, max(1, self.context_window_tokens // 10)
+                ),
+            )
+        )
+        candidate_tokens = (
+            envelope.budget.system_tokens
+            + envelope.budget.tool_schema_tokens
+            + envelope.budget.memory_tokens
+            + envelope.budget.recent_turn_tokens
+            + envelope.budget.observation_tokens
+        )
 
         updated = await self._repositories.chat.update_memory_state(
             owner_user_id=owner_user_id,
@@ -119,8 +143,8 @@ class ChatMemoryService:
         )
         return PreparedChatContext(
             session=updated or current,
-            messages=tuple(candidate_messages),
-            system_prompt=_prompt_with_memory(system_prompt, current.memory_summary),
+            messages=envelope.messages,
+            system_prompt=envelope.system_prompt,
         )
 
     async def refresh_usage(
@@ -290,14 +314,6 @@ def _usage_percent(tokens: int, window: int) -> float:
 
 def _memory_instruction(summary: str) -> str:
     return f"以下是此前对话的压缩记忆，请作为真实会话上下文继续回答：\n{summary}"
-
-
-def _prompt_with_memory(system_prompt: str, summary: str | None) -> str:
-    return (
-        f"{system_prompt}\n\n{_memory_instruction(summary)}"
-        if summary
-        else system_prompt
-    )
 
 
 def _extract_model_text(value: object) -> str:
