@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from super_ai.chat.structured_memory import MemoryCasResult, StructuredChatMemory
 
 ChatMemoryMode = str
 
@@ -661,6 +664,18 @@ class ChatMemoryRepository(Protocol):
         updated_at: datetime | None = None,
     ) -> ChatSessionRecord | None:
         """Update owner-scoped memory policy and compaction state."""
+        ...
+
+    async def compare_and_set_memory(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        expected_version: int,
+        memory: StructuredChatMemory,
+        through_message_id: str,
+    ) -> MemoryCasResult:
+        """Atomically replace structured memory only at the expected version."""
         ...
 
     async def list_sessions(
