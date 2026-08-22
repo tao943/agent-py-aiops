@@ -1,5 +1,6 @@
 """Streaming chat orchestration."""
 
+from super_ai.chat.intent import ChatIntent, ChatIntentRouter, ChatRoute, StructuredRouterModel
 from super_ai.chat.streaming import (
     ChatAgentContentDelta,
     ChatAgentReasoningDelta,
@@ -12,6 +13,7 @@ from super_ai.chat.streaming import (
     SsePayload,
     encode_sse,
 )
+from super_ai.chat.tool_policy import allowed_tools_for
 
 __all__ = [
     "ChatAgentContentDelta",
@@ -20,8 +22,13 @@ __all__ = [
     "ChatAgentRequest",
     "ChatAgentRunner",
     "ChatAgentToolCall",
+    "ChatIntent",
+    "ChatIntentRouter",
+    "ChatRoute",
     "ChatStreamingService",
     "LangChainChatAgentRunner",
     "SsePayload",
+    "StructuredRouterModel",
+    "allowed_tools_for",
     "encode_sse",
 ]
