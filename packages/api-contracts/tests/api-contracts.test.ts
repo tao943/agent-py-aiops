@@ -53,6 +53,8 @@ describe("HTTP response contracts", () => {
     expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.mode).toEqual({
       enum: ["adaptive", "manual"]
     });
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.compactionStatus)
+      .toEqual({ enum: ["idle", "queued", "running", "degraded"] });
   });
 
   it("wraps successful responses with metadata", () => {

@@ -34,6 +34,8 @@ const sessions: readonly ChatSessionSummary[] = [
     updatedAt: "2026-07-10T00:01:00.000Z",
     memory: {
       mode: "adaptive",
+      summaryVersion: 0,
+      compactionStatus: "idle",
       contextTokens: 1200,
       contextWindowTokens: 131072,
       contextUsagePercent: 0.9,
@@ -183,6 +185,32 @@ describe("chat components", () => {
     await wrapper.get("select").setValue("manual");
     await wrapper.get(".chat-composer__apply").trigger("click");
     expect(wrapper.emitted("applyMemory")).toEqual([["manual"]]);
+  });
+
+  it("shows durable compaction progress and keeps manual compaction available", async () => {
+    const wrapper = mount(ChatComposer, {
+      props: {
+        disabled: false,
+        isSending: false,
+        isUpdatingMemory: false,
+        memory: {
+          ...sessions[0]!.memory,
+          mode: "manual",
+          summaryVersion: 3,
+          compactionStatus: "running"
+        }
+      }
+    });
+
+    expect(wrapper.text()).toContain("后台压缩中 · v3");
+    expect(wrapper.text()).toContain("立即压缩");
+    await wrapper.get(".chat-composer__apply").trigger("click");
+    expect(wrapper.emitted("compactMemory")).toHaveLength(1);
+
+    await wrapper.setProps({
+      memory: { ...sessions[0]!.memory, summaryVersion: 3, compactionStatus: "degraded" }
+    });
+    expect(wrapper.text()).toContain("后台压缩降级，可手动重试");
   });
 
   it("marks the selected session and emits session commands", async () => {

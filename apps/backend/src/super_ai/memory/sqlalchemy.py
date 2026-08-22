@@ -155,6 +155,7 @@ class SQLAlchemyChatMemoryRepository:
                 row.structured_memory = {}
                 row.memory_summary_version = 0
                 row.memory_through_message_id = None
+                row.memory_compaction_status = "idle"
                 row.compacted_message_count = 0
                 row.context_tokens = 0
                 row.last_compacted_at = None
@@ -207,6 +208,24 @@ class SQLAlchemyChatMemoryRepository:
                 )
             )
         return "stale" if exists is not None else "not_found"
+
+    async def update_compaction_status(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        status: str,
+    ) -> ChatSessionRecord | None:
+        if status not in {"idle", "queued", "running", "degraded"}:
+            raise ValueError("Unsupported chat memory compaction status")
+        async with self._session_factory() as session:
+            row = await _find_chat_session(session, owner_user_id, session_id)
+            if row is None:
+                return None
+            row.memory_compaction_status = status
+            row.updated_at = utc_now()
+            await session.commit()
+        return _chat_session_record(row)
 
     async def list_sessions(
         self,
@@ -282,6 +301,7 @@ class SQLAlchemyChatMemoryRepository:
             parent.structured_memory = {}
             parent.memory_summary_version = 0
             parent.memory_through_message_id = None
+            parent.memory_compaction_status = "idle"
             parent.compacted_message_count = 0
             parent.context_tokens = 0
             parent.last_compacted_at = None
@@ -2505,6 +2525,7 @@ def _chat_session_record(row: ChatSessionModel) -> ChatSessionRecord:
         structured_memory=structured_memory.model_dump(mode="json"),
         memory_summary_version=row.memory_summary_version,
         memory_through_message_id=row.memory_through_message_id,
+        memory_compaction_status=row.memory_compaction_status,
         compacted_message_count=row.compacted_message_count,
         context_tokens=row.context_tokens,
         last_compacted_at=(

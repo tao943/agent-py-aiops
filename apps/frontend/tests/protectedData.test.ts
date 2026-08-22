@@ -814,6 +814,8 @@ function _chatSession(overrides: Partial<ChatSessionSummary> = {}): ChatSessionS
     updatedAt: "2026-07-09T00:00:01.000Z",
     memory: {
       mode: "adaptive",
+      summaryVersion: 0,
+      compactionStatus: "idle",
       contextTokens: 1200,
       contextWindowTokens: 131072,
       contextUsagePercent: 0.9,

@@ -45,6 +45,7 @@ class ChatSessionRecord:
     structured_memory: JsonDict = field(default_factory=lambda: dict[str, object]())
     memory_summary_version: int = 0
     memory_through_message_id: str | None = None
+    memory_compaction_status: str = "idle"
     compacted_message_count: int = 0
     context_tokens: int = 0
     last_compacted_at: datetime | None = None
@@ -676,6 +677,16 @@ class ChatMemoryRepository(Protocol):
         through_message_id: str,
     ) -> MemoryCasResult:
         """Atomically replace structured memory only at the expected version."""
+        ...
+
+    async def update_compaction_status(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        status: Literal["idle", "queued", "running", "degraded"],
+    ) -> ChatSessionRecord | None:
+        """Persist the public structured-memory compaction lifecycle state."""
         ...
 
     async def list_sessions(

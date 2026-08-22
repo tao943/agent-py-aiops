@@ -1306,6 +1306,8 @@ export const OPENAPI_CONTRACT = {
         type: "object",
         required: [
           "mode",
+          "summaryVersion",
+          "compactionStatus",
           "contextTokens",
           "contextWindowTokens",
           "contextUsagePercent",
@@ -1315,6 +1317,8 @@ export const OPENAPI_CONTRACT = {
         ],
         properties: {
           mode: { enum: ["adaptive", "manual"] },
+          summaryVersion: { type: "integer" },
+          compactionStatus: { enum: ["idle", "queued", "running", "degraded"] },
           contextTokens: { type: "integer" },
           contextWindowTokens: { type: "integer" },
           contextUsagePercent: { type: "number" },

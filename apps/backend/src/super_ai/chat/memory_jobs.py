@@ -36,7 +36,7 @@ async def schedule_compaction(
         f"{session.id}:{through_message_id}:{session.memory_summary_version}"
     )
     job_id = "job_chat_compact_" + sha256(resource_id.encode()).hexdigest()[:40]
-    return await jobs.enqueue_or_get(
+    job = await jobs.enqueue_or_get(
         owner_user_id=owner_user_id,
         job_id=job_id,
         kind="chat_memory_compaction",
@@ -50,6 +50,12 @@ async def schedule_compaction(
         max_attempts=3,
         timeout_seconds=120,
     )
+    await repositories.chat.update_compaction_status(
+        owner_user_id=owner_user_id,
+        session_id=session.id,
+        status="queued",
+    )
+    return job
 
 
 class StructuredMemoryCompactionHandler:
@@ -74,6 +80,39 @@ class StructuredMemoryCompactionHandler:
         )
 
     async def compact(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        through_message_id: str,
+        expected_version: int,
+    ) -> None:
+        await self._repositories.chat.update_compaction_status(
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            status="running",
+        )
+        try:
+            await self._compact_once(
+                owner_user_id=owner_user_id,
+                session_id=session_id,
+                through_message_id=through_message_id,
+                expected_version=expected_version,
+            )
+        except Exception:
+            await self._repositories.chat.update_compaction_status(
+                owner_user_id=owner_user_id,
+                session_id=session_id,
+                status="degraded",
+            )
+            raise
+        await self._repositories.chat.update_compaction_status(
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            status="idle",
+        )
+
+    async def _compact_once(
         self,
         *,
         owner_user_id: str,

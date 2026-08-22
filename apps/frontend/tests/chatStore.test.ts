@@ -21,6 +21,8 @@ const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummar
   updatedAt: "2026-07-10T00:01:00.000Z",
   memory: {
     mode: "adaptive",
+    summaryVersion: 0,
+    compactionStatus: "idle",
     contextTokens: 1200,
     contextWindowTokens: 131072,
     contextUsagePercent: 0.9,
@@ -92,6 +94,22 @@ describe("chat store", () => {
     expect(store.messages).toEqual([message()]);
     expect(store.toolAudits).toEqual([audit()]);
     expect(store.pendingActions).toEqual([pendingAction()]);
+  });
+
+  it("normalizes one-release legacy memory modes from an older API", async () => {
+    const client = fakeClient();
+    const legacy = session({
+      memory: { ...session().memory, mode: "every_30_turns" as never }
+    });
+    client.listSessions = async () => ({ items: [legacy] });
+    client.getSession = async () => ({ session: legacy, messages: [] });
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+
+    await store.initialize();
+
+    expect(store.activeSession?.memory.mode).toBe("adaptive");
   });
 
   it("guards duplicate pending-action decisions while the first request is in flight", async () => {

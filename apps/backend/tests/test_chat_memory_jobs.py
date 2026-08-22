@@ -95,12 +95,17 @@ async def test_concurrent_compaction_scheduling_reuses_one_stable_job(
             )
         )
         persisted = await repositories.background_jobs.list(owner_user_id="owner")  # type: ignore[union-attr]
+        persisted_session = await repositories.chat.get_session(
+            owner_user_id="owner", session_id=session.id
+        )
     finally:
         await engine.dispose()
 
     assert len({job.id for job in jobs}) == 1
     assert len(persisted) == 1
     assert persisted[0].kind == "chat_memory_compaction"
+    assert persisted_session is not None
+    assert persisted_session.memory_compaction_status == "queued"
 
 
 @pytest.mark.asyncio
@@ -155,6 +160,7 @@ async def test_compaction_uses_timestamp_and_id_boundary_and_advances_only_on_su
     assert persisted is not None
     assert persisted.memory_summary_version == 1
     assert persisted.memory_through_message_id == "z-user"
+    assert persisted.memory_compaction_status == "idle"
     prompt = str(model.inputs[0])
     assert "a-assistant" in prompt
     assert "z-user" in prompt
@@ -202,6 +208,7 @@ async def test_compaction_model_failure_does_not_advance_memory_version(
     assert persisted is not None
     assert persisted.memory_summary_version == 0
     assert persisted.memory_through_message_id is None
+    assert persisted.memory_compaction_status == "degraded"
 
 
 @pytest.mark.asyncio

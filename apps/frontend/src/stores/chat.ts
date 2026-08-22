@@ -155,14 +155,15 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function upsertSession(nextSession: ChatSessionSummary): void {
+    const normalized = normalizeSessionMemory(nextSession);
     sessions.value = [
-      nextSession,
-      ...sessions.value.filter((item) => item.id !== nextSession.id)
+      normalized,
+      ...sessions.value.filter((item) => item.id !== normalized.id)
     ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   async function reloadSessions(): Promise<void> {
-    sessions.value = (await client.listSessions()).items;
+    sessions.value = (await client.listSessions()).items.map(normalizeSessionMemory);
   }
 
   function reset(): void {
@@ -586,6 +587,12 @@ function uniqueReferences(items: readonly ChatReference[]): readonly ChatReferen
 
 function referenceScore(reference: ChatReference): number {
   return reference.rerankScore ?? reference.score ?? Number.NEGATIVE_INFINITY;
+}
+
+function normalizeSessionMemory(session: ChatSessionSummary): ChatSessionSummary {
+  const rawMode = session.memory.mode as string;
+  if (rawMode !== "every_30_turns" && rawMode !== "context_70_percent") return session;
+  return { ...session, memory: { ...session.memory, mode: "adaptive" } };
 }
 
 function waitForReconnect(delayMs: number): Promise<void> {

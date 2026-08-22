@@ -59,6 +59,8 @@ export type ChatMemoryMode = "adaptive" | "manual";
 
 export interface ChatMemoryState {
   readonly mode: ChatMemoryMode;
+  readonly summaryVersion: number;
+  readonly compactionStatus: "idle" | "queued" | "running" | "degraded";
   readonly contextTokens: number;
   readonly contextWindowTokens: number;
   readonly contextUsagePercent: number;

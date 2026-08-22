@@ -140,6 +140,17 @@ uv run alembic upgrade head
 `super_ai.memory.repositories`。SQLAlchemy/PostgreSQL 实现位于
 `super_ai.memory.sqlalchemy`。
 
+### Conversation Memory
+
+Conversation Agent 只公开 `adaptive` 与 `manual` 两种记忆模式。`adaptive` 在上下文占用
+达到 60% 后幂等创建 PostgreSQL 持久压缩任务，85% 时同步压缩兜底，95% 时拒绝继续扩张；
+模型上下文始终保留最近 6 个完整 user/assistant 轮次。
+
+长期记忆使用带版本号与来源消息 ID 的 Structured Memory。允许字段仅包括用户目标、已确认
+事实、偏好、决策、未完成事项和资源引用；不得保存 reasoning、系统 Prompt、凭据、原始工具
+输出或 AIOps 恢复安全状态。更新以 PostgreSQL CAS 为正确性边界，后台任务重放不会重复推进
+版本。旧自由文本摘要只在首次结构化压缩前作为不可信引用数据读取。
+
 ## Milvus 向量存储
 
 Milvus 向量存储位于 `src/super_ai/vector_store` 下。导入 Milvus

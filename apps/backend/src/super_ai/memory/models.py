@@ -332,6 +332,9 @@ class ChatSessionModel(Base):
     memory_through_message_id: Mapped[str | None] = mapped_column(
         String(80), nullable=True
     )
+    memory_compaction_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="idle"
+    )
     compacted_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_compacted_at: Mapped[datetime | None] = mapped_column(

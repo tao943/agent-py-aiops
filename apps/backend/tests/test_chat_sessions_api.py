@@ -67,6 +67,8 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
 
     assert create_response.status_code == 201
     assert create_response.json()["data"]["title"] == "New chat"
+    assert create_response.json()["data"]["memory"]["summaryVersion"] == 0
+    assert create_response.json()["data"]["memory"]["compactionStatus"] == "idle"
     assert user_message_response.status_code == 201
     assert user_message_response.json()["data"]["session"]["title"] == (
         "How do I restart the API service during an incident?"

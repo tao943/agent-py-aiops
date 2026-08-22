@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -79,7 +80,7 @@ class ChatMemoryService:
         observations: Sequence[object] = (),
     ) -> PreparedChatContext:
         current = session
-        uncompressed = history[current.compacted_message_count :]
+        uncompressed = _uncompacted_history(history, current)
         candidate = _candidate_user_message(current, owner_user_id, content)
         candidate_messages = [*uncompressed, candidate]
         candidate_tokens = estimate_context_tokens(
@@ -113,7 +114,7 @@ class ChatMemoryService:
             ContextEnvelopeRequest,
             ContextEnvelopeService,
         )
-        synchronous_boundary = _older_history_boundary(history)
+        synchronous_boundary = _older_history_boundary(uncompressed)
         if (
             _usage_percent(candidate_tokens, self.context_window_tokens)
             >= SYNCHRONOUS_COMPACTION_THRESHOLD_PERCENT
@@ -184,10 +185,16 @@ class ChatMemoryService:
         history: list[ChatMessageRecord],
         system_prompt: str,
     ) -> ChatSessionRecord:
+        active_history = _uncompacted_history(history, session)
+        structured_summary = (
+            json.dumps(session.structured_memory, ensure_ascii=False, sort_keys=True)
+            if session.memory_summary_version > 0
+            else session.memory_summary
+        )
         tokens = estimate_context_tokens(
             system_prompt=system_prompt,
-            memory_summary=session.memory_summary,
-            messages=history[session.compacted_message_count :],
+            memory_summary=structured_summary,
+            messages=active_history,
         )
         updated = await self._repositories.chat.update_memory_state(
             owner_user_id=owner_user_id,
@@ -198,7 +205,7 @@ class ChatMemoryService:
         await self._schedule_background_compaction(
             owner_user_id=owner_user_id,
             session=current,
-            history=history,
+            history=active_history,
         )
         return current
 
@@ -240,7 +247,8 @@ class ChatMemoryService:
         history: list[ChatMessageRecord],
         system_prompt: str,
     ) -> ChatSessionRecord:
-        if not history:
+        active_history = _uncompacted_history(history, session)
+        if not active_history:
             return await self.refresh_usage(
                 owner_user_id=owner_user_id,
                 session=session,
@@ -255,7 +263,7 @@ class ChatMemoryService:
         ).compact(
             owner_user_id=owner_user_id,
             session_id=session.id,
-            through_message_id=history[-1].id,
+            through_message_id=active_history[-1].id,
             expected_version=session.memory_summary_version,
         )
         current = (
@@ -355,13 +363,14 @@ def estimate_context_tokens(
 
 
 def memory_payload(session: ChatSessionRecord, context_window_tokens: int) -> dict[str, object]:
+    usage_percent = _usage_percent(session.context_tokens, context_window_tokens)
     return {
         "mode": normalize_memory_mode(session.memory_mode),
+        "summaryVersion": session.memory_summary_version,
+        "compactionStatus": session.memory_compaction_status,
         "contextTokens": session.context_tokens,
         "contextWindowTokens": context_window_tokens,
-        "contextUsagePercent": _usage_percent(
-            session.context_tokens, context_window_tokens
-        ),
+        "contextUsagePercent": usage_percent,
         "compactedMessageCount": session.compacted_message_count,
         "lastCompactedAt": (
             session.last_compacted_at.isoformat()
@@ -395,6 +404,16 @@ def _older_history_boundary(history: Sequence[ChatMessageRecord]) -> str | None:
     if len(history) <= 12:
         return None
     return history[-13].id
+
+
+def _uncompacted_history(
+    history: Sequence[ChatMessageRecord], session: ChatSessionRecord
+) -> list[ChatMessageRecord]:
+    if session.memory_through_message_id is not None:
+        for index, message in enumerate(history):
+            if message.id == session.memory_through_message_id:
+                return list(history[index + 1 :])
+    return list(history[session.compacted_message_count :])
 
 
 def _memory_instruction(summary: str) -> str:
