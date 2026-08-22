@@ -189,6 +189,61 @@ incidents cannot inherit each other's scope. Missing, malformed, traversing, ove
 foreign-scenario, non-CLS, or schema-incompatible scope remains fail-closed and cannot fall back to a
 wildcard query for automatic recovery authority.
 
+### 6.2 Task-scoped read-only tool routing
+
+The automatic alert path uses the existing global
+`TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES` registry as the code-owned catalogue of diagnostic tools. A
+tool being registered does not make it visible to every Task. Before Planner, Executor, or Replanner
+can observe a tool, a deterministic Task router derives one immutable applicability scope from the
+backend-created Task input.
+
+For an exact, valid `APY-LIVE-ORDER-POOL-LEAK-001` scope, the MCP-visible set is exactly:
+
+```text
+SearchLog
+InspectOrderPoolState
+InspectOrderDatabaseSessions
+VerifyOrderDatabaseReachability
+```
+
+RAG remains available through the existing `knowledge_retrieval` path and is not represented as an
+MCP tool. A missing or malformed automatic Live scope exposes none of the four MCP tools. A different
+scenario does not inherit the Order Pool runtime tools. Planner, Executor, Replanner, capability
+routing, and audit persistence all consume the same filtered definitions; an LLM-generated tool name
+cannot expand the set.
+
+The Task-local MCP client is composed from two independently owned sources:
+
+- the user's existing MCP client contributes only the unique official `cls/SearchLog` definition;
+- a backend-owned read-only client contributes only the three Order Pool runtime definitions.
+
+The composition is created per Task. It does not mutate either underlying client, a singleton trusted
+argument map, or another Task's scope. Duplicate names, wrong server provenance, unavailable sources,
+and schema mismatches fail closed.
+
+All recovery and write-capable tools remain outside this client and outside ordinary Tool Calling.
+They can only be reached after Deterministic Validator, Policy Gate, and the existing Recovery
+Coordinator authorize a code-owned action and target.
+
+### 6.3 Resident runtime evidence sources
+
+The resident backend must not reuse the CLI process's `LiveFaultObservation`; that object is neither
+shared across processes nor independently current. The backend-owned read-only client reconstructs
+the three runtime observations from live sources for the validated Task `run_id`:
+
+- `InspectOrderPoolState` reads the fixture's public Prometheus exposition at the fixed loopback Order
+  API address. It accepts only the exact scenario, service, environment, and run labels and requires
+  one complete bounded metric snapshot.
+- `InspectOrderDatabaseSessions` performs fixed, parameterized, read-only queries against the
+  backend-configured Live PostgreSQL database for the hashed run-scoped application name.
+- `VerifyOrderDatabaseReachability` combines a fresh `SELECT 1` with the exact run's bounded business
+  probe metric. It does not invoke the mutating probe endpoint.
+
+The Task cannot supply an URL, port, database name, SQL statement, credential, tool server, or
+recovery target. The client receives no fault token, Docker access, or recovery capability. Each tool
+call produces a separate persisted Evidence ID and provenance fingerprint, so the existing four-source
+trusted pattern (CLS lifecycle, pool state, database sessions, health/probe) remains unchanged.
+
 ## 7. Persistence and Correlation
 
 Migration `202608220002` extends `aiops_alert_incidents` with nullable, bounded fields:

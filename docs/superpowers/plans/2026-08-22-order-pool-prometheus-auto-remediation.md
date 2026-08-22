@@ -689,3 +689,257 @@ git commit -m "docs: verify automatic order pool remediation"
 - [ ] Exactly one restart is attributable to the recovery execution; cleanup is not credited as recovery.
 - [ ] Incident is both `resolved` and `verification_status=passed`.
 - [ ] No manual publisher, forced Multi, secret output, Docker authority expansion, or full pytest run occurred.
+
+---
+
+## Task-scoped Diagnostic Tool Amendment
+
+The first real CLS run reached `SearchLog` but ended with `decision_missing` because the resident
+backend did not own the three runtime evidence tools used by the unchanged deterministic trusted
+pattern. The following tasks close that cross-process gap without lowering the evidence gate.
+
+### Task 13: Deterministic Task Tool Route and Scoped Composite Client
+
+**Files:**
+- Create: `apps/backend/src/super_ai/aiops/tool_routing.py`
+- Create: `apps/backend/src/super_ai/mcp/scoped_client.py`
+- Create: `apps/backend/tests/test_aiops_task_tool_routing.py`
+
+**Interfaces:**
+- Produces: `AutomaticLiveEvidenceScope(run_id, scenario_id, incident_id, from_ms, to_ms)`.
+- Produces: `route_task_read_only_tools(input_payload) -> TaskReadOnlyToolRoute`.
+- Produces: `ScopedCompositeMcpClient` that exposes exact tool-to-client routes and rejects duplicates,
+  undiscovered calls, wrong server provenance, and out-of-scope names.
+- Reuses: `TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES` as the only safety catalogue.
+
+- [ ] **Step 1: Write failing route and composite-client tests**
+
+```python
+def test_order_pool_task_routes_exact_read_only_tools() -> None:
+    route = route_task_read_only_tools(_valid_order_pool_task_payload("run-a"))
+    assert route.allowed_tools == frozenset({
+        "SearchLog",
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    })
+    assert route.scope is not None and route.scope.run_id == "run-a"
+
+@pytest.mark.parametrize("payload", [
+    _automatic_payload_without_scope(),
+    _foreign_scenario_payload(),
+    _traversing_run_payload(),
+    _scope_with_extra_key(),
+])
+def test_invalid_or_foreign_automatic_scope_never_routes_order_pool_tools(payload) -> None:
+    assert route_task_read_only_tools(payload).allowed_tools == frozenset()
+
+async def test_scoped_composite_rejects_unrouted_and_duplicate_tools() -> None:
+    cls_client = FakeRuntimeMcpClient((
+        McpToolDefinition("SearchLog", "CLS", OBJECT_SCHEMA, "cls"),
+        McpToolDefinition("RestartService", "write", OBJECT_SCHEMA, "unsafe"),
+    ))
+    runtime_client = FakeRuntimeMcpClient((
+        McpToolDefinition(
+            "InspectOrderPoolState", "pool", OBJECT_SCHEMA, "order-pool-live"
+        ),
+    ))
+    client = ScopedCompositeMcpClient((
+        ScopedMcpSource(cls_client, frozenset({"SearchLog"})),
+        ScopedMcpSource(runtime_client, frozenset({"InspectOrderPoolState"})),
+    ))
+    assert {tool.name for tool in await client.discover_tools()} == {
+        "SearchLog", "InspectOrderPoolState"
+    }
+    with pytest.raises(McpClientError):
+        await client.call_tool("RestartService", {})
+```
+
+- [ ] **Step 2: Verify red**
+
+Run: `uv run --project apps/backend pytest apps/backend/tests/test_aiops_task_tool_routing.py -q`
+Expected: FAIL because the route and scoped client modules do not exist.
+
+- [ ] **Step 3: Implement the minimal immutable route and composite client**
+
+`route_task_read_only_tools` parses only the five exact `liveEvidenceScope` fields already persisted
+by alert ingestion. It returns the four-tool allowlist only for the exact Order Pool scenario and
+identity relation `incident_id == f"{scenario_id}-{run_id}"`. `ScopedCompositeMcpClient` receives
+explicit `(client, allowed_names)` sources, validates discovered definitions against the trusted
+registry and allowed server names, and routes calls only after successful discovery.
+
+- [ ] **Step 4: Verify green**
+
+Run the Task 13 test file. Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/backend/src/super_ai/aiops/tool_routing.py apps/backend/src/super_ai/mcp/scoped_client.py apps/backend/tests/test_aiops_task_tool_routing.py
+git commit -m "feat: route automatic alert tools per task"
+```
+
+### Task 14: Resident Order Pool Runtime Evidence
+
+**Files:**
+- Modify: `apps/backend/src/super_ai/evaluation/live/order_pool_leak.py`
+- Modify: `apps/backend/tests/test_live_order_pool_contracts.py`
+
+**Interfaces:**
+- Produces: `HttpOrderPoolMetricsReader.snapshot(run_id) -> OrderPoolMetricSnapshot`.
+- Produces: `ResidentOrderPoolEvidenceMcpClient(scope, metrics_reader, postgres_observer)`.
+- Reuses: `PostgresOrderPoolObserver`, `_session_run_pattern`, `McpToolDefinition`, and the official
+  `prometheus_client.parser` already installed by the project.
+
+- [ ] **Step 1: Write failing live-source evidence tests**
+
+```python
+async def test_resident_client_builds_three_independent_live_observations() -> None:
+    client = ResidentOrderPoolEvidenceMcpClient(
+        scope=_scope("run-a"),
+        metrics_reader=FakeMetricsReader(_saturated_snapshot("run-a")),
+        postgres_observer=FakePostgresObserver(sessions=3, reachable=True, lock_wait=False),
+    )
+    pool = await client.call_tool("InspectOrderPoolState", {})
+    sessions = await client.call_tool("InspectOrderDatabaseSessions", {})
+    health = await client.call_tool("VerifyOrderDatabaseReachability", {})
+    assert pool["benchmarkEvidenceId"] == "order-pool-saturated"
+    assert sessions["benchmarkEvidenceId"] == "order-db-sessions"
+    assert health["benchmarkEvidenceId"] == "order-pool-acquire-timeout"
+
+async def test_metrics_reader_rejects_foreign_run_or_incomplete_snapshot() -> None:
+    with pytest.raises(McpClientError):
+        await _reader(_metrics_for("run-b")).snapshot("run-a")
+```
+
+- [ ] **Step 2: Verify red**
+
+Run: `uv run --project apps/backend pytest apps/backend/tests/test_live_order_pool_contracts.py -q`
+Expected: FAIL on missing resident reader/client symbols.
+
+- [ ] **Step 3: Implement bounded metrics parsing and fixed PostgreSQL queries**
+
+Read only `/metrics` from the code-owned loopback `http://127.0.0.1:18082`. Require the exact
+`service=order-api`, `environment=live-eval`, scenario, and run labels; exactly one finite sample for
+each required metric; capacity `1..16`; and values compatible with booleans/counts. Derive:
+
+```python
+pool_at_capacity = checked_out == capacity
+run_scoped_sessions_present = session_count >= capacity
+business_probe_timed_out = business_probe_success == 0
+```
+
+Use only `database_reachable`, `run_scoped_session_count`, and `lock_wait_observed` from the existing
+parameterized PostgreSQL observer. Reject all tool arguments and unknown tools.
+
+- [ ] **Step 4: Verify green**
+
+Run the Task 14 test file. Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/backend/src/super_ai/evaluation/live/order_pool_leak.py apps/backend/tests/test_live_order_pool_contracts.py
+git commit -m "feat: read resident order pool evidence"
+```
+
+### Task 15: Use One Filtered Tool Set Across the Single-Agent Graph
+
+**Files:**
+- Modify: `apps/backend/src/super_ai/aiops/diagnostics.py`
+- Modify: `apps/backend/src/super_ai/api/app.py`
+- Modify: `apps/backend/tests/test_live_diagnostic_adapter.py`
+- Modify: `apps/backend/tests/test_aiops_v4_workflow.py`
+
+**Interfaces:**
+- `AiopsDiagnosticService` gains an injected resident Order Pool evidence client factory.
+- `_mcp_client_for` resolves an ordinary owner client unchanged, but returns a per-Task
+  `ScopedCompositeMcpClient` for a Task carrying `liveEvidenceScope`.
+- Planner persists the filtered definitions; Executor and Replanner reject any step outside that
+  same definition snapshot before calling a client.
+
+- [ ] **Step 1: Write failing graph integration and isolation tests**
+
+```python
+async def test_automatic_order_pool_planner_sees_cls_runtime_and_rag_only() -> None:
+    result = await _run_order_pool_task(owner_tools=ALL_USER_TOOLS)
+    assert result.planner_mcp_tools == EXPECTED_ORDER_POOL_MCP_TOOLS
+    assert result.retrieval_available is True
+    assert "RestartService" not in result.planner_mcp_tools
+
+async def test_executor_cannot_call_tool_omitted_from_task_definition_snapshot() -> None:
+    with pytest.raises(McpClientError):
+        await _execute_injected_step("ReadGroundTruth")
+
+async def test_concurrent_tasks_do_not_share_run_scope() -> None:
+    first, second = await asyncio.gather(_run("run-a"), _run("run-b"))
+    assert first.runtime_run_ids == {"run-a"}
+    assert second.runtime_run_ids == {"run-b"}
+```
+
+- [ ] **Step 2: Verify red**
+
+Run: `uv run --project apps/backend pytest apps/backend/tests/test_live_diagnostic_adapter.py apps/backend/tests/test_aiops_v4_workflow.py -q`
+Expected: FAIL because the resident client is not composed into alert-created Tasks.
+
+- [ ] **Step 3: Wire task-local composition and application-owned fixed sources**
+
+Construct the backend client from `LIVE_ORDER_API_URL` constrained by `OrderPoolLiveConfig` and the
+existing fixed `agent_py_live_eval` PostgreSQL configuration. Do not pass the control token into the
+metrics reader. Change every Single-Agent MCP discovery/call site to resolve from the same Task state;
+validate calls against the persisted filtered definitions before dispatch. Keep ordinary non-Live
+Tasks behavior-compatible.
+
+- [ ] **Step 4: Verify green and focused security regression**
+
+Run:
+
+```text
+uv run --project apps/backend pytest apps/backend/tests/test_aiops_task_tool_routing.py apps/backend/tests/test_live_order_pool_contracts.py apps/backend/tests/test_live_diagnostic_adapter.py apps/backend/tests/test_aiops_v4_workflow.py apps/backend/tests/test_aiops_trusted_patterns.py -q
+```
+
+Expected: PASS; the trusted Order Pool pattern still requires four distinct evidence sources.
+
+- [ ] **Step 5: Run static checks and commit**
+
+Run Ruff on the changed source/tests and Pyright on the changed source files. Expected: exit 0 and
+0 errors.
+
+```bash
+git add apps/backend/src/super_ai/aiops/diagnostics.py apps/backend/src/super_ai/api/app.py apps/backend/tests/test_live_diagnostic_adapter.py apps/backend/tests/test_aiops_v4_workflow.py
+git commit -m "feat: scope automatic alert tools"
+```
+
+### Task 16: Real Single-Agent Closure and Resume Acceptance
+
+**Files:**
+- Modify only if evidence changes the runbook: `docs/runbooks/live-eval.md`
+- Generated, not committed: `var/` and existing PostgreSQL evaluation rows.
+
+- [ ] **Step 1: Confirm infrastructure and backend health**
+
+Check `http://127.0.0.1:8000/health`, Order API `/metrics`, Prometheus, Alertmanager, PostgreSQL,
+Redis, CLS MCP, RAG, and model readiness without printing credentials or Topic IDs.
+
+- [ ] **Step 2: Restart only the resident backend with current worktree code**
+
+Use the existing `var/auto-closure/run_backend.py`; do not expose Docker or recovery permissions to
+FastAPI.
+
+- [ ] **Step 3: Execute a fresh automatic closure run**
+
+Run `scripts/run_order_pool_auto_closure.ps1` with a new validated run ID, `-EvidenceSource cls`, and
+Single-Agent. Expected: four distinct tool Evidence IDs, trusted-pattern match, deterministic
+authorization, exactly one restart, six verification checks, automatic resolved lifecycle,
+`verification_status=passed`, and persisted `VALID_PASS`.
+
+- [ ] **Step 4: Execute exact-run Resume**
+
+Resume the same run ID. Expected: reuse the same Incident, Task, Report, recovery intent, and completed
+execution; restart count does not increase.
+
+- [ ] **Step 5: Record safe acceptance evidence**
+
+Record Git SHA, run ID, safe lifecycle IDs, tool names, Evidence IDs, timings, terminal result, and
+resume reuse result. Never record credentials, database DSNs, raw exceptions, control/fault tokens,
+or CLS Topic ID.
