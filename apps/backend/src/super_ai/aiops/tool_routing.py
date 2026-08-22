@@ -41,7 +41,8 @@ def route_task_read_only_tools(
 ) -> TaskReadOnlyToolRoute:
     """Return a restrictive route before resolving any owner MCP client."""
     automatic_order_pool = (
-        input_payload.get("benchmarkMode") == "live"
+        input_payload.get("automaticClosureMode") is True
+        and input_payload.get("benchmarkMode") == "live"
         and input_payload.get("benchmarkScenarioId") == ORDER_POOL_SCENARIO_ID
     )
     if not automatic_order_pool:
@@ -75,6 +76,7 @@ def parse_automatic_live_evidence_scope(
         or "/" in run_id
         or "\\" in run_id
         or scenario_id != ORDER_POOL_SCENARIO_ID
+        or not isinstance(incident_id, str)
         or incident_id != f"{ORDER_POOL_SCENARIO_ID}-{run_id}"
         or not isinstance(from_ms, int)
         or isinstance(from_ms, bool)

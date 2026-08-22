@@ -225,8 +225,10 @@ All recovery and write-capable tools remain outside this client and outside ordi
 They can only be reached after Deterministic Validator, Policy Gate, and the existing Recovery
 Coordinator authorize a code-owned action and target.
 
-An automatic Live Task is identified from the backend-created `benchmarkMode=live` and exact
-`benchmarkScenarioId`, before parsing `liveEvidenceScope`. Therefore a missing or malformed scope
+An automatic Live Task is identified from the backend-created `automaticClosureMode=true`,
+`benchmarkMode=live`, and exact `benchmarkScenarioId`, before parsing `liveEvidenceScope`. The
+explicit marker avoids restricting an ordinary direct Live Benchmark for the same scenario.
+Therefore a missing or malformed scope
 cannot be mistaken for an ordinary Task and cannot fall back to the owner's full MCP client; it gets
 an empty MCP client and fails closed.
 

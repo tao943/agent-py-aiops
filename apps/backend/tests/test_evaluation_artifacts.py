@@ -246,6 +246,47 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
     assert "sentinel" not in repr(artifact.validation_audit)
 
 
+def test_artifact_projects_final_policy_gate_handoff_safely() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(
+                1,
+                "planner",
+                {
+                    "workflowVersion": "evidence-driven-v4",
+                    "graphVersion": "aiops-diagnostic-v3",
+                    "plan": [],
+                },
+            ),
+            _step(
+                2,
+                "policy_gate",
+                {
+                    "status": "deferred",
+                    "authorizationCode": "external_policy_required",
+                    "executionPermitted": False,
+                    "proposalRecorded": False,
+                    "humanApprovalRequired": False,
+                    "summary": "sentinel must not be projected",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.recovery_policy_audit is not None
+    assert artifact.recovery_policy_audit.status == "deferred"
+    assert (
+        artifact.recovery_policy_audit.authorization_code
+        == "external_policy_required"
+    )
+    assert artifact.recovery_policy_audit.execution_permitted is False
+    assert "sentinel" not in repr(artifact.recovery_policy_audit)
+
+
 @pytest.mark.parametrize(
     "model",
     (

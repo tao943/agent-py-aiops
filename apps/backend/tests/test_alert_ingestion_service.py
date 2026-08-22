@@ -221,6 +221,7 @@ def test_service_builds_exact_live_correlation_without_webhook_authority() -> No
         "APY-LIVE-ORDER-POOL-LEAK-001"
     )
     assert write.task_input_payload["benchmarkMode"] == "live"
+    assert write.task_input_payload["automaticClosureMode"] is True
     assert write.task_input_payload["investigationStrategyMode"] == "single"
     assert write.task_input_payload["workflowVersion"] == "evidence-driven-v4"
     assert write.task_input_payload["graphVersion"] == "aiops-diagnostic-v3"

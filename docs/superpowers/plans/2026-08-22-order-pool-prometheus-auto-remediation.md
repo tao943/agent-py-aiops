@@ -764,7 +764,8 @@ Expected: FAIL because the route and scoped client modules do not exist.
 
 `route_task_read_only_tools` parses only the five exact `liveEvidenceScope` fields already persisted
 by alert ingestion. It first recognizes an automatic Live Task from the backend-created
-`benchmarkMode=live` plus exact `benchmarkScenarioId`; such a Task is always scoped even when the
+`automaticClosureMode=true`, `benchmarkMode=live`, and exact `benchmarkScenarioId`; such a Task is
+always scoped even when the
 scope is absent or malformed, so it can never fall back to the owner MCP client. It returns the
 four-tool allowlist only for the exact Order Pool scenario and
 identity relation `incident_id == f"{scenario_id}-{run_id}"`. `ScopedCompositeMcpClient` receives

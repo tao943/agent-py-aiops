@@ -66,6 +66,7 @@ def test_recovery_authority_requires_code_owned_diagnostic_predicates(
         PersistedDiagnosticOutcome(artifact, "sufficient"),
         _observation(),
         driver_owns_identity=True,
+        expected_task_id="diagnostic-1",
     )
     assert not authorization.execution_permitted
     assert authorization.code == expected_code

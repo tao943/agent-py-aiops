@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
+from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
 from super_ai.alert_ingestion.config import load_alert_ingestion_settings
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
 from super_ai.alert_ingestion.redis_runtime import AlertLeaseManager, RedisLeaseClient
@@ -85,6 +87,12 @@ from super_ai.documents import (
     extract_indexable_text,
 )
 from super_ai.error_catalog import ERROR_DEFINITIONS
+from super_ai.evaluation.live.order_pool_leak import (
+    HttpOrderPoolMetricsReader,
+    PostgresOrderPoolObserver,
+    ResidentOrderPoolEvidenceMcpClient,
+)
+from super_ai.evaluation.live.postgres import PostgresConnectionConfig
 from super_ai.events.outbox import JobEventPublisher, OutboxDispatcher
 from super_ai.events.relay import RedisJobEventRelay
 from super_ai.events.subscriber import JobEventSubscriber, JobEventWakeRelay
@@ -2511,6 +2519,9 @@ def _aiops_diagnostic_runner(request: Request) -> AiopsDiagnosticRunner:
             mcp_client_provider=_mcp_connection_service(request),
             cls_region=required_str(cls_log_config, "region"),
             cls_topic_id=required_str(cls_log_config, "topicId"),
+            resident_order_pool_client_factory=(
+                _resident_order_pool_evidence_client
+            ),
             case_persistor=DiagnosisCasePersistor(
                 repositories=_memory_repositories(request),
                 index_task_scheduler=_index_task_scheduler(request),
@@ -2518,6 +2529,26 @@ def _aiops_diagnostic_runner(request: Request) -> AiopsDiagnosticRunner:
         )
         request.app.state.aiops_diagnostic_runner = runner
     return runner
+
+
+def _resident_order_pool_evidence_client(
+    scope: AutomaticLiveEvidenceScope,
+) -> ResidentOrderPoolEvidenceMcpClient:
+    return ResidentOrderPoolEvidenceMcpClient(
+        scope=scope,
+        metrics_reader=HttpOrderPoolMetricsReader(
+            os.getenv("LIVE_ORDER_API_URL", "http://127.0.0.1:18082")
+        ),
+        postgres_observer=PostgresOrderPoolObserver(
+            PostgresConnectionConfig(
+                host=os.getenv("LIVE_POSTGRES_HOST", "127.0.0.1"),
+                port=int(os.getenv("LIVE_POSTGRES_PORT", "5432")),
+                user=os.getenv("LIVE_POSTGRES_USER", "agent_py"),
+                password=os.getenv("LIVE_POSTGRES_PASSWORD", "agent_py_dev"),
+                database="agent_py_live_eval",
+            )
+        ),
+    )
 
 
 def _cached_knowledge_retrieval_tool(

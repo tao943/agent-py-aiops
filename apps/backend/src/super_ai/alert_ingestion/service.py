@@ -145,6 +145,7 @@ def _live_task_input(
         workflow_version="evidence-driven-v4",
         investigation_strategy="single",
     )
+    payload["automaticClosureMode"] = True
     payload["query"] = query
     payload["alert"] = safe_alert
     payload["liveEvidenceScope"] = {

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from super_ai.aiops.diagnostics import task_scoped_source_fingerprint
 from super_ai.aiops.investigation import TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES
 from super_ai.aiops.tool_routing import (
     ORDER_POOL_AUTOMATIC_TOOLS,
@@ -32,6 +33,7 @@ def _scope(run_id: str = "run-a") -> dict[str, object]:
 
 def _automatic_payload(run_id: str = "run-a") -> dict[str, object]:
     return {
+        "automaticClosureMode": True,
         "benchmarkMode": "live",
         "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
         "liveEvidenceScope": _scope(run_id),
@@ -51,6 +53,7 @@ def test_order_pool_task_routes_exact_read_only_tools() -> None:
     "payload",
     [
         {
+            "automaticClosureMode": True,
             "benchmarkMode": "live",
             "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
         },
@@ -87,6 +90,18 @@ def test_ordinary_task_remains_unscoped() -> None:
     assert not route.scoped
     assert route.allowed_tools is None
     assert route.scope is None
+
+
+def test_direct_live_benchmark_without_automatic_marker_remains_unscoped() -> None:
+    route = route_task_read_only_tools(
+        {
+            "benchmarkMode": "live",
+            "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+        }
+    )
+
+    assert not route.scoped
+    assert route.allowed_tools is None
 
 
 class FakeRuntimeMcpClient:
@@ -159,3 +174,17 @@ async def test_scoped_composite_rejects_wrong_server_and_duplicate_routes() -> N
     )
     with pytest.raises(McpClientError, match="Duplicate"):
         await duplicate.discover_tools()
+
+
+def test_source_fingerprint_is_unique_by_task_and_tool() -> None:
+    pool = task_scoped_source_fingerprint(
+        "task-a", "InspectOrderPoolState", {}
+    )
+    sessions = task_scoped_source_fingerprint(
+        "task-a", "InspectOrderDatabaseSessions", {}
+    )
+    other_task = task_scoped_source_fingerprint(
+        "task-b", "InspectOrderPoolState", {}
+    )
+
+    assert len({pool, sessions, other_task}) == 3

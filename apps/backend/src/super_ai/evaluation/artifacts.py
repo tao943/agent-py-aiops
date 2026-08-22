@@ -162,6 +162,15 @@ class ValidationAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryPolicyAudit:
+    status: str | None
+    authorization_code: str | None
+    execution_permitted: bool | None
+    proposal_recorded: bool | None
+    human_approval_required: bool | None
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactHypothesisAssessment:
     id: str
     disposition: Disposition
@@ -205,6 +214,7 @@ class RunArtifact:
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
     validation_audit: ValidationAudit | None = None
+    recovery_policy_audit: RecoveryPolicyAudit | None = None
     workflow_version: str | None = None
     graph_version: str | None = None
     hypothesis_assessments: tuple[ArtifactHypothesisAssessment, ...] = ()
@@ -268,6 +278,7 @@ def build_run_artifact(
         safety_events=(),
         diagnostic_task_id=task.id,
         validation_audit=_validation_audit_from_steps(ordered_steps),
+        recovery_policy_audit=_recovery_policy_audit_from_steps(ordered_steps),
         workflow_version=workflow_version,
         graph_version=graph_version,
         hypothesis_assessments=hypothesis_assessments,
@@ -855,6 +866,42 @@ def _validation_audit_from_steps(
     )
 
 
+_RECOVERY_POLICY_STATUSES = frozenset({"allowed", "denied", "deferred"})
+_RECOVERY_POLICY_CODES = frozenset(
+    {
+        "no_grounded_action",
+        "external_policy_required",
+        "manual_review_required",
+        "proposal_tool_not_allowed",
+        "human_approval_required",
+        "proposal_schema_invalid",
+        "proposal_record_failed",
+        "proposal_recorded",
+    }
+)
+
+
+def _recovery_policy_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> RecoveryPolicyAudit | None:
+    policy = next(
+        (step for step in reversed(steps) if step.phase == "policy_gate"),
+        None,
+    )
+    if policy is None:
+        return None
+    payload = policy.payload
+    return RecoveryPolicyAudit(
+        status=_allowlisted_text(payload.get("status"), _RECOVERY_POLICY_STATUSES),
+        authorization_code=_allowlisted_text(
+            payload.get("authorizationCode"), _RECOVERY_POLICY_CODES
+        ),
+        execution_permitted=_optional_bool(payload.get("executionPermitted")),
+        proposal_recorded=_optional_bool(payload.get("proposalRecorded")),
+        human_approval_required=_optional_bool(
+            payload.get("humanApprovalRequired")
+        ),
+    )
 def _allowlisted_text(value: object, allowed: frozenset[str]) -> str | None:
     return value if isinstance(value, str) and value in allowed else None
 

@@ -117,6 +117,10 @@ from super_ai.aiops.specialists import (
     derive_specialist_terminal_status,
     specialist_result_legacy_checksum,
 )
+from super_ai.aiops.tool_routing import (
+    AutomaticLiveEvidenceScope,
+    route_task_read_only_tools,
+)
 from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
 from super_ai.aiops.validator_routing import (
     RiskTier,
@@ -126,7 +130,8 @@ from super_ai.aiops.validator_routing import (
 from super_ai.error_catalog import ERROR_DEFINITIONS
 from super_ai.llm import ChatModel, LlmProvider
 from super_ai.llm.config import StructuredOutputMethod
-from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp.cached_client import McpClient, RuntimeMcpClient
+from super_ai.mcp.scoped_client import ScopedCompositeMcpClient, ScopedMcpSource
 from super_ai.mcp.tool_arguments import (
     ToolArgumentContract,
     ToolArgumentContractError,
@@ -160,6 +165,9 @@ class AiopsDiagnosticState(TypedDict, total=False):
     task_id: str
     query: str
     alert: JsonDict
+    automatic_closure_mode: bool
+    benchmark_mode: str
+    benchmark_scenario_id: str
     live_evidence_scope: JsonDict
     task_local_live_scope: bool
     require_trusted_log_scope: bool
@@ -187,6 +195,7 @@ class AiopsDiagnosticState(TypedDict, total=False):
     plan_origin: str
     plan_index: int
     tool_definitions: tuple[McpToolDefinition, ...]
+    proposal_tool_definitions: tuple[McpToolDefinition, ...]
     public_hypotheses: list[JsonDict]
     decision_vocabulary: JsonDict
     hypothesis_states: list[JsonDict]
@@ -1939,6 +1948,10 @@ class AiopsDiagnosticService:
         case_persistor: DiagnosisCasePersistor | None = None,
         investigation_router_policy: InvestigationRouterPolicy | None = None,
         require_trusted_log_scope: bool = False,
+        resident_order_pool_client_factory: Callable[
+            [AutomaticLiveEvidenceScope], McpClient
+        ]
+        | None = None,
     ) -> None:
         self._repositories = repositories
         self._llm_provider = llm_provider
@@ -1950,6 +1963,9 @@ class AiopsDiagnosticService:
         self._cls_region = cls_region
         self._cls_topic_id = cls_topic_id
         self._require_trusted_log_scope = require_trusted_log_scope
+        self._resident_order_pool_client_factory = (
+            resident_order_pool_client_factory
+        )
         self._trusted_tool_arguments = {
             name: dict(arguments)
             for name, arguments in (trusted_tool_arguments or {}).items()
@@ -2083,6 +2099,13 @@ class AiopsDiagnosticService:
             "task_id": task.id,
             "query": task.query,
             "alert": alert,
+            "automatic_closure_mode": (
+                task.input_payload.get("automaticClosureMode") is True
+            ),
+            "benchmark_mode": str(task.input_payload.get("benchmarkMode") or ""),
+            "benchmark_scenario_id": str(
+                task.input_payload.get("benchmarkScenarioId") or ""
+            ),
             "live_evidence_scope": _json_dict(
                 task.input_payload.get("liveEvidenceScope")
             ),
@@ -2194,12 +2217,52 @@ class AiopsDiagnosticService:
             durationMs=elapsed_ms(started_at),
         )
 
-    async def _mcp_client_for(self, owner_user_id: str) -> RuntimeMcpClient:
+    async def _mcp_client_for(
+        self,
+        owner_user_id: str,
+        state: Mapping[str, object] | None = None,
+    ) -> RuntimeMcpClient:
         if self._mcp_client_provider is not None:
-            return await self._mcp_client_provider.client_for_user(owner_user_id=owner_user_id)
-        if self._mcp_client is None:
-            raise McpClientError("MCP client is unavailable.")
-        return self._mcp_client
+            owner_client = await self._mcp_client_provider.client_for_user(
+                owner_user_id=owner_user_id
+            )
+        else:
+            if self._mcp_client is None:
+                raise McpClientError("MCP client is unavailable.")
+            owner_client = self._mcp_client
+        if state is None:
+            return owner_client
+        route = route_task_read_only_tools(
+            {
+                "automaticClosureMode": state.get("automatic_closure_mode"),
+                "benchmarkMode": state.get("benchmark_mode"),
+                "benchmarkScenarioId": state.get("benchmark_scenario_id"),
+                "liveEvidenceScope": state.get("live_evidence_scope"),
+            }
+        )
+        if not route.scoped:
+            return owner_client
+        sources: list[ScopedMcpSource] = []
+        if route.allowed_tools and "SearchLog" in route.allowed_tools:
+            sources.append(ScopedMcpSource(owner_client, frozenset({"SearchLog"})))
+        runtime_tools = frozenset(
+            (route.allowed_tools or frozenset()) - {"SearchLog"}
+        )
+        if (
+            route.scope is not None
+            and runtime_tools
+            and self._resident_order_pool_client_factory is not None
+        ):
+            sources.append(
+                ScopedMcpSource(
+                    self._resident_order_pool_client_factory(route.scope),
+                    runtime_tools,
+                )
+            )
+        return ScopedCompositeMcpClient(
+            tuple(sources),
+            trusted_tool_capabilities=TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
+        )
 
     def _model_runtime(self, state: AiopsDiagnosticState) -> _ModelRuntime:
         return _ModelRuntime(
@@ -2760,7 +2823,7 @@ class AiopsDiagnosticService:
         citation_payloads = _json_list(knowledge_context.get("citations"))
 
         try:
-            mcp_client = await self._mcp_client_for(owner_user_id)
+            mcp_client = await self._mcp_client_for(owner_user_id, state)
             discovered_tools = constrain_tool_definitions(
                 await mcp_client.discover_tools(),
                 self._tool_argument_contracts,
@@ -2939,7 +3002,10 @@ class AiopsDiagnosticService:
             "no_sop_matched": no_sop_matched,
             "plan": plan,
             "plan_origin": plan_origin,
-            "tool_definitions": tuple(discovered_tools),
+            "tool_definitions": tuple(diagnostic_tools),
+            "proposal_tool_definitions": tuple(
+                item for item in discovered_tools if item.name in self._tool_policies
+            ),
             "hypothesis_states": cast(
                 list[JsonDict], state.get("hypothesis_states") or []
             ),
@@ -3937,7 +4003,7 @@ class AiopsDiagnosticService:
                     ],
                 }
             elif tool_name:
-                mcp_client = await self._mcp_client_for(owner_user_id)
+                mcp_client = await self._mcp_client_for(owner_user_id, state)
                 raw_output = await mcp_client.call_tool(tool_name, arguments)
             else:
                 raise ValueError("Diagnostic plan did not specify a tool.")
@@ -4135,7 +4201,11 @@ class AiopsDiagnosticService:
             payload={
                 "arguments": arguments,
                 "output": _safe_value(output),
-                "sourceFingerprint": tool_step_fingerprint(tool_name, arguments),
+                "sourceFingerprint": task_scoped_source_fingerprint(
+                    task_id,
+                    tool_name,
+                    arguments,
+                ),
             },
         )
         evidence["evidenceId"] = evidence_record.id
@@ -5996,7 +6066,7 @@ class AiopsDiagnosticService:
         candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
         proposal_definitions = tuple(
             definition
-            for definition in (state.get("tool_definitions") or ())
+            for definition in (state.get("proposal_tool_definitions") or ())
             if self._tool_policies.get(definition.name) == "proposal_only"
         )
         proposal_tools = {definition.name for definition in proposal_definitions}
@@ -6013,7 +6083,9 @@ class AiopsDiagnosticService:
             plan = _fallback_recovery_plan(
                 candidate,
                 proposal_tools=proposal_tools,
-                force_manual_review=True,
+                force_manual_review=(
+                    state.get("automatic_closure_mode") is not True
+                ),
             )
         else:
             prompt = (
@@ -6053,6 +6125,11 @@ class AiopsDiagnosticService:
                     candidate,
                     proposal_tools=proposal_tools,
                 )
+        if (
+            state.get("automatic_closure_mode") is True
+            and plan.mode == "external_policy_required"
+        ):
+            plan = replace(plan, human_approval_required=False)
         payload = _recovery_plan_payload(plan)
         if model_runtime is not None:
             payload["modelCallCount"] = model_runtime.budget.used
@@ -6167,7 +6244,7 @@ class AiopsDiagnosticService:
                 summary="A proposal must require human approval before any later action.",
             )
 
-        definitions = tuple(state.get("tool_definitions") or ())
+        definitions = tuple(state.get("proposal_tool_definitions") or ())
         proposal_step: JsonDict = {
             "tool": tool_name,
             "arguments": dict(plan.arguments),
@@ -6200,7 +6277,7 @@ class AiopsDiagnosticService:
                 tool_name=tool_name,
                 arguments=dict(plan.arguments),
             )
-            mcp_client = await self._mcp_client_for(owner_user_id)
+            mcp_client = await self._mcp_client_for(owner_user_id, state)
             output = await mcp_client.call_tool(tool_name, dict(plan.arguments))
             await self._finalize_audit(
                 owner_user_id=owner_user_id,
@@ -7483,6 +7560,18 @@ def _model_call_audit_payload(
 def _stable_public_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256(":".join(parts).encode()).hexdigest()
     return f"{prefix}_{digest[:48]}"
+
+
+def task_scoped_source_fingerprint(
+    task_id: str,
+    tool_name: str,
+    arguments: Mapping[str, object],
+) -> str:
+    """Identify a logical evidence source without allowing cross-task reuse."""
+    logical_call = tool_step_fingerprint(tool_name, arguments)
+    return hashlib.sha256(
+        f"{task_id}\x1f{logical_call}".encode()
+    ).hexdigest()
 
 
 def _safe_model_call_error_code(exc: Exception) -> str:

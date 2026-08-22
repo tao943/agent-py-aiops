@@ -307,13 +307,19 @@ def authorize_order_pool_recovery(
     observation: LiveFaultObservation,
     *,
     driver_owns_identity: bool,
+    expected_task_id: str,
 ) -> RecoveryAuthorization:
     artifact = outcome.artifact
     decision = artifact.decision
     checks = {check.name for check in observation.checks if check.passed}
+    policy = artifact.recovery_policy_audit
     predicates = (
         (artifact.scenario_id == SCENARIO_ID, "scenario_mismatch"),
         (observation.scenario_id == SCENARIO_ID, "observation_scenario_mismatch"),
+        (
+            artifact.diagnostic_task_id == expected_task_id,
+            "diagnostic_task_mismatch",
+        ),
         (decision is not None, "decision_missing"),
         (decision is not None and decision.component == "order-api", "component_mismatch"),
         (decision is not None and decision.mechanism == _MECHANISM, "mechanism_mismatch"),
@@ -323,6 +329,16 @@ def authorize_order_pool_recovery(
             artifact.validation_audit is not None
             and artifact.validation_audit.origin in _VALIDATION_ORIGINS,
             "deterministic_validation_failed",
+        ),
+        (policy is not None, "policy_gate_missing"),
+        (
+            policy is not None
+            and policy.status == "deferred"
+            and policy.authorization_code == "external_policy_required"
+            and policy.execution_permitted is False
+            and policy.proposal_recorded is False
+            and policy.human_approval_required is False,
+            "policy_gate_handoff_invalid",
         ),
         (artifact.completed and artifact.report_produced, "diagnostic_incomplete"),
         (driver_owns_identity, "driver_identity_missing"),
@@ -492,6 +508,7 @@ class OrderPoolAutoClosureOrchestrator:
                 outcome,
                 observation,
                 driver_owns_identity=self._driver.recovery_eligible(identity),
+                expected_task_id=lifecycle.diagnostic_task_id,
             )
             if not authorization.execution_permitted:
                 return await self._finish(

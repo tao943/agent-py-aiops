@@ -6,19 +6,24 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from super_ai.mcp.cached_client import RuntimeMcpClient
+from super_ai.mcp.cached_client import McpClient
 from super_ai.mcp_client import McpClientError, McpToolDefinition
 
 
 class TrustedToolCapabilityLike(Protocol):
-    tool_name: str
-    read_only: bool
-    allowed_server_names: frozenset[str]
+    @property
+    def tool_name(self) -> str: ...
+
+    @property
+    def read_only(self) -> bool: ...
+
+    @property
+    def allowed_server_names(self) -> frozenset[str]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class ScopedMcpSource:
-    client: RuntimeMcpClient
+    client: McpClient
     allowed_tools: frozenset[str]
 
 
@@ -56,7 +61,7 @@ class ScopedCompositeMcpClient:
         return tuple(definitions)
 
     async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
-        matches: list[RuntimeMcpClient] = []
+        matches: list[McpClient] = []
         for source in self._sources:
             if name not in source.allowed_tools:
                 continue

@@ -8,7 +8,11 @@ import pytest
 from super_ai.aiops import RootCauseDecision
 from super_ai.aiops.execution import ExecutionResult, UnsafeExecutionReplay
 from super_ai.alert_ingestion.repositories import LiveAlertLifecycle
-from super_ai.evaluation.artifacts import RunArtifact, ValidationAudit
+from super_ai.evaluation.artifacts import (
+    RecoveryPolicyAudit,
+    RunArtifact,
+    ValidationAudit,
+)
 from super_ai.evaluation.live.auto_closure import (
     AutoClosureBudgets,
     OrderPoolAutoClosureOrchestrator,
@@ -76,6 +80,13 @@ def _artifact() -> RunArtifact:
             error_codes=(),
             error_phase=None,
             attempts=0,
+        ),
+        recovery_policy_audit=RecoveryPolicyAudit(
+            status="deferred",
+            authorization_code="external_policy_required",
+            execution_permitted=False,
+            proposal_recorded=False,
+            human_approval_required=False,
         ),
         workflow_version="evidence-driven-v4",
         graph_version="aiops-diagnostic-v3",
@@ -409,6 +420,7 @@ def test_authorization_requires_all_deterministic_predicates() -> None:
         PersistedDiagnosticOutcome(_artifact(), "sufficient"),
         _observation(),
         driver_owns_identity=True,
+        expected_task_id="diagnostic-1",
     )
     assert authorization.execution_permitted
     assert authorization.target == "live-eval-order-api"
@@ -417,9 +429,63 @@ def test_authorization_requires_all_deterministic_predicates() -> None:
         PersistedDiagnosticOutcome(_artifact(), "insufficient"),
         _observation(),
         driver_owns_identity=True,
+        expected_task_id="diagnostic-1",
     )
     assert not denied.execution_permitted
     assert denied.code == "evidence_insufficient"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "expected_code"),
+    (
+        (replace(_artifact(), recovery_policy_audit=None), "policy_gate_missing"),
+        (
+            replace(
+                _artifact(),
+                recovery_policy_audit=replace(
+                    _artifact().recovery_policy_audit,
+                    authorization_code="manual_review_required",
+                ),
+            ),
+            "policy_gate_handoff_invalid",
+        ),
+        (
+            replace(
+                _artifact(),
+                recovery_policy_audit=replace(
+                    _artifact().recovery_policy_audit,
+                    execution_permitted=True,
+                ),
+            ),
+            "policy_gate_handoff_invalid",
+        ),
+    ),
+)
+def test_authorization_requires_persisted_external_policy_handoff(
+    artifact: RunArtifact,
+    expected_code: str,
+) -> None:
+    authorization = authorize_order_pool_recovery(
+        PersistedDiagnosticOutcome(artifact, "sufficient"),
+        _observation(),
+        driver_owns_identity=True,
+        expected_task_id="diagnostic-1",
+    )
+
+    assert not authorization.execution_permitted
+    assert authorization.code == expected_code
+
+
+def test_authorization_rejects_cross_task_artifact() -> None:
+    authorization = authorize_order_pool_recovery(
+        PersistedDiagnosticOutcome(_artifact(), "sufficient"),
+        _observation(),
+        driver_owns_identity=True,
+        expected_task_id="different-task",
+    )
+
+    assert not authorization.execution_permitted
+    assert authorization.code == "diagnostic_task_mismatch"
 
 
 @pytest.mark.asyncio

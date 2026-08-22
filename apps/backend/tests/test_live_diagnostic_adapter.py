@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -827,6 +828,147 @@ def test_diagnostic_service_keeps_task_scopes_out_of_singleton_state() -> None:
 
     assert first != second
     assert service._trusted_tool_arguments == {}  # pyright: ignore[reportPrivateUsage]
+
+
+class _ScopedClient:
+    def __init__(self, definitions: Sequence[McpToolDefinition]) -> None:
+        self.definitions = tuple(definitions)
+        self.calls: list[str] = []
+
+    async def discover_tools(self) -> Sequence[McpToolDefinition]:
+        return self.definitions
+
+    async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        del arguments
+        self.calls.append(name)
+        return {"tool": name}
+
+    async def get_langchain_tools(self) -> list[Any]:
+        return []
+
+
+def _automatic_state(run_id: str, *, include_scope: bool = True) -> dict[str, object]:
+    state: dict[str, object] = {
+        "automatic_closure_mode": True,
+        "benchmark_mode": "live",
+        "benchmark_scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+    }
+    if include_scope:
+        state["live_evidence_scope"] = _task_scope(run_id)["liveEvidenceScope"]
+    return state
+
+
+def _runtime_definitions() -> tuple[McpToolDefinition, ...]:
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    return tuple(
+        McpToolDefinition(name, name, schema, "order-pool-live")
+        for name in (
+            "InspectOrderPoolState",
+            "InspectOrderDatabaseSessions",
+            "VerifyOrderDatabaseReachability",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_composes_exact_task_local_read_only_tools() -> None:
+    owner = _ScopedClient(
+        (
+            _official_cls_search_definition(),
+            McpToolDefinition("RestartService", "write", {}, "unsafe"),
+        )
+    )
+    created_runs: list[str] = []
+
+    def resident_factory(scope: Any) -> _ScopedClient:
+        created_runs.append(scope.run_id)
+        return _ScopedClient(_runtime_definitions())
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=resident_factory,
+    )
+
+    client = await service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+        "owner",
+        _automatic_state("closure-001"),
+    )
+
+    assert {item.name for item in await client.discover_tools()} == {
+        "SearchLog",
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    with pytest.raises(McpClientError):
+        await client.call_tool("RestartService", {})
+    assert created_runs == ["closure-001"]
+
+
+@pytest.mark.asyncio
+async def test_service_missing_automatic_scope_gets_empty_client() -> None:
+    owner = _ScopedClient((_official_cls_search_definition(),))
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=lambda scope: _ScopedClient(
+            _runtime_definitions()
+        ),
+    )
+
+    client = await service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+        "owner",
+        _automatic_state("closure-001", include_scope=False),
+    )
+
+    assert await client.discover_tools() == ()
+    with pytest.raises(McpClientError):
+        await client.call_tool("SearchLog", {})
+
+
+@pytest.mark.asyncio
+async def test_service_concurrent_task_clients_never_share_run_scope() -> None:
+    owner = _ScopedClient((_official_cls_search_definition(),))
+    runtime_clients: dict[str, _ScopedClient] = {}
+
+    def resident_factory(scope: Any) -> _ScopedClient:
+        client = _ScopedClient(_runtime_definitions())
+        runtime_clients[scope.run_id] = client
+        return client
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=resident_factory,
+    )
+
+    first, second = await asyncio.gather(
+        service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+            "owner", _automatic_state("closure-001")
+        ),
+        service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+            "owner", _automatic_state("closure-002")
+        ),
+    )
+    await first.call_tool("InspectOrderPoolState", {})
+    await second.call_tool("InspectOrderPoolState", {})
+
+    assert set(runtime_clients) == {"closure-001", "closure-002"}
+    assert runtime_clients["closure-001"].calls == ["InspectOrderPoolState"]
+    assert runtime_clients["closure-002"].calls == ["InspectOrderPoolState"]
 
 
 def test_official_cls_output_is_canonicalized_before_fact_extraction() -> None:
