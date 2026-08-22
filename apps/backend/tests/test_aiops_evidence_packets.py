@@ -444,6 +444,22 @@ def _specialist_result(
     return SpecialistResult.create(
         role=cast(Any, role),
         terminal_status=cast(Any, status),
+        evidence_status="complete" if evidence_ids else "none",
+        analysis_status=cast(
+            Any,
+            "complete"
+            if status == "completed"
+            else "timeout"
+            if status == "timeout"
+            else "failed",
+        ),
+        analysis_error_code=(
+            "specialist_hard_deadline_expired" if status == "timeout" else None
+        ),
+        analysis_attempt_count=1 if evidence_ids else 0,
+        soft_deadline_exceeded=False,
+        hard_deadline_exceeded=status == "timeout",
+        expected_tool_count=1 if evidence_ids else 0,
         tested_hypotheses=("pool_lifecycle_failure",),
         evidence_ids=evidence_ids,
         fact_candidates=facts,

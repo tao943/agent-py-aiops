@@ -3108,6 +3108,13 @@ class AiopsDiagnosticService:
             result = SpecialistResult.create(
                 role=assignment.role,
                 terminal_status="timeout",
+                evidence_status="none",
+                analysis_status="timeout",
+                analysis_error_code="specialist_soft_deadline_expired",
+                analysis_attempt_count=0,
+                soft_deadline_exceeded=True,
+                hard_deadline_exceeded=False,
+                expected_tool_count=0,
                 tested_hypotheses=assignment.hypotheses_to_test,
                 evidence_ids=(),
                 fact_candidates=(),
@@ -6574,6 +6581,13 @@ def _specialist_result_payload(result: SpecialistResult) -> JsonDict:
     return {
         "role": result.role,
         "terminalStatus": result.terminal_status,
+        "evidenceStatus": result.evidence_status,
+        "analysisStatus": result.analysis_status,
+        "analysisErrorCode": result.analysis_error_code,
+        "analysisAttemptCount": result.analysis_attempt_count,
+        "softDeadlineExceeded": result.soft_deadline_exceeded,
+        "hardDeadlineExceeded": result.hard_deadline_exceeded,
+        "expectedToolCount": result.expected_tool_count,
         "testedHypotheses": list(result.tested_hypotheses),
         "evidenceIds": list(result.evidence_ids),
         "factCandidates": [
@@ -6656,6 +6670,15 @@ def _specialist_result_from_payload(
     return SpecialistResult(
         role=cast(Any, payload.get("role")),
         terminal_status=cast(Any, payload.get("terminalStatus")),
+        evidence_status=cast(Any, payload.get("evidenceStatus")),
+        analysis_status=cast(Any, payload.get("analysisStatus")),
+        analysis_error_code=cast(Any, payload.get("analysisErrorCode")),
+        analysis_attempt_count=int(
+            cast(Any, payload.get("analysisAttemptCount") or 0)
+        ),
+        soft_deadline_exceeded=payload.get("softDeadlineExceeded") is True,
+        hard_deadline_exceeded=payload.get("hardDeadlineExceeded") is True,
+        expected_tool_count=int(cast(Any, payload.get("expectedToolCount") or 0)),
         tested_hypotheses=tuple(
             str(value)
             for value in cast(list[object], payload.get("testedHypotheses") or [])
@@ -6689,6 +6712,13 @@ def _failed_specialist_result(
     return SpecialistResult.create(
         role=assignment.role,
         terminal_status="failed",
+        evidence_status="none",
+        analysis_status="failed",
+        analysis_error_code=None,
+        analysis_attempt_count=0,
+        soft_deadline_exceeded=False,
+        hard_deadline_exceeded=False,
+        expected_tool_count=0,
         tested_hypotheses=assignment.hypotheses_to_test,
         evidence_ids=(),
         fact_candidates=(),

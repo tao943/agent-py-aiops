@@ -33,6 +33,23 @@ SpecialistRole = Literal["runtime", "log"]
 SpecialistTerminalStatus = Literal[
     "completed", "inconclusive", "failed", "timeout", "cancelled"
 ]
+SpecialistEvidenceStatus = Literal["complete", "partial", "none"]
+SpecialistAnalysisStatus = Literal[
+    "complete", "degraded", "timeout", "failed", "skipped"
+]
+SpecialistAnalysisErrorCode = Literal[
+    "parse_error",
+    "schema_validation_failed",
+    "scope_rejected",
+    "provider_4xx",
+    "provider_5xx",
+    "provider_timeout",
+    "retry_exhausted",
+    "retry_skipped_insufficient_deadline",
+    "specialist_soft_deadline_expired",
+    "specialist_hard_deadline_expired",
+    "specialist_model_budget_exhausted",
+]
 SpecialistDeadlineState = Literal["active", "soft_expired", "hard_expired"]
 PublicSignalDisposition = Literal[
     "supported", "refuted", "causally_inactive", "unresolved"
@@ -41,6 +58,25 @@ PublicSignalDisposition = Literal[
 _ROLES = frozenset({"runtime", "log"})
 _TERMINAL_STATUSES = frozenset(
     {"completed", "inconclusive", "failed", "timeout", "cancelled"}
+)
+_EVIDENCE_STATUSES = frozenset({"complete", "partial", "none"})
+_ANALYSIS_STATUSES = frozenset(
+    {"complete", "degraded", "timeout", "failed", "skipped"}
+)
+_ANALYSIS_ERROR_CODES = frozenset(
+    {
+        "parse_error",
+        "schema_validation_failed",
+        "scope_rejected",
+        "provider_4xx",
+        "provider_5xx",
+        "provider_timeout",
+        "retry_exhausted",
+        "retry_skipped_insufficient_deadline",
+        "specialist_soft_deadline_expired",
+        "specialist_hard_deadline_expired",
+        "specialist_model_budget_exhausted",
+    }
 )
 _DEADLINE_STATES = frozenset({"active", "soft_expired", "hard_expired"})
 _CAUSAL_ROLES = frozenset({"trigger", "mechanism", "impact"})
@@ -373,6 +409,13 @@ class SpecialistState:
 class SpecialistResult:
     role: SpecialistRole
     terminal_status: SpecialistTerminalStatus
+    evidence_status: SpecialistEvidenceStatus
+    analysis_status: SpecialistAnalysisStatus
+    analysis_error_code: SpecialistAnalysisErrorCode | None
+    analysis_attempt_count: int
+    soft_deadline_exceeded: bool
+    hard_deadline_exceeded: bool
+    expected_tool_count: int
     tested_hypotheses: tuple[str, ...]
     evidence_ids: tuple[str, ...]
     fact_candidates: tuple[EvidenceClaim, ...]
@@ -389,6 +432,13 @@ class SpecialistResult:
         *,
         role: SpecialistRole,
         terminal_status: SpecialistTerminalStatus,
+        evidence_status: SpecialistEvidenceStatus,
+        analysis_status: SpecialistAnalysisStatus,
+        analysis_error_code: SpecialistAnalysisErrorCode | None,
+        analysis_attempt_count: int,
+        soft_deadline_exceeded: bool,
+        hard_deadline_exceeded: bool,
+        expected_tool_count: int,
         tested_hypotheses: tuple[str, ...],
         evidence_ids: tuple[str, ...],
         fact_candidates: tuple[EvidenceClaim, ...],
@@ -401,6 +451,13 @@ class SpecialistResult:
         return cls(
             role=role,
             terminal_status=terminal_status,
+            evidence_status=evidence_status,
+            analysis_status=analysis_status,
+            analysis_error_code=analysis_error_code,
+            analysis_attempt_count=analysis_attempt_count,
+            soft_deadline_exceeded=soft_deadline_exceeded,
+            hard_deadline_exceeded=hard_deadline_exceeded,
+            expected_tool_count=expected_tool_count,
             tested_hypotheses=tested_hypotheses,
             evidence_ids=evidence_ids,
             fact_candidates=fact_candidates,
@@ -416,6 +473,29 @@ class SpecialistResult:
             raise ValueError("Specialist result role is invalid.")
         if self.terminal_status not in _TERMINAL_STATUSES:
             raise ValueError("Specialist result terminal status is invalid.")
+        if self.evidence_status not in _EVIDENCE_STATUSES:
+            raise ValueError("Specialist result evidence status is invalid.")
+        if self.analysis_status not in _ANALYSIS_STATUSES:
+            raise ValueError("Specialist result analysis status is invalid.")
+        if (
+            self.analysis_error_code is not None
+            and self.analysis_error_code not in _ANALYSIS_ERROR_CODES
+        ):
+            raise ValueError("Specialist result analysis error code is invalid.")
+        if self.analysis_status == "complete" and self.analysis_error_code is not None:
+            raise ValueError("Complete Specialist analysis cannot contain an error code.")
+        if not 0 <= self.analysis_attempt_count <= 2:
+            raise ValueError("Specialist analysis attempt count is invalid.")
+        if not 0 <= self.expected_tool_count <= 3:
+            raise ValueError("Specialist expected tool count is invalid.")
+        if len(self.completed_steps) > self.expected_tool_count:
+            raise ValueError("Specialist completed tool count exceeds its plan.")
+        derived_terminal = derive_specialist_terminal_status(
+            self.evidence_status,
+            self.analysis_status,
+        )
+        if self.terminal_status != derived_terminal:
+            raise ValueError("Specialist result terminal status conflicts with health.")
         _require_public_text(
             *self.tested_hypotheses,
             *self.evidence_ids,
@@ -445,6 +525,30 @@ class SpecialistResult:
         if self.result_checksum and _SHA256_PATTERN.fullmatch(self.result_checksum) is None:
             raise ValueError("Specialist result checksum is invalid.")
         object.__setattr__(self, "result_checksum", expected)
+
+    @property
+    def completed_tool_count(self) -> int:
+        return len(self.completed_steps)
+
+    @property
+    def follow_up_question_count(self) -> int:
+        return len(self.unresolved_questions)
+
+
+def derive_specialist_terminal_status(
+    evidence_status: SpecialistEvidenceStatus,
+    analysis_status: SpecialistAnalysisStatus,
+) -> SpecialistTerminalStatus:
+    """Derive the legacy terminal status without conflating evidence and analysis."""
+    if evidence_status not in _EVIDENCE_STATUSES:
+        raise ValueError("Specialist evidence status is invalid.")
+    if analysis_status not in _ANALYSIS_STATUSES:
+        raise ValueError("Specialist analysis status is invalid.")
+    if evidence_status == "complete" and analysis_status == "complete":
+        return "completed"
+    if evidence_status == "none":
+        return "timeout" if analysis_status == "timeout" else "failed"
+    return "inconclusive"
 
 
 def specialist_execution_key(
@@ -476,8 +580,27 @@ def specialist_result_checksum(result: SpecialistResult) -> str:
     return _calculate_result_checksum(result)
 
 
+def specialist_result_legacy_checksum(result: SpecialistResult) -> str:
+    """Recompute the pre-health-contract checksum for checkpoint migration."""
+    return _sha256_json(_legacy_result_payload(result))
+
+
 def _calculate_result_checksum(result: SpecialistResult) -> str:
     payload = {
+        **_legacy_result_payload(result),
+        "analysisAttemptCount": result.analysis_attempt_count,
+        "analysisErrorCode": result.analysis_error_code,
+        "analysisStatus": result.analysis_status,
+        "evidenceStatus": result.evidence_status,
+        "expectedToolCount": result.expected_tool_count,
+        "hardDeadlineExceeded": result.hard_deadline_exceeded,
+        "softDeadlineExceeded": result.soft_deadline_exceeded,
+    }
+    return _sha256_json(payload)
+
+
+def _legacy_result_payload(result: SpecialistResult) -> dict[str, object]:
+    return {
         "completedSteps": list(result.completed_steps),
         "durationMs": result.duration_ms,
         "evidenceIds": list(result.evidence_ids),
@@ -491,7 +614,6 @@ def _calculate_result_checksum(result: SpecialistResult) -> str:
         "testedHypotheses": list(result.tested_hypotheses),
         "unresolvedQuestions": list(result.unresolved_questions),
     }
-    return _sha256_json(payload)
 
 
 def _claim_payload(claim: EvidenceClaim) -> dict[str, object]:

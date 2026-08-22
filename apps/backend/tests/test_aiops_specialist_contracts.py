@@ -19,8 +19,10 @@ from super_ai.aiops.specialists import (
     SpecialistResult,
     SpecialistRole,
     SpecialistState,
+    derive_specialist_terminal_status,
     specialist_execution_key,
     specialist_result_checksum,
+    specialist_result_legacy_checksum,
 )
 
 
@@ -130,6 +132,13 @@ def _result(**overrides: object) -> SpecialistResult:
     values: dict[str, object] = {
         "role": "runtime",
         "terminal_status": "completed",
+        "evidence_status": "complete",
+        "analysis_status": "complete",
+        "analysis_error_code": None,
+        "analysis_attempt_count": 1,
+        "soft_deadline_exceeded": False,
+        "hard_deadline_exceeded": False,
+        "expected_tool_count": 1,
         "tested_hypotheses": ("order_connection_lifecycle_failure",),
         "evidence_ids": ("ev-pool",),
         "fact_candidates": (_claim(),),
@@ -141,6 +150,57 @@ def _result(**overrides: object) -> SpecialistResult:
     }
     values.update(overrides)
     return SpecialistResult.create(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("evidence_status", "analysis_status", "expected"),
+    (
+        ("complete", "complete", "completed"),
+        ("complete", "degraded", "inconclusive"),
+        ("complete", "timeout", "inconclusive"),
+        ("partial", "complete", "inconclusive"),
+        ("none", "timeout", "timeout"),
+        ("none", "failed", "failed"),
+        ("none", "skipped", "failed"),
+    ),
+)
+def test_specialist_health_derives_legacy_terminal_status(
+    evidence_status: str,
+    analysis_status: str,
+    expected: str,
+) -> None:
+    assert derive_specialist_terminal_status(  # type: ignore[arg-type]
+        evidence_status,
+        analysis_status,
+    ) == expected
+
+
+def test_follow_up_questions_do_not_degrade_complete_analysis() -> None:
+    result = _result(
+        unresolved_questions=("Which deploy first changed checkout latency?",),
+    )
+
+    assert result.terminal_status == "completed"
+    assert result.follow_up_question_count == 1
+    assert result.completed_tool_count == 1
+
+
+def test_specialist_result_rejects_inconsistent_legacy_terminal_status() -> None:
+    with pytest.raises(ValueError, match="terminal"):
+        _result(terminal_status="inconclusive")
+
+
+def test_specialist_result_checksum_covers_health_and_retains_v1_algorithm() -> None:
+    result = _result()
+
+    assert specialist_result_legacy_checksum(result) != result.result_checksum
+    changed = replace(
+        result,
+        analysis_status="degraded",
+        terminal_status="inconclusive",
+        result_checksum="",
+    )
+    assert changed.result_checksum != result.result_checksum
 
 
 def test_context_deep_freezes_all_shared_memory() -> None:
