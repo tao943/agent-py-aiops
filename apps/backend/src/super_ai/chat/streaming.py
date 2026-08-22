@@ -32,7 +32,8 @@ from super_ai.chat.configuration import (
     SelectedChatSkill,
     build_chat_system_prompt,
 )
-from super_ai.chat.execution_policy import ChatExecutionBudget
+from super_ai.chat.execution import ChatTurnExecutionRequest, ChatTurnExecutionService
+from super_ai.chat.execution_policy import ChatExecutionBudget, policy_for
 from super_ai.chat.intent import ChatIntentRouter, ChatRoute
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
 from super_ai.chat.tool_policy import allowed_tools_for
@@ -205,8 +206,32 @@ class ChatAgentReference:
     knowledge_type: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ChatAgentExecutionModeSelected:
+    mode: str
+    required_capability: str
+    postcondition: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChatAgentStructuredResult:
+    result: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatAgentExplanationDegraded:
+    code: str
+    retryable: bool
+
+
 ChatAgentEvent = (
-    ChatAgentContentDelta | ChatAgentReasoningDelta | ChatAgentToolCall | ChatAgentReference
+    ChatAgentContentDelta
+    | ChatAgentReasoningDelta
+    | ChatAgentToolCall
+    | ChatAgentReference
+    | ChatAgentExecutionModeSelected
+    | ChatAgentStructuredResult
+    | ChatAgentExplanationDegraded
 )
 
 
@@ -238,6 +263,59 @@ class ChatAgentRunner(Protocol):
     def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
         """Stream Agent events for a chat request."""
         ...
+
+
+class PolicyDispatchingChatAgentRunner:
+    """Bypass ReAct for deterministic Direct Read policies."""
+
+    def __init__(
+        self,
+        *,
+        fallback: ChatAgentRunner,
+        direct_execution: ChatTurnExecutionService,
+    ) -> None:
+        self._fallback = fallback
+        self._direct_execution = direct_execution
+
+    async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
+        if policy_for(request.route).mode != "direct_read":
+            async for event in self._fallback.stream(request):
+                yield event
+            return
+
+        content = next(
+            (
+                message.content
+                for message in reversed(request.messages)
+                if message.role == "user"
+            ),
+            "",
+        )
+        async for event in self._direct_execution.execute(
+            ChatTurnExecutionRequest(
+                owner_user_id=request.owner_user_id,
+                content=content,
+                route=request.route,
+                chat_run_id=request.chat_run_id,
+            )
+        ):
+            if event.type == "execution.mode_selected":
+                yield ChatAgentExecutionModeSelected(
+                    mode=str(event.payload.get("mode", "direct_read")),
+                    required_capability=str(
+                        event.payload.get("requiredCapability", "direct_read")
+                    ),
+                    postcondition=str(event.payload.get("postcondition", "result")),
+                )
+            elif event.type == "structured.result":
+                yield ChatAgentStructuredResult(event.payload)
+            elif event.type == "explanation.delta":
+                yield ChatAgentContentDelta(str(event.payload.get("delta", "")))
+            elif event.type == "explanation.degraded":
+                yield ChatAgentExplanationDegraded(
+                    code=str(event.payload.get("code", "CHAT_EXPLANATION_DEGRADED")),
+                    retryable=event.payload.get("retryable") is True,
+                )
 
 
 class ContentDeltaBuffer:
@@ -387,6 +465,7 @@ class ChatStreamingService:
         answer_parts: list[str] = []
         tool_call_ids: list[str] = []
         citations: list[dict[str, object]] = []
+        structured_results: list[dict[str, object]] = []
         content_buffer = ContentDeltaBuffer()
         sequence = 0
 
@@ -408,6 +487,24 @@ class ChatStreamingService:
                         )
                 elif isinstance(event, ChatAgentReasoningDelta):
                     continue
+                elif isinstance(event, ChatAgentExecutionModeSelected):
+                    yield _sse_event(
+                        "execution.mode_selected",
+                        {
+                            "mode": event.mode,
+                            "requiredCapability": event.required_capability,
+                            "postcondition": event.postcondition,
+                        },
+                    )
+                elif isinstance(event, ChatAgentStructuredResult):
+                    result_payload = dict(event.result)
+                    structured_results.append(result_payload)
+                    yield _sse_event("structured.result", result_payload)
+                elif isinstance(event, ChatAgentExplanationDegraded):
+                    yield _sse_event(
+                        "explanation.degraded",
+                        {"code": event.code, "retryable": event.retryable},
+                    )
                 elif isinstance(event, ChatAgentToolCall):
                     pending = content_buffer.flush(monotonic())
                     if pending is not None:
@@ -446,6 +543,8 @@ class ChatStreamingService:
                 sequence += 1
                 yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
             answer = "".join(answer_parts).strip()
+            if not answer and structured_results:
+                answer = "已返回结构化结果；模型解读暂不可用。"
             assistant_message = await self._repositories.chat.append_message(
                 owner_user_id=owner_user_id,
                 message_id=assistant_message_id or f"message_{uuid4().hex}",
@@ -455,6 +554,7 @@ class ChatStreamingService:
                 metadata={
                     "citations": citations,
                     "toolCallIds": tool_call_ids,
+                    "structuredResults": structured_results,
                     "route": {
                         "intent": route.intent,
                         "confidence": route.confidence,

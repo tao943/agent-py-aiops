@@ -60,6 +60,7 @@ from super_ai.chat import (
     ChatIntentRouter,
     ChatStreamingService,
     LangChainChatAgentRunner,
+    PolicyDispatchingChatAgentRunner,
     encode_sse,
 )
 from super_ai.chat.aiops_bridge import (
@@ -74,6 +75,7 @@ from super_ai.chat.configuration import (
     validate_chat_prompt_content,
     validate_skill_upload,
 )
+from super_ai.chat.execution import ChatTurnExecutionService
 from super_ai.chat.intent import KeywordRouterModel, LlmStructuredRouterModel
 from super_ai.chat.memory import (
     SUPPORTED_CHAT_MEMORY_MODES,
@@ -2519,11 +2521,18 @@ def _chat_agent_runner(request: Request) -> ChatAgentRunner:
                 rerank_model=_rerank_model(request),
             ),
         )
-        runner = LangChainChatAgentRunner(
+        fallback = LangChainChatAgentRunner(
             llm_provider=_llm_provider(request),
             retrieval_tool=retrieval_tool,
             mcp_client_provider=_mcp_connection_service(request),
             aiops_bridge_service=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
+        )
+        runner = PolicyDispatchingChatAgentRunner(
+            fallback=fallback,
+            direct_execution=ChatTurnExecutionService(
+                bridge=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
+                explanation_model=_llm_provider(request).create_chat_model(),
+            ),
         )
         request.app.state.chat_agent_runner = runner
     return cast(ChatAgentRunner, runner)
