@@ -14,6 +14,7 @@ from super_ai.aiops.diagnostics import (
     bind_trusted_tool_arguments,
     build_generic_live_plan,
     build_grounded_fallback_decision,
+    build_task_local_trusted_tool_arguments,
     merge_live_log_plan_step,
     merge_trusted_live_hypothesis_bindings,
     plan_matches_tool_contracts,
@@ -680,6 +681,204 @@ def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:
     }
     assert bound[1] == model_plan[1]
     assert model_plan[0]["arguments"] == {"Query": "*"}
+
+
+def _official_cls_search_definition(*, server_name: str = "cls") -> McpToolDefinition:
+    return McpToolDefinition(
+        "SearchLog",
+        "Search scoped CLS logs.",
+        {
+            "type": "object",
+            "properties": {
+                "Region": {"type": "string"},
+                "TopicId": {"type": "string"},
+                "From": {"type": "integer"},
+                "To": {"type": "integer"},
+                "Query": {"type": "string"},
+                "Limit": {"type": "integer"},
+            },
+            "required": ["Region", "TopicId", "From", "To", "Query", "Limit"],
+            "additionalProperties": False,
+        },
+        server_name=server_name,
+    )
+
+
+def _task_scope(run_id: str) -> dict[str, object]:
+    scenario_id = "APY-LIVE-ORDER-POOL-LEAK-001"
+    return {
+        "liveEvidenceScope": {
+            "runId": run_id,
+            "scenarioId": scenario_id,
+            "incidentId": f"{scenario_id}-{run_id}",
+            "fromMs": 1_787_360_100_000,
+            "toMs": 1_787_362_200_000,
+        }
+    }
+
+
+def test_alert_task_builds_exact_backend_owned_cls_arguments() -> None:
+    arguments = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-001"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(_official_cls_search_definition(),),
+    )
+
+    assert arguments == {
+        "SearchLog": {
+            "Region": "ap-guangzhou",
+            "TopicId": "topic-live",
+            "From": 1_787_360_100_000,
+            "To": 1_787_362_200_000,
+            "Query": (
+                'run_id:"closure-001" AND '
+                'scenario_id:"APY-LIVE-ORDER-POOL-LEAK-001" AND '
+                'incident_id:"APY-LIVE-ORDER-POOL-LEAK-001-closure-001"'
+            ),
+            "Limit": 20,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "task_input,definition",
+    [
+        (_task_scope("closure-001"), _official_cls_search_definition(server_name="other")),
+        (
+            {
+                "liveEvidenceScope": {
+                    **cast(dict[str, object], _task_scope("closure-001")["liveEvidenceScope"]),
+                    "incidentId": "foreign-incident",
+                }
+            },
+            _official_cls_search_definition(),
+        ),
+        (
+            {
+                "liveEvidenceScope": {
+                    **cast(dict[str, object], _task_scope("closure-001")["liveEvidenceScope"]),
+                    "runId": "../closure-001",
+                }
+            },
+            _official_cls_search_definition(),
+        ),
+    ],
+)
+def test_task_local_cls_scope_fails_closed(
+    task_input: Mapping[str, object],
+    definition: McpToolDefinition,
+) -> None:
+    assert build_task_local_trusted_tool_arguments(
+        task_input,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    ) == {}
+
+
+def test_concurrent_task_scopes_do_not_share_cls_arguments() -> None:
+    definition = _official_cls_search_definition()
+    first = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-001"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    )
+    second = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-002"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    )
+
+    assert first["SearchLog"]["Query"] != second["SearchLog"]["Query"]
+    assert "closure-002" not in cast(str, first["SearchLog"]["Query"])
+    assert "closure-001" not in cast(str, second["SearchLog"]["Query"])
+
+
+def test_diagnostic_service_keeps_task_scopes_out_of_singleton_state() -> None:
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+    )
+    definition = _official_cls_search_definition()
+
+    first = service._trusted_arguments_for_state(  # pyright: ignore[reportPrivateUsage]
+        {
+            "task_local_live_scope": True,
+            "live_evidence_scope": _task_scope("closure-001")["liveEvidenceScope"],
+        },
+        (definition,),
+    )
+    second = service._trusted_arguments_for_state(  # pyright: ignore[reportPrivateUsage]
+        {
+            "task_local_live_scope": True,
+            "live_evidence_scope": _task_scope("closure-002")["liveEvidenceScope"],
+        },
+        (definition,),
+    )
+
+    assert first != second
+    assert service._trusted_tool_arguments == {}  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_required_cls_scope_rejects_non_cls_search_log_from_the_plan() -> None:
+    class SearchOnlyModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "search-untrusted-server",
+                            "tool": "SearchLog",
+                            "arguments": {
+                                "Region": "foreign",
+                                "TopicId": "foreign",
+                                "From": 1,
+                                "To": 2,
+                                "Query": "*",
+                                "Limit": 20,
+                            },
+                            "purpose": "Search logs.",
+                            "testsHypotheses": [],
+                            "causalIntent": "context",
+                        }
+                    ]
+                }
+            )
+
+    class Provider:
+        def create_chat_model(self) -> SearchOnlyModel:
+            return SearchOnlyModel()
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, Provider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+    )
+
+    plan, _origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate the alert.",
+        alert={},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=(_official_cls_search_definition(server_name="other"),),
+        known_hypotheses=(),
+        trusted_tool_arguments={},
+        require_trusted_log_scope=True,
+    )
+
+    assert all(step["tool"] != "SearchLog" for step in plan)
 
 
 @pytest.mark.asyncio

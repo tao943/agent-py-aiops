@@ -160,6 +160,9 @@ class AiopsDiagnosticState(TypedDict, total=False):
     task_id: str
     query: str
     alert: JsonDict
+    live_evidence_scope: JsonDict
+    task_local_live_scope: bool
+    require_trusted_log_scope: bool
     accessible_knowledge_base_ids: tuple[str, ...]
     knowledge_context: JsonDict
     knowledge_evidence_ids: list[str]
@@ -482,6 +485,80 @@ def normalize_tool_plan_steps(
         fingerprints.add(fingerprint)
         accepted.append(step)
     return accepted, errors
+
+
+_AUTOMATIC_LIVE_SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
+_AUTOMATIC_LIVE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_LIVE_EVIDENCE_SCOPE_KEYS = frozenset(
+    {"runId", "scenarioId", "incidentId", "fromMs", "toMs"}
+)
+
+
+def build_task_local_trusted_tool_arguments(
+    input_payload: Mapping[str, object],
+    *,
+    cls_region: str,
+    cls_topic_id: str,
+    tool_definitions: Sequence[McpToolDefinition],
+) -> dict[str, dict[str, object]]:
+    """Derive one fail-closed CLS binding from a backend-created public Task scope."""
+    raw_scope = input_payload.get("liveEvidenceScope")
+    if not isinstance(raw_scope, Mapping):
+        return {}
+    scope = cast(Mapping[object, object], raw_scope)
+    if set(scope) != _LIVE_EVIDENCE_SCOPE_KEYS or not all(
+        isinstance(key, str) for key in scope
+    ):
+        return {}
+    run_id = scope.get("runId")
+    scenario_id = scope.get("scenarioId")
+    incident_id = scope.get("incidentId")
+    from_ms = scope.get("fromMs")
+    to_ms = scope.get("toMs")
+    if (
+        not isinstance(run_id, str)
+        or not _AUTOMATIC_LIVE_RUN_ID.fullmatch(run_id)
+        or ".." in run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or scenario_id != _AUTOMATIC_LIVE_SCENARIO_ID
+        or incident_id != f"{_AUTOMATIC_LIVE_SCENARIO_ID}-{run_id}"
+        or not isinstance(from_ms, int)
+        or isinstance(from_ms, bool)
+        or not isinstance(to_ms, int)
+        or isinstance(to_ms, bool)
+        or from_ms <= 0
+        or not from_ms < to_ms
+        or to_ms - from_ms > 3_600_000
+    ):
+        return {}
+    definitions = tuple(
+        definition
+        for definition in tool_definitions
+        if definition.name == "SearchLog" and definition.server_name == "cls"
+    )
+    if len(definitions) != 1:
+        return {}
+    from super_ai.evaluation.live.cls_evidence import build_cls_search_arguments
+    from super_ai.evaluation.live.domain import LiveClsScope
+
+    arguments = build_cls_search_arguments(
+        LiveClsScope(
+            region=cls_region,
+            topic_id=cls_topic_id,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            run_id=run_id,
+            scenario_id=_AUTOMATIC_LIVE_SCENARIO_ID,
+            incident_id=cast(str, incident_id),
+        )
+    )
+    if not plan_matches_tool_contracts(
+        [{"tool": "SearchLog", "arguments": arguments}],
+        definitions,
+    ):
+        return {}
+    return {"SearchLog": arguments}
 
 
 def build_grounded_fallback_decision(
@@ -1901,6 +1978,28 @@ class AiopsDiagnosticService:
             investigation_router_policy or InvestigationRouterPolicy()
         )
 
+    def _trusted_arguments_for_state(
+        self,
+        state: Mapping[str, object],
+        tool_definitions: Sequence[McpToolDefinition],
+    ) -> dict[str, dict[str, object]]:
+        trusted = {
+            name: dict(arguments)
+            for name, arguments in self._trusted_tool_arguments.items()
+        }
+        if state.get("task_local_live_scope") is not True:
+            return trusted
+        trusted.pop("SearchLog", None)
+        trusted.update(
+            build_task_local_trusted_tool_arguments(
+                {"liveEvidenceScope": state.get("live_evidence_scope")},
+                cls_region=self._cls_region,
+                cls_topic_id=self._cls_topic_id,
+                tool_definitions=tool_definitions,
+            )
+        )
+        return trusted
+
     async def stream(
         self,
         *,
@@ -1953,6 +2052,12 @@ class AiopsDiagnosticService:
             else None
         )
         alert = _json_dict(task.input_payload.get("alert"))
+        task_local_live_scope = "liveEvidenceScope" in task.input_payload
+        automatic_live_task = (
+            task.input_payload.get("benchmarkMode") == "live"
+            and task.input_payload.get("benchmarkScenarioId")
+            == _AUTOMATIC_LIVE_SCENARIO_ID
+        )
         initial_evidence_ids: list[str] = []
         if alert and prior_checkpoint is None:
             alert_evidence = await self._repositories.diagnostics.create_evidence(
@@ -1978,6 +2083,15 @@ class AiopsDiagnosticService:
             "task_id": task.id,
             "query": task.query,
             "alert": alert,
+            "live_evidence_scope": _json_dict(
+                task.input_payload.get("liveEvidenceScope")
+            ),
+            "task_local_live_scope": task_local_live_scope,
+            "require_trusted_log_scope": (
+                self._require_trusted_log_scope
+                or task_local_live_scope
+                or automatic_live_task
+            ),
             "public_hypotheses": public_hypotheses,
             "decision_vocabulary": _json_dict(
                 task.input_payload.get("decisionVocabulary")
@@ -2671,6 +2785,10 @@ class AiopsDiagnosticService:
         diagnostic_tools = [
             item for item in discovered_tools if item.name not in self._tool_policies
         ]
+        trusted_tool_arguments = self._trusted_arguments_for_state(
+            state,
+            diagnostic_tools,
+        )
         known_hypotheses = [
             str(item.get("id"))
             for item in cast(list[JsonDict], state.get("public_hypotheses") or [])
@@ -2686,6 +2804,10 @@ class AiopsDiagnosticService:
                 tool_definitions=diagnostic_tools,
                 known_hypotheses=known_hypotheses,
                 model_runtime=model_runtime,
+                trusted_tool_arguments=trusted_tool_arguments,
+                require_trusted_log_scope=(
+                    state.get("require_trusted_log_scope") is True
+                ),
             )
             return {
                 "plan": created_plan,
@@ -2716,6 +2838,7 @@ class AiopsDiagnosticService:
                         "sopHits": sop_hits,
                         "toolContracts": _tool_contracts_payload(diagnostic_tools),
                         "knownHypotheses": known_hypotheses,
+                        "trustedToolArguments": trusted_tool_arguments,
                     },
                 ),
                 create_plan_operation,
@@ -3685,9 +3808,13 @@ class AiopsDiagnosticService:
             return {"current_evidence_id": "", "events": []}
 
         source_step = plan[plan_index]
+        trusted_tool_arguments = self._trusted_arguments_for_state(
+            state,
+            tuple(state.get("tool_definitions") or ()),
+        )
         normalized_steps, contract_errors = normalize_tool_plan_steps(
             [source_step],
-            trusted_tool_arguments=self._trusted_tool_arguments,
+            trusted_tool_arguments=trusted_tool_arguments,
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tuple(state.get("tool_definitions") or ()),
         )
@@ -4937,7 +5064,10 @@ class AiopsDiagnosticService:
             parsed_steps = []
         parsed_steps, _contract_errors = normalize_tool_plan_steps(
             parsed_steps,
-            trusted_tool_arguments=self._trusted_tool_arguments,
+            trusted_tool_arguments=self._trusted_arguments_for_state(
+                state,
+                tool_definitions,
+            ),
             tool_argument_contracts=self._tool_argument_contracts,
             tool_definitions=tool_definitions,
         )
@@ -4988,7 +5118,10 @@ class AiopsDiagnosticService:
             )
             normalized_fallback, _fallback_contract_errors = normalize_tool_plan_steps(
                 fallback_steps,
-                trusted_tool_arguments=self._trusted_tool_arguments,
+                trusted_tool_arguments=self._trusted_arguments_for_state(
+                    state,
+                    tool_definitions,
+                ),
                 tool_argument_contracts=self._tool_argument_contracts,
                 tool_definitions=tool_definitions,
             )
@@ -6296,29 +6429,55 @@ class AiopsDiagnosticService:
         tool_definitions: Sequence[McpToolDefinition],
         known_hypotheses: Sequence[str],
         model_runtime: _ModelRuntime | None = None,
+        trusted_tool_arguments: Mapping[str, Mapping[str, object]] | None = None,
+        require_trusted_log_scope: bool | None = None,
     ) -> tuple[list[JsonDict], str]:
-        available_tools = [definition.name for definition in tool_definitions]
+        effective_trusted_arguments = (
+            self._trusted_tool_arguments
+            if trusted_tool_arguments is None
+            else trusted_tool_arguments
+        )
+        trusted_log_scope_required = (
+            self._require_trusted_log_scope
+            if require_trusted_log_scope is None
+            else require_trusted_log_scope
+        )
+        effective_tool_definitions = tuple(tool_definitions)
+        trusted_search_definition: McpToolDefinition | None = None
+        if trusted_log_scope_required:
+            trusted_search_definitions = tuple(
+                definition
+                for definition in tool_definitions
+                if definition.name == "SearchLog" and definition.server_name == "cls"
+            )
+            if (
+                len(trusted_search_definitions) == 1
+                and "SearchLog" in effective_trusted_arguments
+            ):
+                trusted_search_definition = trusted_search_definitions[0]
+            effective_tool_definitions = tuple(
+                definition
+                for definition in tool_definitions
+                if definition.name not in {"SearchLog", "SearchLogs"}
+            ) + (
+                (trusted_search_definition,)
+                if trusted_search_definition is not None
+                else ()
+            )
+        available_tools = [definition.name for definition in effective_tool_definitions]
         generic_plan = build_generic_live_plan(
             available_tools=available_tools,
             known_hypotheses=known_hypotheses,
         )
         search_step: JsonDict | None = None
-        if self._require_trusted_log_scope:
-            trusted_search_definition = next(
-                (
-                    definition
-                    for definition in tool_definitions
-                    if definition.name == "SearchLog" and definition.server_name == "cls"
-                ),
-                None,
-            )
+        if trusted_log_scope_required:
             if (
                 trusted_search_definition is not None
-                and "SearchLog" in self._trusted_tool_arguments
+                and "SearchLog" in effective_trusted_arguments
             ):
                 accepted_search, _search_contract_errors = normalize_tool_plan_steps(
                     [self._generic_search_log_step(query)],
-                    trusted_tool_arguments=self._trusted_tool_arguments,
+                    trusted_tool_arguments=effective_trusted_arguments,
                     tool_argument_contracts=self._tool_argument_contracts,
                     tool_definitions=(trusted_search_definition,),
                 )
@@ -6332,9 +6491,9 @@ class AiopsDiagnosticService:
         )
         generic_plan, _generic_contract_errors = normalize_tool_plan_steps(
             generic_plan,
-            trusted_tool_arguments=self._trusted_tool_arguments,
+            trusted_tool_arguments=effective_trusted_arguments,
             tool_argument_contracts=self._tool_argument_contracts,
-            tool_definitions=tool_definitions,
+            tool_definitions=effective_tool_definitions,
         )
         generic_plan = list(repair_plan_causal_coverage(generic_plan).steps)
         prompt = (
@@ -6349,7 +6508,8 @@ class AiopsDiagnosticService:
             "Use at most six "
             "steps and only the tools and argument schemas in these discovered contracts. "
             "The initial plan must contain at most four steps: "
-            f"{json.dumps(_tool_contracts_payload(tool_definitions), ensure_ascii=False)}. "
+            f"{json.dumps(_tool_contracts_payload(effective_tool_definitions), ensure_ascii=False)}"
+            ". "
             f"User query: {query}. Alert: "
             f"{json.dumps(alert)}. SOP evidence: {json.dumps(list(sop_hits))}. "
             f"Known hypotheses: {json.dumps(list(known_hypotheses))}. "
@@ -6373,7 +6533,7 @@ class AiopsDiagnosticService:
                 known_hypotheses=set(known_hypotheses),
                 causal_capabilities={
                     definition.name: allowed_causal_intents(definition.name)
-                    for definition in tool_definitions
+                    for definition in effective_tool_definitions
                 },
             )
             if len(parsed_plan) > 4:
@@ -6388,9 +6548,9 @@ class AiopsDiagnosticService:
             )
         plan, _contract_errors = normalize_tool_plan_steps(
             plan,
-            trusted_tool_arguments=self._trusted_tool_arguments,
+            trusted_tool_arguments=effective_trusted_arguments,
             tool_argument_contracts=self._tool_argument_contracts,
-            tool_definitions=tool_definitions,
+            tool_definitions=effective_tool_definitions,
         )
         plan = merge_trusted_live_hypothesis_bindings(
             plan,
