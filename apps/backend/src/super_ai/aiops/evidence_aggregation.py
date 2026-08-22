@@ -135,6 +135,15 @@ class AggregatedInvestigation:
     """Deterministic Specialist output; it cannot decide or authorize recovery."""
 
     specialist_statuses: Mapping[str, str]
+    specialist_evidence_statuses: Mapping[str, str]
+    specialist_analysis_statuses: Mapping[str, str]
+    specialist_analysis_error_codes: Mapping[str, str]
+    specialist_analysis_attempt_counts: Mapping[str, int]
+    specialist_follow_up_question_counts: Mapping[str, int]
+    specialist_soft_deadline_exceeded: Mapping[str, bool]
+    specialist_hard_deadline_exceeded: Mapping[str, bool]
+    specialist_completed_tool_counts: Mapping[str, int]
+    specialist_expected_tool_counts: Mapping[str, int]
     evidence: tuple[str, ...]
     normalized_facts: tuple[EvidenceClaim, ...]
     hypothesis_signals: tuple[PublicAssessmentSignal, ...]
@@ -150,6 +159,23 @@ class AggregatedInvestigation:
             "specialist_statuses",
             MappingProxyType(dict(sorted(self.specialist_statuses.items()))),
         )
+        for field_name in (
+            "specialist_evidence_statuses",
+            "specialist_analysis_statuses",
+            "specialist_analysis_error_codes",
+            "specialist_analysis_attempt_counts",
+            "specialist_follow_up_question_counts",
+            "specialist_soft_deadline_exceeded",
+            "specialist_hard_deadline_exceeded",
+            "specialist_completed_tool_counts",
+            "specialist_expected_tool_counts",
+        ):
+            value = getattr(self, field_name)
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(sorted(value.items()))),
+            )
         object.__setattr__(
             self,
             "source_groups",
@@ -184,6 +210,27 @@ class AggregatedInvestigation:
         """Project only bounded public aggregation data into a checkpoint."""
         return {
             "specialistStatuses": dict(self.specialist_statuses),
+            "specialistEvidenceStatuses": dict(self.specialist_evidence_statuses),
+            "specialistAnalysisStatuses": dict(self.specialist_analysis_statuses),
+            "specialistAnalysisErrorCodes": dict(
+                self.specialist_analysis_error_codes
+            ),
+            "specialistAnalysisAttemptCounts": dict(
+                self.specialist_analysis_attempt_counts
+            ),
+            "specialistFollowUpQuestionCounts": dict(
+                self.specialist_follow_up_question_counts
+            ),
+            "specialistSoftDeadlineExceeded": dict(
+                self.specialist_soft_deadline_exceeded
+            ),
+            "specialistHardDeadlineExceeded": dict(
+                self.specialist_hard_deadline_exceeded
+            ),
+            "specialistCompletedToolCounts": dict(
+                self.specialist_completed_tool_counts
+            ),
+            "specialistExpectedToolCounts": dict(self.specialist_expected_tool_counts),
             "evidence": list(self.evidence),
             "normalizedFacts": [_claim_checkpoint_payload(item) for item in self.normalized_facts],
             "hypothesisSignals": [
@@ -288,6 +335,43 @@ def aggregate_specialist_results(
     )
     return AggregatedInvestigation(
         specialist_statuses=statuses,
+        specialist_evidence_statuses={
+            role: result.evidence_status
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_analysis_statuses={
+            role: result.analysis_status
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_analysis_error_codes={
+            role: result.analysis_error_code
+            for role, result in sorted(result_by_role.items())
+            if result.analysis_error_code is not None
+        },
+        specialist_analysis_attempt_counts={
+            role: result.analysis_attempt_count
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_follow_up_question_counts={
+            role: result.follow_up_question_count
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_soft_deadline_exceeded={
+            role: result.soft_deadline_exceeded
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_hard_deadline_exceeded={
+            role: result.hard_deadline_exceeded
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_completed_tool_counts={
+            role: result.completed_tool_count
+            for role, result in sorted(result_by_role.items())
+        },
+        specialist_expected_tool_counts={
+            role: result.expected_tool_count
+            for role, result in sorted(result_by_role.items())
+        },
         evidence=tuple(sorted(evidence_ids)),
         normalized_facts=facts,
         hypothesis_signals=signals,

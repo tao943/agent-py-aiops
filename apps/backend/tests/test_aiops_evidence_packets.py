@@ -422,6 +422,9 @@ def _specialist_result(
     *,
     status: str = "completed",
     value: object = True,
+    analysis_status: str | None = None,
+    analysis_error_code: str | None = None,
+    unresolved_questions: tuple[str, ...] | None = None,
 ) -> SpecialistResult:
     facts = (
         _claim(
@@ -447,14 +450,18 @@ def _specialist_result(
         evidence_status="complete" if evidence_ids else "none",
         analysis_status=cast(
             Any,
-            "complete"
-            if status == "completed"
-            else "timeout"
-            if status == "timeout"
-            else "failed",
+            analysis_status
+            or (
+                "complete"
+                if status == "completed"
+                else "timeout"
+                if status == "timeout"
+                else "failed"
+            ),
         ),
         analysis_error_code=(
-            "specialist_hard_deadline_expired" if status == "timeout" else None
+            analysis_error_code
+            or ("specialist_hard_deadline_expired" if status == "timeout" else None)
         ),
         analysis_attempt_count=1 if evidence_ids else 0,
         soft_deadline_exceeded=False,
@@ -464,7 +471,13 @@ def _specialist_result(
         evidence_ids=evidence_ids,
         fact_candidates=facts,
         proposed_assessments=assessments,
-        unresolved_questions=() if status == "completed" else (f"{role}_unavailable",),
+        unresolved_questions=(
+            unresolved_questions
+            if unresolved_questions is not None
+            else ()
+            if status == "completed"
+            else (f"{role}_unavailable",)
+        ),
         completed_steps=(f"{role}-1",) if evidence_ids else (),
         model_call_count=2 if evidence_ids else 1,
         duration_ms=10,
@@ -510,6 +523,50 @@ def test_specialist_aggregation_is_order_independent_and_groups_sources() -> Non
         "shared-source": ("evidence-log", "evidence-runtime")
     }
     assert forward.budget_usage == {"log": 2, "runtime": 2, "total": 4}
+
+
+def test_specialist_aggregation_separates_evidence_and_analysis_health() -> None:
+    runtime_evidence = _specialist_evidence(
+        "evidence-runtime", role="runtime", source_fingerprint="runtime-source"
+    )
+    log_evidence = _specialist_evidence(
+        "evidence-log", role="log", source_fingerprint="log-source"
+    )
+    result = aggregate_specialist_results(
+        (
+            _specialist_result(
+                "runtime",
+                (runtime_evidence.id,),
+                status="inconclusive",
+                analysis_status="degraded",
+                analysis_error_code="retry_exhausted",
+            ),
+            _specialist_result(
+                "log",
+                (log_evidence.id,),
+                unresolved_questions=("Which deploy changed latency?",),
+            ),
+        ),
+        context=_specialist_context((runtime_evidence, log_evidence)),
+    )
+
+    assert result.specialist_evidence_statuses == {
+        "log": "complete",
+        "runtime": "complete",
+    }
+    assert result.specialist_analysis_statuses == {
+        "log": "complete",
+        "runtime": "degraded",
+    }
+    assert result.specialist_analysis_error_codes == {
+        "runtime": "retry_exhausted"
+    }
+    assert result.specialist_analysis_attempt_counts == {"log": 1, "runtime": 1}
+    assert result.specialist_follow_up_question_counts == {"log": 1, "runtime": 1}
+    assert result.specialist_statuses == {
+        "log": "completed",
+        "runtime": "inconclusive",
+    }
 
 
 def test_specialist_aggregation_records_conflict_without_voting() -> None:

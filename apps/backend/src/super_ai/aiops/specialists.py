@@ -580,9 +580,16 @@ def specialist_result_checksum(result: SpecialistResult) -> str:
     return _calculate_result_checksum(result)
 
 
-def specialist_result_legacy_checksum(result: SpecialistResult) -> str:
+def specialist_result_legacy_checksum(
+    result: SpecialistResult,
+    *,
+    terminal_status: SpecialistTerminalStatus | None = None,
+) -> str:
     """Recompute the pre-health-contract checksum for checkpoint migration."""
-    return _sha256_json(_legacy_result_payload(result))
+    payload = _legacy_result_payload(result)
+    if terminal_status is not None:
+        payload["terminalStatus"] = terminal_status
+    return _sha256_json(payload)
 
 
 def _calculate_result_checksum(result: SpecialistResult) -> str:

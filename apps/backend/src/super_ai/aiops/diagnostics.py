@@ -114,6 +114,8 @@ from super_ai.aiops.specialists import (
     SharedRunContext,
     SpecialistAssignment,
     SpecialistResult,
+    derive_specialist_terminal_status,
+    specialist_result_legacy_checksum,
 )
 from super_ai.aiops.trusted_patterns import resolve_trusted_patterns
 from super_ai.aiops.validator_routing import (
@@ -3407,13 +3409,31 @@ class AiopsDiagnosticService:
         state: AiopsDiagnosticState,
         payloads: Sequence[Mapping[str, object]],
     ) -> dict[str, object]:
-        results = tuple(_specialist_result_from_payload(item) for item in payloads)
         dispatches = sorted(
             _json_list(state.get("investigation_dispatches")),
             key=lambda item: str(item.get("investigatorType") or ""),
         )
         _, assignments = _specialist_inputs_from_dispatches(state, dispatches)
         assignment_by_role = {item.role: item for item in assignments}
+        results_list: list[SpecialistResult] = []
+        for item in payloads:
+            raw_role = item.get("role")
+            assignment = (
+                assignment_by_role.get(cast(Any, raw_role))
+                if isinstance(raw_role, str)
+                else None
+            )
+            results_list.append(
+                _specialist_result_from_payload(
+                    item,
+                    legacy_expected_tool_count=(
+                        assignment.maximum_tool_steps
+                        if assignment is not None
+                        else None
+                    ),
+                )
+            )
+        results = tuple(results_list)
         evidence_records = await self._repositories.diagnostics.list_evidence(
             owner_user_id=str(state["owner_user_id"]),
             task_id=str(state["task_id"]),
@@ -3503,6 +3523,33 @@ class AiopsDiagnosticService:
             "completedPacketCount": completed_count,
             "failedPacketCount": failed_count,
             "specialistStatuses": dict(aggregated.specialist_statuses),
+            "specialistEvidenceStatuses": dict(
+                aggregated.specialist_evidence_statuses
+            ),
+            "specialistAnalysisStatuses": dict(
+                aggregated.specialist_analysis_statuses
+            ),
+            "specialistAnalysisErrorCodes": dict(
+                aggregated.specialist_analysis_error_codes
+            ),
+            "specialistAnalysisAttemptCounts": dict(
+                aggregated.specialist_analysis_attempt_counts
+            ),
+            "specialistFollowUpQuestionCounts": dict(
+                aggregated.specialist_follow_up_question_counts
+            ),
+            "specialistSoftDeadlineExceeded": dict(
+                aggregated.specialist_soft_deadline_exceeded
+            ),
+            "specialistHardDeadlineExceeded": dict(
+                aggregated.specialist_hard_deadline_exceeded
+            ),
+            "specialistCompletedToolCounts": dict(
+                aggregated.specialist_completed_tool_counts
+            ),
+            "specialistExpectedToolCounts": dict(
+                aggregated.specialist_expected_tool_counts
+            ),
             "missingDomains": list(aggregated.missing_domains),
             "conflictCount": len(aggregated.conflicts),
             "sourceGroupCount": len(aggregated.source_groups),
@@ -3521,6 +3568,15 @@ class AiopsDiagnosticService:
                 {
                     "role": result.role,
                     "terminalStatus": result.terminal_status,
+                    "evidenceStatus": result.evidence_status,
+                    "analysisStatus": result.analysis_status,
+                    "analysisErrorCode": result.analysis_error_code,
+                    "analysisAttemptCount": result.analysis_attempt_count,
+                    "followUpQuestionCount": result.follow_up_question_count,
+                    "softDeadlineExceeded": result.soft_deadline_exceeded,
+                    "hardDeadlineExceeded": result.hard_deadline_exceeded,
+                    "completedToolCount": result.completed_tool_count,
+                    "expectedToolCount": result.expected_tool_count,
                     "evidenceIds": list(result.evidence_ids),
                     "modelCallCount": result.model_call_count,
                     "durationMs": result.duration_ms,
@@ -3555,6 +3611,33 @@ class AiopsDiagnosticService:
                         "aggregation": {
                             "specialistStatuses": dict(
                                 aggregated.specialist_statuses
+                            ),
+                            "specialistEvidenceStatuses": dict(
+                                aggregated.specialist_evidence_statuses
+                            ),
+                            "specialistAnalysisStatuses": dict(
+                                aggregated.specialist_analysis_statuses
+                            ),
+                            "specialistAnalysisErrorCodes": dict(
+                                aggregated.specialist_analysis_error_codes
+                            ),
+                            "specialistAnalysisAttemptCounts": dict(
+                                aggregated.specialist_analysis_attempt_counts
+                            ),
+                            "specialistFollowUpQuestionCounts": dict(
+                                aggregated.specialist_follow_up_question_counts
+                            ),
+                            "specialistSoftDeadlineExceeded": dict(
+                                aggregated.specialist_soft_deadline_exceeded
+                            ),
+                            "specialistHardDeadlineExceeded": dict(
+                                aggregated.specialist_hard_deadline_exceeded
+                            ),
+                            "specialistCompletedToolCounts": dict(
+                                aggregated.specialist_completed_tool_counts
+                            ),
+                            "specialistExpectedToolCounts": dict(
+                                aggregated.specialist_expected_tool_counts
                             ),
                             "missingDomains": list(aggregated.missing_domains),
                             "conflictCount": len(aggregated.conflicts),
@@ -6624,6 +6707,8 @@ def _specialist_result_payload(result: SpecialistResult) -> JsonDict:
 
 def _specialist_result_from_payload(
     payload: Mapping[str, object],
+    *,
+    legacy_expected_tool_count: int | None = None,
 ) -> SpecialistResult:
     facts: list[EvidenceClaim] = []
     for item in _json_list(payload.get("factCandidates")):
@@ -6667,6 +6752,91 @@ def _specialist_result_from_payload(
         )
         for item in _json_list(payload.get("proposedAssessments"))
     )
+    tested_hypotheses = tuple(
+        str(value)
+        for value in cast(list[object], payload.get("testedHypotheses") or [])
+    )
+    evidence_ids = tuple(
+        str(value)
+        for value in cast(list[object], payload.get("evidenceIds") or [])
+    )
+    unresolved_questions = tuple(
+        str(value)
+        for value in cast(list[object], payload.get("unresolvedQuestions") or [])
+    )
+    completed_steps = tuple(
+        str(value)
+        for value in cast(list[object], payload.get("completedSteps") or [])
+    )
+    role = cast(Any, payload.get("role"))
+    model_call_count = int(cast(Any, payload.get("modelCallCount") or 0))
+    duration_ms = int(cast(Any, payload.get("durationMs") or 0))
+    if "evidenceStatus" not in payload:
+        raw_terminal = cast(Any, payload.get("terminalStatus"))
+        expected_tool_count = (
+            len(completed_steps)
+            if raw_terminal == "completed"
+            else max(len(completed_steps), legacy_expected_tool_count or 0)
+        )
+        evidence_status = (
+            "none"
+            if not evidence_ids
+            else "complete"
+            if expected_tool_count > 0 and len(completed_steps) == expected_tool_count
+            else "partial"
+        )
+        analysis_status = (
+            "complete"
+            if raw_terminal == "completed"
+            else "timeout"
+            if raw_terminal == "timeout"
+            else "degraded"
+            if raw_terminal == "inconclusive"
+            else "failed"
+        )
+        safe_codes = {
+            "retry_exhausted",
+            "retry_skipped_insufficient_deadline",
+            "specialist_soft_deadline_expired",
+            "specialist_hard_deadline_expired",
+            "specialist_model_budget_exhausted",
+        }
+        analysis_error_code = next(
+            (item for item in unresolved_questions if item in safe_codes),
+            None,
+        )
+        migrated = SpecialistResult.create(
+            role=role,
+            terminal_status=derive_specialist_terminal_status(
+                cast(Any, evidence_status), cast(Any, analysis_status)
+            ),
+            evidence_status=cast(Any, evidence_status),
+            analysis_status=cast(Any, analysis_status),
+            analysis_error_code=cast(Any, analysis_error_code),
+            analysis_attempt_count=(1 if model_call_count == 2 else 0),
+            soft_deadline_exceeded=(
+                "specialist_soft_deadline_expired" in unresolved_questions
+            ),
+            hard_deadline_exceeded=(
+                "specialist_hard_deadline_expired" in unresolved_questions
+            ),
+            expected_tool_count=expected_tool_count,
+            tested_hypotheses=tested_hypotheses,
+            evidence_ids=evidence_ids,
+            fact_candidates=tuple(facts),
+            proposed_assessments=signals,
+            unresolved_questions=unresolved_questions,
+            completed_steps=completed_steps,
+            model_call_count=model_call_count,
+            duration_ms=duration_ms,
+        )
+        stored_checksum = str(payload.get("resultChecksum") or "")
+        if stored_checksum != specialist_result_legacy_checksum(
+            migrated,
+            terminal_status=raw_terminal,
+        ):
+            raise ValueError("Legacy Specialist result checksum does not match content.")
+        return migrated
     return SpecialistResult(
         role=cast(Any, payload.get("role")),
         terminal_status=cast(Any, payload.get("terminalStatus")),
@@ -6679,26 +6849,12 @@ def _specialist_result_from_payload(
         soft_deadline_exceeded=payload.get("softDeadlineExceeded") is True,
         hard_deadline_exceeded=payload.get("hardDeadlineExceeded") is True,
         expected_tool_count=int(cast(Any, payload.get("expectedToolCount") or 0)),
-        tested_hypotheses=tuple(
-            str(value)
-            for value in cast(list[object], payload.get("testedHypotheses") or [])
-        ),
-        evidence_ids=tuple(
-            str(value)
-            for value in cast(list[object], payload.get("evidenceIds") or [])
-        ),
+        tested_hypotheses=tested_hypotheses,
+        evidence_ids=evidence_ids,
         fact_candidates=tuple(facts),
         proposed_assessments=signals,
-        unresolved_questions=tuple(
-            str(value)
-            for value in cast(
-                list[object], payload.get("unresolvedQuestions") or []
-            )
-        ),
-        completed_steps=tuple(
-            str(value)
-            for value in cast(list[object], payload.get("completedSteps") or [])
-        ),
+        unresolved_questions=unresolved_questions,
+        completed_steps=completed_steps,
         model_call_count=int(cast(Any, payload.get("modelCallCount") or 0)),
         duration_ms=int(cast(Any, payload.get("durationMs") or 0)),
         result_checksum=str(payload.get("resultChecksum") or ""),
@@ -6740,6 +6896,15 @@ def _specialist_event(
             "specialist": {
                 "role": result.role,
                 "terminalStatus": result.terminal_status,
+                "evidenceStatus": result.evidence_status,
+                "analysisStatus": result.analysis_status,
+                "analysisErrorCode": result.analysis_error_code,
+                "analysisAttemptCount": result.analysis_attempt_count,
+                "followUpQuestionCount": result.follow_up_question_count,
+                "softDeadlineExceeded": result.soft_deadline_exceeded,
+                "hardDeadlineExceeded": result.hard_deadline_exceeded,
+                "completedToolCount": result.completed_tool_count,
+                "expectedToolCount": result.expected_tool_count,
                 "toolNames": sorted(assignment.allowed_tools),
                 "evidenceIds": list(result.evidence_ids),
                 "modelCallCount": result.model_call_count,
