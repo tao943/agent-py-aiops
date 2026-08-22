@@ -5550,7 +5550,7 @@ class AiopsDiagnosticService:
         semantic_valid = validation is not None and validation.status == "valid"
         payload: JsonDict = {
             **_json_dict(state.get("decision_validation")),
-            "validationOrigin": "llm_semantic" if validation is not None else "llm_failed",
+            "validationOrigin": _semantic_validation_origin(validation),
             "semanticValidationStatus": (
                 validation.status if validation is not None else "failed"
             ),
@@ -7572,6 +7572,14 @@ def task_scoped_source_fingerprint(
     return hashlib.sha256(
         f"{task_id}\x1f{logical_call}".encode()
     ).hexdigest()
+
+
+def _semantic_validation_origin(
+    validation: RootCauseValidationDecision | None,
+) -> str:
+    if validation is None:
+        return "llm_failed"
+    return "llm_confirmed" if validation.status == "valid" else "llm_semantic"
 
 
 def _safe_model_call_error_code(exc: Exception) -> str:

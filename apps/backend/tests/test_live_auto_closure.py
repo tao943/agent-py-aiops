@@ -299,6 +299,44 @@ async def test_automatic_closure_waits_for_report_recovers_once_and_closes_verif
 
 
 @pytest.mark.asyncio
+async def test_automatic_closure_waits_for_completed_persisted_artifact() -> None:
+    class EventuallyCompleteLoader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def load(self, **kwargs) -> PersistedDiagnosticOutcome:
+            del kwargs
+            self.calls += 1
+            artifact = _artifact()
+            if self.calls == 1:
+                artifact = replace(
+                    artifact,
+                    completed=False,
+                    report_produced=False,
+                )
+            return PersistedDiagnosticOutcome(artifact, "sufficient")
+
+    loader = EventuallyCompleteLoader()
+    recovery = Recovery()
+    orchestrator = OrderPoolAutoClosureOrchestrator(
+        owner_user_id="owner",
+        source_id="local-alertmanager",
+        driver=Driver(),
+        lifecycles=LifecycleRepository(),
+        diagnostic_loader=loader,
+        recovery=recovery,
+        recovery_coordinator=Coordinator(),
+        budgets=AutoClosureBudgets(poll_seconds=0),
+    )
+
+    result = await orchestrator.run(SCENARIO_ID, run_id="auto-artifact-race")
+
+    assert result.validity == "VALID_PASS"
+    assert loader.calls == 2
+    assert recovery.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_resume_restores_state_and_reuses_completed_recovery() -> None:
     states = StateRepository()
     coordinator = CachingCoordinator()

@@ -4,6 +4,9 @@ global:
 route:
   receiver: agent-py-webhook
   group_by: [alertname, service, environment, scenario_id, run_id]
+  group_wait: 1s
+  group_interval: 5s
+  repeat_interval: 1m
 
 receivers:
   - name: agent-py-webhook

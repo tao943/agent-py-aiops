@@ -471,9 +471,13 @@ class OrderPoolAutoClosureOrchestrator:
                 correlation=_lifecycle_payload(lifecycle),
             )
             diagnosis_started = self._clock()
+            diagnosis_deadline = diagnosis_started + max(
+                0,
+                self._budgets.diagnosis_seconds,
+            )
             lifecycle = await self._wait_lifecycle(
                 run_id,
-                seconds=self._budgets.diagnosis_seconds,
+                seconds=max(0, diagnosis_deadline - self._clock()),
                 require_report=True,
             )
             if lifecycle is None:
@@ -484,6 +488,19 @@ class OrderPoolAutoClosureOrchestrator:
                     observation=observation,
                     started_at=run_started,
                 )
+            outcome = await self._wait_completed_diagnostic_outcome(
+                diagnostic_task_id=lifecycle.diagnostic_task_id,
+                deadline=diagnosis_deadline,
+            )
+            if outcome is None:
+                return await self._finish(
+                    identity,
+                    validity="VALID_FAIL",
+                    authorization_code="diagnostic_report_timeout",
+                    lifecycle=lifecycle,
+                    observation=observation,
+                    started_at=run_started,
+                )
             self._record_stage_latency("diagnosis", diagnosis_started)
             self._progress("diagnosis_completed")
             state = await self._advance_state(
@@ -491,10 +508,6 @@ class OrderPoolAutoClosureOrchestrator:
                 state,
                 stage="diagnosis_completed",
                 correlation=_lifecycle_payload(lifecycle),
-            )
-            outcome = await self._diagnostic_loader.load(
-                owner_user_id=self._owner_user_id,
-                diagnostic_task_id=lifecycle.diagnostic_task_id,
             )
             if evidence_context is not None:
                 outcome = replace(
@@ -762,6 +775,23 @@ class OrderPoolAutoClosureOrchestrator:
             )
             if lifecycle is not None and lifecycle.closed_verified:
                 return lifecycle
+            if self._clock() >= deadline:
+                return None
+            await self._sleep(self._budgets.poll_seconds)
+
+    async def _wait_completed_diagnostic_outcome(
+        self,
+        *,
+        diagnostic_task_id: str,
+        deadline: float,
+    ) -> PersistedDiagnosticOutcome | None:
+        while True:
+            outcome = await self._diagnostic_loader.load(
+                owner_user_id=self._owner_user_id,
+                diagnostic_task_id=diagnostic_task_id,
+            )
+            if outcome.artifact.completed and outcome.artifact.report_produced:
+                return outcome
             if self._clock() >= deadline:
                 return None
             await self._sleep(self._budgets.poll_seconds)

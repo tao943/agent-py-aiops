@@ -246,6 +246,36 @@ def test_artifact_projects_final_validation_audit_safely() -> None:
     assert "sentinel" not in repr(artifact.validation_audit)
 
 
+def test_v4_artifact_projects_final_llm_validator_audit() -> None:
+    artifact = build_run_artifact(
+        _benchmark_task(),
+        (
+            _step(1, "planner", {"workflowVersion": "evidence-driven-v4", "plan": []}),
+            _step(
+                2,
+                "decision_validator",
+                {"status": "valid", "validationOrigin": "deterministic"},
+            ),
+            _step(
+                3,
+                "llm_validator",
+                {
+                    "status": "valid",
+                    "validationOrigin": "llm_confirmed",
+                    "validationModel": "qwen3.8-max",
+                },
+            ),
+        ),
+        (),
+        (),
+        (),
+    )
+
+    assert artifact.validation_audit is not None
+    assert artifact.validation_audit.origin == "llm_confirmed"
+    assert artifact.validation_audit.model == "qwen3.8-max"
+
+
 def test_artifact_projects_final_policy_gate_handoff_safely() -> None:
     artifact = build_run_artifact(
         _benchmark_task(),
@@ -1013,6 +1043,52 @@ def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
         "Region": "ap-guangzhou",
         "TopicId": "topic-live",
     }
+
+
+def test_order_pool_artifact_derives_cls_lifecycle_claim_from_correlated_events() -> None:
+    task = DiagnosticTaskRecord(
+        id="task-order-pool-cls",
+        owner_user_id="eval-user",
+        status="succeeded",
+        query="diagnose",
+        input_payload={
+            "benchmarkScenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "benchmarkMode": "live",
+        },
+        result_payload={},
+        created_at=NOW,
+        updated_at=NOW,
+        completed_at=NOW,
+    )
+    shared = {
+        "run_id": "run-1",
+        "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+        "incident_id": "APY-LIVE-ORDER-POOL-LEAK-001-run-1",
+        "request_id": "fault-1",
+    }
+    evidence = DiagnosticEvidenceRecord(
+        id="ev-cls-lifecycle",
+        owner_user_id="eval-user",
+        task_id=task.id,
+        step_id="step-1",
+        tool_call_id="call-1",
+        kind="tool_result",
+        source="SearchLog",
+        summary="bounded correlated records",
+        payload={
+            "output": {
+                "records": [
+                    {**shared, "event": "connection_checkout"},
+                    {**shared, "event": "order_update_failed"},
+                ]
+            }
+        },
+        created_at=NOW,
+    )
+
+    artifact = build_run_artifact(task, (), (evidence,), (), ())
+
+    assert artifact.evidence[0].claim_id == "cls-order-connection-lifecycle"
 
 
 def test_run_artifact_links_observation_to_persisted_tool_call() -> None:
