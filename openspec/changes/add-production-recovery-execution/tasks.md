@@ -32,7 +32,7 @@
 
 ## 6. Alert-triggered intent dispatch
 
-- [ ] 6.1 Stamp a server-controlled Alertmanager source on webhook-created diagnostic tasks while keeping manual and Chat tasks unmarked.
-- [ ] 6.2 Add a focused dispatcher that delegates proposal and policy decisions to `RecoveryIntentService` and emits only safe classifications.
-- [ ] 6.3 Invoke dispatch from the durable diagnosis Job with cancellation protection and succeeded-task crash compensation that skips Agent/LLM reruns.
-- [ ] 6.4 Prove Compose closure, PostgreSQL approval-only behavior, duplicate-delivery idempotency and safe public audit with focused tests.
+- [x] 6.1 Stamp a server-controlled Alertmanager source on webhook-created diagnostic tasks while keeping manual and Chat tasks unmarked.
+- [x] 6.2 Add a focused dispatcher that delegates proposal and policy decisions to `RecoveryIntentService` and emits only safe classifications.
+- [x] 6.3 Invoke dispatch from the durable diagnosis Job with cancellation protection and succeeded-task crash compensation that skips Agent/LLM reruns.
+- [x] 6.4 Prove Compose closure, PostgreSQL approval-only behavior, duplicate-delivery idempotency and safe public audit with focused tests.

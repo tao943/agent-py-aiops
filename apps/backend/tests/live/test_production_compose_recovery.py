@@ -13,6 +13,8 @@ import httpx
 import pytest
 from sqlalchemy import func, select, update
 
+from super_ai.alert_ingestion.repositories import IngestionWrite
+from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
 from super_ai.api.app import create_app
 from super_ai.memory.models import (
     AiopsExecutionModel,
@@ -138,19 +140,39 @@ async def _seed_grounded_diagnosis(
     app: Any,
     *,
     owner_user_id: str,
-    task_id: str,
-    incident_id: str,
-) -> None:
+) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
+    ingestion = SQLAlchemyAlertIngestionRepository(app.state.memory_session_factory)
+    ingestion_result = await ingestion.apply(
+        IngestionWrite(
+            owner_user_id=owner_user_id,
+            source_id="local-alertmanager",
+            status="firing",
+            group_key_hash=uuid4().hex + uuid4().hex,
+            payload_sha256=uuid4().hex + uuid4().hex,
+            normalized_payload={"version": "4", "status": "firing", "alerts": []},
+            query="Investigate the observed order-api pool saturation.",
+            safe_alert={"labels": {"service": "order-api"}},
+            filtered=False,
+            received_at=now,
+            alert_name="OrderPoolExhausted",
+            service="order-api",
+            severity="critical",
+            starts_at=now,
+            scenario_id="PRODUCTION-RECOVERY-COMPOSE-001",
+            run_id=f"recovery-{uuid4().hex[:12]}",
+        )
+    )
+    assert ingestion_result.diagnostic_task_id is not None
+    assert ingestion_result.incident_id is not None
+    task_id = ingestion_result.diagnostic_task_id
+    incident_id = ingestion_result.incident_id
     diagnostics = app.state.memory_repositories.diagnostics
-    await diagnostics.create_task(
+    await diagnostics.update_task(
         owner_user_id=owner_user_id,
         task_id=task_id,
         status="succeeded",
-        query="Investigate the observed order-api pool saturation.",
-        input_payload={"alert": {"service": "order-api"}},
         result_payload={"status": "succeeded"},
-        created_at=now,
         completed_at=now,
     )
     await diagnostics.add_report(
@@ -193,31 +215,7 @@ async def _seed_grounded_diagnosis(
         evidence_id=f"evidence-{task_id}",
         created_at=now,
     )
-    async with app.state.memory_session_factory() as session, session.begin():
-        session.add(
-            AlertIncidentModel(
-                id=incident_id,
-                owner_user_id=owner_user_id,
-                source_id="production-recovery-live",
-                group_key_hash=uuid4().hex + uuid4().hex,
-                run_id=task_id,
-                scenario_id="PRODUCTION-RECOVERY-COMPOSE-001",
-                status="active",
-                alert_name="OrderPoolExhausted",
-                service="order-api",
-                severity="critical",
-                starts_at=now,
-                last_seen_at=now,
-                resolved_at=None,
-                verification_status="pending",
-                verified_at=None,
-                verification_summary=None,
-                delivery_count=1,
-                diagnostic_task_id=task_id,
-                created_at=now,
-                updated_at=now,
-            )
-        )
+    return task_id, incident_id
 
 
 async def _resolve_after_independent_recovery(
@@ -287,13 +285,24 @@ async def test_compose_recovery_closes_once_through_production_http_api(
             registered = await _register(client)
             owner_user_id = cast(str, cast(Mapping[str, object], registered["user"])["id"])
             token = registered["accessToken"]
-            task_id = f"diagnostic-{uuid4().hex}"
-            incident_id = f"incident-{uuid4().hex}"
-            await _seed_grounded_diagnosis(
+            task_id, incident_id = await _seed_grounded_diagnosis(
                 app,
                 owner_user_id=owner_user_id,
+            )
+            task = await app.state.memory_repositories.diagnostics.get_task(
+                owner_user_id=owner_user_id,
                 task_id=task_id,
-                incident_id=incident_id,
+            )
+            assert task is not None
+            assert task.input_payload["triggerSource"] == "alertmanager"
+            jobs = app.state.memory_repositories.background_jobs
+            assert jobs is not None
+            await jobs.enqueue(
+                owner_user_id=owner_user_id,
+                job_id=f"job-retry-{uuid4().hex}",
+                kind="aiops_diagnosis",
+                resource_type="aiops_diagnostic",
+                resource_id=task_id,
             )
             resolver = asyncio.create_task(
                 _resolve_after_independent_recovery(
@@ -302,25 +311,19 @@ async def test_compose_recovery_closes_once_through_production_http_api(
                     before=before,
                 )
             )
-            first, duplicate = await asyncio.gather(
-                client.post(
-                    f"/aiops/diagnostics/{task_id}/recovery-intents",
-                    headers=_auth(token),
-                    json={"note": "Run governed recovery."},
-                ),
-                client.post(
-                    f"/aiops/diagnostics/{task_id}/recovery-intents",
-                    headers=_auth(token),
-                    json={"note": "Duplicate client delivery."},
-                ),
-            )
-            assert {first.status_code, duplicate.status_code} == {200, 201}
-            intent_ids = {
-                first.json()["data"]["id"],
-                duplicate.json()["data"]["id"],
-            }
-            assert len(intent_ids) == 1
-            intent_id = intent_ids.pop()
+            await app.state.background_job_runtime.start()
+            intent_id: str | None = None
+            for _ in range(300):
+                async with app.state.memory_session_factory() as session:
+                    intent_id = await session.scalar(
+                        select(ProductionRecoveryIntentModel.id).where(
+                            ProductionRecoveryIntentModel.diagnostic_task_id == task_id
+                        )
+                    )
+                if intent_id is not None:
+                    break
+                await asyncio.sleep(0.05)
+            assert intent_id is not None
             terminal: Mapping[str, object] | None = None
             for _ in range(300):
                 response = await client.get(
