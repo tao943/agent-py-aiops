@@ -1,0 +1,81 @@
+cases:
+  - id: QR-001
+    context:
+      - {role: user, content: "PostgreSQL 报 SQLSTATE 40P01 deadlock detected，两个事务更新顺序相反。"}
+      - {role: assistant, content: "需要还原等待环并检查事务重试。"}
+    follow_up_query: "那这个具体怎么确认？"
+    relevant_documents: [postgres-deadlock.md]
+    forbidden_top_one: [postgres-slow-query-lock-wait.md]
+    acceptable_top_k: 3
+  - id: QR-002
+    context:
+      - {role: user, content: "PostgreSQL 连接池 checkout timeout，available=0 且 waiters 持续上升。"}
+      - {role: assistant, content: "需要区分长事务、连接泄漏和容量不足。"}
+    follow_up_query: "那要先收集什么？"
+    relevant_documents: [postgres-pool-exhaustion.md]
+    forbidden_top_one: [postgres-connectivity-auth.md]
+    acceptable_top_k: 3
+  - id: QR-003
+    context:
+      - {role: user, content: "Redis connected_clients 接近 maxclients，新连接被拒绝。"}
+      - {role: assistant, content: "要同时核对连接泄漏与主机 FD。"}
+    follow_up_query: "这个怎么继续排查？"
+    relevant_documents: [redis-maxclients-pressure.md]
+    forbidden_top_one: [host-file-descriptor-exhaustion.md]
+    acceptable_top_k: 3
+  - id: QR-004
+    context:
+      - {role: user, content: "Redis failover 后直连新主成功，但应用连接池仍访问旧主。"}
+      - {role: assistant, content: "可能涉及拓扑收敛、DNS 缓存和连接池重建。"}
+    follow_up_query: "那为什么还没恢复？"
+    relevant_documents: [redis-failover-reconnect.md]
+    forbidden_top_one: [redis-unavailable.md]
+    acceptable_top_k: 3
+  - id: QR-005
+    context:
+      - {role: user, content: "Nginx upstream connect 很快，但等待响应直到 504 timeout。"}
+      - {role: assistant, content: "耗时更可能发生在读取上游响应阶段。"}
+    follow_up_query: "这个需要哪些证据？"
+    relevant_documents: [nginx-upstream-timeout.md]
+    forbidden_top_one: [nginx-upstream-502.md]
+    acceptable_top_k: 3
+  - id: QR-006
+    context:
+      - {role: user, content: "Nginx 同一路由偶尔转发到已下线实例，upstream 结果不一致。"}
+      - {role: assistant, content: "应核对服务发现、DNS 缓存和配置重载。"}
+    follow_up_query: "那先检查什么？"
+    relevant_documents: [nginx-routing-service-discovery.md]
+    forbidden_top_one: [kubernetes-service-endpoint-mismatch.md]
+    acceptable_top_k: 3
+  - id: QR-007
+    context:
+      - {role: user, content: "Kubernetes Pod 内短域名解析失败，但完整域名和外部域名正常。"}
+      - {role: assistant, content: "应检查 search domain、ndots 和 CoreDNS 查询路径。"}
+    follow_up_query: "这个怎么确认？"
+    relevant_documents: [kubernetes-dns-debugging.md]
+    forbidden_top_one: [kubernetes-service-endpoint-mismatch.md]
+    acceptable_top_k: 3
+  - id: QR-008
+    context:
+      - {role: user, content: "Kubernetes Service DNS 正常且 Pod IP 可达，但虚拟服务没有可用 endpoint。"}
+      - {role: assistant, content: "需要核对 selector、EndpointSlice 和 readiness。"}
+    follow_up_query: "那具体看哪些对象？"
+    relevant_documents: [kubernetes-service-endpoint-mismatch.md]
+    forbidden_top_one: [kubernetes-dns-debugging.md]
+    acceptable_top_k: 3
+  - id: QR-009
+    context:
+      - {role: user, content: "RabbitMQ queue backlog 持续增长，入队速率超过成功消费速率。"}
+      - {role: assistant, content: "需要区分流量突增、消费变慢和重试放大。"}
+    follow_up_query: "这个下一步怎么分辨？"
+    relevant_documents: [queue-backlog.md]
+    forbidden_top_one: [queue-consumer-stalled.md]
+    acceptable_top_k: 3
+  - id: QR-010
+    context:
+      - {role: user, content: "RabbitMQ consumer 心跳仍在，但不再 ack 消息，重启后短暂推进又停住。"}
+      - {role: assistant, content: "可能卡在依赖、租约或消费循环。"}
+    follow_up_query: "那应该收集什么？"
+    relevant_documents: [queue-consumer-stalled.md]
+    forbidden_top_one: [queue-backlog.md]
+    acceptable_top_k: 3

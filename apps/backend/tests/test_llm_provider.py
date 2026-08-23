@@ -11,7 +11,10 @@ from super_ai.llm import (
     LlmConfigurationError,
     LlmProviderConfig,
     QwenOpenAIProvider,
+    create_query_rewrite_model,
     load_llm_provider_config,
+    query_rewrite_model_name,
+    query_rewrite_structured_output_method,
 )
 
 
@@ -78,6 +81,8 @@ def test_loads_offline_qwen_configuration(offline_config: LlmProviderConfig) -> 
     assert config.structured_output_method == "json_mode"
     assert config.validator_model == "qwen-test-chat"
     assert config.validator_structured_output_method == "json_mode"
+    assert config.query_rewrite_model == "qwen-test-chat"
+    assert config.query_rewrite_structured_output_method == "json_mode"
     assert config.temperature == 0.2
     assert config.timeout_seconds == 30.0
     assert config.max_retries == 2
@@ -196,6 +201,35 @@ def test_validator_model_requires_matching_capability_profile(tmp_path: Path) ->
     assert "test-secret" not in str(exc_info.value)
 
 
+def test_loads_dedicated_query_rewrite_model_capability(tmp_path: Path) -> None:
+    config = load_llm_provider_config(
+        config_path=_write_config(
+            tmp_path,
+            api_key="shared-secret",
+            chat_model="qwen3.7-plus",
+            query_rewrite_model="qwen3.7-flash",
+        )
+    )
+
+    assert config.chat_model == "qwen3.7-plus"
+    assert config.query_rewrite_model == "qwen3.7-flash"
+    assert config.query_rewrite_structured_output_method == "json_mode"
+
+
+def test_query_rewrite_model_requires_matching_capability_profile(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        api_key="test-secret",
+        query_rewrite_model="qwen3.7-flash",
+    )
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    del raw_config["llm"]["modelCapabilities"]["qwen3.7-flash"]
+    config_path.write_text(json.dumps(raw_config), encoding="utf-8")
+
+    with pytest.raises(LlmConfigurationError, match="qwen3.7-flash"):
+        load_llm_provider_config(config_path=config_path)
+
+
 def test_provider_constructs_model_with_config(
     offline_config: LlmProviderConfig,
 ) -> None:
@@ -248,6 +282,57 @@ def test_provider_constructs_dedicated_validator_with_shared_transport(
     assert validator_config.max_retries == main_config.max_retries
     assert provider.validator_model_name == "qwen3.8-max"
     assert provider.validator_structured_output_method == "json_mode"
+
+
+def test_provider_constructs_dedicated_rewriter_with_shared_transport(
+    tmp_path: Path,
+) -> None:
+    config = load_llm_provider_config(
+        config_path=_write_config(
+            tmp_path,
+            api_key="shared-secret",
+            base_url="https://example.test/v1",
+            chat_model="qwen3.7-plus",
+            query_rewrite_model="qwen3.7-flash",
+            timeout_seconds=45,
+            max_retries=4,
+        )
+    )
+    captured: list[LlmProviderConfig] = []
+
+    def fake_factory(factory_config: LlmProviderConfig) -> FakeChatModel:
+        captured.append(factory_config)
+        return FakeChatModel()
+
+    provider = QwenOpenAIProvider(config=config, model_factory=fake_factory)
+
+    create_query_rewrite_model(provider)
+
+    rewrite_config = captured[0]
+    assert rewrite_config.chat_model == "qwen3.7-flash"
+    assert rewrite_config.api_key == config.api_key
+    assert rewrite_config.base_url == config.base_url
+    assert rewrite_config.temperature == config.temperature
+    assert rewrite_config.timeout_seconds == config.timeout_seconds
+    assert rewrite_config.max_retries == config.max_retries
+    assert query_rewrite_model_name(provider) == "qwen3.7-flash"
+    assert query_rewrite_structured_output_method(provider) == "json_mode"
+
+
+def test_query_rewrite_helpers_support_legacy_provider() -> None:
+    model = FakeChatModel()
+
+    class LegacyProvider:
+        structured_output_method = "json_mode"
+
+        def create_chat_model(self) -> FakeChatModel:
+            return model
+
+    provider = cast(Any, LegacyProvider())
+
+    assert create_query_rewrite_model(provider) is model
+    assert query_rewrite_model_name(provider) == "legacy-chat-model"
+    assert query_rewrite_structured_output_method(provider) == "json_mode"
 
 
 def test_provider_constructs_embedding_model_with_config(
@@ -345,6 +430,7 @@ def _write_config(
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
     chat_model: str = "qwen3.7-max",
     validator_model: str | None = None,
+    query_rewrite_model: str | None = None,
     embedding_model: str = "text-embedding-v4",
     embedding_dimensions: int = 1024,
     rerank_model: str = "qwen3-vl-rerank",
@@ -366,6 +452,11 @@ def _write_config(
             "contextWindowTokens": context_window_tokens,
             "structuredOutputMethod": "json_mode",
         }
+    if query_rewrite_model is not None:
+        capabilities[query_rewrite_model] = {
+            "contextWindowTokens": context_window_tokens,
+            "structuredOutputMethod": "json_mode",
+        }
     llm_config: dict[str, object] = {
         "provider": "qwen-openai",
         "apiKey": api_key,
@@ -382,6 +473,8 @@ def _write_config(
     }
     if validator_model is not None:
         llm_config["validatorModel"] = validator_model
+    if query_rewrite_model is not None:
+        llm_config["queryRewriteModel"] = query_rewrite_model
     config_path = tmp_path / "project.json"
     config_path.write_text(
         json.dumps(

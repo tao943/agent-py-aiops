@@ -42,6 +42,8 @@ class LlmProviderConfig:
     structured_output_method: StructuredOutputMethod
     validator_model: str
     validator_structured_output_method: StructuredOutputMethod
+    query_rewrite_model: str
+    query_rewrite_structured_output_method: StructuredOutputMethod
     temperature: float
     timeout_seconds: float
     max_retries: int
@@ -78,6 +80,17 @@ def load_llm_provider_config(
             validator_model,
             config_field="validatorModel",
         )
+        query_rewrite_model_raw = raw_config.get("queryRewriteModel", chat_model)
+        if not isinstance(query_rewrite_model_raw, str) or not query_rewrite_model_raw.strip():
+            raise ProjectConfigurationError(
+                "Project config field must be a non-empty string: queryRewriteModel"
+            )
+        query_rewrite_model = query_rewrite_model_raw.strip()
+        _, query_rewrite_structured_output_method = _model_capability_profile(
+            typed_model_capabilities,
+            query_rewrite_model,
+            config_field="queryRewriteModel",
+        )
 
         return LlmProviderConfig(
             provider=required_str(raw_config, "provider"),
@@ -95,6 +108,10 @@ def load_llm_provider_config(
             validator_model=validator_model,
             validator_structured_output_method=cast(
                 StructuredOutputMethod, validator_structured_output_method
+            ),
+            query_rewrite_model=query_rewrite_model,
+            query_rewrite_structured_output_method=cast(
+                StructuredOutputMethod, query_rewrite_structured_output_method
             ),
             temperature=required_float(raw_config, "temperature"),
             timeout_seconds=required_float(raw_config, "timeoutSeconds"),

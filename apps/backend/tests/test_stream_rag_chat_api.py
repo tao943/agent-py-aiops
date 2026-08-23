@@ -208,6 +208,8 @@ async def test_streaming_chat_emits_sse_events_and_persists_messages(
     assert runner.requests[0].messages[-1].content == "How do I restart the API?"
     assert runner.requests[0].route.intent == "knowledge_question"
     assert runner.requests[0].tool_names == ("knowledge_retrieval", "load_skill")
+    assert runner.requests[0].execution_budget.max_model_calls == 3
+    assert runner.requests[0].execution_budget.max_query_rewrite_calls == 1
 
     history = detail_response.json()["data"]["messages"]
     assert [message["role"] for message in history] == ["user", "assistant"]

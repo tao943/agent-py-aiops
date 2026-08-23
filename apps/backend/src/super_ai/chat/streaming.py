@@ -36,9 +36,18 @@ from super_ai.chat.execution import ChatTurnExecutionRequest, ChatTurnExecutionS
 from super_ai.chat.execution_policy import ChatExecutionBudget, policy_for
 from super_ai.chat.intent import ChatIntentRouter, ChatRoute
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
+from super_ai.chat.query_rewrite import (
+    AdaptiveKnowledgeQueryTransformer,
+    QueryRewriteContextMessage,
+    StructuredQueryRewriter,
+)
 from super_ai.chat.tool_policy import allowed_tools_for
 from super_ai.error_catalog import ERROR_DEFINITIONS
-from super_ai.llm import LlmProvider
+from super_ai.llm import (
+    LlmProvider,
+    create_query_rewrite_model,
+    query_rewrite_structured_output_method,
+)
 from super_ai.mcp.cached_client import RuntimeMcpClient
 from super_ai.mcp_client import create_current_time_tool
 from super_ai.mcp_connections import McpConnectionService
@@ -118,7 +127,7 @@ def build_agent_middleware(
 
     return (
         ModelCallLimitMiddleware(
-            run_limit=budget.max_model_calls,
+            run_limit=max(0, budget.max_model_calls - budget.max_query_rewrite_calls),
             exit_behavior="error",
         ),
         ToolCallLimitMiddleware(
@@ -536,6 +545,7 @@ class ChatStreamingService:
             route=route,
             tool_names=tuple(sorted(allowed_tools)),
             skills=selected_skills,
+            execution_budget=policy_for(route).budget,
         )
         answer_parts: list[str] = []
         tool_call_ids: list[str] = []
@@ -883,10 +893,25 @@ class LangChainChatAgentRunner:
         self._aiops_bridge_service = aiops_bridge_service
 
     async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
+        query_transformer = None
+        if (
+            request.route.intent == "knowledge_question"
+            and request.execution_budget.max_query_rewrite_calls > 0
+        ):
+            query_transformer = AdaptiveKnowledgeQueryTransformer(
+                StructuredQueryRewriter(
+                    create_query_rewrite_model(self._llm_provider),
+                    structured_output_method=query_rewrite_structured_output_method(
+                        self._llm_provider
+                    ),
+                ),
+                context=_query_rewrite_context(request.messages),
+            )
         langchain_tool = create_langchain_knowledge_retrieval_tool(
             self._retrieval_tool,
             owner_user_id=request.owner_user_id,
             accessible_knowledge_base_ids=request.accessible_knowledge_base_ids,
+            query_transformer=query_transformer,
         )
         tool_registry: dict[str, StructuredTool] = {
             langchain_tool.name: langchain_tool,
@@ -931,6 +956,39 @@ class LangChainChatAgentRunner:
                     yield item
             else:
                 yield parsed
+
+
+def _query_rewrite_context(
+    messages: Sequence[ChatMessageRecord],
+) -> tuple[QueryRewriteContextMessage, ...]:
+    relevant = [message for message in messages if message.role in {"user", "assistant"}]
+    current_user_index = next(
+        (
+            index
+            for index in range(len(relevant) - 1, -1, -1)
+            if relevant[index].role == "user"
+        ),
+        len(relevant),
+    )
+    prior = relevant[:current_user_index]
+    complete_turns: list[list[ChatMessageRecord]] = []
+    current: list[ChatMessageRecord] = []
+    for message in prior:
+        if message.role == "user":
+            if current and any(item.role == "assistant" for item in current):
+                complete_turns.append(current)
+            current = [message]
+        elif current:
+            current.append(message)
+    if current and any(item.role == "assistant" for item in current):
+        complete_turns.append(current)
+    return tuple(
+        QueryRewriteContextMessage(
+            "user" if message.role == "user" else "assistant", message.content
+        )
+        for turn in complete_turns[-2:]
+        for message in turn
+    )
 
 
 def create_load_skill_tool(skills: Sequence[SelectedChatSkill]) -> StructuredTool:

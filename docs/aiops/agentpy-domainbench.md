@@ -241,6 +241,37 @@ Agent RAG before/after 对比在 30 卡导入与 64-query Retrieval Eval 通过�
 场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；不能为了改善结果修改标签、
 Prompt 或评分规则。
 
+### Conversation Query Rewrite Retrieval A/B
+
+`query_rewrite_cases.yaml` 另含 10 条多轮追问，覆盖 PostgreSQL deadlock/连接池、Redis
+maxclients/failover、Nginx timeout/路由、Kubernetes DNS/endpoint 和消息队列积压/消费停滞。
+它与 64 条独立查询职责不同：64-query 集合验证知识库整体召回，Query Rewrite A/B 只比较
+同一追问在“原样检索”和“结合最近完整对话轮次重写后检索”之间的组件差异。
+
+运行前必须显式提供 `--confirm-real-model`、owner 和知识库。所有 relevant/forbidden 文档名
+必须在该 scope 的已索引数据中唯一解析，少于 8 个有效案例、缺卡或同名歧义均记为
+`INFRA_INVALID`。baseline/rewrite 两个 `retrieval` Artifact 在模型调用前先创建；失败、取消
+或阈值未达标也分别进入不可变终态，不遗留 running 记录。
+
+指标沿用 Recall@1/3、MRR、forbidden Top-1、citation completeness，并新增 rewrite 应用数、
+模型调用数、平均与 nearest-rank P95 时延。direct 查询不调用 Rewriter；contextual 查询每个
+请求最多一次，Agent 2 + Rewriter 1 的总模型预算不超过 3。Artifact 只保存 case ID、排名文档、
+安全重写枚举、聚合指标和不可逆 Corpus 指纹/文档/Chunk 计数，不保存追问、上下文、重写文本、
+Prompt、推理、知识正文或原始模型响应。10 条多轮集合的门禁为 Recall@1 ≥ 0.80、Recall@3 ≥
+0.90、MRR ≥ 0.85、forbidden Top-1 ≤ 0.05、citation completeness = 1.00；Forbidden 门槛不因
+小样本放宽。
+
+该 A/B 的 baseline 直接进入 canonical retrieval，刻意绕过 Agent 自己可能生成的工具查询，
+因此结论标记为 `query-rewrite-retrieval-component`。另用一次不计分 Conversation
+`knowledge_question` smoke 验证生产注入可达；smoke 不作为召回质量证据。该流程不调用 CLS
+或 Docker，也不改变 AIOps RAG、恢复和评分。
+
+2026-08-23 固定主模型 `qwen3.7-plus`、Embedding `qwen3.7-text-embedding`、Rerank
+`qwen3-vl-rerank`、案例与知识库，仅使用独立 `qwen3.7-flash` Rewriter 和 25 秒单次超时。
+真实 Run `conversation-query-rewrite-ab-20260823-5` 得到 Rewrite Recall@1=0.90、
+Recall@3=1.00、MRR=0.95、forbidden Top-1=0.00、citation completeness=1.00，结果为
+`VALID_PASS`；10 次调用无 timeout，9 次应用，1 次 semantic guard 安全回退后仍正确召回。
+
 ### 历史两卡 smoke 基线（2026-08-13）
 
 在本地测试 owner 的隔离知识库中，仅更新 PostgreSQL 与 Redis 两张综合卡后执行了一次

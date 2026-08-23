@@ -139,6 +139,10 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "vectorChannelCoverageRate",
             "bm25ChannelCoverageRate",
             "hybridChannelCoverageRate",
+            "rewriteAppliedCount",
+            "rewriteModelCallCount",
+            "averageDurationMs",
+            "p95DurationMs",
         }
     ),
     "live": frozenset(
@@ -193,7 +197,7 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
 }
 _RESULT_KEYS: dict[EvaluationKind, frozenset[str]] = {
     "snapshot": frozenset({"failures", "scoreReasons", "hardGate"}),
-    "retrieval": frozenset({"failures", "queryResults"}),
+    "retrieval": frozenset({"failures", "queryResults", "corpusMetadata"}),
     "live": frozenset(
         {
             "failures",

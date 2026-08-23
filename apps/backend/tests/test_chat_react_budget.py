@@ -22,9 +22,12 @@ from super_ai.chat.streaming import (
 
 
 def test_budget_uses_langchain_limit_middleware() -> None:
-    middleware = build_agent_middleware(ChatExecutionBudget(2, 2, 120.0))
+    middleware = build_agent_middleware(
+        ChatExecutionBudget(3, 2, 120.0, max_query_rewrite_calls=1)
+    )
 
     assert isinstance(middleware[0], ModelCallLimitMiddleware)
+    assert middleware[0].run_limit == 2
     assert isinstance(middleware[1], ToolCallLimitMiddleware)
     assert isinstance(middleware[2], RepeatedToolCallMiddleware)
 

@@ -16,6 +16,7 @@ class ChatExecutionBudget:
     max_model_calls: int
     max_tool_calls: int
     deadline_seconds: float
+    max_query_rewrite_calls: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class ChatExecutionPolicy:
 
 _NO_MODEL_BUDGET = ChatExecutionBudget(0, 0, 30.0)
 _NORMAL_REACT_BUDGET = ChatExecutionBudget(2, 2, 120.0)
+_KNOWLEDGE_REACT_BUDGET = ChatExecutionBudget(3, 2, 120.0, 1)
 _EXPLORATORY_REACT_BUDGET = ChatExecutionBudget(4, 6, 180.0)
 
 
@@ -74,7 +76,7 @@ def policy_for(route: ChatRoute) -> ChatExecutionPolicy:
             allowed_tools=allowed_tools_for(route.intent),
             required_tools=frozenset({"knowledge_retrieval"}),
             postcondition="grounded_answer",
-            budget=_NORMAL_REACT_BUDGET,
+            budget=_KNOWLEDGE_REACT_BUDGET,
         )
     return ChatExecutionPolicy(
         mode="bounded_react",

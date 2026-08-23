@@ -50,10 +50,17 @@ def test_knowledge_react_has_normal_budget_and_required_retrieval() -> None:
     policy = policy_for(ChatRoute("knowledge_question", 0.9, "model"))
 
     assert policy.mode == "bounded_react"
-    assert policy.budget.max_model_calls == 2
+    assert policy.budget.max_model_calls == 3
+    assert policy.budget.max_query_rewrite_calls == 1
     assert policy.budget.max_tool_calls == 2
     assert policy.budget.deadline_seconds == 120.0
     assert policy.required_tools == frozenset({"knowledge_retrieval"})
+
+
+def test_non_knowledge_routes_do_not_reserve_rewrite_calls() -> None:
+    policy = policy_for(ChatRoute("general_chat", 0.9, "model"))
+
+    assert policy.budget.max_query_rewrite_calls == 0
 
 
 def test_missing_required_tool_fails_compilation() -> None:
