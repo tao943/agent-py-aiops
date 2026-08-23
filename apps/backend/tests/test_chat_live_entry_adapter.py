@@ -17,7 +17,7 @@ from super_ai.evaluation.live.domain import (
     LiveFaultObservation,
     LiveScenario,
 )
-from super_ai.memory.repositories import PendingChatActionRecord
+from super_ai.memory.repositories import ChatSessionRecord, PendingChatActionRecord
 
 NOW = datetime(2026, 8, 22, tzinfo=timezone.utc)
 
@@ -199,7 +199,11 @@ class PendingRepository:
                 id=str(values["action_id"]),
                 owner_user_id=str(values["owner_user_id"]),
                 session_id=str(values["session_id"]),
-                chat_run_id=str(values["chat_run_id"]),
+                chat_run_id=(
+                    str(values["chat_run_id"])
+                    if values["chat_run_id"] is not None
+                    else None
+                ),
                 action_type="start_diagnostic",
                 target_resource_id=str(values["target_resource_id"]),
                 public_arguments={"incidentId": str(values["target_resource_id"])},
@@ -268,6 +272,40 @@ class PendingRepository:
         raise AssertionError("manual review is not expected")
 
 
+class SessionRepository:
+    def __init__(self) -> None:
+        self.session: ChatSessionRecord | None = None
+
+    async def get_session(
+        self, *, owner_user_id: str, session_id: str
+    ) -> ChatSessionRecord | None:
+        if (
+            self.session is not None
+            and self.session.owner_user_id == owner_user_id
+            and self.session.id == session_id
+        ):
+            return self.session
+        return None
+
+    async def create_session(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        title: str | None = None,
+        created_at: datetime | None = None,
+    ) -> ChatSessionRecord:
+        timestamp = created_at or NOW
+        self.session = ChatSessionRecord(
+            id=session_id,
+            owner_user_id=owner_user_id,
+            title=title,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        return self.session
+
+
 class DiagnosticDelegate:
     def __init__(self) -> None:
         self.calls = 0
@@ -299,9 +337,11 @@ class DiagnosticDelegate:
 @pytest.mark.asyncio
 async def test_live_diagnostic_adapter_delegates_to_aiops_and_keeps_scores_separate() -> None:
     repository = PendingRepository()
+    sessions = SessionRepository()
     delegate = DiagnosticDelegate()
     adapter = ChatEntryLiveDiagnosticAdapter(
         owner_user_id="owner-live",
+        session_repository=sessions,
         pending_repository=repository,
         report_bridge=Bridge(),
         diagnostic_delegate=delegate,
@@ -328,6 +368,10 @@ async def test_live_diagnostic_adapter_delegates_to_aiops_and_keeps_scores_separ
     )
 
     assert delegate.calls == 1
+    assert sessions.session is not None
+    assert repository.action is not None
+    assert repository.action.session_id == sessions.session.id
+    assert repository.action.chat_run_id is None
     assert artifact.diagnostic_task_id == "diagnostic_live_1"
     assert adapter.conversation_metrics()["confirmationAccuracy"] == 1.0
     assert "total" not in adapter.conversation_metrics()

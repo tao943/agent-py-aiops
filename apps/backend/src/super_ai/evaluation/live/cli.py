@@ -421,6 +421,7 @@ async def _run_live_command(
                 raise RuntimeError("Pending Chat Action repository is required for Chat Live.")
             chat_diagnostic = ChatEntryLiveDiagnosticAdapter(
                 owner_user_id=cast(str, arguments.owner_user_id),
+                session_repository=repositories.chat,
                 pending_repository=pending_repository,
                 report_bridge=AiopsBridgeService(
                     incidents=_UnavailableIncidentQueries(),
