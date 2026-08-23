@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from super_ai.aiops.diagnostics import task_scoped_source_fingerprint
+from super_ai.aiops.diagnostics import AiopsDiagnosticService, task_scoped_source_fingerprint
 from super_ai.aiops.investigation import TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES
 from super_ai.aiops.tool_routing import (
     ORDER_POOL_AUTOMATIC_TOOLS,
@@ -102,6 +102,34 @@ def test_direct_live_benchmark_without_automatic_marker_remains_unscoped() -> No
 
     assert not route.scoped
     assert route.allowed_tools is None
+
+
+@pytest.mark.asyncio
+async def test_ordinary_state_does_not_materialize_an_absent_live_scope() -> None:
+    owner = FakeRuntimeMcpClient((_definition("InspectContainer", "runtime"),))
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, owner),
+        cls_region="unused",
+        cls_topic_id="unused",
+    )
+    routed = await service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+        "owner",
+        cast(
+            Any,
+            {
+                "automatic_closure_mode": False,
+                "benchmark_mode": "",
+                "benchmark_scenario_id": "",
+                "live_evidence_scope": {},
+                "task_local_live_scope": False,
+            },
+        ),
+    )
+
+    assert routed is owner
 
 
 class FakeRuntimeMcpClient:

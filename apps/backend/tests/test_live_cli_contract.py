@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from super_ai.api.app import CreateAiopsDiagnosticRequest
-from super_ai.evaluation.live.cli import _auto_closure_strategy, build_parser
+from super_ai.evaluation.live.cli import (
+    _auto_closure_strategy,  # pyright: ignore[reportPrivateUsage]
+    build_parser,
+)
 
 
 def _run_arguments() -> list[str]:

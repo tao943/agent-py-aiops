@@ -514,10 +514,8 @@ def build_task_local_trusted_tool_arguments(
     raw_scope = input_payload.get("liveEvidenceScope")
     if not isinstance(raw_scope, Mapping):
         return {}
-    scope = cast(Mapping[object, object], raw_scope)
-    if set(scope) != _LIVE_EVIDENCE_SCOPE_KEYS or not all(
-        isinstance(key, str) for key in scope
-    ):
+    scope = cast(Mapping[str, object], raw_scope)
+    if set(scope) != set(_LIVE_EVIDENCE_SCOPE_KEYS):
         return {}
     run_id = scope.get("runId")
     scenario_id = scope.get("scenarioId")
@@ -2232,14 +2230,19 @@ class AiopsDiagnosticService:
             owner_client = self._mcp_client
         if state is None:
             return owner_client
-        route = route_task_read_only_tools(
-            {
-                "automaticClosureMode": state.get("automatic_closure_mode"),
-                "benchmarkMode": state.get("benchmark_mode"),
-                "benchmarkScenarioId": state.get("benchmark_scenario_id"),
-                "liveEvidenceScope": state.get("live_evidence_scope"),
-            }
+        route_input: dict[str, object] = {
+            "automaticClosureMode": state.get("automatic_closure_mode"),
+            "benchmarkMode": state.get("benchmark_mode"),
+            "benchmarkScenarioId": state.get("benchmark_scenario_id"),
+        }
+        automatic_live_task = (
+            state.get("automatic_closure_mode") is True
+            and state.get("benchmark_mode") == "live"
+            and state.get("benchmark_scenario_id") == _AUTOMATIC_LIVE_SCENARIO_ID
         )
+        if state.get("task_local_live_scope") is True or automatic_live_task:
+            route_input["liveEvidenceScope"] = state.get("live_evidence_scope")
+        route = route_task_read_only_tools(route_input)
         if not route.scoped:
             return owner_client
         sources: list[ScopedMcpSource] = []
@@ -6064,10 +6067,9 @@ class AiopsDiagnosticService:
         owner_user_id = str(state["owner_user_id"])
         evidence_ids = _unique_strings(cast(list[str], state.get("evidence_ids") or []))
         candidate = _root_cause_decision_from_payload(state.get("root_cause_decision"))
-        proposal_definitions = tuple(
-            definition
-            for definition in (state.get("proposal_tool_definitions") or ())
-            if self._tool_policies.get(definition.name) == "proposal_only"
+        proposal_definitions = _proposal_definitions_for_state(
+            state,
+            self._tool_policies,
         )
         proposal_tools = {definition.name for definition in proposal_definitions}
         model_runtime = (
@@ -6244,7 +6246,7 @@ class AiopsDiagnosticService:
                 summary="A proposal must require human approval before any later action.",
             )
 
-        definitions = tuple(state.get("proposal_tool_definitions") or ())
+        definitions = _proposal_definitions_for_state(state, self._tool_policies)
         proposal_step: JsonDict = {
             "tool": tool_name,
             "arguments": dict(plan.arguments),
@@ -7572,6 +7574,26 @@ def task_scoped_source_fingerprint(
     return hashlib.sha256(
         f"{task_id}\x1f{logical_call}".encode()
     ).hexdigest()
+
+
+def _proposal_definitions_for_state(
+    state: Mapping[str, object],
+    tool_policies: Mapping[str, Literal["proposal_only"]],
+) -> tuple[McpToolDefinition, ...]:
+    """Read current proposal tools, with a fail-closed legacy checkpoint fallback."""
+    source = (
+        state.get("proposal_tool_definitions")
+        if "proposal_tool_definitions" in state
+        else state.get("tool_definitions")
+    )
+    if not isinstance(source, (tuple, list)):
+        return ()
+    return tuple(
+        definition
+        for definition in source
+        if isinstance(definition, McpToolDefinition)
+        and tool_policies.get(definition.name) == "proposal_only"
+    )
 
 
 def _semantic_validation_origin(

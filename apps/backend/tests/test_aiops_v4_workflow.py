@@ -4659,6 +4659,27 @@ async def test_invalid_recovery_model_falls_back_to_schema_valid_proposal_only(
     assert len(mcp.calls) == 1
 
 
+def test_legacy_proposal_definition_fallback_never_expands_current_policy() -> None:
+    allowed = McpToolDefinition("RecordProposal", "Record a proposal.", {})
+    unknown_write = McpToolDefinition("RestartService", "Restart a service.", {})
+    policies = {"RecordProposal": "proposal_only"}
+
+    legacy = diagnostics_module._proposal_definitions_for_state(  # pyright: ignore[reportPrivateUsage]
+        {"tool_definitions": (allowed, unknown_write)},
+        cast(Any, policies),
+    )
+    explicit_empty = diagnostics_module._proposal_definitions_for_state(  # pyright: ignore[reportPrivateUsage]
+        {
+            "proposal_tool_definitions": (),
+            "tool_definitions": (allowed,),
+        },
+        cast(Any, policies),
+    )
+
+    assert legacy == (allowed,)
+    assert explicit_empty == ()
+
+
 @pytest.mark.asyncio
 async def test_exhausted_budget_prevents_recovery_model_call_and_executes_nothing(
     migrated_database_url: str,

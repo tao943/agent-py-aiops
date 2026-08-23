@@ -39,6 +39,11 @@ async def test_alert_ingestion_schema_has_required_tables_and_columns(
         "resolved_at",
         "delivery_count",
         "diagnostic_task_id",
+        "run_id",
+        "scenario_id",
+        "verification_status",
+        "verified_at",
+        "verification_summary",
         "created_at",
         "updated_at",
     } == incident_columns
