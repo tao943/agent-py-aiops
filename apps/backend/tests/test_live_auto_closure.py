@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 import pytest
 
 from super_ai.aiops import RootCauseDecision
-from super_ai.aiops.execution import ExecutionResult, UnsafeExecutionReplay
+from super_ai.aiops.execution import (
+    ExecutionIdentity,
+    ExecutionResult,
+    UnsafeExecutionReplay,
+)
 from super_ai.alert_ingestion.repositories import LiveAlertLifecycle
 from super_ai.evaluation.artifacts import (
     RecoveryPolicyAudit,
@@ -15,6 +21,7 @@ from super_ai.evaluation.artifacts import (
 )
 from super_ai.evaluation.live.auto_closure import (
     AutoClosureBudgets,
+    ClosureMetricStage,
     OrderPoolAutoClosureOrchestrator,
     PersistedDiagnosticOutcome,
     PersistedDiagnosticOutcomeLoader,
@@ -27,6 +34,7 @@ from super_ai.evaluation.live.domain import (
     LiveEvidenceContext,
     LiveFaultObservation,
     LiveRecoveryRecord,
+    LiveRunIdentity,
     LiveVerification,
 )
 
@@ -110,34 +118,39 @@ class Driver:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def preflight(self, identity) -> None:
+    async def preflight(self, identity: LiveRunIdentity) -> None:
+        del identity
         self.calls.append("preflight")
 
-    async def baseline(self, identity) -> None:
+    async def baseline(self, identity: LiveRunIdentity) -> None:
+        del identity
         self.calls.append("baseline")
 
-    def export_resume_state(self, identity) -> dict[str, object]:
+    def export_resume_state(self, identity: LiveRunIdentity) -> dict[str, object]:
         del identity
         return {
             "originalGeneration": "generation-1",
             "unrelatedSessionFingerprints": ["a" * 64],
         }
 
-    def restore(self, identity, state) -> None:
+    def restore(self, identity: LiveRunIdentity, state: Mapping[str, object]) -> None:
         del identity, state
         self.calls.append("restore")
 
-    async def inject(self, identity) -> LiveFaultObservation:
+    async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
+        del identity
         self.calls.append("inject")
         return _observation()
 
-    def recovery_eligible(self, identity) -> bool:
+    def recovery_eligible(self, identity: LiveRunIdentity) -> bool:
+        del identity
         return True
 
-    def mark_recovery_completed(self, identity) -> None:
+    def mark_recovery_completed(self, identity: LiveRunIdentity) -> None:
         del identity
 
-    async def verify(self, identity) -> LiveVerification:
+    async def verify(self, identity: LiveRunIdentity) -> LiveVerification:
+        del identity
         self.calls.append("verify")
         return LiveVerification(
             tuple(
@@ -153,7 +166,8 @@ class Driver:
             )
         )
 
-    async def cleanup(self, identity) -> LiveCleanupResult:
+    async def cleanup(self, identity: LiveRunIdentity) -> LiveCleanupResult:
+        del identity
         self.calls.append("cleanup")
         return LiveCleanupResult((LiveCheck("cleanup", True),))
 
@@ -163,12 +177,14 @@ class LifecycleRepository:
         self.verification_status = "pending"
         self.verification_calls = 0
 
-    async def get_live_lifecycle(self, **kwargs) -> LiveAlertLifecycle:
+    async def get_live_lifecycle(
+        self, **kwargs: str
+    ) -> LiveAlertLifecycle:
         del kwargs
         status = "resolved" if self.verification_calls else "active"
         return _lifecycle(status=status, verification=self.verification_status)
 
-    async def record_verification(self, **kwargs) -> LiveAlertLifecycle:
+    async def record_verification(self, **kwargs: object) -> LiveAlertLifecycle:
         assert kwargs["status"] == "passed"
         self.verification_calls += 1
         self.verification_status = "passed"
@@ -176,7 +192,7 @@ class LifecycleRepository:
 
 
 class Loader:
-    async def load(self, **kwargs) -> PersistedDiagnosticOutcome:
+    async def load(self, **kwargs: str) -> PersistedDiagnosticOutcome:
         del kwargs
         return PersistedDiagnosticOutcome(_artifact(), "sufficient")
 
@@ -185,7 +201,7 @@ class Recovery:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def recover(self, **kwargs) -> LiveRecoveryRecord:
+    async def recover(self, **kwargs: object) -> LiveRecoveryRecord:
         del kwargs
         self.calls += 1
         return LiveRecoveryRecord(
@@ -199,7 +215,13 @@ class Recovery:
 
 
 class Coordinator:
-    async def run_once(self, identity, operation, *, outcome_known_on_error):
+    async def run_once(
+        self,
+        identity: ExecutionIdentity,
+        operation: Callable[[], Awaitable[dict[str, object]]],
+        *,
+        outcome_known_on_error: bool,
+    ) -> ExecutionResult:
         assert identity.side_effecting
         assert identity.execution_kind == "recovery"
         assert not outcome_known_on_error
@@ -210,7 +232,13 @@ class CachingCoordinator:
     def __init__(self) -> None:
         self.outputs: dict[str, dict[str, object]] = {}
 
-    async def run_once(self, identity, operation, *, outcome_known_on_error):
+    async def run_once(
+        self,
+        identity: ExecutionIdentity,
+        operation: Callable[[], Awaitable[dict[str, object]]],
+        *,
+        outcome_known_on_error: bool,
+    ) -> ExecutionResult:
         assert not outcome_known_on_error
         if identity.execution_key in self.outputs:
             return ExecutionResult(self.outputs[identity.execution_key], True, 1)
@@ -223,18 +251,18 @@ class StateRepository:
     def __init__(self) -> None:
         self.state: AutoClosureState | None = None
 
-    async def create(self, **kwargs) -> AutoClosureState:
-        driver_state = kwargs["driver_state"]
+    async def create(self, **kwargs: object) -> AutoClosureState:
+        driver_state = cast(dict[str, object], kwargs["driver_state"])
         if self.state is None:
             self.state = AutoClosureState("baseline_ready", driver_state)
         return self.state
 
-    async def load(self, **kwargs) -> AutoClosureState | None:
+    async def load(self, **kwargs: object) -> AutoClosureState | None:
         del kwargs
         return self.state
 
-    async def save(self, **kwargs) -> AutoClosureState:
-        state = kwargs["state"]
+    async def save(self, **kwargs: object) -> AutoClosureState:
+        state = cast(AutoClosureState, kwargs["state"])
         assert self.state is not None
         assert state.version == self.state.version
         self.state = replace(state, version=state.version + 1)
@@ -246,10 +274,12 @@ class ClosureMetrics:
         self.latencies: list[tuple[str, float]] = []
         self.verifications: list[str] = []
 
-    def record_stage_latency(self, stage, *, latency_ms) -> None:
+    def record_stage_latency(
+        self, stage: ClosureMetricStage, *, latency_ms: float
+    ) -> None:
         self.latencies.append((stage, latency_ms))
 
-    def record_verification(self, status) -> None:
+    def record_verification(self, status: Literal["passed", "failed"]) -> None:
         self.verifications.append(status)
 
 
@@ -257,7 +287,9 @@ class EvidencePreparer:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def prepare(self, identity, observation) -> LiveEvidenceContext:
+    async def prepare(
+        self, identity: LiveRunIdentity, observation: LiveFaultObservation
+    ) -> LiveEvidenceContext:
         assert observation.confirmed
         self.calls += 1
         return LiveEvidenceContext.local(incident_id=f"{SCENARIO_ID}-{identity.run_id}")
@@ -304,7 +336,7 @@ async def test_automatic_closure_waits_for_completed_persisted_artifact() -> Non
         def __init__(self) -> None:
             self.calls = 0
 
-        async def load(self, **kwargs) -> PersistedDiagnosticOutcome:
+        async def load(self, **kwargs: str) -> PersistedDiagnosticOutcome:
             del kwargs
             self.calls += 1
             artifact = _artifact()
@@ -426,11 +458,13 @@ async def test_success_records_bounded_stage_metrics_and_progress() -> None:
 @pytest.mark.asyncio
 async def test_wrong_root_cause_is_valid_fail_without_recovery() -> None:
     class WrongLoader:
-        async def load(self, **kwargs) -> PersistedDiagnosticOutcome:
+        async def load(self, **kwargs: str) -> PersistedDiagnosticOutcome:
             del kwargs
+            decision = _artifact().decision
+            assert decision is not None
             artifact = replace(
                 _artifact(),
-                decision=replace(_artifact().decision, mechanism="connectivity_failure"),
+                decision=replace(decision, mechanism="connectivity_failure"),
             )
             return PersistedDiagnosticOutcome(artifact, "sufficient")
 
@@ -473,6 +507,12 @@ def test_authorization_requires_all_deterministic_predicates() -> None:
     assert denied.code == "evidence_insufficient"
 
 
+def _policy_audit() -> RecoveryPolicyAudit:
+    audit = _artifact().recovery_policy_audit
+    assert audit is not None
+    return audit
+
+
 @pytest.mark.parametrize(
     ("artifact", "expected_code"),
     (
@@ -481,7 +521,7 @@ def test_authorization_requires_all_deterministic_predicates() -> None:
             replace(
                 _artifact(),
                 recovery_policy_audit=replace(
-                    _artifact().recovery_policy_audit,
+                    _policy_audit(),
                     authorization_code="manual_review_required",
                 ),
             ),
@@ -491,7 +531,7 @@ def test_authorization_requires_all_deterministic_predicates() -> None:
             replace(
                 _artifact(),
                 recovery_policy_audit=replace(
-                    _artifact().recovery_policy_audit,
+                    _policy_audit(),
                     execution_permitted=True,
                 ),
             ),
@@ -529,7 +569,13 @@ def test_authorization_rejects_cross_task_artifact() -> None:
 @pytest.mark.asyncio
 async def test_uncertain_recovery_is_manual_review_and_never_verified() -> None:
     class UncertainCoordinator:
-        async def run_once(self, identity, operation, *, outcome_known_on_error):
+        async def run_once(
+            self,
+            identity: ExecutionIdentity,
+            operation: Callable[[], Awaitable[dict[str, object]]],
+            *,
+            outcome_known_on_error: bool,
+        ) -> ExecutionResult:
             del identity, operation, outcome_known_on_error
             raise UnsafeExecutionReplay("uncertain_side_effect_requires_manual_review")
 
@@ -561,31 +607,37 @@ async def test_persisted_loader_rebuilds_artifact_without_reading_report_prose()
     report = SimpleNamespace(payload={"evidenceSufficiency": "sufficient"})
 
     class Diagnostics:
-        async def get_task(self, **kwargs):
+        async def get_task(self, **kwargs: str) -> object:
             del kwargs
             return task
 
-        async def list_steps(self, **kwargs):
+        async def list_steps(self, **kwargs: str) -> list[object]:
             del kwargs
             return ["step"]
 
-        async def list_evidence(self, **kwargs):
+        async def list_evidence(self, **kwargs: str) -> list[object]:
             del kwargs
             return ["evidence"]
 
-        async def list_reports(self, **kwargs):
+        async def list_reports(self, **kwargs: str) -> list[object]:
             del kwargs
             return [report]
 
     class Audits:
-        async def list_for_diagnostic_task(self, **kwargs):
+        async def list_for_diagnostic_task(self, **kwargs: str) -> list[object]:
             del kwargs
             return ["audit"]
 
     repositories = SimpleNamespace(diagnostics=Diagnostics(), tool_call_audits=Audits())
-    captured = {}
+    captured: dict[str, object] = {}
 
-    def builder(actual_task, steps, evidence, audits, reports):
+    def builder(
+        actual_task: object,
+        steps: Sequence[object],
+        evidence: Sequence[object],
+        audits: Sequence[object],
+        reports: Sequence[object],
+    ) -> RunArtifact:
         captured.update(
             task=actual_task,
             steps=steps,
@@ -595,7 +647,10 @@ async def test_persisted_loader_rebuilds_artifact_without_reading_report_prose()
         )
         return _artifact()
 
-    loader = PersistedDiagnosticOutcomeLoader(repositories, artifact_builder=builder)
+    loader = PersistedDiagnosticOutcomeLoader(
+        cast(Any, repositories),
+        artifact_builder=cast(Any, builder),
+    )
 
     outcome = await loader.load(
         owner_user_id="owner",
@@ -621,26 +676,30 @@ async def test_persisted_loader_reads_structured_evidence_sufficiency_status() -
     )
 
     class Diagnostics:
-        async def get_task(self, **kwargs):
+        async def get_task(self, **kwargs: str) -> object:
             del kwargs
             return task
 
-        async def list_steps(self, **kwargs):
+        async def list_steps(self, **kwargs: str) -> list[object]:
             del kwargs
             return []
 
-        async def list_evidence(self, **kwargs):
+        async def list_evidence(self, **kwargs: str) -> list[object]:
             del kwargs
             return []
 
-        async def list_reports(self, **kwargs):
+        async def list_reports(self, **kwargs: str) -> list[object]:
             del kwargs
             return []
 
     repositories = SimpleNamespace(diagnostics=Diagnostics(), tool_call_audits=None)
+
+    def static_builder(*_args: object) -> RunArtifact:
+        return _artifact()
+
     loader = PersistedDiagnosticOutcomeLoader(
-        repositories,
-        artifact_builder=lambda *_args: _artifact(),
+        cast(Any, repositories),
+        artifact_builder=cast(Any, static_builder),
     )
 
     outcome = await loader.load(

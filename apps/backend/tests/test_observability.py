@@ -53,8 +53,22 @@ async def test_request_observability_preserves_correlation_and_aggregates_metric
         "orphanResolvedTotal": 0,
         "ingestionFailedTotal": 0,
         "redisDegradedTotal": 0,
+        "runtimeWakeFailedTotal": 0,
+        "verifiedClosureTotal": 0,
+        "verificationFailedTotal": 0,
         "ingestionLatencyMs": {"count": 0, "sum": 0.0, "max": 0.0},
         "diagnosisEnqueueLatencyMs": {"count": 0, "sum": 0.0, "max": 0.0},
+        "autoClosureStageLatencyMs": {
+            stage: {"count": 0, "sum": 0.0, "max": 0.0}
+            for stage in (
+                "detection",
+                "diagnosis",
+                "recovery",
+                "verification",
+                "resolved",
+                "total",
+            )
+        },
     }
     events = [
         json.loads(record.message) for record in caplog.records if record.message.startswith("{")

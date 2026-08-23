@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
+
+from sqlalchemy import String, Table
 
 from super_ai.memory.models import AlertIncidentModel
 
@@ -16,7 +19,7 @@ MIGRATION = (
 
 
 def test_alert_incident_model_has_live_correlation_and_verification_contract() -> None:
-    table = AlertIncidentModel.__table__
+    table = cast(Table, AlertIncidentModel.__table__)
 
     assert {
         "run_id",
@@ -25,10 +28,10 @@ def test_alert_incident_model_has_live_correlation_and_verification_contract() -
         "verified_at",
         "verification_summary",
     } <= set(table.columns.keys())
-    assert table.c.run_id.type.length == 80
-    assert table.c.scenario_id.type.length == 96
-    assert table.c.verification_status.type.length == 24
-    assert table.c.verification_summary.type.length == 512
+    assert cast(String, table.c.run_id.type).length == 80
+    assert cast(String, table.c.scenario_id.type).length == 96
+    assert cast(String, table.c.verification_status.type).length == 24
+    assert cast(String, table.c.verification_summary.type).length == 512
     assert any(
         index.name == "ix_aiops_alert_incidents_live_correlation"
         and tuple(column.name for column in index.columns)

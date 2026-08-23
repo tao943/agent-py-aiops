@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Any, Literal, Protocol, cast
+from typing import Literal, Protocol, cast
 
 from super_ai.aiops.execution import (
     ExecutionIdentity,
@@ -32,6 +32,14 @@ from super_ai.evaluation.live.domain import (
     RecoveryExpectation,
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
+from super_ai.memory.repositories import (
+    AgentToolCallAuditRecord,
+    DiagnosticEvidenceRecord,
+    DiagnosticReportRecord,
+    DiagnosticStepRecord,
+    DiagnosticTaskRecord,
+    MemoryRepositories,
+)
 
 SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
 RECOVERY_TARGET = "live-eval-order-api"
@@ -225,9 +233,18 @@ class PersistedDiagnosticOutcomeLoader:
 
     def __init__(
         self,
-        repositories: Any,
+        repositories: MemoryRepositories,
         *,
-        artifact_builder: Callable[..., RunArtifact] = build_run_artifact,
+        artifact_builder: Callable[
+            [
+                DiagnosticTaskRecord,
+                Sequence[DiagnosticStepRecord],
+                Sequence[DiagnosticEvidenceRecord],
+                Sequence[AgentToolCallAuditRecord],
+                Sequence[DiagnosticReportRecord],
+            ],
+            RunArtifact,
+        ] = build_run_artifact,
     ) -> None:
         self._repositories = repositories
         self._artifact_builder = artifact_builder
@@ -278,7 +295,7 @@ class PersistedDiagnosticOutcomeLoader:
 def _evidence_sufficiency_status(payload: Mapping[str, object]) -> str | None:
     raw = payload.get("evidenceSufficiency")
     if isinstance(raw, Mapping):
-        raw = raw.get("status")
+        raw = cast(Mapping[str, object], raw).get("status")
     return raw if isinstance(raw, str) and raw in {"sufficient", "insufficient"} else None
 
 

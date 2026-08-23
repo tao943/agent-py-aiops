@@ -326,7 +326,7 @@ async def test_driver_resume_state_is_safe_and_restores_recovery_identity() -> N
 
     resume_state = driver.export_resume_state(identity)
     restored = OrderPoolLeakScenarioDriver(
-        driver._config,  # noqa: SLF001 - verifies a new-process driver instance
+        driver._config,  # pyright: ignore[reportPrivateUsage] # noqa: SLF001
         api=api,
         postgres=postgres,
     )

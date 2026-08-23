@@ -5,14 +5,25 @@ from pathlib import Path
 
 import pytest
 
+from super_ai.aiops import RootCauseDecision
+from super_ai.evaluation.artifacts import RunArtifact
 from super_ai.evaluation.live.auto_closure import (
     PersistedDiagnosticOutcome,
     authorize_order_pool_recovery,
 )
 from super_ai.evaluation.live.cli import safe_output
 from super_ai.evaluation.live.scenarios import validate_run_id
-from test_live_auto_closure import _artifact, _observation
-from test_live_order_pool_contracts import _driver
+from test_live_auto_closure import (
+    _artifact,  # pyright: ignore[reportPrivateUsage]
+    _observation,  # pyright: ignore[reportPrivateUsage]
+)
+from test_live_order_pool_contracts import _driver  # pyright: ignore[reportPrivateUsage]
+
+
+def _decision() -> RootCauseDecision:
+    decision = _artifact().decision
+    assert decision is not None
+    return decision
 
 
 @pytest.mark.parametrize(
@@ -45,21 +56,21 @@ def test_driver_restore_rejects_secret_or_authority_fields(forbidden_key: str) -
         (
             replace(
                 _artifact(),
-                decision=replace(_artifact().decision, component="backend"),
+                decision=replace(_decision(), component="backend"),
             ),
             "component_mismatch",
         ),
         (
             replace(
                 _artifact(),
-                decision=replace(_artifact().decision, mechanism="connectivity_failure"),
+                decision=replace(_decision(), mechanism="connectivity_failure"),
             ),
             "mechanism_mismatch",
         ),
     ),
 )
 def test_recovery_authority_requires_code_owned_diagnostic_predicates(
-    artifact,
+    artifact: RunArtifact,
     expected_code: str,
 ) -> None:
     authorization = authorize_order_pool_recovery(

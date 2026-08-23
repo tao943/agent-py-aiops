@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 
@@ -9,7 +10,10 @@ from super_ai.alert_ingestion.domain import AlertmanagerDelivery, NormalizedAler
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
 from super_ai.alert_ingestion.redis_runtime import AlertLease
 from super_ai.alert_ingestion.repositories import IngestionResult, IngestionWrite, RedisMode
-from super_ai.alert_ingestion.service import AlertIngestionService, _live_task_input
+from super_ai.alert_ingestion.service import (
+    AlertIngestionService,
+    _live_task_input,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _delivery(
@@ -111,7 +115,7 @@ async def test_filtered_delivery_is_audited_without_authority_from_payload() -> 
     repository = RecordingRepository("filtered")
     leases = LeaseProvider("primary")
     metrics = AlertIngestionMetrics()
-    service = AlertIngestionService(repository, leases, metrics)
+    service = AlertIngestionService(cast(Any, repository), leases, metrics)
 
     result = await service.ingest(_source(), _delivery(environment="dev"))
 
@@ -126,7 +130,7 @@ async def test_redis_failure_still_calls_repository_and_marks_degraded() -> None
     repository = RecordingRepository()
     leases = LeaseProvider("degraded")
     metrics = AlertIngestionMetrics()
-    service = AlertIngestionService(repository, leases, metrics)
+    service = AlertIngestionService(cast(Any, repository), leases, metrics)
 
     result = await service.ingest(_source(), _delivery())
 
@@ -184,7 +188,9 @@ async def test_lease_is_released_when_repository_fails() -> None:
             raise RuntimeError("database failed")
 
     leases = LeaseProvider("primary")
-    service = AlertIngestionService(FailingRepository(), leases, AlertIngestionMetrics())
+    service = AlertIngestionService(
+        cast(Any, FailingRepository()), leases, AlertIngestionMetrics()
+    )
 
     with pytest.raises(RuntimeError, match="database failed"):
         await service.ingest(_source(), _delivery())

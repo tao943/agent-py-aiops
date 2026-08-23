@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 ORDER_POOL_SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
 ORDER_POOL_AUTOMATIC_TOOLS = frozenset(
@@ -61,8 +62,8 @@ def parse_automatic_live_evidence_scope(
 ) -> AutomaticLiveEvidenceScope | None:
     if not isinstance(raw_scope, Mapping):
         return None
-    scope = raw_scope
-    if set(scope) != _SCOPE_KEYS or not all(isinstance(key, str) for key in scope):
+    scope = cast(Mapping[str, object], raw_scope)
+    if set(scope) != set(_SCOPE_KEYS):
         return None
     run_id = scope.get("runId")
     scenario_id = scope.get("scenarioId")
