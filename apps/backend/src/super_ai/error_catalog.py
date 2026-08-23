@@ -1,6 +1,11 @@
 """Shared API and SSE error catalog."""
 
 ERROR_DEFINITIONS = {
+    "CHAT_EXECUTION_BUDGET_EXHAUSTED": (
+        "business",
+        409,
+        "本轮对话已达到安全执行预算，请缩小问题范围后重试。",
+    ),
     "CHAT_CONTEXT_LIMIT_REACHED": (
         "business",
         409,

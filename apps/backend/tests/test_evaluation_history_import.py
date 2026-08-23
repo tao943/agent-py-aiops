@@ -1,11 +1,15 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.history import EvaluationRunEnvelope
-from super_ai.evaluation.history_import import import_history
+from super_ai.evaluation.history_import import (
+    _database_envelope,  # pyright: ignore[reportPrivateUsage]
+    import_history,
+)
 from super_ai.memory.repositories import EvaluationResultRecord, EvaluationRunRecord
 
 
@@ -27,6 +31,33 @@ class Repository:
         self,
     ) -> list[tuple[EvaluationRunRecord, EvaluationResultRecord | None]]:
         return []
+
+
+def test_database_reconstruction_preserves_v1_schema_version() -> None:
+    now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    run = EvaluationRunRecord(
+        run_id="legacy-v1",
+        evaluation_kind="retrieval",
+        artifact_schema_version="v1",
+        artifact_checksum=None,
+        provenance="native",
+        run_metadata={"datasetChecksum": "a" * 64},
+        scenario_id="retrieval-suite",
+        mode="retrieval",
+        suite_version="v1",
+        agent_version={},
+        model_configuration={},
+        status="running",
+        failure_category=None,
+        diagnostic_task_id=None,
+        created_at=now,
+        started_at=now,
+        completed_at=None,
+    )
+
+    envelope = _database_envelope(run, None)
+
+    assert envelope.artifact_schema_version == "v1"
 
 
 @pytest.mark.asyncio

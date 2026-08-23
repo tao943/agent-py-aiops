@@ -16,7 +16,9 @@ from typing import cast
 from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity, ExecutionResult
 from super_ai.aiops.investigation import StrategyMode
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
+from super_ai.alert_ingestion.repositories import AlertIncidentRecord
 from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
+from super_ai.chat.aiops_bridge import AiopsBridgeService
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.artifacts import (
     InvestigationAudit,
@@ -41,6 +43,7 @@ from super_ai.evaluation.live.auto_closure import (
 from super_ai.evaluation.live.auto_closure_state import (
     SQLAlchemyAutoClosureStateRepository,
 )
+from super_ai.evaluation.live.chat_entry import ChatEntryLiveDiagnosticAdapter
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     LiveClsLogUploader,
@@ -145,6 +148,7 @@ _SAFE_RESULT_FIELDS = frozenset(
         "closedVerified",
         "correlation",
         "recoveryIntentId",
+        "conversationMetrics",
     }
 )
 
@@ -297,6 +301,22 @@ def safe_output(
     return payload
 
 
+class _UnavailableIncidentQueries:
+    """Report-only bridge dependency; prepared Live incidents are owned by Chat entry."""
+
+    async def list_active(
+        self, *, owner_user_id: str, limit: int
+    ) -> list[AlertIncidentRecord]:
+        del owner_user_id, limit
+        return []
+
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None:
+        del owner_user_id, incident_id
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     command = cast(str, arguments.command)
@@ -321,7 +341,23 @@ def main(argv: list[str] | None = None) -> int:
 
 async def _run_live_command(
     arguments: argparse.Namespace,
+    *,
+    enter_through_chat: bool = False,
 ) -> tuple[dict[str, object], int]:
+    if enter_through_chat and bool(arguments.auto_closure):
+        return (
+            safe_output(
+                command="run",
+                scenario_id=cast(str, arguments.scenario),
+                run_id=cast(str, arguments.run_id),
+                status="infra_invalid",
+                result={
+                    "validity": "INFRA_INVALID",
+                    "failureCategory": "auto_closure_arguments_invalid",
+                },
+            ),
+            2,
+        )
     try:
         effective_strategy = _auto_closure_strategy(arguments)
     except ValueError:
@@ -348,6 +384,7 @@ async def _run_live_command(
         archive=EvaluationArchive.from_config(config_path=config_path),
         repository=EvaluationRepository(session_factory),
     )
+    conversation_metrics: dict[str, object] = {}
 
     async def execute() -> LiveEvaluationResult:
         components = build_live_scenario_registry().resolve(
@@ -365,7 +402,7 @@ async def _run_live_command(
             vector_store=build_default_milvus_vector_store(config_path=config_path),
             rerank_model=llm_provider.create_rerank_model(),
         )
-        diagnostic = ApplicationLiveDiagnosticAdapter(
+        application_diagnostic = ApplicationLiveDiagnosticAdapter(
             repositories=repositories,
             llm_provider=llm_provider,
             retrieval_tool=retrieval_tool,
@@ -376,6 +413,24 @@ async def _run_live_command(
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )
+        diagnostic: ApplicationLiveDiagnosticAdapter | ChatEntryLiveDiagnosticAdapter
+        chat_diagnostic: ChatEntryLiveDiagnosticAdapter | None = None
+        if enter_through_chat:
+            pending_repository = repositories.pending_chat_actions
+            if pending_repository is None:
+                raise RuntimeError("Pending Chat Action repository is required for Chat Live.")
+            chat_diagnostic = ChatEntryLiveDiagnosticAdapter(
+                owner_user_id=cast(str, arguments.owner_user_id),
+                pending_repository=pending_repository,
+                report_bridge=AiopsBridgeService(
+                    incidents=_UnavailableIncidentQueries(),
+                    diagnostics=repositories.diagnostics,
+                ),
+                diagnostic_delegate=application_diagnostic,
+            )
+            diagnostic = chat_diagnostic
+        else:
+            diagnostic = application_diagnostic
         runtime_provider = repositories.aiops_runtime
         if runtime_provider is None:
             raise RuntimeError("AIOps runtime repository is required for Live recovery.")
@@ -400,10 +455,13 @@ async def _run_live_command(
             ),
             recovery_coordinator_factory=recovery_coordinator_factory,
         )
-        return await runner.run(
+        result = await runner.run(
             cast(str, arguments.scenario),
             run_id=cast(str, arguments.run_id),
         )
+        if chat_diagnostic is not None:
+            conversation_metrics.update(chat_diagnostic.conversation_metrics())
+        return result
 
     try:
         payload, exit_code = await _run_live_once(
@@ -414,6 +472,7 @@ async def _run_live_command(
             recorder=recorder,
             campaign_id=cast(str | None, arguments.campaign_id),
             investigation_strategy=effective_strategy,
+            conversation_metrics=conversation_metrics,
         )
     finally:
         await engine.dispose()
@@ -554,6 +613,7 @@ async def _run_auto_closure_command(
             snapshot = closure_metrics.snapshot().get("autoClosureStageLatencyMs")
             if not isinstance(snapshot, Mapping):
                 return {}
+            stage_snapshots = cast(Mapping[str, object], snapshot)
             result: dict[str, int | float] = {}
             for stage in (
                 "detection",
@@ -563,9 +623,9 @@ async def _run_auto_closure_command(
                 "resolved",
                 "total",
             ):
-                value = snapshot.get(stage)
+                value = stage_snapshots.get(stage)
                 if isinstance(value, Mapping):
-                    total = value.get("sum")
+                    total = cast(Mapping[str, object], value).get("sum")
                     if isinstance(total, (int, float)) and not isinstance(total, bool):
                         result[stage] = total
             return result
@@ -600,6 +660,14 @@ async def _run_auto_closure_command(
     return payload, exit_code
 
 
+async def run_chat_live_command(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, object], int]:
+    """Run the existing Live lifecycle with Chat confirmation as its diagnostic entry."""
+
+    return await _run_live_command(arguments, enter_through_chat=True)
+
+
 async def _run_live_once(
     *,
     scenario_id: str,
@@ -609,6 +677,7 @@ async def _run_live_once(
     recorder: EvaluationRunRecorder,
     campaign_id: str | None = None,
     investigation_strategy: StrategyMode = "auto",
+    conversation_metrics: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, object], int]:
     timestamp = datetime.now(timezone.utc)
     metadata: dict[str, object] = {
@@ -715,6 +784,11 @@ async def _run_live_once(
         "verificationPassed": result.recovery_verification == 15,
         "cleanupSucceeded": True,
     }
+    if conversation_metrics:
+        metrics["conversationMetrics"] = dict(conversation_metrics)
+        result_section = live_result.get("result")
+        if isinstance(result_section, dict):
+            result_section["conversationMetrics"] = dict(conversation_metrics)
     investigation_metrics = result.investigation_metrics
     if investigation_metrics is not None:
         if investigation_metrics.strategy != investigation_strategy:

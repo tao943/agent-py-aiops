@@ -59,9 +59,17 @@ from super_ai.auth.service import AuthError, AuthResult, AuthService
 from super_ai.auth.sqlalchemy import SQLAlchemyAuthRepository
 from super_ai.chat import (
     ChatAgentRunner,
+    ChatIntentRouter,
     ChatStreamingService,
     LangChainChatAgentRunner,
+    PolicyDispatchingChatAgentRunner,
     encode_sse,
+)
+from super_ai.chat.aiops_bridge import (
+    AiopsBridgeService,
+)
+from super_ai.chat.aiops_bridge import (
+    RecoveryApprovalRequestRepository as BridgeRecoveryApprovalRequestRepository,
 )
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
@@ -69,12 +77,20 @@ from super_ai.chat.configuration import (
     validate_chat_prompt_content,
     validate_skill_upload,
 )
+from super_ai.chat.execution import ChatTurnExecutionService
+from super_ai.chat.intent import KeywordRouterModel, LlmStructuredRouterModel
 from super_ai.chat.memory import (
     SUPPORTED_CHAT_MEMORY_MODES,
     ChatContextLimitReached,
     ChatMemoryService,
     memory_payload,
 )
+from super_ai.chat.memory_jobs import StructuredMemoryCompactionHandler
+from super_ai.chat.pending_action_jobs import PendingChatActionJobHandler
+from super_ai.chat.pending_actions import PendingChatActionService
+from super_ai.chat.routes import create_chat_runs_router, create_pending_chat_actions_router
+from super_ai.chat.runs import ChatRunJobHandler
+from super_ai.chat.streaming import sanitize_chat_metadata
 from super_ai.documents import (
     ALLOWED_DOCUMENT_EXTENSIONS,
     DEFAULT_CHUNK_OVERLAP,
@@ -208,7 +224,7 @@ class StreamChatMessageRequest(BaseModel):
 
 
 class UpdateChatMemoryRequest(BaseModel):
-    mode: Literal["every_30_turns", "context_70_percent", "manual"]
+    mode: Literal["adaptive", "manual", "every_30_turns", "context_70_percent"]
 
 
 class UpdateChatAssemblyConfigurationRequest(BaseModel):
@@ -360,6 +376,7 @@ def create_app(
     rerank_model: RerankModel | None = None,
     llm_provider: LlmProvider | None = None,
     chat_agent_runner: ChatAgentRunner | None = None,
+    chat_intent_router: ChatIntentRouter | None = None,
     aiops_diagnostic_runner: AiopsDiagnosticRunner | None = None,
     alert_provider: ActiveAlertProvider | None = None,
     index_task_scheduler: DocumentIndexTaskScheduler | None = None,
@@ -439,6 +456,29 @@ def create_app(
     app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
     repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
+    app.include_router(
+        create_chat_runs_router(
+            repositories=repositories,
+            current_user_dependency=_current_user,
+        )
+    )
+    app.include_router(
+        create_pending_chat_actions_router(
+            repositories=repositories,
+            current_user_dependency=_current_user,
+        )
+    )
+    incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    app.state.aiops_bridge_service = AiopsBridgeService(
+        incidents=incident_repository,
+        diagnostics=repositories.diagnostics,
+        scheduler=incident_repository,
+        approval_requests=cast(
+            BridgeRecoveryApprovalRequestRepository | None,
+            repositories.recovery_approvals,
+        ),
+        tool_executions=repositories.chat_tool_executions,
+    )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
         config_path=resolved_project_config_path
     )
@@ -446,6 +486,8 @@ def create_app(
     app.state.rerank_model = rerank_model
     app.state.llm_provider = llm_provider
     app.state.chat_agent_runner = chat_agent_runner
+    app.state.chat_agent_runner_injected = chat_agent_runner is not None
+    app.state.chat_intent_router = chat_intent_router
     app.state.aiops_diagnostic_runner = aiops_diagnostic_runner
     app.state.alert_provider = alert_provider
     if repositories.background_jobs is None:
@@ -455,6 +497,13 @@ def create_app(
     background_runtime = BackgroundJobRuntime(repositories.background_jobs)
     background_runtime.register("document_index", _document_index_job_handler(app))
     background_runtime.register("aiops_diagnosis", _aiops_job_handler(app))
+    background_runtime.register("chat_agent_run", _chat_run_job_handler(app))
+    background_runtime.register(
+        "chat_memory_compaction", _chat_memory_compaction_job_handler(app)
+    )
+    background_runtime.register(
+        "pending_chat_action", _pending_chat_action_job_handler(app)
+    )
     app.state.background_job_runtime = background_runtime
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
@@ -523,7 +572,7 @@ def create_app(
         lease_ms=alert_ingestion_settings.redis_lease_milliseconds,
     )
     composed_alert_ingestion = alert_ingestion_service or AlertIngestionService(
-        SQLAlchemyAlertIngestionRepository(session_factory),
+        incident_repository,
         composed_alert_leases,
         alert_ingestion_metrics,
     )
@@ -1513,7 +1562,7 @@ def create_app(
             session_id=session.id,
             role=body.role,
             content=body.content,
-            metadata=body.metadata,
+            metadata=sanitize_chat_metadata(body.metadata),
         )
         updated_session = await _maybe_generate_chat_title(
             repositories,
@@ -1554,6 +1603,7 @@ def create_app(
             repositories=repositories,
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
+            intent_router=_chat_intent_router(request),
         )
 
         async def event_stream() -> AsyncIterator[str]:
@@ -1569,7 +1619,11 @@ def create_app(
         return StreamingResponse(
             event_stream(),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Deprecation": "true",
+                "Link": '</chat/sessions/{session_id}/runs>; rel="successor-version"',
+            },
         )
 
     @app.post("/chat/sessions/{session_id}/messages:clear")
@@ -2027,6 +2081,51 @@ def _document_index_job_handler(
     return handle
 
 
+def _chat_run_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        request = _request_for_app(app)
+        repositories = _memory_repositories(request)
+        streaming = ChatStreamingService(
+            repositories=repositories,
+            agent_runner=_chat_agent_runner(request),
+            memory_service=_chat_memory_service(request),
+            intent_router=_chat_intent_router(request),
+        )
+        await ChatRunJobHandler(
+            repositories=repositories,
+            streaming=streaming,
+        )(context)
+
+    return handle
+
+
+def _pending_chat_action_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        await PendingChatActionJobHandler(
+            repositories=cast(MemoryRepositories, app.state.memory_repositories),
+            bridge=cast(AiopsBridgeService, app.state.aiops_bridge_service),
+        )(context)
+
+    return handle
+
+
+def _chat_memory_compaction_job_handler(
+    app: FastAPI,
+) -> Callable[[BackgroundJobContext], Awaitable[None]]:
+    async def handle(context: BackgroundJobContext) -> None:
+        request = _request_for_app(app)
+        await StructuredMemoryCompactionHandler(
+            repositories=_memory_repositories(request),
+            llm_provider=_llm_provider(request),
+        )(context)
+
+    return handle
+
+
 def _aiops_job_handler(
     app: FastAPI,
 ) -> Callable[[BackgroundJobContext], Awaitable[None]]:
@@ -2470,13 +2569,44 @@ def _chat_agent_runner(request: Request) -> ChatAgentRunner:
                 rerank_model=_rerank_model(request),
             ),
         )
-        runner = LangChainChatAgentRunner(
+        fallback = LangChainChatAgentRunner(
             llm_provider=_llm_provider(request),
             retrieval_tool=retrieval_tool,
             mcp_client_provider=_mcp_connection_service(request),
+            aiops_bridge_service=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
+        )
+        runner = PolicyDispatchingChatAgentRunner(
+            fallback=fallback,
+            direct_execution=ChatTurnExecutionService(
+                bridge=cast(AiopsBridgeService, request.app.state.aiops_bridge_service),
+                explanation_model=_llm_provider(request).create_chat_model(),
+            ),
+            pending_actions=PendingChatActionService(
+                _require_pending_chat_actions(request)
+            ),
         )
         request.app.state.chat_agent_runner = runner
     return cast(ChatAgentRunner, runner)
+
+
+def _require_pending_chat_actions(request: Request):  # type: ignore[no-untyped-def]
+    repository = _memory_repositories(request).pending_chat_actions
+    if repository is None:
+        raise RuntimeError("Pending Chat Action repository is required")
+    return repository
+
+
+def _chat_intent_router(request: Request) -> ChatIntentRouter:
+    router = cast(ChatIntentRouter | None, request.app.state.chat_intent_router)
+    if router is None:
+        model = (
+            KeywordRouterModel()
+            if bool(request.app.state.chat_agent_runner_injected)
+            else LlmStructuredRouterModel(_llm_provider(request).create_chat_model())
+        )
+        router = ChatIntentRouter(model)
+        request.app.state.chat_intent_router = router
+    return router
 
 
 def _mcp_client(request: Request) -> LocalMcpClient:
@@ -2632,7 +2762,7 @@ def _chat_message_payload(message: ChatMessageRecord) -> dict[str, object]:
         "sessionId": message.session_id,
         "role": message.role,
         "content": message.content,
-        "metadata": message.metadata,
+        "metadata": sanitize_chat_metadata(message.metadata),
         "createdAt": message.created_at.isoformat(),
     }
 
@@ -2840,9 +2970,7 @@ _AIOPS_PRIVATE_PAYLOAD_KEYS = frozenset(
 _AIOPS_WORKFLOW_VERSIONS = frozenset(
     {"evidence-driven-v2", "evidence-driven-v3", "evidence-driven-v4"}
 )
-_AIOPS_MODEL_ROLES = frozenset(
-    {"planner", "adjudicator", "replanner", "validator", "report"}
-)
+_AIOPS_MODEL_ROLES = frozenset({"planner", "adjudicator", "replanner", "validator", "report"})
 
 
 def _safe_aiops_public_payload(value: object) -> object:
@@ -2927,11 +3055,7 @@ def _aiops_execution_observability(
             resume_count += 1
     return {
         "graphVersion": graph_version
-        or (
-            "aiops-diagnostic-v2"
-            if workflow_version == "evidence-driven-v4"
-            else None
-        ),
+        or ("aiops-diagnostic-v2" if workflow_version == "evidence-driven-v4" else None),
         "workflowVersion": workflow_version,
         "modelCallCount": model_call_count,
         "modelCalls": model_calls,

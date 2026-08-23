@@ -469,6 +469,7 @@ def _database_envelope(
         provenance=cast(EvaluationProvenance, run.provenance),
         created_at=run.created_at,
         started_at=started_at,
+        artifact_schema_version=run.artifact_schema_version,
     )
     if run.status in {"running", "pending"} and result is None:
         return running

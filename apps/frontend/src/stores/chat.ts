@@ -6,6 +6,9 @@ import type {
   ChatAssemblyConfigurationResponse,
   ChatSessionSummary,
   ChatMemoryMode,
+  ChatRun,
+  DiagnosticResultSseEvent,
+  PendingChatAction,
   ReferenceSourceSseEvent,
   ToolCallAudit
 } from "@agent-py/api-contracts";
@@ -26,7 +29,6 @@ export interface LiveToolCall {
 }
 
 let clientFactory: () => ChatClient = createChatClient;
-export const CHAT_TYPEWRITER_DELAY_MS = 28;
 
 export function setChatClientFactoryForTests(factory: (() => ChatClient) | null): void {
   clientFactory = factory ?? createChatClient;
@@ -40,6 +42,10 @@ export const useChatStore = defineStore("chat", () => {
   const toolAudits = ref<readonly ToolCallAudit[]>([]);
   const liveToolCalls = ref<readonly LiveToolCall[]>([]);
   const references = ref<readonly ChatReference[]>([]);
+  const diagnosticResults = ref<readonly DiagnosticResultSseEvent["diagnostic"][]>([]);
+  const pendingActions = ref<readonly PendingChatAction[]>([]);
+  const pendingActionLoadingIds = ref<readonly string[]>([]);
+  const activeRunId = ref<string | null>(null);
   const isLoading = ref(false);
   const isSending = ref(false);
   const isUpdatingMemory = ref(false);
@@ -63,37 +69,114 @@ export const useChatStore = defineStore("chat", () => {
     references.value = uniqueReferences(latestAssistant?.metadata.citations ?? []);
   }
 
-  async function loadSession(sessionId: string): Promise<void> {
-    const [detail, audits] = await Promise.all([
+  async function loadSession(sessionId: string, resumeActiveRun = true): Promise<void> {
+    const [detail, audits, pending] = await Promise.all([
       client.getSession(sessionId),
-      client.listToolCallAudits(sessionId)
+      client.listToolCallAudits(sessionId),
+      client.listPendingActions?.(sessionId) ?? Promise.resolve({ items: [] })
     ]);
     activeSessionId.value = detail.session.id;
     messages.value = detail.messages;
     toolAudits.value = audits.items;
+    pendingActions.value = pending.items;
     liveToolCalls.value = [];
     setReferencesFromMessages(detail.messages);
     upsertSession(detail.session);
+    if (
+      resumeActiveRun &&
+      client.getActiveRun !== undefined &&
+      client.streamRunEvents !== undefined
+    ) {
+      const activeRun = await client.getActiveRun(sessionId);
+      if (activeRun !== null) {
+        await resumeRun(sessionId, activeRun);
+      }
+    }
+  }
+
+  async function resumeRun(sessionId: string, run: ChatRun): Promise<void> {
+    if (client.streamRunEvents === undefined || client.getRun === undefined) return;
+    activeRunId.value = run.id;
+    isSending.value = true;
+    const draftId = `message_draft_${run.id}`;
+    let afterSequence = 0;
+    let reconnectDelay = 200;
+    try {
+      for (;;) {
+        let completed = false;
+        try {
+          for await (const event of client.streamRunEvents(sessionId, run.id, afterSequence)) {
+            const sequence = Number.parseInt(event.id, 10);
+            if (Number.isFinite(sequence)) afterSequence = Math.max(afterSequence, sequence);
+            if (event.type === "run.restarted") {
+              messages.value = messages.value.filter((item) => item.id !== draftId);
+            }
+            if (event.type === "content.delta") {
+              updateAssistantDraft(sessionId, draftId, event.delta, messages);
+            }
+            if (event.type === "reference.source") {
+              references.value = uniqueReferences([...references.value, event.reference]);
+            }
+            if (event.type === "tool.call") updateLiveToolCall(event.toolCall, liveToolCalls);
+            if (event.type === "diagnostic.result") {
+              diagnosticResults.value = [
+                event.diagnostic,
+                ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
+              ];
+            }
+            if (event.type === "confirmation.required") {
+              upsertPendingAction(event.action, pendingActions);
+            }
+            if (event.type === "confirmation.resolved") {
+              upsertPendingAction(event.action, pendingActions);
+            }
+            if (event.type === "complete") completed = true;
+            if (event.type === "error") throw new ApiClientError(event.error);
+          }
+          if (completed) break;
+        } catch (error) {
+          if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) throw error;
+        }
+        const current = await client.getRun(sessionId, run.id);
+        if (current.status === "succeeded") break;
+        if (["failed", "cancelled"].includes(current.status)) {
+          throw new Error(current.errorCode ?? "对话任务执行失败。");
+        }
+        await waitForReconnect(reconnectDelay);
+        reconnectDelay = Math.min(5000, reconnectDelay * 2);
+      }
+      await loadSession(sessionId, false);
+      await reloadSessions();
+    } finally {
+      activeRunId.value = null;
+      isSending.value = false;
+      liveToolCalls.value = [];
+    }
   }
 
   function upsertSession(nextSession: ChatSessionSummary): void {
+    const normalized = normalizeSessionMemory(nextSession);
     sessions.value = [
-      nextSession,
-      ...sessions.value.filter((item) => item.id !== nextSession.id)
+      normalized,
+      ...sessions.value.filter((item) => item.id !== normalized.id)
     ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   async function reloadSessions(): Promise<void> {
-    sessions.value = (await client.listSessions()).items;
+    sessions.value = (await client.listSessions()).items.map(normalizeSessionMemory);
   }
 
   function reset(): void {
     sessions.value = [];
     activeSessionId.value = null;
+    activeRunId.value = null;
     messages.value = [];
     toolAudits.value = [];
     liveToolCalls.value = [];
     references.value = [];
+    diagnosticResults.value = [];
+    pendingActions.value = [];
+    pendingActionLoadingIds.value = [];
     errorMessage.value = null;
     configuration.value = null;
     isSavingConfiguration.value = false;
@@ -104,9 +187,13 @@ export const useChatStore = defineStore("chat", () => {
 
   return {
     activeSessionId,
+    activeRunId,
     activeSession,
     errorMessage,
     configuration,
+    diagnosticResults,
+    pendingActions,
+    pendingActionLoadingIds,
     isSavingConfiguration,
     isLoading,
     isSending,
@@ -129,6 +216,8 @@ export const useChatStore = defineStore("chat", () => {
           messages.value = [];
           toolAudits.value = [];
           references.value = [];
+          diagnosticResults.value = [];
+          pendingActions.value = [];
         }
       } catch (error) {
         reportError(error);
@@ -146,6 +235,8 @@ export const useChatStore = defineStore("chat", () => {
         toolAudits.value = [];
         liveToolCalls.value = [];
         references.value = [];
+        diagnosticResults.value = [];
+        pendingActions.value = [];
         return created;
       } catch (error) {
         reportError(error);
@@ -154,6 +245,7 @@ export const useChatStore = defineStore("chat", () => {
     },
     selectSession: async (sessionId: string): Promise<void> => {
       isLoading.value = true;
+      diagnosticResults.value = [];
       try {
         await loadSession(sessionId);
       } catch (error) {
@@ -174,6 +266,8 @@ export const useChatStore = defineStore("chat", () => {
             messages.value = [];
             toolAudits.value = [];
             references.value = [];
+            diagnosticResults.value = [];
+            pendingActions.value = [];
           } else {
             await loadSession(nextSession.id);
           }
@@ -261,6 +355,48 @@ export const useChatStore = defineStore("chat", () => {
       }
     },
     reset,
+    confirmPendingAction: async (actionId: string): Promise<void> => {
+      if (
+        client.confirmPendingAction === undefined ||
+        pendingActionLoadingIds.value.includes(actionId)
+      ) return;
+      pendingActionLoadingIds.value = [...pendingActionLoadingIds.value, actionId];
+      try {
+        upsertPendingAction(
+          await client.confirmPendingAction(actionId),
+          pendingActions
+        );
+      } catch (error) {
+        reportError(error);
+        throw error;
+      } finally {
+        pendingActionLoadingIds.value = pendingActionLoadingIds.value.filter(
+          (item) => item !== actionId
+        );
+      }
+    },
+    cancelPendingAction: async (actionId: string): Promise<void> => {
+      if (
+        client.cancelPendingAction === undefined ||
+        pendingActionLoadingIds.value.includes(actionId)
+      ) return;
+      pendingActionLoadingIds.value = [...pendingActionLoadingIds.value, actionId];
+      try {
+        await client.cancelPendingAction(actionId);
+        pendingActions.value = pendingActions.value.filter((item) => item.id !== actionId);
+      } catch (error) {
+        reportError(error);
+        throw error;
+      } finally {
+        pendingActionLoadingIds.value = pendingActionLoadingIds.value.filter(
+          (item) => item !== actionId
+        );
+      }
+    },
+    resumeRun: async (sessionId: string, runId: string): Promise<void> => {
+      if (client.getRun === undefined) return;
+      await resumeRun(sessionId, await client.getRun(sessionId, runId));
+    },
     updateMemoryMode: async (mode: ChatMemoryMode): Promise<void> => {
       const sessionId = activeSessionId.value;
       if (sessionId === null || isUpdatingMemory.value) return;
@@ -306,25 +442,44 @@ export const useChatStore = defineStore("chat", () => {
         isSending.value = true;
         errorMessage.value = null;
         references.value = [];
+        diagnosticResults.value = [];
         const optimisticUser = createOptimisticMessage(targetSessionId, "user", content);
         const draftId = `message_draft_${Date.now()}`;
         messages.value = [...messages.value, optimisticUser];
+        if (
+          client.createRun !== undefined &&
+          client.streamRunEvents !== undefined &&
+          client.getRun !== undefined
+        ) {
+          const run = await client.createRun(targetSessionId, {
+            content,
+            clientRequestId: globalThis.crypto.randomUUID()
+          });
+          await resumeRun(targetSessionId, run);
+          return;
+        }
         let finished = false;
         for await (const event of client.streamMessage(targetSessionId, { content })) {
           if (event.type === "content.delta") {
-            for (const character of event.delta) {
-              updateAssistantDraft(targetSessionId, draftId, character, messages);
-              await waitForTypewriterTick();
-            }
-          }
-          if (event.type === "reasoning.delta") {
-            updateAssistantReasoning(targetSessionId, draftId, event.delta, messages);
+            updateAssistantDraft(targetSessionId, draftId, event.delta, messages);
           }
           if (event.type === "reference.source") {
             references.value = uniqueReferences([...references.value, event.reference]);
           }
           if (event.type === "tool.call") {
             updateLiveToolCall(event.toolCall, liveToolCalls);
+          }
+          if (event.type === "diagnostic.result") {
+            diagnosticResults.value = [
+              event.diagnostic,
+              ...diagnosticResults.value.filter((item) => item.taskId !== event.diagnostic.taskId)
+            ];
+          }
+          if (event.type === "confirmation.required") {
+            upsertPendingAction(event.action, pendingActions);
+          }
+          if (event.type === "confirmation.resolved") {
+            upsertPendingAction(event.action, pendingActions);
           }
           if (event.type === "error") {
             throw new ApiClientError(event.error);
@@ -395,31 +550,6 @@ function updateAssistantDraft(
     : target.value.map((item) => (item.id === draftId ? draft : item));
 }
 
-function updateAssistantReasoning(
-  sessionId: string,
-  draftId: string,
-  delta: string,
-  target: { value: readonly ChatMessage[] }
-): void {
-  const existing = target.value.find((item) => item.id === draftId);
-  const draft: ChatMessage = {
-    id: draftId,
-    ownerUserId: "current",
-    sessionId,
-    role: "assistant",
-    content: existing?.content ?? "",
-    metadata: {
-      ...existing?.metadata,
-      citations: existing?.metadata.citations ?? [],
-      reasoning: [...(existing?.metadata.reasoning ?? []), delta]
-    },
-    createdAt: existing?.createdAt ?? new Date().toISOString()
-  };
-  target.value = existing === undefined
-    ? [...target.value, draft]
-    : target.value.map((item) => (item.id === draftId ? draft : item));
-}
-
 function updateLiveToolCall(
   next: LiveToolCall,
   target: { value: readonly LiveToolCall[] }
@@ -432,6 +562,13 @@ function updateLiveToolCall(
     ...(next.output === undefined ? {} : { output: next.output })
   };
   target.value = [merged, ...target.value.filter((item) => item.id !== next.id)];
+}
+
+function upsertPendingAction(
+  next: PendingChatAction,
+  target: { value: readonly PendingChatAction[] }
+): void {
+  target.value = [next, ...target.value.filter((item) => item.id !== next.id)];
 }
 
 function uniqueReferences(items: readonly ChatReference[]): readonly ChatReference[] {
@@ -452,8 +589,12 @@ function referenceScore(reference: ChatReference): number {
   return reference.rerankScore ?? reference.score ?? Number.NEGATIVE_INFINITY;
 }
 
-function waitForTypewriterTick(): Promise<void> {
-  return new Promise((resolve) => {
-    globalThis.setTimeout(resolve, CHAT_TYPEWRITER_DELAY_MS);
-  });
+function normalizeSessionMemory(session: ChatSessionSummary): ChatSessionSummary {
+  const rawMode = session.memory.mode as string;
+  if (rawMode !== "every_30_turns" && rawMode !== "context_70_percent") return session;
+  return { ...session, memory: { ...session.memory, mode: "adaptive" } };
+}
+
+function waitForReconnect(delayMs: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
 }

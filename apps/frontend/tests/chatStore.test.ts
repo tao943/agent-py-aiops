@@ -3,16 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ChatMessage,
+  PendingChatAction,
+  ChatRun,
   ChatSessionSummary,
   SseEvent,
   ToolCallAudit
 } from "@agent-py/api-contracts";
 
-import {
-  CHAT_TYPEWRITER_DELAY_MS,
-  setChatClientFactoryForTests,
-  useChatStore
-} from "../src/stores/chat";
+import { setChatClientFactoryForTests, useChatStore } from "../src/stores/chat";
 import type { ChatClient } from "../src/chat/chatClient";
 
 const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummary => ({
@@ -22,7 +20,9 @@ const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummar
   createdAt: "2026-07-10T00:00:00.000Z",
   updatedAt: "2026-07-10T00:01:00.000Z",
   memory: {
-    mode: "every_30_turns",
+    mode: "adaptive",
+    summaryVersion: 0,
+    compactionStatus: "idle",
     contextTokens: 1200,
     contextWindowTokens: 131072,
     contextUsagePercent: 0.9,
@@ -60,6 +60,19 @@ const audit = (): ToolCallAudit => ({
   createdAt: "2026-07-10T00:00:01.000Z"
 });
 
+const pendingAction = (overrides: Partial<PendingChatAction> = {}): PendingChatAction => ({
+  id: "chat_action_1",
+  sessionId: "chat_1",
+  actionType: "start_diagnostic",
+  targetResourceId: "incident_1",
+  publicArguments: {},
+  status: "pending",
+  expiresAt: "2026-08-22T00:15:00Z",
+  backgroundJobId: null,
+  executionResultId: null,
+  ...overrides
+});
+
 afterEach(() => {
   vi.useRealTimers();
   setChatClientFactoryForTests(null);
@@ -67,7 +80,9 @@ afterEach(() => {
 
 describe("chat store", () => {
   it("loads session history from the backend when a user selects a conversation", async () => {
-    setChatClientFactoryForTests(() => fakeClient());
+    const client = fakeClient();
+    client.listPendingActions = async () => ({ items: [pendingAction()] });
+    setChatClientFactoryForTests(() => client);
     setActivePinia(createPinia());
     const store = useChatStore();
 
@@ -78,6 +93,52 @@ describe("chat store", () => {
     expect(store.activeSessionId).toBe("chat_1");
     expect(store.messages).toEqual([message()]);
     expect(store.toolAudits).toEqual([audit()]);
+    expect(store.pendingActions).toEqual([pendingAction()]);
+  });
+
+  it("normalizes one-release legacy memory modes from an older API", async () => {
+    const client = fakeClient();
+    const legacy = session({
+      memory: { ...session().memory, mode: "every_30_turns" as never }
+    });
+    client.listSessions = async () => ({ items: [legacy] });
+    client.getSession = async () => ({ session: legacy, messages: [] });
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+
+    await store.initialize();
+
+    expect(store.activeSession?.memory.mode).toBe("adaptive");
+  });
+
+  it("guards duplicate pending-action decisions while the first request is in flight", async () => {
+    let releaseConfirmation: (() => void) | undefined;
+    const confirmationGate = new Promise<void>((resolve) => {
+      releaseConfirmation = resolve;
+    });
+    const confirmPendingAction = vi.fn(async () => {
+      await confirmationGate;
+      return pendingAction({ status: "confirmed", backgroundJobId: "job_1" });
+    });
+    const client = fakeClient();
+    client.listPendingActions = async () => ({ items: [pendingAction()] });
+    client.confirmPendingAction = confirmPendingAction;
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+    await store.initialize();
+
+    const first = store.confirmPendingAction("chat_action_1");
+    const duplicate = store.confirmPendingAction("chat_action_1");
+    await Promise.resolve();
+
+    expect(confirmPendingAction).toHaveBeenCalledTimes(1);
+    expect(store.pendingActionLoadingIds).toEqual(["chat_action_1"]);
+    releaseConfirmation?.();
+    await Promise.all([first, duplicate]);
+    expect(store.pendingActions[0]).toMatchObject({ status: "confirmed", backgroundJobId: "job_1" });
+    expect(store.pendingActionLoadingIds).toEqual([]);
   });
 
   it("reconciles streamed content, references, and tool calls with persisted history", async () => {
@@ -130,6 +191,22 @@ describe("chat store", () => {
       },
       {
         id: "event_5",
+        type: "diagnostic.result",
+        channel: "chat",
+        timestamp: "2026-07-10T00:00:02.500Z",
+        diagnostic: {
+          taskId: "diagnostic_1",
+          reportId: "report_1",
+          rootCause: { primaryCause: "database_lock" },
+          recoveryMode: "manual_review",
+          executionPermitted: false,
+          humanApprovalRequired: true,
+          validatorStatus: "deterministic_grounded_fallback",
+          evidenceIds: ["evidence_1"]
+        }
+      },
+      {
+        id: "event_6",
         type: "complete",
         channel: "chat",
         timestamp: "2026-07-10T00:00:03.000Z",
@@ -184,6 +261,11 @@ describe("chat store", () => {
     ]);
     expect(store.toolAudits).toEqual([audit()]);
     expect(store.liveToolCalls).toEqual([]);
+    expect(store.diagnosticResults[0]).toMatchObject({
+      taskId: "diagnostic_1",
+      executionPermitted: false,
+      recoveryMode: "manual_review"
+    });
   });
 
   it("sorts live references by rerank score and keeps only five", async () => {
@@ -285,8 +367,8 @@ describe("chat store", () => {
     expect(store.references).toEqual([]);
   });
 
-  it("renders model content one character per typewriter tick", async () => {
-    vi.useFakeTimers();
+  it("appends one server content chunk without typewriter timers", async () => {
+    const timeout = vi.spyOn(globalThis, "setTimeout");
     const streamed: SseEvent[] = [
       {
         id: "event_content_typewriter",
@@ -312,20 +394,10 @@ describe("chat store", () => {
     const store = useChatStore();
     await store.initialize();
 
-    const sending = store.send("type slowly");
-    await Promise.resolve();
-    await Promise.resolve();
-    const draftContent = (): string | undefined =>
-      store.messages.find((item) => item.id.startsWith("message_draft_"))?.content;
+    await store.send("render one chunk");
 
-    expect(draftContent()).toBe("A");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    expect(draftContent()).toBe("AB");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    expect(draftContent()).toBe("ABC");
-    await vi.advanceTimersByTimeAsync(CHAT_TYPEWRITER_DELAY_MS);
-    await sending;
     expect(store.messages[0]?.content).toBe("ABC");
+    expect(timeout).not.toHaveBeenCalled();
   });
 
   it("clears visible conversation state on logout without deleting server sessions", async () => {
@@ -354,6 +426,39 @@ describe("chat store", () => {
     await store.compactMemory();
     expect(store.activeSession?.memory.contextUsagePercent).toBe(0.2);
     expect(store.isUpdatingMemory).toBe(false);
+  });
+
+  it("uses durable runs and clears tentative content after a worker restart", async () => {
+    const client = fakeClient({ historyMessage: message({ content: "new answer" }) });
+    const run: ChatRun = {
+      id: "run_1",
+      sessionId: "chat_1",
+      clientRequestId: "request_1",
+      status: "queued",
+      lastEventSequence: 0,
+      errorCode: null,
+      createdAt: "2026-08-22T00:00:00Z",
+      updatedAt: "2026-08-22T00:00:00Z"
+    };
+    client.createRun = async () => run;
+    client.getRun = async () => ({ ...run, status: "succeeded", lastEventSequence: 4 });
+    client.getActiveRun = async () => null;
+    client.streamRunEvents = async function* (): AsyncIterable<SseEvent> {
+      yield { id: "1", type: "content.delta", channel: "chat", timestamp: run.createdAt, delta: "old", sequence: 1 };
+      yield { id: "2", type: "run.restarted", channel: "chat", timestamp: run.createdAt, runId: run.id, attempt: 2 };
+      yield { id: "3", type: "content.delta", channel: "chat", timestamp: run.createdAt, delta: "new", sequence: 2 };
+      yield { id: "4", type: "complete", channel: "chat", timestamp: run.createdAt };
+    };
+    setChatClientFactoryForTests(() => client);
+    setActivePinia(createPinia());
+    const store = useChatStore();
+    await store.initialize();
+
+    await store.send("diagnose");
+
+    expect(store.messages.at(-1)?.content).toBe("new answer");
+    expect(store.messages.some((item) => item.content.includes("old"))).toBe(false);
+    expect(store.activeRunId).toBeNull();
   });
 });
 

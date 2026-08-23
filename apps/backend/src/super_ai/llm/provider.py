@@ -127,6 +127,22 @@ class QwenOpenAIProvider:
             replace(self._config, chat_model=self._config.validator_model)
         )
 
+    @property
+    def query_rewrite_model_name(self) -> str:
+        """Return the configured query Rewriter model name."""
+        return self._config.query_rewrite_model
+
+    @property
+    def query_rewrite_structured_output_method(self) -> StructuredOutputMethod:
+        """Return the Rewriter structured-output steering method."""
+        return self._config.query_rewrite_structured_output_method
+
+    def create_query_rewrite_model(self) -> ChatModel:
+        """Create the Rewriter model with shared provider transport settings."""
+        return self._model_factory(
+            replace(self._config, chat_model=self._config.query_rewrite_model)
+        )
+
     def create_embedding_model(self) -> EmbeddingModel:
         """Create a configured OpenAI-compatible embedding model."""
         return self._embedding_factory(self._config)
@@ -163,6 +179,34 @@ class QwenOpenAIProvider:
 def build_default_llm_provider(config_path: Path | str | None = None) -> LlmProvider:
     """Build the default configured LLM provider."""
     return QwenOpenAIProvider(load_llm_provider_config(config_path=config_path))
+
+
+def create_query_rewrite_model(provider: LlmProvider) -> ChatModel:
+    """Create a dedicated Rewriter model with a legacy-provider fallback."""
+    factory = getattr(provider, "create_query_rewrite_model", None)
+    if callable(factory):
+        return cast(ChatModel, factory())
+    return provider.create_chat_model()
+
+
+def query_rewrite_model_name(provider: LlmProvider) -> str:
+    """Return a safe Rewriter model name for evaluation metadata."""
+    value = getattr(provider, "query_rewrite_model_name", None)
+    if isinstance(value, str) and value:
+        return value
+    config = getattr(provider, "config", None)
+    chat_model = getattr(config, "chat_model", None)
+    return chat_model if isinstance(chat_model, str) and chat_model else "legacy-chat-model"
+
+
+def query_rewrite_structured_output_method(
+    provider: LlmProvider,
+) -> StructuredOutputMethod:
+    """Return Rewriter steering with a legacy-provider fallback."""
+    value = getattr(provider, "query_rewrite_structured_output_method", None)
+    if value in {"function_calling", "json_mode", "json_schema"}:
+        return cast(StructuredOutputMethod, value)
+    return provider.structured_output_method
 
 
 def _create_chat_openai_model(config: LlmProviderConfig) -> ChatModel:

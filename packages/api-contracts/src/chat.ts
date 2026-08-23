@@ -1,10 +1,52 @@
 import type { ReferenceSourceSseEvent } from "./sse";
 
 export type ChatMessageRole = "user" | "assistant";
+export type ChatRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface CreateChatRunRequest {
+  readonly content: string;
+  readonly metadata?: ChatMessageMetadata;
+  readonly clientRequestId: string;
+}
+
+export interface ChatRun {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly clientRequestId: string;
+  readonly status: ChatRunStatus;
+  readonly lastEventSequence: number;
+  readonly errorCode: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type PendingChatActionType = "start_diagnostic" | "create_recovery_approval";
+export type PendingChatActionStatus =
+  | "pending"
+  | "confirmed"
+  | "executed"
+  | "cancelled"
+  | "expired"
+  | "manual_review";
+
+export interface PendingChatAction {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly actionType: PendingChatActionType;
+  readonly targetResourceId: string;
+  readonly publicArguments: Record<string, unknown>;
+  readonly status: PendingChatActionStatus;
+  readonly expiresAt: string;
+  readonly backgroundJobId: string | null;
+  readonly executionResultId: string | null;
+}
+
+export interface PendingChatActionListResponse {
+  readonly items: readonly PendingChatAction[];
+}
 
 export interface ChatMessageMetadata {
   readonly citations?: readonly ReferenceSourceSseEvent["reference"][];
-  readonly reasoning?: readonly string[];
   readonly toolCallIds?: readonly string[];
   readonly custom?: Record<string, unknown>;
 }
@@ -13,10 +55,12 @@ export interface CreateChatSessionRequest {
   readonly title?: string | null;
 }
 
-export type ChatMemoryMode = "every_30_turns" | "context_70_percent" | "manual";
+export type ChatMemoryMode = "adaptive" | "manual";
 
 export interface ChatMemoryState {
   readonly mode: ChatMemoryMode;
+  readonly summaryVersion: number;
+  readonly compactionStatus: "idle" | "queued" | "running" | "degraded";
   readonly contextTokens: number;
   readonly contextWindowTokens: number;
   readonly contextUsagePercent: number;
@@ -91,6 +135,10 @@ export interface ChatToolCallAuditListResponse {
 export interface ChatSessionMutationResponse {
   readonly session: ChatSessionSummary;
   readonly message?: ChatMessage;
+}
+
+export interface ChatRunCreateResponse {
+  readonly run: ChatRun;
 }
 
 export interface ChatStreamCompleteResult {

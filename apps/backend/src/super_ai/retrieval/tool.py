@@ -72,6 +72,22 @@ class KnowledgeRetrievalToolInput:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeRetrievalQueryTransform:
+    """Effective query plus a content-free audit for the LangChain boundary."""
+
+    input: KnowledgeRetrievalToolInput
+    metadata: Mapping[str, object]
+
+
+class KnowledgeRetrievalQueryTransformer(Protocol):
+    """Optional request-scoped query-only transform."""
+
+    async def transform(
+        self, input: KnowledgeRetrievalToolInput
+    ) -> KnowledgeRetrievalQueryTransform: ...
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeRetrievalHit:
     """Structured retrieval hit returned to agent orchestration."""
 
@@ -373,6 +389,7 @@ def create_langchain_knowledge_retrieval_tool(
     *,
     owner_user_id: str,
     accessible_knowledge_base_ids: Sequence[str],
+    query_transformer: KnowledgeRetrievalQueryTransformer | None = None,
 ) -> StructuredTool:
     """Create a request-scoped LangChain tool for tenant-safe knowledge retrieval."""
 
@@ -381,16 +398,30 @@ def create_langchain_knowledge_retrieval_tool(
         top_k: int | None = None,
         filters: LangChainKnowledgeRetrievalFilters | None = None,
     ) -> dict[str, object]:
+        original_input = KnowledgeRetrievalToolInput(
+            query=query,
+            top_k=top_k,
+            filters=_filters_from_langchain(filters),
+        )
+        transform = (
+            await query_transformer.transform(original_input)
+            if query_transformer is not None
+            else None
+        )
+        effective_input = KnowledgeRetrievalToolInput(
+            query=(transform.input.query if transform is not None else original_input.query),
+            top_k=original_input.top_k,
+            filters=original_input.filters,
+        )
         result = await retrieval_tool.run(
-            KnowledgeRetrievalToolInput(
-                query=query,
-                top_k=top_k,
-                filters=_filters_from_langchain(filters),
-            ),
+            effective_input,
             owner_user_id=owner_user_id,
             accessible_knowledge_base_ids=accessible_knowledge_base_ids,
         )
-        return _result_payload(result)
+        payload = _result_payload(result)
+        if transform is not None:
+            payload["queryRewrite"] = _safe_query_transform_metadata(transform.metadata)
+        return payload
 
     return StructuredTool.from_function(
         coroutine=run_knowledge_retrieval,
@@ -409,6 +440,17 @@ def _bounded_top_k(value: int | None) -> int:
             message="Retrieval topK must be greater than zero.",
         )
     return min(value, MAX_RETRIEVAL_TOP_K)
+
+
+def _safe_query_transform_metadata(metadata: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "action": metadata.get("action"),
+        "reason": metadata.get("reason"),
+        "applied": metadata.get("applied"),
+        "modelCallCount": metadata.get("modelCallCount"),
+        "durationMs": metadata.get("durationMs"),
+        "safeErrorCode": metadata.get("safeErrorCode"),
+    }
 
 
 def _resolve_knowledge_base_ids(

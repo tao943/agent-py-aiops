@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import cast
 
 import pytest
 
-from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService
+from super_ai.chat.memory import (
+    ChatContextLimitReached,
+    ChatMemoryService,
+    normalize_memory_mode,
+)
 from super_ai.llm import LlmProvider
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
@@ -22,7 +27,18 @@ class FakeChatModel:
 
     async def ainvoke(self, input: object) -> object:
         self.inputs.append(input)
-        return FakeMessage("用户正在排查 API；已确认需要保留工具结果和后续任务。")
+        return FakeMessage(
+            json.dumps(
+                {
+                    "user_goals": [],
+                    "confirmed_facts": [],
+                    "preferences": [],
+                    "decisions": [],
+                    "open_tasks": [],
+                    "resource_refs": [],
+                }
+            )
+        )
 
 
 class FakeProvider:
@@ -31,8 +47,23 @@ class FakeProvider:
 
     def create_chat_model(self) -> FakeChatModel:
         return self.model
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("adaptive", "adaptive"),
+        ("every_30_turns", "adaptive"),
+        ("context_70_percent", "adaptive"),
+        ("manual", "manual"),
+    ],
+)
+def test_normalize_memory_mode_keeps_one_legacy_compatibility_window(
+    raw: str, expected: str
+) -> None:
+    assert normalize_memory_mode(raw) == expected
 @pytest.mark.asyncio
-async def test_thirty_turn_mode_compacts_without_deleting_history(
+async def test_adaptive_mode_no_longer_uses_the_legacy_thirty_turn_trigger(
     migrated_database_url: str,
 ) -> None:
     engine = create_memory_engine(migrated_database_url)
@@ -75,10 +106,13 @@ async def test_thirty_turn_mode_compacts_without_deleting_history(
     finally:
         await engine.dispose()
 
-    assert len(provider.model.inputs) == 1
-    assert prepared.session.compacted_message_count == 60
-    assert prepared.session.memory_summary is not None
-    assert len(prepared.messages) == 1
+    assert provider.model.inputs == []
+    assert prepared.session.memory_mode == "adaptive"
+    assert prepared.session.compacted_message_count == 0
+    assert prepared.session.memory_summary is None
+    assert len(prepared.messages) == 13
+    assert prepared.messages[0].id == "message-24-user"
+    assert prepared.messages[-1].id == "candidate"
     assert len(persisted) == 60
 
 
@@ -150,7 +184,7 @@ async def test_context_threshold_and_manual_mode_are_session_scoped(
     assert threshold_result.session.memory_mode == "context_70_percent"
     assert threshold_result.session.compacted_message_count == 1
     assert manual_result.memory_mode == "manual"
-    assert manual_result.compacted_message_count == 1
+    assert manual_result.memory_summary_version == 1
     assert len(provider.model.inputs) == 2
 
 

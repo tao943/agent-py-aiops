@@ -325,6 +325,30 @@ redis-cli -n 0 HGETALL 'agent-py:limit:diagnostic.create:<owner-hash>'
 curl http://127.0.0.1:8080/metrics
 ```
 
+### Conversation RAG 自适应问题重写
+
+`knowledge_question` 只在查询包含指代、追问或低信息量省略时调用一次结构化 Rewriter；
+包含明确组件、错误码或资源标识的问题直接进入现有 Vector + BM25 + RRF + Rerank。
+无历史上下文、15 秒超时、模型/JSON 失败或组件、标识符、否定语义丢失时，检索自动使用
+原查询。重写包装器不能改变 owner、知识库、document/metadata filters 或 topK。
+
+知识问答总模型预算为 3：LangChain Agent 最多 2 次，request-scoped Rewriter 最多 1 次；
+即使 Agent 连续或并发调用两次检索，Rewriter 的一次性额度也不会重复消费。工具只公开
+action/reason/applied/modelCallCount/durationMs/safeErrorCode，不保存 Prompt、上下文、推理或
+原始响应。
+
+真实组件 A/B 需显式确认，并生成两个不可变 Retrieval Artifact：
+
+```powershell
+cd apps/backend
+uv run python scripts/run_query_rewrite_benchmark.py --confirm-real-model --owner-user-id <owner-id> --knowledge-base-id <kb-id> --output var/benchmarks/query-rewrite-ab.json
+```
+
+命令先校验 10 个标签在指定 owner/KB 的 Milvus 索引中唯一存在，再顺序比较 raw follow-up
+与 rewrite 后检索。退出码为 0 达标、1 有效但未达标、2 配置/数据/基础设施无效、130 中断。
+它不调用 CLS 或 Docker，只证明“问题重写 + 检索”组件增益；不能单独宣称端到端 Conversation
+能力提升。
+
 ## Nginx API 网关与入口限流
 
 本地前端和 AIOps 演示脚本默认通过 `http://127.0.0.1:8080` 访问 Nginx，

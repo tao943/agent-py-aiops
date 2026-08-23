@@ -25,6 +25,10 @@ class JobCancelled(RuntimeError):
     """Cooperative cancellation requested at a safe handler boundary."""
 
 
+class TerminalBackgroundJobError(RuntimeError):
+    """A safe non-retryable failure whose job must become terminal immediately."""
+
+
 @dataclass(frozen=True, slots=True)
 class BackgroundJobContext:
     """Narrow handler context backed by the durable repository."""
@@ -125,6 +129,20 @@ class BackgroundJobRuntime:
         except JobCancelled:
             await self._repository.mark_cancelled(job_id=job.id, worker_id=worker_id)
             emit_event(logger, "background.job.cancelled", jobId=job.id, kind=job.kind)
+        except TerminalBackgroundJobError as exc:
+            await self._repository.mark_failed(
+                job_id=job.id,
+                worker_id=worker_id,
+                error_message=_safe_error(exc),
+            )
+            emit_event(
+                logger,
+                "background.job.failed",
+                jobId=job.id,
+                kind=job.kind,
+                final=True,
+                errorCategory=exc.__class__.__name__,
+            )
         except Exception as exc:
             retry_at = _utc_now() + timedelta(seconds=min(30, 2**job.attempt))
             updated = await self._repository.handle_failure(

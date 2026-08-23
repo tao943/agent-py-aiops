@@ -2,9 +2,18 @@ import type { ApiErrorMessage } from "./responses";
 
 export const SSE_EVENT_TYPES = [
   "content.delta",
-  "reasoning.delta",
   "tool.call",
   "reference.source",
+  "diagnostic.result",
+  "run.status",
+  "run.restarted",
+  "execution.mode_selected",
+  "structured.result",
+  "confirmation.required",
+  "confirmation.resolved",
+  "explanation.delta",
+  "explanation.degraded",
+  "budget.exhausted",
   "task.status",
   "report",
   "complete",
@@ -26,11 +35,6 @@ export interface ContentDeltaSseEvent extends SseEventBase<"content.delta"> {
   readonly sequence: number;
 }
 
-export interface ReasoningDeltaSseEvent extends SseEventBase<"reasoning.delta"> {
-  readonly delta: string;
-  readonly sequence: number;
-}
-
 export interface ToolCallSseEvent extends SseEventBase<"tool.call"> {
   readonly toolCall: {
     readonly id: string;
@@ -39,6 +43,66 @@ export interface ToolCallSseEvent extends SseEventBase<"tool.call"> {
     readonly input?: unknown;
     readonly output?: unknown;
   };
+}
+
+export interface DiagnosticResultSseEvent extends SseEventBase<"diagnostic.result"> {
+  readonly diagnostic: {
+    readonly taskId: string;
+    readonly reportId: string;
+    readonly rootCause: Record<string, unknown>;
+    readonly recoveryMode: string;
+    readonly executionPermitted: boolean;
+    readonly humanApprovalRequired: boolean;
+    readonly validatorStatus: string;
+    readonly evidenceIds: readonly string[];
+  };
+}
+
+export interface RunStatusSseEvent extends SseEventBase<"run.status"> {
+  readonly run: {
+    readonly id: string;
+    readonly status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  };
+}
+
+export interface RunRestartedSseEvent extends SseEventBase<"run.restarted"> {
+  readonly runId: string;
+  readonly attempt: number;
+}
+
+export interface ExecutionModeSelectedSseEvent
+  extends SseEventBase<"execution.mode_selected"> {
+  readonly mode: "direct_read" | "confirmation_required" | "bounded_react";
+  readonly requiredCapability: string;
+  readonly postcondition: string;
+}
+
+export interface StructuredResultSseEvent extends SseEventBase<"structured.result"> {
+  readonly [key: string]: unknown;
+}
+
+export interface ConfirmationRequiredSseEvent
+  extends SseEventBase<"confirmation.required"> {
+  readonly action: import("./chat").PendingChatAction;
+}
+
+export interface ConfirmationResolvedSseEvent
+  extends SseEventBase<"confirmation.resolved"> {
+  readonly action: import("./chat").PendingChatAction;
+}
+
+export interface ExplanationDeltaSseEvent extends SseEventBase<"explanation.delta"> {
+  readonly delta: string;
+}
+
+export interface ExplanationDegradedSseEvent
+  extends SseEventBase<"explanation.degraded"> {
+  readonly code: "CHAT_EXPLANATION_DEGRADED";
+  readonly retryable: boolean;
+}
+
+export interface BudgetExhaustedSseEvent extends SseEventBase<"budget.exhausted"> {
+  readonly code: "CHAT_EXECUTION_BUDGET_EXHAUSTED";
 }
 
 export interface ReferenceSourceSseEvent extends SseEventBase<"reference.source"> {
@@ -93,9 +157,18 @@ export interface ErrorSseEvent extends SseEventBase<"error"> {
 
 export type SseEvent =
   | ContentDeltaSseEvent
-  | ReasoningDeltaSseEvent
   | ToolCallSseEvent
   | ReferenceSourceSseEvent
+  | DiagnosticResultSseEvent
+  | RunStatusSseEvent
+  | RunRestartedSseEvent
+  | ExecutionModeSelectedSseEvent
+  | StructuredResultSseEvent
+  | ConfirmationRequiredSseEvent
+  | ConfirmationResolvedSseEvent
+  | ExplanationDeltaSseEvent
+  | ExplanationDegradedSseEvent
+  | BudgetExhaustedSseEvent
   | TaskStatusSseEvent
   | ReportSseEvent
   | CompleteSseEvent

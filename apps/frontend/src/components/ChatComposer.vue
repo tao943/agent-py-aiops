@@ -16,9 +16,16 @@ const props = defineProps<{
   readonly memory: ChatMemoryState | null;
 }>();
 const content = ref("");
-const selectedMode = ref<ChatMemoryMode>(props.memory?.mode ?? "every_30_turns");
+const selectedMode = ref<ChatMemoryMode>(props.memory?.mode ?? "adaptive");
 const isHardLimited = computed(() => (props.memory?.contextUsagePercent ?? 0) >= 95);
 const inputDisabled = computed(() => props.disabled || props.isSending || isHardLimited.value);
+const compactionLabel = computed(() => {
+  const status = props.memory?.compactionStatus ?? "idle";
+  if (status === "queued") return "后台压缩已排队";
+  if (status === "running") return "后台压缩中";
+  if (status === "degraded") return "后台压缩降级，可手动重试";
+  return "保留最近 6 轮完整对话";
+});
 
 watch(
   () => props.memory?.mode,
@@ -55,10 +62,12 @@ function handleKeydown(event: KeyboardEvent): void {
           <strong>{{ memory?.contextUsagePercent ?? 0 }}%</strong>
         </div>
         <progress :value="memory?.contextUsagePercent ?? 0" max="100" aria-label="上下文窗口占用" />
+        <p class="chat-composer__memory-status" :data-status="memory?.compactionStatus ?? 'idle'">
+          {{ compactionLabel }}<span v-if="memory"> · v{{ memory.summaryVersion }}</span>
+        </p>
         <div class="chat-composer__memory-actions">
           <select v-model="selectedMode" aria-label="记忆模式" :disabled="!memory || isUpdatingMemory">
-            <option value="every_30_turns">每 30 轮压缩</option>
-            <option value="context_70_percent">占用 70% 自动压缩</option>
+            <option value="adaptive">自适应压缩</option>
             <option value="manual">手动压缩</option>
           </select>
           <button
@@ -99,6 +108,9 @@ textarea::placeholder { color: var(--text-tertiary); }
 .chat-composer__memory-head span { align-items: center; color: var(--text-secondary); display: inline-flex; font-size: 0.72rem; gap: 0.35rem; }
 .chat-composer__memory-head strong { font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 progress { accent-color: var(--text-primary); height: 0.35rem; width: 100%; }
+.chat-composer__memory-status { color: var(--text-tertiary); font-size: 0.68rem; line-height: 1.4; margin: 0; }
+.chat-composer__memory-status[data-status="running"] { color: var(--status-running-text); }
+.chat-composer__memory-status[data-status="degraded"] { color: var(--status-error-text); }
 .chat-composer__memory-actions { display: grid; gap: 0.4rem; grid-template-columns: minmax(0, 1fr) auto; }
 select { background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 0.35rem; color: var(--text-primary); font-size: 0.7rem; min-width: 0; padding: 0.35rem; }
 .chat-composer__apply { background: var(--surface-subtle); border: 1px solid var(--line-strong); border-radius: 0.35rem; color: var(--text-primary); font-size: 0.7rem; padding: 0.35rem 0.55rem; white-space: nowrap; }
