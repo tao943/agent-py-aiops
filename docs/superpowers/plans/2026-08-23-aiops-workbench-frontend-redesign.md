@@ -17,7 +17,7 @@
 - Incident、Prompt、Skill、Binding、Audit、Knowledge 和 Diagnostic 全部从认证上下文执行 owner scope。
 - Prompt/Skill 不能扩大系统 tool allowlist，不能绕过 Validator、Policy Gate 或恢复审批。
 - 现有 Chat Prompt/Skill 数据必须兼容迁移，不能静默丢弃用户数据。
-- PostgreSQL migration 新增 revision `202608230001`，不得改写已发布 migration。
+- PostgreSQL Agent 配置 migration 新增 revision `202608230002`，承接已发布的 Production Recovery revision `202608230001`，不得改写已发布 migration。
 - 只使用真实 API 状态；loading、empty、error、partial、stale 和 permission denied 必须有明确界面。
 - 实现遵循 TDD；每个任务通过聚焦测试后单独 Conventional Commit。
 
@@ -90,7 +90,7 @@ git commit -m "docs: specify event-first aiops workbench"
 
 **Interfaces:**
 - Consumes: existing `AiopsDiagnosticSummary`, `AiopsDiagnosticEvidenceChain`, `BackgroundJob`, response envelope.
-- Produces: `IncidentSummary`, `IncidentDetail`, `RuntimeReadiness`, `AgentResource`, `AgentResourceVersion`, `AgentBinding`, mutation request/response types.
+- Produces: `IncidentSummary`, `IncidentDetail`, cursor-paginated Incident list, current `RecoveryIntent` projection, `RuntimeReadiness`, `AgentResource`, `AgentResourceVersion`, `AgentBinding`, server-derived Agent configuration capabilities, and mutation request/response types.
 
 - [ ] **Step 1: Write failing contract tests**
 
@@ -114,9 +114,10 @@ const incident: IncidentSummary = {
   environment: null,
   assignee: null,
   agentMode: "multi",
-  approvalStatus: "pending",
-  recoveryMode: "manual_review",
-  recoveryExecutionStatus: "not_available"
+  approvalStatus: null,
+  recoveryMode: "automatic",
+  recoveryExecutionStatus: "executing",
+  recoveryIntentId: "intent_1"
 };
 expect(incident.currentStage).toBe("investigation");
 ```
@@ -156,7 +157,9 @@ export interface AgentBinding {
 
 `RuntimeReadiness` reuses `/ready` dependency names and never exposes hostnames or secrets. Export all modules from `index.ts` and mirror them in `openapi.ts`.
 
-`IncidentSummary` fields without a current fact source are nullable, never synthesized. `recoveryExecutionStatus` includes `not_available`, and the list response includes `approvalWorkflow: "request_only"` plus `productionRecoveryExecution: false` so the UI can distinguish zero activity from an unsupported operation.
+`IncidentSummary` fields without a current fact source are nullable, never synthesized. Reuse the existing shared `RecoveryIntent` and `RecoveryStatus` contracts. `recoveryIntentId` is nullable; `recoveryExecutionStatus` is projected from the latest owner-scoped formal Intent when one exists and otherwise equals `not_available`. The response exposes `productionRecoveryExecution: true` only when the formal control plane is installed; it never infers execution from legacy Chat approval-request rows or Live Eval records.
+
+`IncidentListResponse` uses opaque `nextCursor: string | null`. Ordering is stable by `(updatedAt DESC, id ASC)` and the cursor encodes only those public ordering fields through a server-owned serializer; clients must not construct or inspect it. Agent configuration responses include `capabilities.canManageConfiguration`. In the first local-workspace release every authenticated owner is administrator only of their own resources; cross-owner access remains uniformly denied. Hiding controls is presentation, while every mutation endpoint independently enforces the authenticated owner capability.
 
 - [ ] **Step 4: Run contract checks**
 
@@ -184,7 +187,7 @@ git commit -m "feat: define workbench api contracts"
 - Test: `apps/backend/tests/test_aiops_incidents_api.py`
 
 **Interfaces:**
-- Consumes: authenticated `UserRecord`, `AlertIncidentModel`, `DiagnosticTaskModel`, existing `AlertIncidentQueryRepository`.
+- Consumes: authenticated `UserRecord`, `AlertIncidentModel`, `DiagnosticTaskModel`, `ProductionRecoveryIntentModel`, existing `AlertIncidentQueryRepository`.
 - Produces: `GET /aiops/incidents`, `GET /aiops/incidents/{incident_id}` and `POST /aiops/incidents/{incident_id}:diagnose`.
 
 - [ ] **Step 1: Write failing owner-scope and projection tests**
@@ -203,6 +206,8 @@ second = await client.post("/aiops/incidents/incident_a:diagnose", headers=heade
 assert first.json()["data"]["diagnosticTaskId"] == second.json()["data"]["diagnosticTaskId"]
 ```
 
+Also create two historical formal Intents for one Diagnostic Task and assert the deterministic latest record is projected once without duplicating the Incident row. Assert the detail/list payload includes the current `recoveryIntentId`, `recoveryExecutionStatus` and `productionRecoveryExecution=true`; cross-owner Intents, legacy Chat approval rows and Live Eval execution keys never appear. Add at least three equal-timestamp Incidents and paginate with `limit=2`, asserting stable `(updated_at DESC, id ASC)` order, a non-null first `nextCursor`, a null terminal cursor and no duplicate/missing IDs.
+
 - [ ] **Step 2: Run tests to verify failure**
 
 Run from `apps/backend`: `uv run pytest tests/test_aiops_incidents_api.py -q`
@@ -211,7 +216,7 @@ Expected: FAIL with 404 for the unregistered Incident endpoints.
 
 - [ ] **Step 3: Extend the repository projection without raw webhook payloads**
 
-Expand `AlertIncidentRecord` and `list_owned(owner_user_id, status, limit, cursor)` to return only safe fields: source, first/last seen, delivery count, diagnostic task/status, report-derived Agent mode and recovery mode, verification status, pending approval status and recovery execution availability. Join owner-scoped Diagnostic Task and Recovery Approval data server-side. `environment` is derived only from allowlisted normalized labels when present; `assignee` remains `null` because no assignment subsystem exists. Production recovery execution remains `not_available` because the current executor exists only inside Live Eval. Do not return normalized webhook JSON, credentials or internal checkpoint data.
+Expand `AlertIncidentRecord` and `list_owned(owner_user_id, status, limit, cursor)` to return only safe fields: source, first/last seen, delivery count, diagnostic task/status, report-derived Agent mode and recovery mode, verification status, pending approval status and the latest formal Recovery Intent ID/status. Join owner-scoped Diagnostic Task and `ProductionRecoveryIntentModel` data server-side. `environment` is derived only from allowlisted normalized labels when present; `assignee` remains `null` because no assignment subsystem exists. Legacy Chat approval-request rows and Live Eval execution keys are never projected as production Intents. Do not return normalized webhook JSON, trusted snapshots, credentials or internal checkpoint data.
 
 - [ ] **Step 4: Add a focused router**
 
@@ -224,9 +229,15 @@ async def list_incidents(
     user: Annotated[UserRecord, Depends(current_user)],
     status: Literal["active", "resolved", "all"] = "active",
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query(max_length=512)] = None,
 ) -> object:
-    records = await repository.list_owned(owner_user_id=user.id, status=status, limit=limit)
-    return success_response(request, {"items": [_incident_payload(item) for item in records]})
+    page = await repository.list_owned(
+        owner_user_id=user.id, status=status, limit=limit, cursor=cursor
+    )
+    return success_response(
+        request,
+        {"items": [_incident_payload(item) for item in page.items], "nextCursor": page.next_cursor},
+    )
 ```
 
 Register the router during app creation; keep webhook ingestion routes separate.
@@ -432,11 +443,10 @@ git commit -m "feat: build real incident center"
 ### Task 6: 将现有 AIOps 诊断页重构为调查工作台
 
 **Files:**
-- Create: `apps/backend/src/super_ai/aiops/recovery_routes.py`
-- Modify: `apps/backend/src/super_ai/api/app.py`
-- Test: `apps/backend/tests/test_aiops_recovery_requests_api.py`
 - Modify: `apps/frontend/src/aiops/aiopsClient.ts`
 - Modify: `apps/frontend/src/stores/aiops.ts`
+- Create: `apps/frontend/src/recovery/recoveryClient.ts`
+- Create: `apps/frontend/src/stores/recovery.ts`
 - Create: `apps/frontend/src/components/investigation/InvestigationHeader.vue`
 - Create: `apps/frontend/src/components/investigation/ExecutionTrace.vue`
 - Create: `apps/frontend/src/components/investigation/HypothesisEvidencePanel.vue`
@@ -448,16 +458,20 @@ git commit -m "feat: build real incident center"
 - Retain/refactor: `apps/frontend/src/components/AiopsTimeline.vue`
 - Retain/refactor: `apps/frontend/src/components/AiopsReportPanel.vue`
 - Test: `apps/frontend/tests/investigationWorkspace.test.ts`
+- Create: `apps/frontend/tests/recoveryClient.test.ts`
+- Create: `apps/frontend/tests/recoveryStore.test.ts`
 - Modify: `apps/frontend/tests/aiopsComponents.test.ts`
 - Modify: `apps/frontend/tests/aiopsStore.test.ts`
 
 **Interfaces:**
-- Consumes: `IncidentDetail`, existing `AiopsDiagnosticEvidenceChain`, diagnostic SSE and report payload.
-- Produces: six-tab investigation workspace, explicit safety/degradation presentation and an idempotent owner-scoped recovery approval request action. It does not create production approval-decision or recovery-execution authority.
+- Consumes: `IncidentDetail`, existing `AiopsDiagnosticEvidenceChain`, diagnostic SSE/report payload, and the existing owner-scoped formal Recovery Intent API.
+- Produces: six-tab investigation workspace, explicit safety/degradation presentation, formal Intent status/events, and owner actions permitted by the existing recovery state machine. The frontend never derives action/target/arguments and never calls an executor directly.
 
 - [ ] **Step 1: Write failing semantic presentation tests**
 
-Fixtures must cover: running Single-Agent, running Multi-Agent with one inconclusive Specialist, deterministic grounded fallback, manual approval request, Live Eval auto-remediation evidence and completed verification. Add API tests proving duplicate requests reuse one approval, cross-owner IDs are hidden, ineligible proposals fail safely and the endpoint never executes recovery.
+Fixtures must cover: running Single-Agent, running Multi-Agent with one inconclusive Specialist, deterministic grounded fallback, automatic Compose Intent, PostgreSQL `awaiting_approval`, executing/verifying/recovered, verification failure and manual intervention. Client/store tests prove duplicate create returns the same formal Intent, cross-owner IDs remain hidden by the API, approval confirmation binds the Incident ID, and UI code never submits action, target, PID, SQL, Compose path or execution arguments.
+
+Recovery Store tests use fake timers and document visibility changes. They prove `queued/revalidating/executing/verifying` poll the formal Intent and events at a bounded 2-second interval only while the page is visible; `recovered/denied/rejected/expired/cancelled/verification_failed/manual_intervention` stop polling; hidden pages pause and resume; transient failures retain the last successful Intent, mark it stale and expose retry without converting the state to success. Incident Store tests prove `loadMore()` follows opaque `nextCursor` without duplicating rows.
 
 ```ts
 expect(wrapper.get('[data-status="inconclusive"]').text()).toContain("缺少独立日志证据");
@@ -468,11 +482,9 @@ expect(wrapper.get('[data-recovery-permitted="false"]').text()).toContain("禁�
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run from `apps/backend`: `uv run pytest tests/test_aiops_recovery_requests_api.py -q`
+Run from repository root: `npm --workspace apps/frontend run test -- investigationWorkspace.test.ts recoveryClient.test.ts recoveryStore.test.ts aiopsComponents.test.ts aiopsStore.test.ts`
 
-Run from repository root: `npm --workspace apps/frontend run test -- investigationWorkspace.test.ts aiopsComponents.test.ts aiopsStore.test.ts`
-
-Expected: backend FAIL because the direct owner-scoped request route is absent; frontend FAIL because the semantic adapters and new workspace are absent.
+Expected: frontend FAIL because the semantic adapters, formal recovery client/store and new workspace are absent. Existing backend recovery API contract tests remain green and are not reimplemented here.
 
 - [ ] **Step 3: Add a public result adapter**
 
@@ -482,7 +494,9 @@ Create pure typed selectors in the AIOps store that map existing `resultPayload`
 
 Tabs are overview, trace, hypothesis/evidence, tool audit, recovery closure and audit timeline. The context aside shows owner-safe impact, mode, configuration version IDs and checkpoint metadata counts—not checkpoint state. Existing working evidence/report components are wrapped or split instead of duplicated.
 
-The recovery tab may create/reuse a pending approval request after a second confirmation. It must label the current capability as “提交人工复核请求”, not “批准” or “执行”. Live Eval auto-recovery records are read-only evidence. A production approval decision/execution engine is a separate security-sensitive OpenSpec change and is not inferred from the Live Eval executor.
+The recovery tab reads the formal Intent projected by Incident detail and loads its append-only public events. Eligible Compose Intents may progress automatically through `queued -> revalidating -> executing -> verifying -> recovered`; the UI shows status and verification but provides no execute button. PostgreSQL Intents at `awaiting_approval` expose explicit approve/reject controls with Incident ID confirmation and risk copy. `manual_intervention` and `verification_failed` expose audit context without automatic retry. Legacy Chat approval requests and Live Eval execution keys remain read-only evidence and are never rendered as formal Intents.
+
+The Recovery Store owns bounded refresh independently from diagnostic SSE. It polls only non-terminal formal Intents every 2 seconds while `document.visibilityState === "visible"`, fetches events with the last durable `afterSequence`, pauses when hidden, resumes immediately when visible, and stops at every terminal status or view disposal. A failed refresh keeps the last known state with `stale=true` and an explicit retry action; it never invents a recovery transition.
 
 - [ ] **Step 5: Preserve SSE and cancellation behavior**
 
@@ -493,9 +507,9 @@ Route opening an active Diagnostic resumes the existing stream. Cancel continues
 Run:
 
 ```bash
-npm --workspace apps/frontend run test -- investigationWorkspace.test.ts aiopsComponents.test.ts aiopsStore.test.ts activeAlerts.test.ts
+npm --workspace apps/frontend run test -- investigationWorkspace.test.ts recoveryClient.test.ts recoveryStore.test.ts aiopsComponents.test.ts aiopsStore.test.ts activeAlerts.test.ts
 npm run frontend:typecheck
-cd apps/backend && uv run pytest tests/test_aiops_recovery_requests_api.py tests/test_chat_aiops_bridge.py -q
+cd apps/backend && uv run pytest tests/test_recovery_api.py tests/test_recovery_api_security.py tests/test_chat_aiops_bridge.py -q
 ```
 
 Expected: PASS.
@@ -503,7 +517,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/backend/src/super_ai/aiops/recovery_routes.py apps/backend/src/super_ai/api/app.py apps/backend/tests/test_aiops_recovery_requests_api.py apps/frontend/src/aiops apps/frontend/src/stores/aiops.ts apps/frontend/src/components/investigation apps/frontend/src/views/IncidentWorkspaceView.vue apps/frontend/src/components/Aiops* apps/frontend/tests
+git add apps/frontend/src/aiops apps/frontend/src/recovery apps/frontend/src/stores/aiops.ts apps/frontend/src/stores/recovery.ts apps/frontend/src/components/investigation apps/frontend/src/views/IncidentWorkspaceView.vue apps/frontend/src/components/Aiops* apps/frontend/tests
 git commit -m "feat: redesign incident investigation workspace"
 ```
 
@@ -521,7 +535,7 @@ git commit -m "feat: redesign incident investigation workspace"
 - Modify: `apps/backend/src/super_ai/memory/chat_runs_sqlalchemy.py`
 - Modify: `apps/backend/src/super_ai/memory/sqlalchemy.py`
 - Create: `apps/backend/src/super_ai/memory/agent_configuration_sqlalchemy.py`
-- Create: `apps/backend/alembic/versions/202608230001_add_agent_configuration_versions.py`
+- Create: `apps/backend/alembic/versions/202608230002_add_agent_configuration_versions.py`
 - Test: `apps/backend/tests/test_agent_configuration_migration.py`
 - Test: `apps/backend/tests/test_agent_configuration_service.py`
 - Test: `apps/backend/tests/test_agent_configuration_repository.py`
@@ -590,16 +604,16 @@ Run from `apps/backend`:
 ```bash
 uv run alembic upgrade head
 uv run pytest tests/test_agent_configuration_service.py tests/test_agent_configuration_repository.py tests/test_agent_configuration_migration.py -q
-uv run ruff check src/super_ai/agent_configuration src/super_ai/memory/agent_configuration_sqlalchemy.py alembic/versions/202608230001_add_agent_configuration_versions.py tests/test_agent_configuration_*.py
+uv run ruff check src/super_ai/agent_configuration src/super_ai/memory/agent_configuration_sqlalchemy.py alembic/versions/202608230002_add_agent_configuration_versions.py tests/test_agent_configuration_*.py
 uv run pyright src/super_ai/agent_configuration src/super_ai/memory/agent_configuration_sqlalchemy.py
 ```
 
-Expected: migration reaches `202608230001`; all checks PASS.
+Expected: migration reaches `202608230002`; all checks PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add apps/backend/src/super_ai/agent_configuration apps/backend/src/super_ai/memory apps/backend/alembic/versions/202608230001_add_agent_configuration_versions.py apps/backend/tests/test_agent_configuration_*
+git add apps/backend/src/super_ai/agent_configuration apps/backend/src/super_ai/memory apps/backend/alembic/versions/202608230002_add_agent_configuration_versions.py apps/backend/tests/test_agent_configuration_*
 git commit -m "feat: version agent prompts and skills"
 ```
 
@@ -631,8 +645,9 @@ Cover create draft, update draft, validate, publish, bind, list audit, cross-own
 snapshot = await runtime.resolve_snapshot(owner_user_id="owner_a", node="validator")
 assembled = runtime.assemble_system_prompt(MANDATORY_VALIDATOR_PROMPT, snapshot)
 assert assembled.startswith(MANDATORY_VALIDATOR_PROMPT)
-assert "disable policy gate" not in assembled.lower()
 assert set(snapshot.allowed_tools) <= VALIDATOR_SYSTEM_TOOL_ALLOWLIST
+assert snapshot.policy_gate_required is True
+assert snapshot.owner_user_id == "owner_a"
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -660,7 +675,7 @@ PUT    /agent-configuration/bindings/{node}
 GET    /agent-configuration/audit-events
 ```
 
-All errors map to stable catalog codes; raw validation/parser exceptions stay server-side.
+All errors map to stable catalog codes; raw validation/parser exceptions stay server-side. Validation may warn on suspicious policy-bypass prose, but prose filtering is not an authorization boundary. Runtime assembly places published content in a delimited untrusted configuration section; mandatory safety, owner scope, tool intersection, Validator routing and Policy Gate execution remain server-owned fields that configuration cannot disable.
 
 - [ ] **Step 4: Assemble runtime configuration behind mandatory safety text**
 
@@ -735,7 +750,7 @@ Expected: FAIL because the Agent Configuration UI does not exist and Chat still 
 
 - [ ] **Step 3: Implement typed client and Pinia state machine**
 
-Store state distinguishes library loading, selected resource/version, dirty draft, validation result, publish state, binding state and audit pagination. Route changes with dirty content require `ConfirmDialog`; save errors keep the draft visible and never imply publication.
+Store state distinguishes library loading, selected resource/version, dirty draft, validation result, publish state, binding state, server-derived `canManageConfiguration` and audit pagination. Route changes with dirty content require `ConfirmDialog`; save errors keep the draft visible and never imply publication. The first release treats each authenticated owner as administrator of only their own local-workspace resources; mutation authorization is enforced server-side even when the UI control is hidden.
 
 - [ ] **Step 4: Implement three-pane desktop and drawer-based narrow UI**
 
