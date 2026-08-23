@@ -2,8 +2,8 @@
 
 - [x] 1.1 Add shared recovery contracts, stable errors, domain types and safe public projections.
 - [x] 1.2 Add disabled-by-default recovery configuration and unique diagnostic selectors.
-- [ ] 1.3 Add Alembic revision `202608230001`, ORM models and owner-scoped repository protocols.
-- [ ] 1.4 Implement conflict-safe repository transitions and atomic Intent/Job/Event units of work.
+- [x] 1.3 Add Alembic revision `202608230001`, ORM models and owner-scoped repository protocols.
+- [x] 1.4 Implement conflict-safe repository transitions and atomic Intent/Job/Event units of work.
 
 ## 2. Grounded intent and policy
 

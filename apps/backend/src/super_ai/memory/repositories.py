@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from super_ai.chat.structured_memory import MemoryCasResult, StructuredChatMemory
+    from super_ai.recovery.repository import RecoveryIntentRepository
 
 ChatMemoryMode = str
 
@@ -1877,3 +1878,4 @@ class MemoryRepositories:
     chat_tool_executions: ChatToolExecutionRepository | None = None
     recovery_approvals: RecoveryApprovalRequestRepository | None = None
     pending_chat_actions: PendingChatActionRepository | None = None
+    recovery_intents: RecoveryIntentRepository | None = None
