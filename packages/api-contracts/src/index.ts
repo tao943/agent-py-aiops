@@ -11,6 +11,7 @@ export const FOUNDATION_HEALTH_CONTRACT = {
 } as const satisfies HealthContract;
 
 export * from "./auth";
+export * from "./agent-configuration";
 export * from "./background-jobs";
 export * from "./chat";
 export * from "./chat-configuration";
@@ -18,11 +19,13 @@ export * from "./documents";
 export * from "./errors";
 export * from "./feedback";
 export * from "./indexing";
+export * from "./incidents";
 export * from "./mcp";
 export * from "./openapi";
 export * from "./protected-data";
 export * from "./retrieval";
 export * from "./responses";
 export * from "./recovery";
+export * from "./runtime-status";
 export * from "./sse";
 export * from "./vector";
