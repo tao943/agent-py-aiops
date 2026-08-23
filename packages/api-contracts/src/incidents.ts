@@ -65,7 +65,7 @@ export interface IncidentListResponse {
 export interface IncidentListQuery {
   readonly cursor?: string;
   readonly limit?: number;
-  readonly status?: IncidentStatus;
+  readonly status?: IncidentStatus | "all";
   readonly severity?: IncidentSeverity;
   readonly service?: string;
 }
