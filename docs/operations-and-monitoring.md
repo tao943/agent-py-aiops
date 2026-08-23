@@ -20,6 +20,28 @@ cp config/user.project.template.json config/user.project.json
 schema/relation。该映射只保存在被忽略的本地配置中，不进入 API；PID 始终来自执行前 fresh
 probe，模型、Prompt、旧 Evidence 和客户端均不能指定。
 
+### 隔离生产恢复验收
+
+生产恢复验收只验证已持久化诊断之后的控制面，不调用 benchmark oracle，也不依赖 LLM、
+CLS 或自动报警链路。测试先制造真实故障并据实写入 owner-scoped Task、Evidence、Report 和
+active Incident，再只通过正式 Recovery HTTP API 创建或审批 Intent；执行器不能由测试直接
+调用。独立监视器只在容器/数据库恢复信号成立后把 Incident 标记为 resolved。
+
+在 `live-eval-order-api` 和测试 PostgreSQL 已启动后，从 `apps/backend` 显式运行：
+
+```bash
+uv run pytest tests/live/test_production_compose_recovery.py -q
+uv run pytest tests/live/test_production_postgres_recovery.py -q
+```
+
+Compose 用例只重启隔离的 `live-eval-order-api`，并验证重复请求收敛、容器身份变化、健康与
+业务探针、Incident resolved、单条 recovery execution 和完整审计状态。PostgreSQL 用例只在
+`recovery_test.orders` 制造锁等待，验证跨 owner/错误确认被拒绝、审批绑定、唯一 blocker 被
+终止、waiter 前进及无关连接存活。两项测试都会改变各自的隔离 fixture，不属于普通 CI。
+
+这两条命令不证明 `Alertmanager → 自动诊断 → RecoveryIntent` 上游链路已经验收；自动报警
+闭环应使用独立的端到端场景验证，避免把 LLM/CLS 波动混入恢复执行器的正确性判断。
+
 ## 项目交付后的个人配置
 
 在本地 `config/user.project.json` 中填写使用者自己的模型密钥、CLS 凭据和 CLS 日志目标。其他运行参数可在本地 `config/project.json` 中调整：

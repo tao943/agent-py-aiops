@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import ceil
 from time import monotonic
 from typing import Literal, Protocol, cast
 
@@ -262,14 +263,43 @@ class ComposeRecoveryVerifier:
         probes: RecoveryHttpProbe,
         incidents: IncidentStatusReader,
         now: Callable[[], datetime] | None = None,
+        verification_timeout_seconds: float = 15.0,
+        poll_interval_seconds: float = 0.25,
     ) -> None:
+        if verification_timeout_seconds < 0 or poll_interval_seconds <= 0:
+            raise ValueError("compose_verification_poll_invalid")
         self._target = target
         self._inspector = inspector
         self._probes = probes
         self._incidents = incidents
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._verification_timeout_seconds = verification_timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
 
     async def verify(
+        self,
+        *,
+        owner_user_id: str,
+        incident_id: str,
+        before: ComposeContainerIdentity,
+    ) -> RecoveryVerificationResult:
+        attempts = max(
+            1,
+            ceil(self._verification_timeout_seconds / self._poll_interval_seconds) + 1,
+        )
+        result: RecoveryVerificationResult | None = None
+        for attempt in range(attempts):
+            result = await self._verify_once(
+                owner_user_id=owner_user_id,
+                incident_id=incident_id,
+                before=before,
+            )
+            if result.passed or attempt == attempts - 1:
+                return result
+            await asyncio.sleep(self._poll_interval_seconds)
+        raise RuntimeError("compose_verification_unreachable")
+
+    async def _verify_once(
         self,
         *,
         owner_user_id: str,

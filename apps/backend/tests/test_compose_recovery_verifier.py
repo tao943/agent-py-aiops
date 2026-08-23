@@ -71,6 +71,22 @@ class Incidents:
         )
 
 
+class ConvergingIncidents(Incidents):
+    def __init__(self) -> None:
+        super().__init__("active")
+        self.calls = 0
+
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None:
+        self.calls += 1
+        self.status = "resolved" if self.calls >= 2 else "active"
+        return await super().get_owned(
+            owner_user_id=owner_user_id,
+            incident_id=incident_id,
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("after", "health", "business", "incident_status", "expected"),
@@ -134,6 +150,7 @@ async def test_verification_requires_all_four_independent_signals(
         probes=probes,
         incidents=Incidents(incident_status),  # type: ignore[arg-type]
         now=lambda: NOW,
+        verification_timeout_seconds=0,
     )
 
     result = await verifier.verify(
@@ -154,3 +171,33 @@ async def test_verification_requires_all_four_independent_signals(
     assert all(check.checked_at == NOW for check in result.checks)
     assert probes.calls == [target.health_url, target.business_probe_url]
     assert "restart" not in result.safe_summary
+
+
+@pytest.mark.asyncio
+async def test_verification_waits_for_independent_incident_resolution() -> None:
+    target = _target()
+    incidents = ConvergingIncidents()
+    verifier = ComposeRecoveryVerifier(
+        target=target,
+        inspector=Inspector(
+            ComposeContainerIdentity(
+                "bbbbbbbbbbbb", "live-eval-order-api", "started-after"
+            )
+        ),
+        probes=Probes({target.health_url: True, target.business_probe_url: True}),
+        incidents=incidents,
+        now=lambda: NOW,
+        verification_timeout_seconds=0.02,
+        poll_interval_seconds=0.01,
+    )
+
+    result = await verifier.verify(
+        owner_user_id="owner-1",
+        incident_id="incident-1",
+        before=ComposeContainerIdentity(
+            "aaaaaaaaaaaa", "live-eval-order-api", "started-before"
+        ),
+    )
+
+    assert result.passed is True
+    assert incidents.calls == 2
