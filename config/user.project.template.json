@@ -31,5 +31,11 @@
     "pollIntervalSeconds": 2,
     "indexWaitSeconds": 90,
     "queryLimit": 20
+  },
+  "productionRecovery": {
+    "enabled": false,
+    "approvalTtlSeconds": 600,
+    "composeTargets": [],
+    "postgresTargets": []
   }
 }

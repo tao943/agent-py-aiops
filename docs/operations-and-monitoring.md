@@ -9,6 +9,14 @@ cp config/project.template.json config/project.json
 cp config/user.project.template.json config/user.project.json
 ```
 
+## 生产恢复安全默认值
+
+`productionRecovery` 默认关闭且两个目标白名单均为空。只有在本地忽略的
+`config/user.project.json` 中显式开启全局开关并配置受控 target，恢复 Worker 才可能排队；
+提交的模板不会包含 Compose 绝对路径、数据库连接串或凭据。Compose 自动恢复还要求 target
+显式 `automaticRecoveryEnabled=true`，PostgreSQL blocker 终止始终需要当前 Incident owner
+在 600 秒内审批。
+
 ## 项目交付后的个人配置
 
 在本地 `config/user.project.json` 中填写使用者自己的模型密钥、CLS 凭据和 CLS 日志目标。其他运行参数可在本地 `config/project.json` 中调整：
