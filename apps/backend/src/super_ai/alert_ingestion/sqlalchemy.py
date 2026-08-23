@@ -69,6 +69,17 @@ class SQLAlchemyAlertIngestionRepository:
             row = (await session.scalars(statement)).one_or_none()
         return _incident_record(row) if row is not None else None
 
+    async def get_by_diagnostic_task(
+        self, *, owner_user_id: str, diagnostic_task_id: str
+    ) -> AlertIncidentRecord | None:
+        statement = select(AlertIncidentModel).where(
+            AlertIncidentModel.owner_user_id == owner_user_id,
+            AlertIncidentModel.diagnostic_task_id == diagnostic_task_id,
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+        return _incident_record(row) if row is not None else None
+
     async def schedule_for_incident(
         self,
         *,

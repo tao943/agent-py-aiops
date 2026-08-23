@@ -17,11 +17,11 @@ def _compose_target(**overrides: object) -> dict[str, object]:
         "healthUrl": "http://127.0.0.1:18081/health",
         "businessProbeUrl": "http://127.0.0.1:18081/live-eval/probe",
         "diagnosticSelector": {
-            "component": "order-service",
-            "mechanisms": ["application_connection_pool_leak"],
+            "component": "order-api",
+            "mechanisms": ["exception_path_connection_not_released"],
             "requiredEvidenceFacts": [
-                "InspectConnectionPool.poolExhausted",
-                "InspectConnectionPool.checkoutWithoutCheckin",
+                "InspectOrderPoolState.poolAtCapacity",
+                "VerifyOrderDatabaseReachability.businessProbeTimedOut",
             ],
         },
     }
@@ -35,7 +35,7 @@ def _postgres_target(**overrides: object) -> dict[str, object]:
         "databaseConfigKey": "backend",
         "diagnosticSelector": {
             "component": "postgresql",
-            "mechanisms": ["transaction_blocker_lock_wait"],
+            "mechanisms": ["row_lock_blocking"],
             "requiredEvidenceFacts": [
                 "InspectPostgresLockGraph.blockerEdgeConfirmed",
                 "InspectPostgresLockGraph.blockerRole",
@@ -89,7 +89,7 @@ def test_loads_isolated_compose_and_postgres_targets(tmp_path: Path) -> None:
     assert compose.service == "live-eval-order-api"
     assert compose.automatic_recovery_enabled is True
     assert settings.postgres_targets["agent-py-postgres"].database_config_key == "backend"
-    assert settings.selector_target("order-service", "application_connection_pool_leak") == (
+    assert settings.selector_target("order-api", "exception_path_connection_not_released") == (
         "live-eval-order-api"
     )
 
@@ -137,8 +137,8 @@ def test_rejects_duplicate_target_keys(tmp_path: Path) -> None:
 def test_rejects_ambiguous_diagnostic_selectors(tmp_path: Path) -> None:
     conflicting = _postgres_target(
         diagnosticSelector={
-            "component": "order-service",
-            "mechanisms": ["application_connection_pool_leak"],
+            "component": "order-api",
+            "mechanisms": ["exception_path_connection_not_released"],
             "requiredEvidenceFacts": ["InspectPostgresLockGraph.blockerEdgeConfirmed"],
         }
     )

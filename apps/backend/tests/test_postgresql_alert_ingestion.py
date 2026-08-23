@@ -123,6 +123,32 @@ async def test_identical_delivery_retry_updates_count_but_deduplicates_event(
     assert event_count == 1
 
 
+async def test_recovery_lookup_finds_incident_only_by_owned_diagnostic_task(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_user(session_factory)
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    try:
+        created = await repository.apply(_write(1))
+        assert created.diagnostic_task_id is not None
+        owned = await repository.get_by_diagnostic_task(
+            owner_user_id="owner",
+            diagnostic_task_id=created.diagnostic_task_id,
+        )
+        foreign = await repository.get_by_diagnostic_task(
+            owner_user_id="other-owner",
+            diagnostic_task_id=created.diagnostic_task_id,
+        )
+    finally:
+        await engine.dispose()
+
+    assert owned is not None
+    assert owned.id == created.incident_id
+    assert foreign is None
+
+
 async def test_resolved_closes_active_incident_and_firing_reopens_new_lifecycle(
     migrated_database_url: str,
 ) -> None:

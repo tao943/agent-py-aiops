@@ -55,6 +55,10 @@ class AlertIncidentQueryRepository(Protocol):
         self, *, owner_user_id: str, incident_id: str
     ) -> AlertIncidentRecord | None: ...
 
+    async def get_by_diagnostic_task(
+        self, *, owner_user_id: str, diagnostic_task_id: str
+    ) -> AlertIncidentRecord | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class DiagnosticScheduleResult:
