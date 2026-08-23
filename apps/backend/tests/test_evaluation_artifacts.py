@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import pytest
 
 from super_ai.evaluation.artifacts import build_run_artifact
+from super_ai.evaluation.live.diagnostics import append_live_evidence_context
+from super_ai.evaluation.live.domain import LiveClsScope, LiveEvidenceContext
 from super_ai.memory.repositories import (
     AgentToolCallAuditRecord,
     DiagnosticEvidenceRecord,
@@ -1014,7 +1016,7 @@ def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
         kind="tool_result",
         source="SearchLog",
         summary="one matching record",
-        payload={"output": {"benchmarkEvidenceId": "cls-live-request-timeout"}},
+        payload={"output": {"records": [{"event": "request_timeout"}]}},
         created_at=NOW,
     )
     tool_call = AgentToolCallAuditRecord(
@@ -1033,8 +1035,27 @@ def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
         created_at=NOW,
     )
 
-    artifact = build_run_artifact(task, (), (evidence,), (tool_call,), ())
+    raw_artifact = build_run_artifact(task, (), (evidence,), (tool_call,), ())
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_000,
+        to_ms=10_000,
+        run_id="run-1",
+        scenario_id="APY-LIVE-PG-LOCK-001",
+        incident_id="APY-LIVE-PG-LOCK-001-run-1",
+    )
+    artifact = append_live_evidence_context(
+        raw_artifact,
+        context=LiveEvidenceContext(
+            source="cls",
+            incident_id=scope.incident_id,
+            cls_scope=scope,
+            verified_events=("request_timeout",),
+        ),
+    )
 
+    assert raw_artifact.evidence[0].claim_id == "ev-cls"
     assert artifact.evidence[0].source == "SearchLog"
     assert artifact.evidence[0].claim_id == "cls-live-request-timeout"
     assert artifact.evidence[0].tool_call_id == "call-1"
@@ -1043,6 +1064,75 @@ def test_run_artifact_preserves_evidence_source_and_tool_arguments() -> None:
         "Region": "ap-guangzhou",
         "TopicId": "topic-live",
     }
+
+
+@pytest.mark.parametrize(
+    ("run_id", "scenario_id", "incident_id", "verified_events"),
+    (
+        ("run-2", "APY-LIVE-PG-LOCK-001", "APY-LIVE-PG-LOCK-001-run-1", ("request_timeout",)),
+        (
+            "run-1",
+            "APY-LIVE-PG-DEADLOCK-001",
+            "APY-LIVE-PG-DEADLOCK-001-run-1",
+            ("request_timeout",),
+        ),
+        ("run-1", "APY-LIVE-PG-LOCK-001", "wrong-incident", ("request_timeout",)),
+        ("run-1", "APY-LIVE-PG-LOCK-001", "APY-LIVE-PG-LOCK-001-run-1", ()),
+    ),
+)
+def test_pg_lock_cls_claim_rejects_untrusted_scope_or_missing_timeout(
+    run_id: str,
+    scenario_id: str,
+    incident_id: str,
+    verified_events: tuple[str, ...],
+) -> None:
+    task = DiagnosticTaskRecord(
+        id="task-cls-negative",
+        owner_user_id="eval-user",
+        status="succeeded",
+        query="diagnose",
+        input_payload={
+            "benchmarkScenarioId": "APY-LIVE-PG-LOCK-001",
+            "benchmarkMode": "live",
+        },
+        result_payload={},
+        created_at=NOW,
+        updated_at=NOW,
+        completed_at=NOW,
+    )
+    evidence = DiagnosticEvidenceRecord(
+        id="ev-cls-negative",
+        owner_user_id="eval-user",
+        task_id=task.id,
+        step_id="step-1",
+        tool_call_id="call-1",
+        kind="tool_result",
+        source="SearchLog",
+        summary="bounded records",
+        payload={"output": {"records": [{"event": "request_timeout"}]}},
+        created_at=NOW,
+    )
+    scope = LiveClsScope(
+        region="ap-guangzhou",
+        topic_id="topic-live",
+        from_ms=1_000,
+        to_ms=10_000,
+        run_id=run_id,
+        scenario_id=scenario_id,
+        incident_id=incident_id,
+    )
+
+    artifact = append_live_evidence_context(
+        build_run_artifact(task, (), (evidence,), (), ()),
+        context=LiveEvidenceContext(
+            source="cls",
+            incident_id=incident_id,
+            cls_scope=scope,
+            verified_events=verified_events,
+        ),
+    )
+
+    assert artifact.evidence[0].claim_id == "ev-cls-negative"
 
 
 def test_order_pool_artifact_derives_cls_lifecycle_claim_from_correlated_events() -> None:

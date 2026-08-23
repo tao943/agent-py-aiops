@@ -455,8 +455,26 @@ def append_live_evidence_context(
     """Append trusted, non-secret evidence scope after artifact assembly."""
     scope = context.cls_scope
     readiness = context.readiness
+    evidence = artifact.evidence
+    trusted_pg_timeout = (
+        context.source == "cls"
+        and scope is not None
+        and artifact.scenario_id == "APY-LIVE-PG-LOCK-001"
+        and scope.scenario_id == artifact.scenario_id
+        and scope.incident_id == context.incident_id
+        and scope.incident_id == f"{scope.scenario_id}-{scope.run_id}"
+        and "request_timeout" in context.verified_events
+    )
+    if trusted_pg_timeout:
+        evidence = tuple(
+            replace(item, claim_id="cls-live-request-timeout")
+            if item.source == "SearchLog"
+            else item
+            for item in evidence
+        )
     return replace(
         artifact,
+        evidence=evidence,
         live_evidence=LiveEvidenceAudit(
             source=context.source,
             region=scope.region if scope is not None else None,

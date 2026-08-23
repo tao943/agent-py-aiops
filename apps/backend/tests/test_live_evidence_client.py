@@ -45,7 +45,7 @@ def _record(*, run_id: str = "run-1") -> dict[str, object]:
         "incident_id": (
             SCOPE.incident_id if run_id == "run-1" else f"{SCOPE.scenario_id}-{run_id}"
         ),
-        "event": "order_update_timeout",
+        "event": "request_timeout",
         "message": "Order update timed out.",
     }
 
@@ -126,7 +126,7 @@ async def test_cls_composite_discovers_search_and_routes_postgres() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cls_search_filters_cross_run_records_and_tags_evidence() -> None:
+async def test_cls_search_filters_cross_run_records_without_exposing_eval_scope() -> None:
     cls_client = FakeClsClient(_official_output(_record(), _record(run_id="run-2")))
     client = LiveCompositeEvidenceMcpClient(
         postgres_client=LivePostgresEvidenceMcpClient(OBSERVATION),
@@ -137,30 +137,32 @@ async def test_cls_search_filters_cross_run_records_and_tags_evidence() -> None:
     result = await client.call_tool("SearchLog", valid_search_arguments())
 
     assert isinstance(result, dict)
-    assert result["benchmarkEvidenceId"] == "cls-live-request-timeout"
     assert result["recordCount"] == 1
     assert result["rejectedRecordCount"] == 1
     serialized = json.dumps(result)
-    assert '"run_id": "run-1"' in serialized
+    assert "request_timeout" in serialized
     assert "run-2" not in serialized
+    for forbidden in (
+        "benchmarkEvidenceId",
+        "run_id",
+        "scenario_id",
+        "incident_id",
+        SCOPE.scenario_id,
+    ):
+        assert forbidden not in serialized
 
 
 @pytest.mark.parametrize(
-    ("scenario_id", "evidence_id"),
+    "scenario_id",
     (
-        ("APY-LIVE-PG-LOCK-001", "cls-live-request-timeout"),
-        ("APY-LIVE-PG-DEADLOCK-001", "cls-live-database-deadlock"),
-        (
-            "APY-LIVE-REDIS-MAXCLIENTS-001",
-            "cls-live-redis-connection-rejected",
-        ),
-        ("APY-LIVE-NGINX-TIMEOUT-001", "cls-live-nginx-upstream-timeout"),
+        "APY-LIVE-PG-LOCK-001",
+        "APY-LIVE-PG-DEADLOCK-001",
+        "APY-LIVE-REDIS-MAXCLIENTS-001",
+        "APY-LIVE-NGINX-TIMEOUT-001",
     ),
 )
 @pytest.mark.asyncio
-async def test_cls_search_tags_each_scenario_with_its_own_evidence_id(
-    scenario_id: str, evidence_id: str
-) -> None:
+async def test_cls_search_never_exposes_scenario_evidence_id(scenario_id: str) -> None:
     scope = LiveClsScope(
         region="ap-guangzhou",
         topic_id="topic-live",
@@ -202,7 +204,9 @@ async def test_cls_search_tags_each_scenario_with_its_own_evidence_id(
     )
 
     assert isinstance(result, dict)
-    assert result["benchmarkEvidenceId"] == evidence_id
+    assert result["recordCount"] == 1
+    assert "benchmarkEvidenceId" not in result
+    assert scenario_id not in json.dumps(result)
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -10,10 +11,24 @@ from super_ai.evaluation.live.postgres import (
     PostgresConnectionConfig,
     PostgresLiveRecoveryService,
     PostgresLockScenarioDriver,
+    _task_timed_out_without_cancelling,  # pyright: ignore[reportPrivateUsage]
 )
 from super_ai.evaluation.live.scenarios import validate_run_id
 
 pytestmark = pytest.mark.live_docker
+
+
+@pytest.mark.asyncio
+async def test_completed_business_probe_is_not_classified_as_timeout() -> None:
+    async def completed_update() -> str:
+        return "UPDATE 1"
+
+    task = asyncio.create_task(completed_update())
+
+    assert (
+        await _task_timed_out_without_cancelling(task, timeout_seconds=0.1) is False
+    )
+    assert task.result() == "UPDATE 1"
 
 
 @pytest.mark.asyncio
@@ -34,6 +49,10 @@ async def test_real_postgres_lock_injection_recovery_and_idempotent_cleanup() ->
         observation = await driver.inject(identity)
 
         assert observation.confirmed is True
+        assert observation.check_passed("business_probe_timed_out") is True
+        follow_up = await driver.observe(identity)
+        assert follow_up.check_passed("waiter_has_lock_event") is True
+        assert follow_up.check_passed("blocker_edge_confirmed") is True
         artifact = RunArtifact(
             scenario_id="APY-LIVE-PG-LOCK-001",
             mode="live",

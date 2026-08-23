@@ -78,6 +78,7 @@ class LiveEvidenceContext:
     incident_id: str
     cls_scope: LiveClsScope | None = None
     readiness: LiveEvidenceReadiness | None = None
+    verified_events: tuple[str, ...] = ()
 
     @classmethod
     def local(cls, *, incident_id: str) -> LiveEvidenceContext:

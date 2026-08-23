@@ -66,6 +66,10 @@ from super_ai.retrieval import (
 
 ToolCallStatus = Literal["started", "delta", "completed", "failed"]
 logger = logging.getLogger(__name__)
+
+BLOCKED_CHAT_RESPONSE = (
+    "该请求包含不安全的指令组合，无法执行。请改为描述需要查询的事故、诊断或知识问题。"
+)
 _AsyncItem = TypeVar("_AsyncItem")
 
 
@@ -482,13 +486,74 @@ class ChatStreamingService:
             or existing_user_message.role != "user"
         ):
             raise LookupError("owned chat run user message not found")
-        system_prompt, selected_skills = await self.build_agent_configuration(
-            owner_user_id=owner_user_id
-        )
         route = (
             await self._intent_router.route(message_content)
             if self._intent_router is not None
             else ChatRoute("general_chat", 0.0, "fallback")
+        )
+        if route.blocked_reason is not None:
+            user_message = existing_user_message or await self._repositories.chat.append_message(
+                owner_user_id=owner_user_id,
+                message_id=f"message_{uuid4().hex}",
+                session_id=session.id,
+                role="user",
+                content=message_content,
+                metadata=sanitize_chat_metadata(metadata or {}),
+            )
+            del user_message
+            assistant_message = (
+                await self._repositories.chat.get_message(
+                    owner_user_id=owner_user_id,
+                    message_id=assistant_message_id,
+                )
+                if assistant_message_id is not None
+                else None
+            )
+            if assistant_message is not None and (
+                assistant_message.session_id != session.id
+                or assistant_message.role != "assistant"
+            ):
+                raise LookupError("owned chat run assistant message not found")
+            route_metadata = {
+                "intent": route.intent,
+                "confidence": route.confidence,
+                "source": route.source,
+                "incidentId": None,
+                "diagnosticTaskId": None,
+                "needsClarification": False,
+                "blockedReason": route.blocked_reason,
+            }
+            assistant_message = assistant_message or await self._repositories.chat.append_message(
+                owner_user_id=owner_user_id,
+                message_id=assistant_message_id or f"message_{uuid4().hex}",
+                session_id=session.id,
+                role="assistant",
+                content=BLOCKED_CHAT_RESPONSE,
+                metadata={"route": route_metadata},
+            )
+            yield _sse_event(
+                "content.delta",
+                {"delta": BLOCKED_CHAT_RESPONSE, "sequence": 1},
+            )
+            yield _sse_event(
+                "complete",
+                {
+                    "result": {
+                        "session": _chat_session_payload(session, 131072),
+                        "message": _chat_message_payload(assistant_message),
+                    }
+                },
+            )
+            emit_event(
+                logger,
+                "agent.chat.input_blocked",
+                sessionId=session.id,
+                blockedReason=route.blocked_reason,
+                durationMs=elapsed_ms(started_at),
+            )
+            return
+        system_prompt, selected_skills = await self.build_agent_configuration(
+            owner_user_id=owner_user_id
         )
         allowed_tools = allowed_tools_for(route.intent)
         if route.needs_clarification:
@@ -652,6 +717,7 @@ class ChatStreamingService:
                         "incidentId": route.incident_id,
                         "diagnosticTaskId": route.diagnostic_task_id,
                         "needsClarification": route.needs_clarification,
+                        "blockedReason": route.blocked_reason,
                     },
                 },
             )

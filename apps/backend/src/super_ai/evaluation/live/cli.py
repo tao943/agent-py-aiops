@@ -49,6 +49,7 @@ from super_ai.evaluation.live.cls_evidence import (
     LiveClsLogUploader,
     LiveClsRecordProvider,
     McpClsSearcher,
+    PostgresLockClsRecordProvider,
 )
 from super_ai.evaluation.live.diagnostics import (
     ApplicationLiveDiagnosticAdapter,
@@ -1381,6 +1382,7 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
             driver=driver,
             recovery=PostgresLiveRecoveryService(driver),
             component_evidence_factory=LivePostgresEvidenceMcpClient,
+            cls_record_provider=PostgresLockClsRecordProvider(),
         )
 
     registry.register("APY-LIVE-PG-LOCK-001", postgres_lock_components)

@@ -38,6 +38,11 @@ _EXPLORATORY_REACT_BUDGET = ChatExecutionBudget(4, 6, 180.0)
 def policy_for(route: ChatRoute) -> ChatExecutionPolicy:
     """Compile one immutable policy without consulting model-generated tool names."""
 
+    if route.blocked_reason is not None:
+        return _direct_read(
+            capability="input_safety_refusal",
+            postcondition="unsafe_request_refused",
+        )
     if route.needs_clarification:
         safe_tools = allowed_tools_for(route.intent) - frozenset(
             {"start_incident_diagnostic", "create_recovery_approval_request"}

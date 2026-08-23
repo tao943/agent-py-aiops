@@ -122,6 +122,7 @@ class _RunConnections:
     blocker_pid: int
     waiter_pid: int
     unrelated_pids: frozenset[int]
+    business_probe_timed_out: bool = False
 
 
 class PostgresLockScenarioDriver:
@@ -207,8 +208,14 @@ class PostgresLockScenarioDriver:
         self._runs[identity.run_id] = state
         for _ in range(100):
             observation = await self.observe(identity)
-            if observation.confirmed:
-                return observation
+            if observation.check_passed(
+                "waiter_has_lock_event"
+            ) and observation.check_passed("blocker_edge_confirmed"):
+                state.business_probe_timed_out = await _task_timed_out_without_cancelling(
+                    waiter_task,
+                    timeout_seconds=self._timeout_seconds,
+                )
+                return await self.observe(identity)
             await asyncio.sleep(0.02)
         return await self.observe(identity)
 
@@ -235,11 +242,15 @@ class PostgresLockScenarioDriver:
                         row is not None and bool(row["edge"]),
                         "InspectPostgresLockGraph",
                     ),
+                    LiveCheck(
+                        "business_probe_timed_out",
+                        state.business_probe_timed_out,
+                        "ProbeBusinessRequest",
+                    ),
                 ),
             )
         finally:
             await connection.close()
-
     async def session_state(
         self, identity: LiveRunIdentity, target_pid: int
     ) -> tuple[PostgresSessionState | None, int]:
@@ -402,6 +413,16 @@ class PostgresLockScenarioDriver:
             return PostgresLiveRunAudit(healthy, session_count, table_count)
         finally:
             await connection.close()
+
+
+async def _task_timed_out_without_cancelling(
+    task: asyncio.Task[str], *, timeout_seconds: float
+) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout_seconds)
+    except TimeoutError:
+        return True
+    return False
 
 
 class PostgresLiveRecoveryService:

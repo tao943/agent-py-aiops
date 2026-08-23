@@ -923,7 +923,7 @@ def _artifact_evidence(
     if isinstance(output, Mapping):
         safe_output = cast(Mapping[object, object], output)
         value = safe_output.get("benchmarkEvidenceId")
-        if isinstance(value, str) and value:
+        if record.source != "SearchLog" and isinstance(value, str) and value:
             claim_id = value
         elif (
             scenario_id == "APY-LIVE-ORDER-POOL-LEAK-001"
