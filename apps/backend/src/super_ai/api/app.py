@@ -167,6 +167,7 @@ from super_ai.observability import (
 )
 from super_ai.project_config import project_config_section, required_int, required_str
 from super_ai.recovery.api import create_recovery_router
+from super_ai.recovery.auto_dispatch import AutoRecoveryIntentDispatcher
 from super_ai.recovery.config import load_production_recovery_settings
 from super_ai.recovery.intent_service import RecoveryIntentService
 from super_ai.recovery.worker import build_production_recovery_handler
@@ -483,6 +484,10 @@ def create_app(
         incidents=incident_repository,
         intents=recovery_intents,
         settings=recovery_settings,
+    )
+    app.state.auto_recovery_intent_dispatcher = AutoRecoveryIntentDispatcher(
+        diagnostics=repositories.diagnostics,
+        recovery_intents=recovery_intent_service,
     )
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
@@ -2173,14 +2178,47 @@ def _aiops_job_handler(
         )
         if task is None:
             raise RuntimeError("Diagnostic task is unavailable.")
-        runner = _aiops_diagnostic_runner(_request_for_app(app))
+        if task.status == "failed":
+            raise RuntimeError("Diagnostic execution failed.")
+        if task.status == "cancelled":
+            raise JobCancelled("Diagnostic execution was cancelled.")
+        if task.status not in {"accepted", "running", "succeeded"}:
+            raise RuntimeError("Diagnostic task has an unsupported status.")
         try:
-            async for event in runner.stream(
-                task=task,
-                accessible_knowledge_base_ids=(f"kb_{context.job.owner_user_id}",),
-            ):
-                await context.raise_if_cancelled()
-                await context.append_event(event)
+            if task.status != "succeeded":
+                runner = _aiops_diagnostic_runner(_request_for_app(app))
+                async for event in runner.stream(
+                    task=task,
+                    accessible_knowledge_base_ids=(
+                        f"kb_{context.job.owner_user_id}",
+                    ),
+                ):
+                    await context.raise_if_cancelled()
+                    await context.append_event(event)
+            updated = await repositories.diagnostics.get_task(
+                owner_user_id=task.owner_user_id,
+                task_id=task.id,
+            )
+            if updated is None:
+                raise RuntimeError("Diagnostic task is unavailable.")
+            if updated.status == "failed":
+                raise RuntimeError("Diagnostic execution failed.")
+            if updated.status == "cancelled":
+                raise JobCancelled("Diagnostic execution was cancelled.")
+            if updated.status != "succeeded":
+                raise RuntimeError("Diagnostic execution did not complete.")
+            await context.raise_if_cancelled()
+            dispatcher = cast(
+                AutoRecoveryIntentDispatcher,
+                app.state.auto_recovery_intent_dispatcher,
+            )
+            dispatch_result = await dispatcher.dispatch(
+                owner_user_id=updated.owner_user_id,
+                diagnostic_task_id=updated.id,
+            )
+            if dispatch_result.reason_code == "task_unavailable":
+                raise RuntimeError("Diagnostic task is unavailable.")
+            await context.append_event(dispatch_result.public_event())
         except JobCancelled:
             await repositories.diagnostics.update_task(
                 owner_user_id=task.owner_user_id,
@@ -2189,12 +2227,6 @@ def _aiops_job_handler(
                 completed_at=datetime.now(timezone.utc),
             )
             raise
-        updated = await repositories.diagnostics.get_task(
-            owner_user_id=task.owner_user_id,
-            task_id=task.id,
-        )
-        if updated is None or updated.status == "failed":
-            raise RuntimeError("Diagnostic execution failed.")
 
     return handle
 
