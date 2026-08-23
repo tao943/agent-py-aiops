@@ -73,3 +73,14 @@ export interface IncidentListQuery {
 export interface IncidentDetailResponse {
   readonly incident: IncidentDetail;
 }
+
+export interface DiagnoseIncidentRequest {
+  readonly note?: string;
+}
+
+export interface DiagnoseIncidentResponse {
+  readonly incidentId: string;
+  readonly diagnosticTaskId: string;
+  readonly backgroundJobId: string;
+  readonly reused: boolean;
+}

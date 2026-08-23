@@ -1,8 +1,8 @@
 ## 1. Contracts and incident projection
 
-- [ ] 1.1 Add shared Incident, runtime status and Agent configuration contracts with strict fixtures.
-- [ ] 1.2 Implement owner-scoped Incident list/detail projection, stable opaque cursor pagination and formal Recovery Intent selection.
-- [ ] 1.3 Cover cross-owner isolation, equal-timestamp pagination, legacy recovery exclusion and safe public serialization.
+- [x] 1.1 Add shared Incident, runtime status and Agent configuration contracts with strict fixtures.
+- [x] 1.2 Implement owner-scoped Incident list/detail projection, stable opaque cursor pagination and formal Recovery Intent selection.
+- [x] 1.3 Cover cross-owner isolation, equal-timestamp pagination, legacy recovery exclusion and safe public serialization.
 
 ## 2. Event-first Vue workspace
 

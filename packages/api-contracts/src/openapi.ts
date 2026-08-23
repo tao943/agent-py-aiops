@@ -962,6 +962,23 @@ export const OPENAPI_CONTRACT = {
         }
       }
     },
+    "/aiops/incidents/{incidentId}:diagnose": {
+      post: {
+        operationId: "diagnoseAiopsIncident",
+        summary: "Idempotently schedule diagnosis for an owned active Incident",
+        tags: ["aiops-incidents"],
+        security: bearerSecurity,
+        requestBody: {
+          required: false,
+          content: jsonContent("#/components/schemas/DiagnoseIncidentRequest")
+        },
+        responses: {
+          "200": okResponse("#/components/schemas/DiagnoseIncidentApiResponse"),
+          "202": okResponse("#/components/schemas/DiagnoseIncidentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
     "/aiops/diagnostics/{diagnosticId}/recovery-intents": {
       post: {
         operationId: "createRecoveryIntent",
@@ -2334,6 +2351,12 @@ export const OPENAPI_CONTRACT = {
           meta: { $ref: "#/components/schemas/ApiResponseMeta" }
         }
       },
+      DiagnoseIncidentRequest: {
+        type: "object",
+        properties: { note: { type: "string" } },
+        additionalProperties: false
+      },
+      DiagnoseIncidentApiResponse: { type: "object" },
       RecoveryCheck: {
         type: "object",
         required: ["key", "status", "safeSummary", "checkedAt"],

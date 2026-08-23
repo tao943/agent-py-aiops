@@ -32,6 +32,10 @@ class IncidentNotActive(RuntimeError):
     """A diagnostic cannot be scheduled for a resolved Incident."""
 
 
+class InvalidIncidentCursor(ValueError):
+    """An opaque Incident pagination cursor is invalid."""
+
+
 @dataclass(frozen=True, slots=True)
 class AlertIncidentRecord:
     """Minimal owner-scoped Incident projection safe for application queries."""
@@ -44,9 +48,37 @@ class AlertIncidentRecord:
     severity: str
     last_seen_at: datetime
     diagnostic_task_id: str | None
+    source_id: str = ""
+    first_seen_at: datetime | None = None
+    updated_at: datetime | None = None
+    delivery_count: int = 1
+    diagnostic_status: str | None = None
+    verification_status: str = "not_applicable"
+    environment: str | None = None
+    agent_mode: Literal["single", "multi"] | None = None
+    recovery_mode: Literal["automatic", "manual_review", "not_available"] = "not_available"
+    approval_status: Literal["pending", "approved", "rejected", "expired"] | None = None
+    recovery_intent_id: str | None = None
+    recovery_execution_status: str | None = None
+    summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AlertIncidentPage:
+    items: tuple[AlertIncidentRecord, ...]
+    next_cursor: str | None
 
 
 class AlertIncidentQueryRepository(Protocol):
+    async def list_owned(
+        self,
+        *,
+        owner_user_id: str,
+        status: Literal["active", "resolved", "all"],
+        limit: int,
+        cursor: str | None,
+    ) -> AlertIncidentPage: ...
+
     async def list_active(
         self, *, owner_user_id: str, limit: int
     ) -> list[AlertIncidentRecord]: ...

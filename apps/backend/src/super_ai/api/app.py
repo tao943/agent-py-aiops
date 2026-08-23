@@ -31,6 +31,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
+from super_ai.aiops.incident_routes import create_incident_router
 from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
 from super_ai.alert_ingestion.config import load_alert_ingestion_settings
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
@@ -529,6 +530,15 @@ def create_app(
         "production_recovery", build_production_recovery_handler(app)
     )
     app.state.background_job_runtime = background_runtime
+    app.include_router(
+        create_incident_router(
+            current_user_dependency=_current_user,
+            repository=incident_repository,
+            scheduler=incident_repository,
+            runtime=background_runtime,
+        )
+    )
+
     async def enforce_recovery_rate_limit(owner_id: str) -> None:
         await enforce_rate_limit(
             cast(RateLimitService, app.state.rate_limit_service),

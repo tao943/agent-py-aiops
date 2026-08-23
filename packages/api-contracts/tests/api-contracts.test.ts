@@ -108,6 +108,7 @@ describe("HTTP response contracts", () => {
     expect(list.nextCursor).toBe("opaque");
     expect(readiness.dependencies[0]?.name).toBe("postgresql");
     expect(OPENAPI_CONTRACT.paths["/aiops/incidents"]?.get).toBeDefined();
+    expect(OPENAPI_CONTRACT.paths["/aiops/incidents/{incidentId}:diagnose"]?.post).toBeDefined();
     expect(OPENAPI_CONTRACT.components.schemas.IncidentSummary).toBeDefined();
   });
 
