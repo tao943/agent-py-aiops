@@ -166,6 +166,9 @@ from super_ai.observability import (
     set_request_id,
 )
 from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.recovery.api import create_recovery_router
+from super_ai.recovery.config import load_production_recovery_settings
+from super_ai.recovery.intent_service import RecoveryIntentService
 from super_ai.recovery.worker import build_production_recovery_handler
 from super_ai.redis_runtime import (
     RedisRuntimeSettings,
@@ -471,6 +474,16 @@ def create_app(
     )
     incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
     app.state.alert_incident_repository = incident_repository
+    recovery_intents = repositories.recovery_intents
+    if recovery_intents is None:
+        raise RuntimeError("Production recovery intent repository is required.")
+    recovery_settings = load_production_recovery_settings(resolved_project_config_path)
+    recovery_intent_service = RecoveryIntentService(
+        diagnostics=repositories.diagnostics,
+        incidents=incident_repository,
+        intents=recovery_intents,
+        settings=recovery_settings,
+    )
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
         diagnostics=repositories.diagnostics,
@@ -479,6 +492,7 @@ def create_app(
             BridgeRecoveryApprovalRequestRepository | None,
             repositories.recovery_approvals,
         ),
+        recovery_intents=recovery_intent_service,
         tool_executions=repositories.chat_tool_executions,
     )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
@@ -510,6 +524,23 @@ def create_app(
         "production_recovery", build_production_recovery_handler(app)
     )
     app.state.background_job_runtime = background_runtime
+    async def enforce_recovery_rate_limit(owner_id: str) -> None:
+        await enforce_rate_limit(
+            cast(RateLimitService, app.state.rate_limit_service),
+            owner_id=owner_id,
+            action="recovery.execute",
+        )
+
+    app.include_router(
+        create_recovery_router(
+            current_user_dependency=_current_user,
+            service=recovery_intent_service,
+            intents=recovery_intents,
+            settings=recovery_settings,
+            runtime=background_runtime,
+            rate_limit_guard=enforce_recovery_rate_limit,
+        )
+    )
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
     if composed_redis_settings is None and redis_client is None:

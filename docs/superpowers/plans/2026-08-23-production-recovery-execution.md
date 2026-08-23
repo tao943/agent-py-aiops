@@ -306,7 +306,7 @@ Run from `apps/backend`: `uv run pytest tests/test_recovery_migration.py tests/t
 
 Expected: PASS when test PostgreSQL is available; otherwise report the environment dependency, do not add skips.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add apps/backend/src/super_ai/memory apps/backend/src/super_ai/recovery apps/backend/alembic/versions/202608230001_add_production_recovery.py apps/backend/tests/test_recovery_migration.py apps/backend/tests/test_postgresql_recovery_repository.py
@@ -526,7 +526,7 @@ Run from `apps/backend`: `uv run pytest tests/test_recovery_worker.py tests/test
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add apps/backend/src/super_ai/recovery/worker.py apps/backend/src/super_ai/api/app.py apps/backend/tests/test_recovery_worker*.py
@@ -554,7 +554,7 @@ git commit -m "feat: orchestrate durable recovery execution"
 - Produces: six endpoints from the design and unified response payloads from Task 2.
 - Consumes: authenticated user dependency, `RecoveryIntentService`, repository, Background Job repository/runtime, rate limiter action `recovery.execute`.
 
-- [ ] **Step 1: Write API happy-path tests**
+- [x] **Step 1: Write API happy-path tests**
 
 Cover:
 
@@ -569,31 +569,31 @@ GET  /aiops/recovery-intents/{intent_id}/events?afterSequence=0
 
 Approval body is exactly `{ "incidentIdConfirmation": "<full id>" }`; create body only permits optional bounded `note` and rejects extra fields.
 
-- [ ] **Step 2: Write authorization and race tests**
+- [x] **Step 2: Write authorization and race tests**
 
 Assert non-owner, wrong Incident confirmation, expired approval, duplicate approve, approve-vs-reject race, cancel-vs-worker race, malformed IDs, path traversal strings and extra action/PID/path fields cannot mutate or enumerate resources. API must not serialize private/trusted fields.
 
-- [ ] **Step 3: Implement API router**
+- [x] **Step 3: Implement API router**
 
 Create Intent returns `201` or existing active Intent `200`; auto-eligible queued Intent uses `create_intent_with_job_and_event` and wakes runtime. Approve enforces `recovery.execute`, uses `approve_with_job_and_event`, then returns `202`. Reject/cancel return the converged terminal state. Inject transaction failures in API tests and prove no partial Intent/job/approval/event state escapes.
 
-- [ ] **Step 4: Add public event projection**
+- [x] **Step 4: Add public event projection**
 
 Map only `sequence`, `type`, `fromStatus`, `toStatus`, `safeReasonCode`, `safeSummary`, `durationMs`, `createdAt`. Validate allowlist recursively so forbidden keys such as `password`, `token`, `dsn`, `sql`, `pid`, `path`, `stdout`, `stderr`, `exception` cannot appear nested.
 
-- [ ] **Step 5: Migrate the Chat approval bridge to formal RecoveryIntent creation**
+- [x] **Step 5: Migrate the Chat approval bridge to formal RecoveryIntent creation**
 
 Keep the Chat tool name and pending confirmation UX for compatibility, but after the user confirms, `PendingChatActionJobService` calls `RecoveryIntentService.create(...)` instead of creating a new row in `aiops_recovery_approval_requests`. Chat may create/reuse an Intent and report `awaiting_approval`/`queued`; it may never approve, execute or supply action/target/PID. Existing legacy approval rows remain read-only and are returned with `legacy=true`, `executionPermitted=false`, and a safe instruction to create a current Intent; they are not silently converted into approval authority.
 
 Test old rows, duplicate Chat confirmations, API-and-Chat concurrent creation, owner isolation, and that the Chat execution policy/tool allowlist gains no production write executor.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run from `apps/backend`: `uv run pytest tests/test_recovery_api.py tests/test_recovery_api_security.py tests/test_chat_aiops_bridge.py tests/test_pending_chat_actions.py tests/test_chat_runs_repository.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add apps/backend/src/super_ai/recovery/api.py apps/backend/src/super_ai/api apps/backend/src/super_ai/chat apps/backend/src/super_ai/memory/chat_runs_sqlalchemy.py apps/backend/tests/test_recovery_api*.py apps/backend/tests/test_chat_aiops_bridge.py apps/backend/tests/test_pending_chat_actions.py apps/backend/tests/test_chat_runs_repository.py

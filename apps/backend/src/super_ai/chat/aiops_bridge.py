@@ -28,6 +28,7 @@ from super_ai.memory.repositories import (
     DiagnosticMemoryRepository,
     JsonDict,
 )
+from super_ai.recovery.intent_service import RecoveryIntentService
 
 
 class BridgeResourceNotFound(LookupError):
@@ -46,15 +47,22 @@ class RecoveryApprovalRequest:
     status: str
     execution_permitted: bool
     reused: bool
+    legacy: bool = False
 
     def to_payload(self) -> JsonDict:
-        return {
+        payload: JsonDict = {
             "id": self.id,
             "diagnosticTaskId": self.diagnostic_task_id,
             "status": self.status,
             "executionPermitted": False,
             "reused": self.reused,
+            "legacy": self.legacy,
         }
+        if self.legacy:
+            payload["safeInstruction"] = (
+                "Create a current Recovery Intent; this legacy request grants no authority."
+            )
+        return payload
 
 
 class RecoveryApprovalRequestRepository(Protocol):
@@ -169,12 +177,14 @@ class AiopsBridgeService:
         diagnostics: DiagnosticMemoryRepository,
         scheduler: IncidentDiagnosticScheduler | None = None,
         approval_requests: RecoveryApprovalRequestRepository | None = None,
+        recovery_intents: RecoveryIntentService | None = None,
         tool_executions: ChatToolExecutionRepository | None = None,
     ) -> None:
         self._incidents = incidents
         self._diagnostics = diagnostics
         self._scheduler = scheduler
         self._approval_requests = approval_requests
+        self._recovery_intents = recovery_intents
         self.tool_executions = tool_executions
 
     async def list_active_incidents(
@@ -279,6 +289,24 @@ class AiopsBridgeService:
         reason: str,
         chat_run_id: str | None,
     ) -> RecoveryApprovalRequest:
+        bounded_reason = reason.strip()[:1000]
+        if not bounded_reason:
+            raise ValueError("Recovery approval reason is required.")
+        if self._recovery_intents is not None:
+            result = await self._recovery_intents.create_result(
+                owner_user_id=owner_user_id,
+                diagnostic_task_id=task_id,
+                note=bounded_reason,
+            )
+            intent = result.intent
+            return RecoveryApprovalRequest(
+                id=intent.id,
+                owner_user_id=owner_user_id,
+                diagnostic_task_id=task_id,
+                status=intent.status,
+                execution_permitted=False,
+                reused=result.reused,
+            )
         if self._approval_requests is None:
             raise RuntimeError("Recovery approval persistence is unavailable.")
         report = await self.get_diagnostic_report(owner_user_id=owner_user_id, task_id=task_id)
@@ -290,9 +318,6 @@ class AiopsBridgeService:
             raise RecoveryApprovalNotAllowed(
                 "Diagnostic recovery proposal is not eligible for approval."
             )
-        bounded_reason = reason.strip()[:1000]
-        if not bounded_reason:
-            raise ValueError("Recovery approval reason is required.")
         canonical = json.dumps(
             {
                 "taskId": report.task_id,
@@ -304,12 +329,21 @@ class AiopsBridgeService:
             sort_keys=True,
             separators=(",", ":"),
         )
-        return await self._approval_requests.create_or_get(
+        legacy = await self._approval_requests.create_or_get(
             owner_user_id=owner_user_id,
             diagnostic_task_id=task_id,
             proposal_fingerprint=sha256(canonical.encode("utf-8")).hexdigest(),
             request_reason=bounded_reason,
             chat_run_id=chat_run_id,
+        )
+        return RecoveryApprovalRequest(
+            id=legacy.id,
+            owner_user_id=legacy.owner_user_id,
+            diagnostic_task_id=legacy.diagnostic_task_id,
+            status=legacy.status,
+            execution_permitted=False,
+            reused=legacy.reused,
+            legacy=True,
         )
 
     async def _require_task(self, owner_user_id: str, task_id: str) -> Any:

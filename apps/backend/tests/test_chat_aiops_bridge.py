@@ -24,6 +24,8 @@ from super_ai.memory.repositories import (
     DiagnosticReportRecord,
     DiagnosticTaskRecord,
 )
+from super_ai.recovery.contracts import RecoveryIntentRecord
+from super_ai.recovery.repository import RecoveryIntentCreateResult
 
 NOW = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
@@ -65,6 +67,19 @@ class FakeIncidentQueries:
     ) -> AlertIncidentRecord | None:
         item = self.items.get(incident_id)
         return item if item is not None and item.owner_user_id == owner_user_id else None
+
+    async def get_by_diagnostic_task(
+        self, *, owner_user_id: str, diagnostic_task_id: str
+    ) -> AlertIncidentRecord | None:
+        return next(
+            (
+                item
+                for item in self.items.values()
+                if item.owner_user_id == owner_user_id
+                and item.diagnostic_task_id == diagnostic_task_id
+            ),
+            None,
+        )
 
 
 class FakeDiagnostics:
@@ -187,6 +202,19 @@ def _bridge() -> AiopsBridgeService:
     )
 
 
+class FakeFormalRecoveryIntents:
+    async def create_result(self, **_: object) -> RecoveryIntentCreateResult:
+        return RecoveryIntentCreateResult(
+            RecoveryIntentRecord(
+                "intent_a", "owner_a", "incident_a", "diagnostic_a", "report_a",
+                "terminate_postgres_blocker", "postgres", "high", False, True,
+                "awaiting_approval", "a" * 64, ("evidence_a",), {}, {}, NOW,
+                None, None, None, None, None, (),
+            ),
+            False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_list_active_incidents_returns_only_owned_safe_summaries() -> None:
     items = await _bridge().list_active_incidents(owner_user_id="owner_a", limit=10)
@@ -273,6 +301,28 @@ async def test_recovery_request_only_creates_pending_non_executable_approval() -
     assert result.execution_permitted is False
     assert "approve" not in result.to_payload()
     assert "execute" not in result.to_payload()
+    assert result.to_payload()["legacy"] is True
+
+
+@pytest.mark.asyncio
+async def test_confirmed_chat_action_creates_formal_intent_without_approval() -> None:
+    bridge = AiopsBridgeService(
+        incidents=FakeIncidentQueries(),
+        diagnostics=FakeDiagnostics(),  # type: ignore[arg-type]
+        recovery_intents=FakeFormalRecoveryIntents(),  # type: ignore[arg-type]
+    )
+
+    result = await bridge.create_recovery_approval_request(
+        owner_user_id="owner_a",
+        task_id="diagnostic_a",
+        reason="Create an intent for operator review.",
+        chat_run_id="run_a",
+    )
+
+    assert result.id == "intent_a"
+    assert result.status == "awaiting_approval"
+    assert result.execution_permitted is False
+    assert result.legacy is False
 
 
 @pytest.mark.asyncio

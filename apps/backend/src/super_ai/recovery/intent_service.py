@@ -22,6 +22,7 @@ from super_ai.recovery.proposal_adapter import (
 )
 from super_ai.recovery.repository import (
     RecoveryIntentCreate,
+    RecoveryIntentCreateResult,
     RecoveryIntentRepository,
 )
 
@@ -59,6 +60,21 @@ class RecoveryIntentService:
         diagnostic_task_id: str,
         note: str | None,
     ) -> RecoveryIntentRecord:
+        return (
+            await self.create_result(
+                owner_user_id=owner_user_id,
+                diagnostic_task_id=diagnostic_task_id,
+                note=note,
+            )
+        ).intent
+
+    async def create_result(
+        self,
+        *,
+        owner_user_id: str,
+        diagnostic_task_id: str,
+        note: str | None,
+    ) -> RecoveryIntentCreateResult:
         del note  # Human prose is intentionally outside the trusted proposal identity.
         task = await self._diagnostics.get_task(
             owner_user_id=owner_user_id,
@@ -147,7 +163,7 @@ class RecoveryIntentService:
             status=creation.next_status,
             trusted_snapshot=proposal.trusted_snapshot,
         )
-        result = await self._intents.create_intent_with_job_and_event(
+        return await self._intents.create_intent_with_job_and_event(
             request,
             background_job_id=(
                 self._id_factory("job") if creation.next_status == "queued" else None
@@ -155,7 +171,6 @@ class RecoveryIntentService:
             event_id=self._id_factory("event"),
             now=self._now(),
         )
-        return result.intent
 
     async def _linked_evidence(
         self,
