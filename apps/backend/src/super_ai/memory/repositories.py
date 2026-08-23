@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from super_ai.chat.structured_memory import MemoryCasResult, StructuredChatMemory
 
 ChatMemoryMode = str
 
@@ -37,8 +40,12 @@ class ChatSessionRecord:
     title: str | None
     created_at: datetime
     updated_at: datetime
-    memory_mode: ChatMemoryMode = "every_30_turns"
+    memory_mode: ChatMemoryMode = "adaptive"
     memory_summary: str | None = None
+    structured_memory: JsonDict = field(default_factory=lambda: dict[str, object]())
+    memory_summary_version: int = 0
+    memory_through_message_id: str | None = None
+    memory_compaction_status: str = "idle"
     compacted_message_count: int = 0
     context_tokens: int = 0
     last_compacted_at: datetime | None = None
@@ -53,6 +60,151 @@ class ChatMessageRecord:
     content: str
     metadata: JsonDict
     created_at: datetime
+
+
+ChatRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+ChatToolExecutionStatus = Literal["running", "completed", "failed", "uncertain"]
+ChatToolClaimAction = Literal["acquired", "wait", "reuse", "manual_review"]
+PendingChatActionType = Literal["start_diagnostic", "create_recovery_approval"]
+PendingChatActionStatus = Literal[
+    "pending", "confirmed", "executed", "cancelled", "expired", "manual_review"
+]
+
+
+class ChatRunIdempotencyConflict(RuntimeError):
+    """A client request key was reused with different request content."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunRecord:
+    id: str
+    owner_user_id: str
+    session_id: str
+    client_request_id: str
+    request_fingerprint: str
+    user_message_id: str
+    assistant_message_id: str | None
+    background_job_id: str
+    status: ChatRunStatus
+    attempt_count: int
+    last_event_sequence: int
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunCreateResult:
+    run: ChatRunRecord
+    background_job_id: str
+    reused: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRunEventRecord:
+    run_id: str
+    owner_user_id: str
+    sequence: int
+    event_type: str
+    public_payload: JsonDict
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionRecord:
+    tool_call_key: str
+    owner_user_id: str
+    chat_run_id: str
+    logical_step: str
+    tool_name: str
+    arguments_fingerprint: str
+    status: ChatToolExecutionStatus
+    attempt_count: int
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    side_effecting: bool
+    outcome_known: bool
+    public_result: JsonDict
+    safe_error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionClaim:
+    tool_call_key: str
+    owner_user_id: str
+    chat_run_id: str
+    logical_step: str
+    tool_name: str
+    arguments_fingerprint: str
+    lease_owner: str
+    lease_expires_at: datetime
+    side_effecting: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatToolExecutionClaimResult:
+    action: ChatToolClaimAction
+    execution: ChatToolExecutionRecord
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryApprovalRequestRecord:
+    id: str
+    owner_user_id: str
+    diagnostic_task_id: str
+    proposal_fingerprint: str
+    request_reason: str
+    chat_run_id: str | None
+    status: Literal["pending"]
+    execution_permitted: bool
+    reused: bool
+    created_at: datetime
+    updated_at: datetime
+
+    def to_payload(self) -> JsonDict:
+        return {
+            "id": self.id,
+            "diagnosticTaskId": self.diagnostic_task_id,
+            "status": "pending",
+            "executionPermitted": False,
+            "reused": self.reused,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PendingChatActionRecord:
+    id: str
+    owner_user_id: str
+    session_id: str
+    chat_run_id: str | None
+    action_type: PendingChatActionType
+    target_resource_id: str
+    public_arguments: JsonDict
+    action_fingerprint: str
+    status: PendingChatActionStatus
+    expires_at: datetime
+    confirmed_at: datetime | None
+    execution_result_id: str | None
+    background_job_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    def to_payload(self) -> JsonDict:
+        return {
+            "id": self.id,
+            "sessionId": self.session_id,
+            "actionType": self.action_type,
+            "targetResourceId": self.target_resource_id,
+            "publicArguments": self.public_arguments,
+            "status": self.status,
+            "expiresAt": self.expires_at.isoformat(),
+            "backgroundJobId": self.background_job_id,
+            "executionResultId": self.execution_result_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +667,28 @@ class ChatMemoryRepository(Protocol):
         """Update owner-scoped memory policy and compaction state."""
         ...
 
+    async def compare_and_set_memory(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        expected_version: int,
+        memory: StructuredChatMemory,
+        through_message_id: str,
+    ) -> MemoryCasResult:
+        """Atomically replace structured memory only at the expected version."""
+        ...
+
+    async def update_compaction_status(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        status: Literal["idle", "queued", "running", "degraded"],
+    ) -> ChatSessionRecord | None:
+        """Persist the public structured-memory compaction lifecycle state."""
+        ...
+
     async def list_sessions(
         self,
         *,
@@ -565,6 +739,16 @@ class ChatMemoryRepository(Protocol):
         time_range: TimeRangeFilter | None = None,
     ) -> list[ChatMessageRecord]:
         """List chat messages by session and optional time range."""
+        ...
+
+    async def list_messages_through(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        through_message_id: str,
+    ) -> list[ChatMessageRecord]:
+        """List a stable owner-scoped prefix using the boundary's timestamp and id."""
         ...
 
     async def get_message(
@@ -1180,6 +1364,142 @@ class ToolCallAuditRepository(Protocol):
         ...
 
 
+class ChatRunRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        client_request_id: str,
+        request_fingerprint: str,
+        content: str,
+        metadata: JsonDict,
+    ) -> ChatRunCreateResult: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, session_id: str, run_id: str
+    ) -> ChatRunRecord | None: ...
+
+    async def get_active(self, *, owner_user_id: str, session_id: str) -> ChatRunRecord | None: ...
+
+    async def claim_attempt(self, *, owner_user_id: str, run_id: str) -> ChatRunRecord | None: ...
+
+    async def append_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        event_type: str,
+        public_payload: JsonDict,
+    ) -> ChatRunEventRecord: ...
+
+    async def list_events(
+        self, *, owner_user_id: str, run_id: str, after_sequence: int = 0
+    ) -> list[ChatRunEventRecord]: ...
+
+    async def complete(
+        self, *, owner_user_id: str, run_id: str, assistant_message_id: str
+    ) -> ChatRunRecord: ...
+
+    async def complete_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        assistant_message_id: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord: ...
+
+    async def fail(self, *, owner_user_id: str, run_id: str, error_code: str) -> ChatRunRecord: ...
+
+    async def fail_with_event(
+        self,
+        *,
+        owner_user_id: str,
+        run_id: str,
+        error_code: str,
+        public_payload: JsonDict,
+    ) -> ChatRunRecord: ...
+
+
+class ChatToolExecutionRepository(Protocol):
+    async def claim(self, claim: ChatToolExecutionClaim) -> ChatToolExecutionClaimResult: ...
+
+    async def complete(
+        self, *, tool_call_key: str, lease_owner: str, public_result: JsonDict
+    ) -> ChatToolExecutionRecord: ...
+
+    async def fail(
+        self,
+        *,
+        tool_call_key: str,
+        lease_owner: str,
+        safe_error_code: str,
+        retryable: bool,
+    ) -> ChatToolExecutionRecord: ...
+
+    async def mark_uncertain(
+        self, *, tool_call_key: str, lease_owner: str, safe_error_code: str
+    ) -> ChatToolExecutionRecord: ...
+
+
+class RecoveryApprovalRequestRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        diagnostic_task_id: str,
+        proposal_fingerprint: str,
+        request_reason: str,
+        chat_run_id: str | None,
+    ) -> RecoveryApprovalRequestRecord: ...
+
+
+class PendingChatActionRepository(Protocol):
+    async def create_or_get(
+        self,
+        *,
+        action_id: str,
+        owner_user_id: str,
+        session_id: str,
+        chat_run_id: str | None,
+        action_type: PendingChatActionType,
+        target_resource_id: str,
+        public_arguments: JsonDict,
+        action_fingerprint: str,
+        expires_at: datetime,
+    ) -> PendingChatActionRecord: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, action_id: str
+    ) -> PendingChatActionRecord | None: ...
+
+    async def list_pending(
+        self, *, owner_user_id: str, session_id: str
+    ) -> list[PendingChatActionRecord]: ...
+
+    async def confirm_and_enqueue(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord | None: ...
+
+    async def cancel(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord | None: ...
+
+    async def mark_executed(
+        self,
+        *,
+        owner_user_id: str,
+        action_id: str,
+        execution_result_id: str,
+        now: datetime,
+    ) -> PendingChatActionRecord: ...
+
+    async def mark_manual_review(
+        self, *, owner_user_id: str, action_id: str, now: datetime
+    ) -> PendingChatActionRecord: ...
+
+
 class BackgroundJobRepository(Protocol):
     """Repository contract for durable leased jobs and their event log."""
 
@@ -1195,6 +1515,20 @@ class BackgroundJobRepository(Protocol):
         max_attempts: int = 3,
         timeout_seconds: int = 900,
         retry_of_job_id: str | None = None,
+        available_at: datetime | None = None,
+    ) -> BackgroundJobRecord: ...
+
+    async def enqueue_or_get(
+        self,
+        *,
+        owner_user_id: str,
+        job_id: str,
+        kind: str,
+        resource_type: str,
+        resource_id: str,
+        payload: JsonDict | None = None,
+        max_attempts: int = 3,
+        timeout_seconds: int = 900,
         available_at: datetime | None = None,
     ) -> BackgroundJobRecord: ...
 
@@ -1261,6 +1595,10 @@ class BackgroundJobRepository(Protocol):
         worker_id: str,
         error_message: str,
         retry_at: datetime,
+    ) -> BackgroundJobRecord | None: ...
+
+    async def mark_failed(
+        self, *, job_id: str, worker_id: str, error_message: str
     ) -> BackgroundJobRecord | None: ...
 
     async def retry(
@@ -1496,13 +1834,9 @@ class AiopsExecutionRepository(Protocol):
 
 
 class LangGraphCheckpointRepository(Protocol):
-    async def get_tuple(
-        self, identity: CheckpointIdentity
-    ) -> StoredCheckpointTuple | None: ...
+    async def get_tuple(self, identity: CheckpointIdentity) -> StoredCheckpointTuple | None: ...
 
-    async def list_tuples(
-        self, query: CheckpointQuery
-    ) -> Sequence[StoredCheckpointTuple]: ...
+    async def list_tuples(self, query: CheckpointQuery) -> Sequence[StoredCheckpointTuple]: ...
 
     async def put_checkpoint(self, record: StoredCheckpoint) -> None: ...
 
@@ -1539,3 +1873,7 @@ class MemoryRepositories:
     aiops_executions: AiopsExecutionRepository | None = None
     langgraph_checkpoints: LangGraphCheckpointRepository | None = None
     aiops_runtime: AiopsRuntimeRepositoryProvider | None = None
+    chat_runs: ChatRunRepository | None = None
+    chat_tool_executions: ChatToolExecutionRepository | None = None
+    recovery_approvals: RecoveryApprovalRequestRepository | None = None
+    pending_chat_actions: PendingChatActionRepository | None = None

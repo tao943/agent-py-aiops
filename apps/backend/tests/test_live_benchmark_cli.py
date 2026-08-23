@@ -67,6 +67,67 @@ def test_registry_resolves_order_pool_runtime() -> None:
     assert components.cls_record_provider is not None
 
 
+def _live_run_arguments(*extra: str):  # type: ignore[no-untyped-def]
+    return build_parser().parse_args(
+        [
+            "run",
+            "--scenario",
+            "APY-LIVE-ORDER-POOL-LEAK-001",
+            "--run-id",
+            "live-routing-1",
+            "--owner-user-id",
+            "eval-user",
+            "--knowledge-base-id",
+            "kb-live",
+            *extra,
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_entry_rejects_automatic_closure_before_starting_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def forbidden(_arguments: object) -> tuple[dict[str, object], int]:
+        raise AssertionError("Automatic closure runtime must not start through Chat entry.")
+
+    monkeypatch.setattr(live_cli, "_run_auto_closure_command", forbidden)
+
+    payload, exit_code = await live_cli._run_live_command(  # pyright: ignore[reportPrivateUsage]
+        _live_run_arguments("--auto-closure"),
+        enter_through_chat=True,
+    )
+
+    assert exit_code == 2
+    assert payload["status"] == "infra_invalid"
+    assert payload["result"] == {
+        "validity": "INFRA_INVALID",
+        "failureCategory": "auto_closure_arguments_invalid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_direct_automatic_closure_uses_single_agent_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[object] = []
+
+    async def execute(arguments: object) -> tuple[dict[str, object], int]:
+        captured.append(arguments)
+        return {"status": "passed"}, 0
+
+    monkeypatch.setattr(live_cli, "_run_auto_closure_command", execute)
+
+    arguments = _live_run_arguments("--auto-closure")
+    payload, exit_code = await live_cli._run_live_command(  # pyright: ignore[reportPrivateUsage]
+        arguments
+    )
+
+    assert exit_code == 0
+    assert payload == {"status": "passed"}
+    assert captured == [arguments]
+
+
 class AvailableEvaluationRepository:
     async def start_envelope(self, envelope: object) -> None:
         del envelope
@@ -582,6 +643,11 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
         execute=execute,
         recorder=recorder,
         investigation_strategy="multi",
+        conversation_metrics={
+            "routeAccuracy": 1.0,
+            "confirmationAccuracy": 1.0,
+            "modelCallCount": 0,
+        },
     )
 
     envelope = archive.load("live-success-task-link")
@@ -628,6 +694,11 @@ async def test_successful_live_run_persists_diagnostic_task_id(tmp_path: Path) -
     assert envelope.metrics["missingDomains"] == []
     assert envelope.metrics["aggregationChecksum"] == "a" * 64
     assert envelope.metrics["terminalFailureCategory"] is None
+    assert envelope.metrics["conversationMetrics"] == {
+        "routeAccuracy": 1.0,
+        "confirmationAccuracy": 1.0,
+        "modelCallCount": 0,
+    }
 
 
 def test_cli_rejects_missing_identity() -> None:

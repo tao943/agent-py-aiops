@@ -11,6 +11,8 @@ import type {
 import { createProtectedDataClient } from "../src/protectedDataClient";
 import { createProtectedDataState } from "../src/protectedDataState";
 
+const TEST_API_BASE_URL = "http://protected-data.test";
+
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
 
@@ -179,6 +181,7 @@ describe("protected data client", () => {
     const requests: Array<{ input: RequestInfo | URL; init: RequestInit }> = [];
     storage.setItem("super-ai.auth-token", "token-1");
     const client = createProtectedDataClient({
+      baseUrl: TEST_API_BASE_URL,
       storage,
       fetchImpl: async (input, init) => {
         requests.push({ input, init: init ?? {} });
@@ -222,12 +225,12 @@ describe("protected data client", () => {
     expect(cleared.deletedMessages).toBe(1);
     expect(deleted.deleted).toBe(true);
     expect(requests.map((request) => request.input.toString())).toEqual([
-      "http://127.0.0.1:8080/chat/sessions",
-      "http://127.0.0.1:8080/chat/sessions",
-      "http://127.0.0.1:8080/chat/sessions/chat_1",
-      "http://127.0.0.1:8080/chat/sessions/chat_1/messages",
-      "http://127.0.0.1:8080/chat/sessions/chat_1/messages:clear",
-      "http://127.0.0.1:8080/chat/sessions/chat_1"
+      `${TEST_API_BASE_URL}/chat/sessions`,
+      `${TEST_API_BASE_URL}/chat/sessions`,
+      `${TEST_API_BASE_URL}/chat/sessions/chat_1`,
+      `${TEST_API_BASE_URL}/chat/sessions/chat_1/messages`,
+      `${TEST_API_BASE_URL}/chat/sessions/chat_1/messages:clear`,
+      `${TEST_API_BASE_URL}/chat/sessions/chat_1`
     ]);
     expect(new Headers(requests[0]?.init.headers).get("Authorization")).toBe("Bearer token-1");
   });
@@ -237,6 +240,7 @@ describe("protected data client", () => {
     const requests: Array<{ input: RequestInfo | URL; init: RequestInit }> = [];
     storage.setItem("super-ai.auth-token", "token-1");
     const client = createProtectedDataClient({
+      baseUrl: TEST_API_BASE_URL,
       storage,
       fetchImpl: async (input, init) => {
         requests.push({ input, init: init ?? {} });
@@ -299,7 +303,7 @@ describe("protected data client", () => {
     }
 
     expect(requests[0]?.input.toString()).toBe(
-      "http://127.0.0.1:8080/chat/sessions/chat_1/messages:stream"
+      `${TEST_API_BASE_URL}/chat/sessions/chat_1/messages:stream`
     );
     expect(requests[0]?.init.method).toBe("POST");
     expect(new Headers(requests[0]?.init.headers).get("Authorization")).toBe("Bearer token-1");
@@ -813,7 +817,9 @@ function _chatSession(overrides: Partial<ChatSessionSummary> = {}): ChatSessionS
     createdAt: "2026-07-09T00:00:00.000Z",
     updatedAt: "2026-07-09T00:00:01.000Z",
     memory: {
-      mode: "every_30_turns",
+      mode: "adaptive",
+      summaryVersion: 0,
+      compactionStatus: "idle",
       contextTokens: 1200,
       contextWindowTokens: 131072,
       contextUsagePercent: 0.9,

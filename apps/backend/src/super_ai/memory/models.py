@@ -323,8 +323,18 @@ class ChatSessionModel(Base):
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(240), nullable=True)
-    memory_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="every_30_turns")
+    memory_mode: Mapped[str] = mapped_column(String(40), nullable=False, default="adaptive")
     memory_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structured_memory: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    memory_summary_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    memory_through_message_id: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    memory_compaction_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="idle"
+    )
     compacted_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_compacted_at: Mapped[datetime | None] = mapped_column(
@@ -444,6 +454,234 @@ class ChatMessageModel(Base):
         nullable=False,
         default=utc_now,
     )
+
+
+class ChatAgentRunModel(Base):
+    """Durable owner-scoped execution of one chat turn."""
+
+    __tablename__ = "chat_agent_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "chat_session_id",
+            "client_request_id",
+            name="uq_chat_agent_runs_client_request",
+        ),
+        UniqueConstraint("user_message_id", name="uq_chat_agent_runs_user_message"),
+        CheckConstraint(
+            "status IN ('queued','running','succeeded','failed','cancelled')",
+            name="ck_chat_agent_runs_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="ck_chat_agent_runs_attempt_count"),
+        CheckConstraint("last_event_sequence >= 0", name="ck_chat_agent_runs_last_event_sequence"),
+        Index(
+            "ix_chat_agent_runs_owner_session_status_updated",
+            "owner_user_id",
+            "chat_session_id",
+            "status",
+            "updated_at",
+        ),
+        Index(
+            "uq_chat_agent_runs_assistant_message",
+            "assistant_message_id",
+            unique=True,
+            postgresql_where=text("assistant_message_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    chat_session_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    client_request_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_message_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), nullable=False
+    )
+    assistant_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+    )
+    background_job_id: Mapped[str] = mapped_column(
+        ForeignKey("background_jobs.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_event_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChatRunEventModel(Base):
+    """Public replayable event for a durable chat run."""
+
+    __tablename__ = "chat_run_events"
+    __table_args__ = (
+        Index("ix_chat_run_events_owner_run_sequence", "owner_user_id", "run_id", "sequence"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_agent_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    public_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ChatRunToolExecutionModel(Base):
+    """Idempotency record for a logical tool call in a chat run."""
+
+    __tablename__ = "chat_run_tool_executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_run_id",
+            "logical_step",
+            "tool_name",
+            "arguments_fingerprint",
+            name="uq_chat_run_tool_executions_logical_call",
+        ),
+        CheckConstraint(
+            "status IN ('running','completed','failed','uncertain')",
+            name="ck_chat_run_tool_executions_status",
+        ),
+        CheckConstraint("attempt_count >= 1", name="ck_chat_run_tool_executions_attempt_count"),
+        Index("ix_chat_run_tool_executions_owner_run", "owner_user_id", "chat_run_id"),
+    )
+
+    tool_call_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    chat_run_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    logical_step: Mapped[str] = mapped_column(String(120), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    arguments_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    side_effecting: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    outcome_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    public_result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    safe_error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RecoveryApprovalRequestModel(Base):
+    """Pending human approval request created by chat without execution authority."""
+
+    __tablename__ = "aiops_recovery_approval_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "diagnostic_task_id",
+            "proposal_fingerprint",
+            name="uq_aiops_recovery_approval_proposal",
+        ),
+        CheckConstraint("status = 'pending'", name="ck_aiops_recovery_approval_pending"),
+        CheckConstraint(
+            "execution_permitted = false",
+            name="ck_aiops_recovery_approval_no_execution",
+        ),
+        CheckConstraint(
+            "char_length(proposal_fingerprint) = 64",
+            name="ck_aiops_recovery_approval_fingerprint",
+        ),
+        Index(
+            "ix_aiops_recovery_approval_owner_created",
+            "owner_user_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    diagnostic_task_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    proposal_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_reason: Mapped[str] = mapped_column(String(1000), nullable=False)
+    chat_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    execution_permitted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PendingChatActionModel(Base):
+    """Owner-scoped confirmation state for one frozen chat write intent."""
+
+    __tablename__ = "pending_chat_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ('start_diagnostic','create_recovery_approval')",
+            name="ck_pending_chat_actions_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','confirmed','executed','cancelled','expired','manual_review')",
+            name="ck_pending_chat_actions_status",
+        ),
+        CheckConstraint(
+            "char_length(action_fingerprint) = 64",
+            name="ck_pending_chat_actions_fingerprint",
+        ),
+        Index(
+            "ix_pending_chat_actions_owner_session_status",
+            "owner_user_id",
+            "session_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "uq_pending_chat_actions_active_fingerprint",
+            "owner_user_id",
+            "action_fingerprint",
+            unique=True,
+            postgresql_where=text("status IN ('pending','confirmed')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    chat_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_agent_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    action_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_resource_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    public_arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    action_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_result_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    background_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("background_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AgentToolCallAuditModel(Base):

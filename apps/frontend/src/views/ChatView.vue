@@ -43,11 +43,16 @@ function saveChatConfiguration(systemPromptId: string, skillIds: readonly string
     <div class="chat-view__conversation">
       <header><p>当前对话</p><h2>{{ activeTitle }}</h2></header>
       <ChatTranscript
+        :diagnostic-results="chat.diagnosticResults"
         :is-loading="chat.isLoading"
         :live-tool-calls="chat.liveToolCalls"
         :messages="chat.messages"
+        :pending-action-loading-ids="chat.pendingActionLoadingIds"
+        :pending-actions="chat.pendingActions"
         :references="chat.references"
         :tool-audits="chat.toolAudits"
+        @cancel-action="run(() => chat.cancelPendingAction($event))"
+        @confirm-action="run(() => chat.confirmPendingAction($event))"
         @open-document="openCitationDocument"
       />
       <ChatComposer

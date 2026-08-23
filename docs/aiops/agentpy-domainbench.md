@@ -241,6 +241,37 @@ Agent RAG before/after 对比在 30 卡导入与 64-query Retrieval Eval 通过�
 场景、模型、Prompt、Workflow 和 Tool，仅改变 RAG 开关；不能为了改善结果修改标签、
 Prompt 或评分规则。
 
+### Conversation Query Rewrite Retrieval A/B
+
+`query_rewrite_cases.yaml` 另含 10 条多轮追问，覆盖 PostgreSQL deadlock/连接池、Redis
+maxclients/failover、Nginx timeout/路由、Kubernetes DNS/endpoint 和消息队列积压/消费停滞。
+它与 64 条独立查询职责不同：64-query 集合验证知识库整体召回，Query Rewrite A/B 只比较
+同一追问在“原样检索”和“结合最近完整对话轮次重写后检索”之间的组件差异。
+
+运行前必须显式提供 `--confirm-real-model`、owner 和知识库。所有 relevant/forbidden 文档名
+必须在该 scope 的已索引数据中唯一解析，少于 8 个有效案例、缺卡或同名歧义均记为
+`INFRA_INVALID`。baseline/rewrite 两个 `retrieval` Artifact 在模型调用前先创建；失败、取消
+或阈值未达标也分别进入不可变终态，不遗留 running 记录。
+
+指标沿用 Recall@1/3、MRR、forbidden Top-1、citation completeness，并新增 rewrite 应用数、
+模型调用数、平均与 nearest-rank P95 时延。direct 查询不调用 Rewriter；contextual 查询每个
+请求最多一次，Agent 2 + Rewriter 1 的总模型预算不超过 3。Artifact 只保存 case ID、排名文档、
+安全重写枚举、聚合指标和不可逆 Corpus 指纹/文档/Chunk 计数，不保存追问、上下文、重写文本、
+Prompt、推理、知识正文或原始模型响应。10 条多轮集合的门禁为 Recall@1 ≥ 0.80、Recall@3 ≥
+0.90、MRR ≥ 0.85、forbidden Top-1 ≤ 0.05、citation completeness = 1.00；Forbidden 门槛不因
+小样本放宽。
+
+该 A/B 的 baseline 直接进入 canonical retrieval，刻意绕过 Agent 自己可能生成的工具查询，
+因此结论标记为 `query-rewrite-retrieval-component`。另用一次不计分 Conversation
+`knowledge_question` smoke 验证生产注入可达；smoke 不作为召回质量证据。该流程不调用 CLS
+或 Docker，也不改变 AIOps RAG、恢复和评分。
+
+2026-08-23 固定主模型 `qwen3.7-plus`、Embedding `qwen3.7-text-embedding`、Rerank
+`qwen3-vl-rerank`、案例与知识库，仅使用独立 `qwen3.7-flash` Rewriter 和 25 秒单次超时。
+真实 Run `conversation-query-rewrite-ab-20260823-5` 得到 Rewrite Recall@1=0.90、
+Recall@3=1.00、MRR=0.95、forbidden Top-1=0.00、citation completeness=1.00，结果为
+`VALID_PASS`；10 次调用无 timeout，9 次应用，1 次 semantic guard 安全回退后仍正确召回。
+
 ### 历史两卡 smoke 基线（2026-08-13）
 
 在本地测试 owner 的隔离知识库中，仅更新 PostgreSQL 与 Redis 两张综合卡后执行了一次
@@ -845,3 +876,40 @@ Live 满分 100：故障确认 10、必要证据 20、多候选差分排查 15�
 CLS 接入不增加分数。有效的 CLS 运行继续使用相同 100 分模型，但必需证据和引用审计必须
 同时包含 CLS 与 PostgreSQL 来源。云端或审计基础设施失败标记为 `INFRA_INVALID`；Agent
 未调用工具、查询范围错误或未引用证据标记为 `VALID_FAIL`。
+
+## Conversation 三层 Eval 与 Chat Live 入口
+
+Conversation 与 AIOps 使用三层、职责分离的验收方式：
+
+| 层级 | 真实模型 | CLS / Docker | 验证目标 |
+| --- | --- | --- | --- |
+| Offline Conversation Eval | 否 | 否 | 路由、最小工具、确认、幂等、隔离、预算与安全硬门 |
+| Conversation Model Eval | 是 | 否，AIOps Bridge 为 fake | 模糊路由、结构化解释、超时降级、Prompt Injection |
+| Chat→AIOps Live Eval | 是 | 是 | 从对话确认入口复用完整 Live 诊断、恢复和评分闭环 |
+
+Chat Live 的执行顺序固定为：Live harness 注入故障并准备 scoped CLS → Chat 创建 Pending
+Action → 人工确认 → evaluation-only durable worker → 现有
+`ApplicationLiveDiagnosticAdapter` → AIOps CLS/RAG/LangGraph/Recovery/Scorer。Chat 的工具
+列表不包含 CLS；显式 Incident ID 可确定性路由，因此 Conversation 侧模型调用数允许为 0，
+但确认后的 AIOps 诊断仍使用原场景、原证据上下文和原评分器。
+
+手动命令从 `apps/backend` 执行：
+
+```powershell
+uv run python scripts/run_conversation_model_eval.py --confirm-real-model
+uv run python scripts/run_chat_aiops_live_eval.py --scenario APY-LIVE-PG-LOCK-001 --owner-user-id <owner-id> --knowledge-base-id <kb-id> --confirm-real-model --confirm-live-cls
+```
+
+Chat Live 同时要求 `--confirm-real-model` 和 `--confirm-live-cls`，场景 ID 只接受 registry 中的
+`APY-LIVE-*` 标识并拒绝路径穿越。两类 CLI 的退出码为 `0` 达标、`1` 有效但未达标、`2`
+授权/配置/基础设施/持久化无效、`130` 中断。每次有效或失败结果先写 Evaluation Archive，
+再幂等同步 PostgreSQL；`--output` 仅作为兼容导出。
+
+Artifact v2 为 `conversation_model` 提供独立类型，并允许 Live 在嵌套
+`conversationMetrics` 中并列保存路由、目标、确认、任务复用、工具与时延指标。Conversation
+指标不能覆盖或提高 AIOps `total`、`rawTotal` 和 pass/fail；v1 历史 Artifact 仍可读取、导入、
+审计和汇总。任何 Artifact 都禁止保存 Prompt、私有推理、原始模型响应、Ground Truth、Oracle
+或原始 CLS 日志。
+
+本轮实现只完成离线 fake-provider、CLI 合同与聚焦回归，没有运行真实模型、CLS 或 Docker
+Live；真实验收必须由操作员重新明确批准额度与外部资源后单独执行。

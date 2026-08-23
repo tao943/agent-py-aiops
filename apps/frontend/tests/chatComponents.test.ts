@@ -4,7 +4,13 @@ import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ChatMessage, ChatSessionSummary, ToolCallAudit } from "@agent-py/api-contracts";
+import type {
+  ChatMessage,
+  ChatSessionSummary,
+  DiagnosticResultSseEvent,
+  PendingChatAction,
+  ToolCallAudit
+} from "@agent-py/api-contracts";
 
 import ChatComposer from "../src/components/ChatComposer.vue";
 import ChatSessionList from "../src/components/ChatSessionList.vue";
@@ -27,7 +33,9 @@ const sessions: readonly ChatSessionSummary[] = [
     createdAt: "2026-07-10T00:00:00.000Z",
     updatedAt: "2026-07-10T00:01:00.000Z",
     memory: {
-      mode: "every_30_turns",
+      mode: "adaptive",
+      summaryVersion: 0,
+      compactionStatus: "idle",
       contextTokens: 1200,
       contextWindowTokens: 131072,
       contextUsagePercent: 0.9,
@@ -65,8 +73,7 @@ const assistantMessage: ChatMessage = {
         rerankScore: 0.94
       }
     ],
-    toolCallIds: ["tool_1"],
-    reasoning: ["先确认运行手册，再给出结论。"]
+    toolCallIds: ["tool_1"]
   },
   createdAt: "2026-07-10T00:01:00.000Z"
 };
@@ -89,13 +96,41 @@ const audits: readonly ToolCallAudit[] = [
   }
 ];
 
+const diagnosticResults: readonly DiagnosticResultSseEvent["diagnostic"][] = [
+  {
+    taskId: "diagnostic_1",
+    reportId: "report_1",
+    rootCause: { primaryCause: "database_lock" },
+    recoveryMode: "manual_review",
+    executionPermitted: false,
+    humanApprovalRequired: true,
+    validatorStatus: "deterministic_grounded_fallback",
+    evidenceIds: ["evidence_1"]
+  }
+];
+
+const pendingActions: readonly PendingChatAction[] = [{
+  id: "chat_action_1",
+  sessionId: "chat_1",
+  actionType: "create_recovery_approval",
+  targetResourceId: "diagnostic_1",
+  publicArguments: {},
+  status: "pending",
+  expiresAt: "2026-08-22T00:15:00Z",
+  backgroundJobId: null,
+  executionResultId: null
+}];
+
 describe("chat components", () => {
   it("leaves an empty conversation blank without helper copy or an accent mark", () => {
     const wrapper = mount(ChatTranscript, {
       props: {
         isLoading: false,
+        diagnosticResults: [],
         liveToolCalls: [],
         messages: [],
+        pendingActionLoadingIds: [],
+        pendingActions: [],
         references: [],
         toolAudits: []
       }
@@ -147,9 +182,35 @@ describe("chat components", () => {
     expect(wrapper.text()).toContain("上下文已达到 95%，请执行手动压缩");
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
 
-    await wrapper.get("select").setValue("context_70_percent");
+    await wrapper.get("select").setValue("manual");
     await wrapper.get(".chat-composer__apply").trigger("click");
-    expect(wrapper.emitted("applyMemory")).toEqual([["context_70_percent"]]);
+    expect(wrapper.emitted("applyMemory")).toEqual([["manual"]]);
+  });
+
+  it("shows durable compaction progress and keeps manual compaction available", async () => {
+    const wrapper = mount(ChatComposer, {
+      props: {
+        disabled: false,
+        isSending: false,
+        isUpdatingMemory: false,
+        memory: {
+          ...sessions[0]!.memory,
+          mode: "manual",
+          summaryVersion: 3,
+          compactionStatus: "running"
+        }
+      }
+    });
+
+    expect(wrapper.text()).toContain("后台压缩中 · v3");
+    expect(wrapper.text()).toContain("立即压缩");
+    await wrapper.get(".chat-composer__apply").trigger("click");
+    expect(wrapper.emitted("compactMemory")).toHaveLength(1);
+
+    await wrapper.setProps({
+      memory: { ...sessions[0]!.memory, summaryVersion: 3, compactionStatus: "degraded" }
+    });
+    expect(wrapper.text()).toContain("后台压缩降级，可手动重试");
   });
 
   it("marks the selected session and emits session commands", async () => {
@@ -169,8 +230,11 @@ describe("chat components", () => {
     const wrapper = mount(ChatTranscript, {
       props: {
         isLoading: false,
+        diagnosticResults,
         liveToolCalls: [],
         messages: [assistantMessage],
+        pendingActionLoadingIds: [],
+        pendingActions,
         references: assistantMessage.metadata.citations ?? [],
         toolAudits: audits
       }
@@ -180,8 +244,12 @@ describe("chat components", () => {
     expect(wrapper.text()).toContain("Restart runbook");
     expect(wrapper.text()).toContain("Found 1 relevant chunk.");
     expect(wrapper.text()).toContain("工具调用");
-    expect(wrapper.text()).toContain("深度思考");
-    expect(wrapper.text()).toContain("先确认运行手册，再给出结论。");
+    expect(wrapper.text()).not.toContain("深度思考");
+    expect(wrapper.text()).toContain("禁止自动执行");
+    expect(wrapper.text()).toContain("人工复核");
+    expect(wrapper.text()).toContain("database_lock");
+    expect(wrapper.text()).toContain("创建人工审批请求");
+    expect(wrapper.text()).toContain("不会批准或执行恢复");
     expect(wrapper.text()).toContain("向量#2 · 87%");
     expect(wrapper.text()).toContain("BM25#1 · 4.210");
     expect(wrapper.text()).toContain("精排#1 · 94%");
@@ -191,6 +259,8 @@ describe("chat components", () => {
     expect(wrapper.text()).toContain("SOP");
     await wrapper.get('button[aria-label="在知识库中打开 Restart runbook"]').trigger("click");
     expect(wrapper.emitted("open-document")?.[0]?.[0]).toMatchObject({ documentId: "doc_1" });
+    await wrapper.get('[data-action="confirm"]').trigger("click");
+    expect(wrapper.emitted("confirm-action")).toEqual([["chat_action_1"]]);
   });
 
   it("shows an explicit un-recalled state for a missing coarse retrieval stage", () => {

@@ -10,6 +10,7 @@ from super_ai.retrieval import (
     KNOWLEDGE_RETRIEVAL_TOOL_NAME,
     KnowledgeRetrievalError,
     KnowledgeRetrievalFilters,
+    KnowledgeRetrievalQueryTransform,
     KnowledgeRetrievalTool,
     KnowledgeRetrievalToolInput,
     create_langchain_knowledge_retrieval_tool,
@@ -522,6 +523,59 @@ async def test_langchain_retrieval_tool_accepts_json_encoded_filters_from_model(
     )
 
     assert result["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_langchain_retrieval_transform_changes_only_query_and_adds_safe_audit() -> None:
+    class Transformer:
+        async def transform(
+            self, input: KnowledgeRetrievalToolInput
+        ) -> KnowledgeRetrievalQueryTransform:
+            return KnowledgeRetrievalQueryTransform(
+                input=KnowledgeRetrievalToolInput(
+                    query="Redis maxclients 排查",
+                    top_k=input.top_k,
+                    filters=input.filters,
+                ),
+                metadata={
+                    "action": "rewrite",
+                    "reason": "context_reference",
+                    "applied": True,
+                    "modelCallCount": 1,
+                    "durationMs": 3,
+                    "safeErrorCode": None,
+                },
+            )
+
+    embedding = FakeEmbeddingModel()
+    tool = KnowledgeRetrievalTool(
+        embedding_model=embedding,
+        vector_store=FakeRetrievalVectorStore(),
+        rerank_model=FakeRerankModel(),
+    )
+    filters = {"knowledgeBaseIds": ["kb_user_a"], "documentIds": ["doc_1"]}
+    langchain_tool = create_langchain_knowledge_retrieval_tool(
+        tool,
+        owner_user_id="user_a",
+        accessible_knowledge_base_ids=("kb_user_a",),
+        query_transformer=Transformer(),
+    )
+
+    result = await langchain_tool.ainvoke(
+        {"query": "那这个怎么办", "topK": 2, "filters": filters}
+    )
+
+    assert embedding.inputs == [["Redis maxclients 排查"]]
+    assert result["query"] == "Redis maxclients 排查"
+    assert result["topK"] == 2
+    assert result["queryRewrite"] == {
+        "action": "rewrite",
+        "reason": "context_reference",
+        "applied": True,
+        "modelCallCount": 1,
+        "durationMs": 3,
+        "safeErrorCode": None,
+    }
 
 
 @pytest.mark.asyncio

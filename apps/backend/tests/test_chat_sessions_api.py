@@ -38,6 +38,7 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
                 "role": "assistant",
                 "content": "Use the restart runbook.",
                 "metadata": {
+                    "reasoning": ["legacy private chain"],
                     "citations": [
                         {
                             "id": "chunk_1",
@@ -66,6 +67,8 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
 
     assert create_response.status_code == 201
     assert create_response.json()["data"]["title"] == "New chat"
+    assert create_response.json()["data"]["memory"]["summaryVersion"] == 0
+    assert create_response.json()["data"]["memory"]["compactionStatus"] == "idle"
     assert user_message_response.status_code == 201
     assert user_message_response.json()["data"]["session"]["title"] == (
         "How do I restart the API service during an incident?"
@@ -74,6 +77,9 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
         "tool_call_1"
     ]
     assert assistant_message_response.status_code == 201
+    assert "reasoning" not in assistant_message_response.json()["data"]["message"][
+        "metadata"
+    ]
     assert (
         assistant_message_response.json()["data"]["message"]["metadata"]["citations"][0][
             "chunkId"
@@ -85,6 +91,7 @@ async def test_chat_session_lifecycle_persists_history_and_generates_title(
     assert detail_response.status_code == 200
     assert detail_payload["session"]["id"] == session_id
     assert [message["role"] for message in detail_payload["messages"]] == ["user", "assistant"]
+    assert "reasoning" not in detail_payload["messages"][1]["metadata"]
     assert list_response.status_code == 200
     assert list_response.json()["data"]["items"][0]["id"] == session_id
     assert clear_response.status_code == 200
@@ -125,6 +132,39 @@ async def test_chat_sessions_are_ordered_by_recent_updates(migrated_database_url
         first["id"],
         second["id"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_memory_defaults_to_adaptive_and_normalizes_legacy_modes(
+    migrated_database_url: str,
+) -> None:
+    transport = httpx.ASGITransport(app=create_app(database_url=migrated_database_url))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        user = await _register(client, "adaptive-memory@example.com", "Adaptive Memory")
+        headers = _auth_headers(user["accessToken"])
+        created = await client.post("/chat/sessions", headers=headers, json={})
+        session_id = created.json()["data"]["id"]
+
+        legacy_turns = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "every_30_turns"},
+        )
+        legacy_threshold = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "context_70_percent"},
+        )
+        manual = await client.put(
+            f"/chat/sessions/{session_id}/memory",
+            headers=headers,
+            json={"mode": "manual"},
+        )
+
+    assert created.json()["data"]["memory"]["mode"] == "adaptive"
+    assert legacy_turns.json()["data"]["memory"]["mode"] == "adaptive"
+    assert legacy_threshold.json()["data"]["memory"]["mode"] == "adaptive"
+    assert manual.json()["data"]["memory"]["mode"] == "manual"
 
 
 @pytest.mark.asyncio

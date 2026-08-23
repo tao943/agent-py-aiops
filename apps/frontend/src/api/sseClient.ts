@@ -8,7 +8,11 @@ import {
 } from "./apiClient";
 
 export interface SseClient {
-  stream(path: string, init?: RequestInit): AsyncIterable<SseEvent>;
+  stream(
+    path: string,
+    init?: RequestInit,
+    options?: { readonly lastEventId?: number }
+  ): AsyncIterable<SseEvent>;
 }
 
 export function createSseClient(options: ApiClientOptions): SseClient {
@@ -16,15 +20,23 @@ export function createSseClient(options: ApiClientOptions): SseClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, "");
 
   return {
-    async *stream(path: string, init: RequestInit = {}): AsyncIterable<SseEvent> {
+    async *stream(
+      path: string,
+      init: RequestInit = {},
+      streamOptions: { readonly lastEventId?: number } = {}
+    ): AsyncIterable<SseEvent> {
+      const headers = buildTransportHeaders({
+        accept: "text/event-stream",
+        body: init.body,
+        headers: init.headers,
+        token: options.getAccessToken()
+      });
+      if (streamOptions.lastEventId !== undefined) {
+        headers["Last-Event-ID"] = String(streamOptions.lastEventId);
+      }
       const response = await fetchImpl(`${baseUrl}${path}`, {
         ...init,
-        headers: buildTransportHeaders({
-          accept: "text/event-stream",
-          body: init.body,
-          headers: init.headers,
-          token: options.getAccessToken()
-        })
+        headers
       });
       if (!response.ok) {
         throw new ApiClientError(await readApiError(response), response.status);
@@ -66,6 +78,10 @@ function parseSseFrames(buffer: string): {
   const remainder = frames.pop() ?? "";
   const events: SseEvent[] = [];
   for (const frame of frames) {
+    const eventId = frame
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("id:"))
+      ?.slice("id:".length).trim();
     const data = frame
       .split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
@@ -79,7 +95,7 @@ function parseSseFrames(buffer: string): {
       if (!isSseEvent(event)) {
         throw new Error("Invalid shared SSE event.");
       }
-      events.push(event);
+      events.push(eventId === undefined || eventId === "" ? event : { ...event, id: eventId });
     } catch {
       throw new ApiClientError({
         code: "SYSTEM_INTERNAL_ERROR",

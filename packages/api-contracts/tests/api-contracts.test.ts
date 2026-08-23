@@ -5,6 +5,8 @@ import {
   DOCUMENT_UPLOAD_POLICY,
   OPENAPI_CONTRACT,
   SSE_EVENT_TYPES,
+  type ChatRun,
+  type PendingChatAction,
   type AuthTokenResponse,
   type AuthUser,
   type AppendChatMessageRequest,
@@ -47,6 +49,14 @@ import {
 } from "../src";
 
 describe("HTTP response contracts", () => {
+  it("publishes only adaptive and manual chat memory modes", () => {
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.mode).toEqual({
+      enum: ["adaptive", "manual"]
+    });
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.compactionStatus)
+      .toEqual({ enum: ["idle", "queued", "running", "degraded"] });
+  });
+
   it("wraps successful responses with metadata", () => {
     const response: ApiSuccessResponse<{ id: string }> = buildSuccessResponse(
       { id: "chat_123" },
@@ -493,14 +503,61 @@ describe("SSE event contracts", () => {
   it("defines every required event type", () => {
     expect(SSE_EVENT_TYPES).toEqual([
       "content.delta",
-      "reasoning.delta",
       "tool.call",
       "reference.source",
+      "diagnostic.result",
+      "run.status",
+      "run.restarted",
+      "execution.mode_selected",
+      "structured.result",
+      "confirmation.required",
+      "confirmation.resolved",
+      "explanation.delta",
+      "explanation.degraded",
+      "budget.exhausted",
       "task.status",
       "report",
       "complete",
       "error"
     ]);
+    expect(OPENAPI_CONTRACT.components.schemas.ChatMessageMetadata?.properties).not.toHaveProperty(
+      "reasoning"
+    );
+  });
+
+  it("defines durable chat run contracts and routes", () => {
+    const run: ChatRun = {
+      id: "run_1",
+      sessionId: "session_1",
+      clientRequestId: "request_1",
+      status: "queued",
+      lastEventSequence: 0,
+      errorCode: null,
+      createdAt: "2026-08-22T00:00:00Z",
+      updatedAt: "2026-08-22T00:00:00Z"
+    };
+    expect(run.status).toBe("queued");
+    expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs"]).toBeDefined();
+    expect(OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/runs/active"]).toBeDefined();
+  });
+
+  it("defines durable pending chat action contracts and routes", () => {
+    const action: PendingChatAction = {
+      id: "chat_action_1",
+      sessionId: "session_1",
+      actionType: "start_diagnostic",
+      targetResourceId: "incident_1",
+      publicArguments: { incidentId: "incident_1" },
+      status: "pending",
+      expiresAt: "2026-08-22T00:15:00Z",
+      backgroundJobId: null,
+      executionResultId: null
+    };
+    expect(action.status).toBe("pending");
+    expect(OPENAPI_CONTRACT.paths["/chat/actions/{action_id}/confirm"]).toBeDefined();
+    expect(
+      OPENAPI_CONTRACT.paths["/chat/sessions/{session_id}/actions/pending"]
+    ).toBeDefined();
   });
 
   it("reuses structured errors for streaming failures", () => {

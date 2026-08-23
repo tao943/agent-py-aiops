@@ -24,6 +24,55 @@ class AlertPersistenceError(RuntimeError):
     """Safe persistence failure exposed at the HTTP boundary."""
 
 
+class IncidentUnavailable(LookupError):
+    """An owner-scoped Incident is absent or inaccessible."""
+
+
+class IncidentNotActive(RuntimeError):
+    """A diagnostic cannot be scheduled for a resolved Incident."""
+
+
+@dataclass(frozen=True, slots=True)
+class AlertIncidentRecord:
+    """Minimal owner-scoped Incident projection safe for application queries."""
+
+    id: str
+    owner_user_id: str
+    status: str
+    alert_name: str
+    service: str
+    severity: str
+    last_seen_at: datetime
+    diagnostic_task_id: str | None
+
+
+class AlertIncidentQueryRepository(Protocol):
+    async def list_active(
+        self, *, owner_user_id: str, limit: int
+    ) -> list[AlertIncidentRecord]: ...
+
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticScheduleResult:
+    diagnostic_task_id: str
+    background_job_id: str
+    reused: bool
+
+
+class IncidentDiagnosticScheduler(Protocol):
+    async def schedule_for_incident(
+        self,
+        *,
+        owner_user_id: str,
+        incident_id: str,
+        note: str | None,
+    ) -> DiagnosticScheduleResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionWrite:
     owner_user_id: str

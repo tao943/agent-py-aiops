@@ -2,29 +2,52 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import import_module
 from time import monotonic
-from typing import Any, Literal, Protocol, TypedDict, cast
+from typing import Any, Literal, Protocol, TypedDict, TypeVar, cast
 from uuid import uuid4
 
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    ToolCallLimitMiddleware,
+)
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+from super_ai.chat.aiops_bridge import AiopsBridgeService, build_aiops_bridge_tools
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
     DEFAULT_CHAT_PROMPT_LABEL,
     SelectedChatSkill,
     build_chat_system_prompt,
 )
+from super_ai.chat.execution import ChatTurnExecutionRequest, ChatTurnExecutionService
+from super_ai.chat.execution_policy import ChatExecutionBudget, policy_for
+from super_ai.chat.intent import ChatIntentRouter, ChatRoute
 from super_ai.chat.memory import ChatContextLimitReached, ChatMemoryService, memory_payload
+from super_ai.chat.query_rewrite import (
+    AdaptiveKnowledgeQueryTransformer,
+    QueryRewriteContextMessage,
+    StructuredQueryRewriter,
+)
+from super_ai.chat.tool_policy import allowed_tools_for
 from super_ai.error_catalog import ERROR_DEFINITIONS
-from super_ai.llm import LlmProvider
+from super_ai.llm import (
+    LlmProvider,
+    create_query_rewrite_model,
+    query_rewrite_structured_output_method,
+)
 from super_ai.mcp.cached_client import RuntimeMcpClient
 from super_ai.mcp_client import create_current_time_tool
 from super_ai.mcp_connections import McpConnectionService
@@ -33,6 +56,7 @@ from super_ai.memory.repositories import (
     ChatSessionRecord,
     JsonDict,
     MemoryRepositories,
+    PendingChatActionRecord,
 )
 from super_ai.observability import elapsed_ms, emit_event
 from super_ai.retrieval import (
@@ -42,6 +66,97 @@ from super_ai.retrieval import (
 
 ToolCallStatus = Literal["started", "delta", "completed", "failed"]
 logger = logging.getLogger(__name__)
+_AsyncItem = TypeVar("_AsyncItem")
+
+
+class RepeatedToolCallError(RuntimeError):
+    """The Agent attempted the same logical tool call twice in one run."""
+
+
+class ChatExecutionDeadlineExceeded(TimeoutError):
+    """The total ReAct execution deadline expired."""
+
+
+def chat_execution_error_code(error: Exception) -> str:
+    """Map bounded execution failures without depending on private provider details."""
+
+    if isinstance(error, (RepeatedToolCallError, ChatExecutionDeadlineExceeded)) or (
+        error.__class__.__name__
+        in {"ModelCallLimitExceededError", "ToolCallLimitExceededError"}
+    ):
+        return "CHAT_EXECUTION_BUDGET_EXHAUSTED"
+    return "SYSTEM_INTERNAL_ERROR"
+
+
+class RepeatedToolCallMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Reject a repeated tool name and canonical argument pair before execution."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[
+            [ToolCallRequest], Awaitable[ToolMessage | Command[Any]]
+        ],
+    ) -> ToolMessage | Command[Any]:
+        tool_call = request.tool_call
+        canonical = json.dumps(
+            {
+                "name": tool_call.get("name"),
+                "args": tool_call.get("args", {}),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if canonical in self._seen:
+            raise RepeatedToolCallError(
+                f"Repeated tool call blocked: {tool_call.get('name', 'unknown')}"
+            )
+        self._seen.add(canonical)
+        return await handler(request)
+
+
+def build_agent_middleware(
+    budget: ChatExecutionBudget,
+) -> tuple[AgentMiddleware[Any, Any, Any], ...]:
+    """Create request-scoped official call limits plus the fingerprint guard."""
+
+    return (
+        ModelCallLimitMiddleware(
+            run_limit=max(0, budget.max_model_calls - budget.max_query_rewrite_calls),
+            exit_behavior="error",
+        ),
+        ToolCallLimitMiddleware(
+            run_limit=budget.max_tool_calls,
+            exit_behavior="error",
+        ),
+        RepeatedToolCallMiddleware(),
+    )
+
+
+async def iterate_with_deadline(
+    iterator: AsyncIterator[_AsyncItem], seconds: float
+) -> AsyncIterator[_AsyncItem]:
+    """Apply one monotonic deadline to an async iterator, not per-event timeouts."""
+
+    deadline = monotonic() + seconds
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ChatExecutionDeadlineExceeded("Chat execution deadline exceeded.")
+        try:
+            item = await asyncio.wait_for(anext(iterator), timeout=remaining)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            raise ChatExecutionDeadlineExceeded(
+                "Chat execution deadline exceeded."
+            ) from None
+        yield item
 
 
 class SsePayload(TypedDict):
@@ -101,8 +216,38 @@ class ChatAgentReference:
     knowledge_type: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ChatAgentExecutionModeSelected:
+    mode: str
+    required_capability: str
+    postcondition: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChatAgentStructuredResult:
+    result: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatAgentExplanationDegraded:
+    code: str
+    retryable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ChatAgentConfirmationRequired:
+    action: Mapping[str, object]
+
+
 ChatAgentEvent = (
-    ChatAgentContentDelta | ChatAgentReasoningDelta | ChatAgentToolCall | ChatAgentReference
+    ChatAgentContentDelta
+    | ChatAgentReasoningDelta
+    | ChatAgentToolCall
+    | ChatAgentReference
+    | ChatAgentExecutionModeSelected
+    | ChatAgentStructuredResult
+    | ChatAgentExplanationDegraded
+    | ChatAgentConfirmationRequired
 )
 
 
@@ -115,7 +260,11 @@ class ChatAgentRequest:
     messages: Sequence[ChatMessageRecord]
     accessible_knowledge_base_ids: tuple[str, ...]
     system_prompt: str
+    chat_run_id: str | None = None
+    route: ChatRoute = ChatRoute("general_chat", 0.0, "fallback")
+    tool_names: tuple[str, ...] = ()
     skills: tuple[SelectedChatSkill, ...] = ()
+    execution_budget: ChatExecutionBudget = ChatExecutionBudget(2, 2, 120.0)
 
 
 class LoadSkillInput(BaseModel):
@@ -132,6 +281,153 @@ class ChatAgentRunner(Protocol):
         ...
 
 
+class PendingActionPreviewer(Protocol):
+    async def preview_start(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        incident_id: str,
+        chat_run_id: str | None = None,
+        note: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord: ...
+
+    async def preview_recovery_approval(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        diagnostic_task_id: str,
+        reason: str,
+        chat_run_id: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> PendingChatActionRecord: ...
+
+
+class PolicyDispatchingChatAgentRunner:
+    """Bypass ReAct for deterministic Direct Read policies."""
+
+    def __init__(
+        self,
+        *,
+        fallback: ChatAgentRunner,
+        direct_execution: ChatTurnExecutionService,
+        pending_actions: PendingActionPreviewer | None = None,
+    ) -> None:
+        self._fallback = fallback
+        self._direct_execution = direct_execution
+        self._pending_actions = pending_actions
+
+    async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
+        policy = policy_for(request.route)
+        if policy.mode == "confirmation_required":
+            if self._pending_actions is None:
+                raise RuntimeError("Pending Chat Action service is unavailable.")
+            content = next(
+                (
+                    message.content
+                    for message in reversed(request.messages)
+                    if message.role == "user"
+                ),
+                "",
+            )
+            if request.route.intent == "start_diagnostic":
+                incident_id = request.route.incident_id
+                if incident_id is None:
+                    raise ValueError("Incident ID is required for confirmation.")
+                action = await self._pending_actions.preview_start(
+                    owner_user_id=request.owner_user_id,
+                    session_id=request.session_id,
+                    incident_id=incident_id,
+                    chat_run_id=request.chat_run_id,
+                    note=content,
+                )
+            else:
+                task_id = request.route.diagnostic_task_id
+                if task_id is None:
+                    raise ValueError("Diagnostic task ID is required for confirmation.")
+                action = await self._pending_actions.preview_recovery_approval(
+                    owner_user_id=request.owner_user_id,
+                    session_id=request.session_id,
+                    diagnostic_task_id=task_id,
+                    reason=content or "用户请求创建人工恢复审批",
+                    chat_run_id=request.chat_run_id,
+                )
+            yield ChatAgentExecutionModeSelected(
+                mode=policy.mode,
+                required_capability=policy.required_capability,
+                postcondition=policy.postcondition,
+            )
+            yield ChatAgentConfirmationRequired(action.to_payload())
+            return
+        if policy.mode != "direct_read":
+            async for event in self._fallback.stream(request):
+                yield event
+            return
+
+        content = next(
+            (
+                message.content
+                for message in reversed(request.messages)
+                if message.role == "user"
+            ),
+            "",
+        )
+        async for event in self._direct_execution.execute(
+            ChatTurnExecutionRequest(
+                owner_user_id=request.owner_user_id,
+                content=content,
+                route=request.route,
+                chat_run_id=request.chat_run_id,
+            )
+        ):
+            if event.type == "execution.mode_selected":
+                yield ChatAgentExecutionModeSelected(
+                    mode=str(event.payload.get("mode", "direct_read")),
+                    required_capability=str(
+                        event.payload.get("requiredCapability", "direct_read")
+                    ),
+                    postcondition=str(event.payload.get("postcondition", "result")),
+                )
+            elif event.type == "structured.result":
+                yield ChatAgentStructuredResult(event.payload)
+            elif event.type == "explanation.delta":
+                yield ChatAgentContentDelta(str(event.payload.get("delta", "")))
+            elif event.type == "explanation.degraded":
+                yield ChatAgentExplanationDegraded(
+                    code=str(event.payload.get("code", "CHAT_EXPLANATION_DEGRADED")),
+                    retryable=event.payload.get("retryable") is True,
+                )
+
+
+class ContentDeltaBuffer:
+    """Coalesce small model deltas into bounded user-visible SSE chunks."""
+
+    def __init__(self, *, character_limit: int = 32, flush_seconds: float = 0.05) -> None:
+        self._character_limit = character_limit
+        self._flush_seconds = flush_seconds
+        self._parts: list[str] = []
+        self._size = 0
+        self._last_flush = monotonic()
+
+    def push(self, delta: str, now: float) -> str | None:
+        self._parts.append(delta)
+        self._size += len(delta)
+        if self._size >= self._character_limit or now - self._last_flush >= self._flush_seconds:
+            return self.flush(now)
+        return None
+
+    def flush(self, now: float) -> str | None:
+        if not self._parts:
+            return None
+        value = "".join(self._parts)
+        self._parts = []
+        self._size = 0
+        self._last_flush = now
+        return value
+
+
 class ChatStreamingService:
     """Persist chat messages and translate Agent events into shared SSE payloads."""
 
@@ -141,10 +437,12 @@ class ChatStreamingService:
         repositories: MemoryRepositories,
         agent_runner: ChatAgentRunner,
         memory_service: ChatMemoryService | None = None,
+        intent_router: ChatIntentRouter | None = None,
     ) -> None:
         self._repositories = repositories
         self._agent_runner = agent_runner
         self._memory_service = memory_service
+        self._intent_router = intent_router
 
     async def stream_message(
         self,
@@ -154,6 +452,10 @@ class ChatStreamingService:
         content: str,
         metadata: JsonDict | None = None,
         accessible_knowledge_base_ids: Sequence[str],
+        existing_user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
+        raise_errors: bool = False,
+        chat_run_id: str | None = None,
     ) -> AsyncIterator[dict[str, object]]:
         started_at = monotonic()
         message_content = content.strip()
@@ -166,18 +468,45 @@ class ChatStreamingService:
             owner_user_id=owner_user_id,
             session_id=session.id,
         )
+        existing_user_message = (
+            await self._repositories.chat.get_message(
+                owner_user_id=owner_user_id,
+                message_id=existing_user_message_id,
+            )
+            if existing_user_message_id is not None
+            else None
+        )
+        if existing_user_message_id is not None and (
+            existing_user_message is None
+            or existing_user_message.session_id != session.id
+            or existing_user_message.role != "user"
+        ):
+            raise LookupError("owned chat run user message not found")
         system_prompt, selected_skills = await self.build_agent_configuration(
             owner_user_id=owner_user_id
         )
+        route = (
+            await self._intent_router.route(message_content)
+            if self._intent_router is not None
+            else ChatRoute("general_chat", 0.0, "fallback")
+        )
+        allowed_tools = allowed_tools_for(route.intent)
+        if route.needs_clarification:
+            allowed_tools = allowed_tools - frozenset(
+                {"start_incident_diagnostic", "create_recovery_approval_request"}
+            )
         prepared_messages: Sequence[ChatMessageRecord] | None = None
         if self._memory_service is not None:
             try:
                 prepared = await self._memory_service.prepare_message(
                     owner_user_id=owner_user_id,
                     session=session,
-                    history=history,
+                    history=[
+                        message for message in history if message.id != existing_user_message_id
+                    ],
                     system_prompt=system_prompt,
                     content=message_content,
+                    tool_schemas=tuple(sorted(allowed_tools)),
                 )
             except ChatContextLimitReached:
                 yield _error_event("CHAT_CONTEXT_LIMIT_REACHED")
@@ -186,13 +515,13 @@ class ChatStreamingService:
             system_prompt = prepared.system_prompt
             prepared_messages = prepared.messages
 
-        user_message = await self._repositories.chat.append_message(
+        user_message = existing_user_message or await self._repositories.chat.append_message(
             owner_user_id=owner_user_id,
             message_id=f"message_{uuid4().hex}",
             session_id=session.id,
             role="user",
             content=message_content,
-            metadata=metadata or {},
+            metadata=sanitize_chat_metadata(metadata or {}),
         )
         await self._maybe_generate_chat_title(
             owner_user_id=owner_user_id,
@@ -212,12 +541,17 @@ class ChatStreamingService:
             messages=model_messages if model_messages else [user_message],
             accessible_knowledge_base_ids=tuple(accessible_knowledge_base_ids),
             system_prompt=system_prompt,
+            chat_run_id=chat_run_id,
+            route=route,
+            tool_names=tuple(sorted(allowed_tools)),
             skills=selected_skills,
+            execution_budget=policy_for(route).budget,
         )
         answer_parts: list[str] = []
         tool_call_ids: list[str] = []
         citations: list[dict[str, object]] = []
-        reasoning_parts: list[str] = []
+        structured_results: list[dict[str, object]] = []
+        content_buffer = ContentDeltaBuffer()
         sequence = 0
 
         try:
@@ -226,24 +560,46 @@ class ChatStreamingService:
                     if event.delta == "":
                         continue
                     answer_parts.append(event.delta)
-                    for character in event.delta:
+                    delta = content_buffer.push(event.delta, monotonic())
+                    if delta is not None:
                         sequence += 1
                         yield _sse_event(
                             "content.delta",
                             {
-                                "delta": character,
+                                "delta": delta,
                                 "sequence": sequence,
                             },
                         )
                 elif isinstance(event, ChatAgentReasoningDelta):
-                    if event.delta == "":
-                        continue
-                    reasoning_parts.append(event.delta)
-                    sequence += 1
+                    continue
+                elif isinstance(event, ChatAgentExecutionModeSelected):
                     yield _sse_event(
-                        "reasoning.delta", {"delta": event.delta, "sequence": sequence}
+                        "execution.mode_selected",
+                        {
+                            "mode": event.mode,
+                            "requiredCapability": event.required_capability,
+                            "postcondition": event.postcondition,
+                        },
+                    )
+                elif isinstance(event, ChatAgentStructuredResult):
+                    result_payload = dict(event.result)
+                    structured_results.append(result_payload)
+                    yield _sse_event("structured.result", result_payload)
+                elif isinstance(event, ChatAgentExplanationDegraded):
+                    yield _sse_event(
+                        "explanation.degraded",
+                        {"code": event.code, "retryable": event.retryable},
+                    )
+                elif isinstance(event, ChatAgentConfirmationRequired):
+                    structured_results.append({"pendingAction": dict(event.action)})
+                    yield _sse_event(
+                        "confirmation.required", {"action": dict(event.action)}
                     )
                 elif isinstance(event, ChatAgentToolCall):
+                    pending = content_buffer.flush(monotonic())
+                    if pending is not None:
+                        sequence += 1
+                        yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
                     await self._persist_tool_call_audit(
                         owner_user_id=owner_user_id,
                         session_id=session.id,
@@ -260,22 +616,43 @@ class ChatStreamingService:
                     if event.output is not None:
                         payload["output"] = event.output
                     yield _sse_event("tool.call", {"toolCall": payload})
+                    diagnostic = _diagnostic_result_payload(event)
+                    if diagnostic is not None:
+                        yield _sse_event("diagnostic.result", {"diagnostic": diagnostic})
                 else:
+                    pending = content_buffer.flush(monotonic())
+                    if pending is not None:
+                        sequence += 1
+                        yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
                     reference = _reference_payload(event)
                     citations.append(reference)
                     yield _sse_event("reference.source", {"reference": reference})
 
+            pending = content_buffer.flush(monotonic())
+            if pending is not None:
+                sequence += 1
+                yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
             answer = "".join(answer_parts).strip()
+            if not answer and structured_results:
+                answer = "已返回结构化结果；模型解读暂不可用。"
             assistant_message = await self._repositories.chat.append_message(
                 owner_user_id=owner_user_id,
-                message_id=f"message_{uuid4().hex}",
+                message_id=assistant_message_id or f"message_{uuid4().hex}",
                 session_id=session.id,
                 role="assistant",
                 content=answer,
                 metadata={
                     "citations": citations,
-                    "reasoning": reasoning_parts,
                     "toolCallIds": tool_call_ids,
+                    "structuredResults": structured_results,
+                    "route": {
+                        "intent": route.intent,
+                        "confidence": route.confidence,
+                        "source": route.source,
+                        "incidentId": route.incident_id,
+                        "diagnosticTaskId": route.diagnostic_task_id,
+                        "needsClarification": route.needs_clarification,
+                    },
                 },
             )
             refreshed_session = (
@@ -317,6 +694,10 @@ class ChatStreamingService:
                 durationMs=elapsed_ms(started_at),
             )
         except Exception as exc:
+            pending = content_buffer.flush(monotonic())
+            if pending is not None:
+                sequence += 1
+                yield _sse_event("content.delta", {"delta": pending, "sequence": sequence})
             emit_event(
                 logger,
                 "agent.chat.failed",
@@ -324,7 +705,9 @@ class ChatStreamingService:
                 errorCategory=exc.__class__.__name__,
                 durationMs=elapsed_ms(started_at),
             )
-            yield _error_event("SYSTEM_INTERNAL_ERROR")
+            if raise_errors:
+                raise
+            yield _error_event(chat_execution_error_code(exc))
             return
 
     async def build_system_prompt(self, *, owner_user_id: str) -> str:
@@ -501,33 +884,56 @@ class LangChainChatAgentRunner:
         retrieval_tool: KnowledgeRetrievalToolRunner,
         mcp_client: RuntimeMcpClient | None = None,
         mcp_client_provider: McpConnectionService | None = None,
+        aiops_bridge_service: AiopsBridgeService | None = None,
     ) -> None:
         self._llm_provider = llm_provider
         self._retrieval_tool = retrieval_tool
         self._mcp_client = mcp_client
         self._mcp_client_provider = mcp_client_provider
+        self._aiops_bridge_service = aiops_bridge_service
 
     async def stream(self, request: ChatAgentRequest) -> AsyncIterator[ChatAgentEvent]:
+        query_transformer = None
+        if (
+            request.route.intent == "knowledge_question"
+            and request.execution_budget.max_query_rewrite_calls > 0
+        ):
+            query_transformer = AdaptiveKnowledgeQueryTransformer(
+                StructuredQueryRewriter(
+                    create_query_rewrite_model(self._llm_provider),
+                    structured_output_method=query_rewrite_structured_output_method(
+                        self._llm_provider
+                    ),
+                ),
+                context=_query_rewrite_context(request.messages),
+            )
         langchain_tool = create_langchain_knowledge_retrieval_tool(
             self._retrieval_tool,
             owner_user_id=request.owner_user_id,
             accessible_knowledge_base_ids=request.accessible_knowledge_base_ids,
+            query_transformer=query_transformer,
         )
-        tools = [langchain_tool, create_current_time_tool()]
+        tool_registry: dict[str, StructuredTool] = {
+            langchain_tool.name: langchain_tool,
+            "get_current_time": create_current_time_tool(),
+        }
         if request.skills:
-            tools.append(create_load_skill_tool(request.skills))
-        mcp_client = self._mcp_client
-        if self._mcp_client_provider is not None:
-            mcp_client = await self._mcp_client_provider.client_for_user(
-                owner_user_id=request.owner_user_id
+            load_skill = create_load_skill_tool(request.skills)
+            tool_registry[load_skill.name] = load_skill
+        if self._aiops_bridge_service is not None:
+            tool_registry.update(
+                build_aiops_bridge_tools(
+                    owner_user_id=request.owner_user_id,
+                    service=self._aiops_bridge_service,
+                    chat_run_id=request.chat_run_id,
+                )
             )
-        if mcp_client is not None:
-            await mcp_client.discover_tools()
-            tools.extend(await mcp_client.get_langchain_tools())
+        tools = [tool_registry[name] for name in request.tool_names if name in tool_registry]
         agent = _create_langchain_agent(
             model=cast(Any, self._llm_provider.create_chat_model()),
             tools=tools,
             system_prompt=(request.system_prompt),
+            middleware=build_agent_middleware(request.execution_budget),
         )
         messages = [
             {"role": message.role, "content": message.content}
@@ -535,9 +941,12 @@ class LangChainChatAgentRunner:
             if message.role in {"user", "assistant"}
         ]
 
-        async for raw_event in agent.astream_events(
-            cast(Any, {"messages": messages}),
-            version="v2",
+        raw_events = agent.astream_events(
+            cast(Any, {"messages": messages}), version="v2"
+        )
+        async for raw_event in iterate_with_deadline(
+            cast(AsyncIterator[object], raw_events),
+            request.execution_budget.deadline_seconds,
         ):
             parsed = _agent_event_from_langchain_event(cast(Mapping[str, object], raw_event))
             if parsed is None:
@@ -547,6 +956,39 @@ class LangChainChatAgentRunner:
                     yield item
             else:
                 yield parsed
+
+
+def _query_rewrite_context(
+    messages: Sequence[ChatMessageRecord],
+) -> tuple[QueryRewriteContextMessage, ...]:
+    relevant = [message for message in messages if message.role in {"user", "assistant"}]
+    current_user_index = next(
+        (
+            index
+            for index in range(len(relevant) - 1, -1, -1)
+            if relevant[index].role == "user"
+        ),
+        len(relevant),
+    )
+    prior = relevant[:current_user_index]
+    complete_turns: list[list[ChatMessageRecord]] = []
+    current: list[ChatMessageRecord] = []
+    for message in prior:
+        if message.role == "user":
+            if current and any(item.role == "assistant" for item in current):
+                complete_turns.append(current)
+            current = [message]
+        elif current:
+            current.append(message)
+    if current and any(item.role == "assistant" for item in current):
+        complete_turns.append(current)
+    return tuple(
+        QueryRewriteContextMessage(
+            "user" if message.role == "user" else "assistant", message.content
+        )
+        for turn in complete_turns[-2:]
+        for message in turn
+    )
 
 
 def create_load_skill_tool(skills: Sequence[SelectedChatSkill]) -> StructuredTool:
@@ -846,6 +1288,59 @@ def _reference_payload(reference: ChatAgentReference) -> dict[str, object]:
     return payload
 
 
+def _diagnostic_result_payload(event: ChatAgentToolCall) -> dict[str, object] | None:
+    raw_output: object = event.output
+    if (
+        event.name != "get_diagnostic_report"
+        or event.status != "completed"
+        or not isinstance(raw_output, Mapping)
+    ):
+        return None
+    output = cast(Mapping[str, object], raw_output)
+    task_id = output.get("taskId")
+    report_id = output.get("id")
+    recovery_mode = output.get("recoveryMode")
+    execution_permitted = output.get("executionPermitted")
+    human_approval_required = output.get("humanApprovalRequired")
+    validator_status = output.get("validatorStatus")
+    if (
+        not isinstance(task_id, str)
+        or not isinstance(report_id, str)
+        or not isinstance(recovery_mode, str)
+        or not isinstance(execution_permitted, bool)
+        or not isinstance(human_approval_required, bool)
+        or not isinstance(validator_status, str)
+    ):
+        return None
+    root_cause = output.get("rootCause")
+    evidence_ids = output.get("evidenceIds")
+    bounded_evidence_ids = (
+        [item for item in cast(list[object], evidence_ids) if isinstance(item, str)]
+        if isinstance(evidence_ids, list)
+        else []
+    )
+    return {
+        "taskId": task_id,
+        "reportId": report_id,
+        "rootCause": _json_dict_or_empty(root_cause),
+        "recoveryMode": recovery_mode,
+        "executionPermitted": execution_permitted,
+        "humanApprovalRequired": human_approval_required,
+        "validatorStatus": validator_status,
+        "evidenceIds": bounded_evidence_ids,
+    }
+
+
+def sanitize_chat_metadata(metadata: Mapping[str, object]) -> dict[str, object]:
+    """Remove legacy/private reasoning fields before persistence or serialization."""
+
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key.casefold() not in {"reasoning", "reasoning_content"}
+    }
+
+
 def _chat_session_payload(
     record: ChatSessionRecord, context_window_tokens: int
 ) -> dict[str, object]:
@@ -866,7 +1361,7 @@ def _chat_message_payload(message: ChatMessageRecord) -> dict[str, object]:
         "sessionId": message.session_id,
         "role": message.role,
         "content": message.content,
-        "metadata": message.metadata,
+        "metadata": sanitize_chat_metadata(message.metadata),
         "createdAt": message.created_at.isoformat(),
     }
 

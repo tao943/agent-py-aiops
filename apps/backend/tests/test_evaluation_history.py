@@ -86,7 +86,7 @@ def _live_failure_result_payload() -> dict[str, object]:
     }
 
 
-def test_live_failure_diagnostics_are_structured_and_round_trip_in_v1() -> None:
+def test_live_failure_diagnostics_are_structured_and_round_trip_in_v2() -> None:
     envelope = terminal_envelope(
         running=_running_live(),
         status="failed",
@@ -103,7 +103,7 @@ def test_live_failure_diagnostics_are_structured_and_round_trip_in_v1() -> None:
 
     assert restored == envelope
     assert artifact_checksum(restored) == artifact_checksum(envelope)
-    assert restored.artifact_schema_version == "v1"
+    assert restored.artifact_schema_version == "v2"
 
 
 def _invalid_live_failure_payloads() -> tuple[dict[str, object], ...]:
@@ -207,7 +207,110 @@ def test_terminal_envelope_checksum_is_stable_after_round_trip() -> None:
 
     assert restored == envelope
     assert artifact_checksum(restored) == artifact_checksum(envelope)
-    assert envelope.to_json()["artifactSchemaVersion"] == "v1"
+    assert envelope.to_json()["artifactSchemaVersion"] == "v2"
+
+
+def test_v1_artifact_remains_readable_after_v2_upgrade() -> None:
+    payload = terminal_envelope(
+        running=_running(),
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={"recallAt1": 1.0},
+        result_payload={"failures": []},
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=FIXED_TIME,
+    ).to_json()
+    payload["artifactSchemaVersion"] = "v1"
+
+    restored = type(_running()).from_json(payload)
+
+    assert restored.artifact_schema_version == "v1"
+    assert restored.evaluation_kind == "retrieval"
+
+
+def test_v2_conversation_model_and_live_conversation_metrics_round_trip() -> None:
+    model_running = running_envelope(
+        run_id="conversation-model-1",
+        evaluation_kind="conversation_model",
+        scenario_id="conversation-model-suite",
+        suite_version="conversation-model-v1",
+        metadata={
+            "gitSha": "abc123",
+            "workflowVersion": "conversation-model-v1",
+            "modelConfiguration": {"model": "fake-model"},
+            "scenarioVersion": "conversation-model-v1",
+        },
+        created_at=FIXED_TIME,
+        started_at=FIXED_TIME,
+    )
+    model_terminal = terminal_envelope(
+        running=model_running,
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={
+            "scenarioCount": 6,
+            "passedScenarioCount": 6,
+            "routeAccuracy": 1.0,
+            "structuredInterpretationAccuracy": 1.0,
+            "degradedFallbackAccuracy": 1.0,
+            "promptInjectionSafety": 1.0,
+            "modelCallCount": 6,
+        },
+        result_payload={
+            "failures": [],
+            "scenarioResults": [],
+            "safetyCategories": ["prompt_injection_resisted"],
+        },
+        diagnostic_task_id=None,
+        failure_category=None,
+        completed_at=FIXED_TIME,
+    )
+    live_terminal = terminal_envelope(
+        running=_running_live(),
+        status="passed",
+        validity="VALID_PASS",
+        passed=True,
+        metrics={
+            "total": 100,
+            "conversationMetrics": {
+                "routeAccuracy": 1.0,
+                "confirmationAccuracy": 1.0,
+            },
+        },
+        result_payload={"failures": []},
+        diagnostic_task_id="diagnostic-1",
+        failure_category=None,
+        completed_at=FIXED_TIME,
+    )
+
+    assert type(model_terminal).from_json(model_terminal.to_json()) == model_terminal
+    assert type(live_terminal).from_json(live_terminal.to_json()) == live_terminal
+
+
+def test_v1_rejects_conversation_model_kind() -> None:
+    payload = {
+        **running_envelope(
+            run_id="conversation-model-v1-invalid",
+            evaluation_kind="conversation_model",
+            scenario_id="conversation-model-suite",
+            suite_version="conversation-model-v1",
+            metadata={
+                "gitSha": "abc123",
+                "workflowVersion": "conversation-model-v1",
+                "modelConfiguration": {"model": "fake-model"},
+                "scenarioVersion": "conversation-model-v1",
+            },
+            created_at=FIXED_TIME,
+            started_at=FIXED_TIME,
+        ).to_json(),
+        "artifactSchemaVersion": "v1",
+    }
+
+    with pytest.raises(ValueError, match="schema version"):
+        type(_running()).from_json(payload)
 
 
 @pytest.mark.parametrize(

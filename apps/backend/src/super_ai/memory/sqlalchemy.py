@@ -9,12 +9,16 @@ from datetime import datetime, timezone
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, update
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from super_ai.chat.structured_memory import (
+    MemoryCasResult,
+    StructuredChatMemory,
+)
 from super_ai.memory.models import (
     AgentToolCallAuditModel,
     ChatMessageModel,
@@ -148,6 +152,10 @@ class SQLAlchemyChatMemoryRepository:
                 row.memory_mode = memory_mode
             if clear_compaction:
                 row.memory_summary = None
+                row.structured_memory = {}
+                row.memory_summary_version = 0
+                row.memory_through_message_id = None
+                row.memory_compaction_status = "idle"
                 row.compacted_message_count = 0
                 row.context_tokens = 0
                 row.last_compacted_at = None
@@ -161,6 +169,61 @@ class SQLAlchemyChatMemoryRepository:
                 if last_compacted_at is not None:
                     row.last_compacted_at = last_compacted_at
             row.updated_at = timestamp
+            await session.commit()
+        return _chat_session_record(row)
+
+    async def compare_and_set_memory(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        expected_version: int,
+        memory: StructuredChatMemory,
+        through_message_id: str,
+    ) -> MemoryCasResult:
+        statement = (
+            update(ChatSessionModel)
+            .where(
+                ChatSessionModel.id == session_id,
+                ChatSessionModel.owner_user_id == owner_user_id,
+                ChatSessionModel.memory_summary_version == expected_version,
+            )
+            .values(
+                structured_memory=memory.model_dump(mode="json"),
+                memory_summary_version=expected_version + 1,
+                memory_through_message_id=through_message_id,
+                memory_summary=None,
+                updated_at=utc_now(),
+            )
+            .returning(ChatSessionModel.id)
+        )
+        async with self._session_factory() as session, session.begin():
+            updated_id = await session.scalar(statement)
+            if updated_id is not None:
+                return "updated"
+            exists = await session.scalar(
+                select(ChatSessionModel.id).where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.owner_user_id == owner_user_id,
+                )
+            )
+        return "stale" if exists is not None else "not_found"
+
+    async def update_compaction_status(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        status: str,
+    ) -> ChatSessionRecord | None:
+        if status not in {"idle", "queued", "running", "degraded"}:
+            raise ValueError("Unsupported chat memory compaction status")
+        async with self._session_factory() as session:
+            row = await _find_chat_session(session, owner_user_id, session_id)
+            if row is None:
+                return None
+            row.memory_compaction_status = status
+            row.updated_at = utc_now()
             await session.commit()
         return _chat_session_record(row)
 
@@ -235,6 +298,10 @@ class SQLAlchemyChatMemoryRepository:
             )
             parent.updated_at = timestamp
             parent.memory_summary = None
+            parent.structured_memory = {}
+            parent.memory_summary_version = 0
+            parent.memory_through_message_id = None
+            parent.memory_compaction_status = "idle"
             parent.compacted_message_count = 0
             parent.context_tokens = 0
             parent.last_compacted_at = None
@@ -276,6 +343,46 @@ class SQLAlchemyChatMemoryRepository:
         stmt = stmt.order_by(ChatMessageModel.created_at.asc(), ChatMessageModel.id.asc())
         async with self._session_factory() as session:
             rows = list((await session.scalars(stmt)).all())
+        return [_chat_message_record(row) for row in rows]
+
+    async def list_messages_through(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        through_message_id: str,
+    ) -> list[ChatMessageRecord]:
+        async with self._session_factory() as session:
+            boundary = (
+                await session.scalars(
+                    select(ChatMessageModel).where(
+                        ChatMessageModel.id == through_message_id,
+                        ChatMessageModel.owner_user_id == owner_user_id,
+                        ChatMessageModel.session_id == session_id,
+                    )
+                )
+            ).one_or_none()
+            if boundary is None:
+                return []
+            rows = list(
+                (
+                    await session.scalars(
+                        select(ChatMessageModel)
+                        .where(
+                            ChatMessageModel.owner_user_id == owner_user_id,
+                            ChatMessageModel.session_id == session_id,
+                            (
+                                (ChatMessageModel.created_at < boundary.created_at)
+                                | (
+                                    (ChatMessageModel.created_at == boundary.created_at)
+                                    & (ChatMessageModel.id <= boundary.id)
+                                )
+                            ),
+                        )
+                        .order_by(ChatMessageModel.created_at.asc(), ChatMessageModel.id.asc())
+                    )
+                ).all()
+            )
         return [_chat_message_record(row) for row in rows]
 
     async def get_message(
@@ -1503,11 +1610,7 @@ class SQLAlchemyDiagnosticMemoryRepository:
             await session.commit()
         async with self._session_factory() as session:
             row = await session.get(DiagnosticEvidenceModel, evidence_id)
-        if (
-            row is None
-            or row.owner_user_id != owner_user_id
-            or row.task_id != task_id
-        ):
+        if row is None or row.owner_user_id != owner_user_id or row.task_id != task_id:
             raise TenantScopeError("Diagnostic evidence identity is outside task scope.")
         return _diagnostic_evidence_record(row)
 
@@ -2080,9 +2183,7 @@ class SQLAlchemyEvaluationRepository:
 
                 existing = (
                     await session.scalars(
-                        select(EvaluationResultModel).where(
-                            EvaluationResultModel.run_id == run_id
-                        )
+                        select(EvaluationResultModel).where(EvaluationResultModel.run_id == run_id)
                     )
                 ).one_or_none()
                 if run.status == "completed":
@@ -2152,11 +2253,19 @@ def create_sqlalchemy_memory_repositories(
     from super_ai.memory.aiops_execution_sqlalchemy import (
         SQLAlchemyAiopsRuntimeRepositoryProvider,
     )
+    from super_ai.memory.chat_runs_sqlalchemy import (
+        SQLAlchemyChatRunRepository,
+        SQLAlchemyChatToolExecutionRepository,
+        SQLAlchemyRecoveryApprovalRequestRepository,
+    )
     from super_ai.memory.extended_sqlalchemy import (
         SQLAlchemyBackgroundJobRepository,
         SQLAlchemyMcpConnectionRepository,
         SQLAlchemyOutboxEventRepository,
         SQLAlchemyUserFeedbackRepository,
+    )
+    from super_ai.memory.pending_actions_sqlalchemy import (
+        SQLAlchemyPendingChatActionRepository,
     )
 
     return MemoryRepositories(
@@ -2174,6 +2283,10 @@ def create_sqlalchemy_memory_repositories(
         mcp_connections=SQLAlchemyMcpConnectionRepository(session_factory),
         evaluations=SQLAlchemyEvaluationRepository(session_factory),
         aiops_runtime=SQLAlchemyAiopsRuntimeRepositoryProvider(session_factory),
+        chat_runs=SQLAlchemyChatRunRepository(session_factory),
+        chat_tool_executions=SQLAlchemyChatToolExecutionRepository(session_factory),
+        recovery_approvals=SQLAlchemyRecoveryApprovalRequestRepository(session_factory),
+        pending_chat_actions=SQLAlchemyPendingChatActionRepository(session_factory),
     )
 
 
@@ -2400,6 +2513,7 @@ def _json_dict(value: object) -> JsonDict:
 
 
 def _chat_session_record(row: ChatSessionModel) -> ChatSessionRecord:
+    structured_memory = StructuredChatMemory.model_validate(row.structured_memory)
     return ChatSessionRecord(
         id=row.id,
         owner_user_id=row.owner_user_id,
@@ -2408,6 +2522,10 @@ def _chat_session_record(row: ChatSessionModel) -> ChatSessionRecord:
         updated_at=_ensure_utc(row.updated_at),
         memory_mode=row.memory_mode,
         memory_summary=row.memory_summary,
+        structured_memory=structured_memory.model_dump(mode="json"),
+        memory_summary_version=row.memory_summary_version,
+        memory_through_message_id=row.memory_through_message_id,
+        memory_compaction_status=row.memory_compaction_status,
         compacted_message_count=row.compacted_message_count,
         context_tokens=row.context_tokens,
         last_compacted_at=(
