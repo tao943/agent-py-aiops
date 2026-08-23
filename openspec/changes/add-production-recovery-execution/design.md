@@ -42,6 +42,12 @@ Compose 要求容器身份变化、health、业务探针和 Incident resolved；
 
 现有 Chat 工具名称和确认 UX 保留，但确认后创建/复用正式 Intent。Chat 无权批准或执行。旧 request-only 记录只读且始终不可执行，不迁移为审批权限。
 
+### Alert-triggered dispatch remains in the durable diagnosis job
+
+Alertmanager ingestion 在创建 Diagnostic Task 的同一事务内强制写入服务端来源标记。现有 `aiops_diagnosis` Job 在诊断成功并持久化 Report/Evidence 后调用聚焦 Dispatcher，Dispatcher 只检查可信来源和任务终态，所有提案、策略和 Intent 幂等仍由 `RecoveryIntentService` 决定。派生不进入 LangGraph，因此模型和 Agent 不获得生产恢复权限。
+
+Job 在派生前再次检查取消。若 Intent 已创建后 Job 崩溃，重试检测到 Task 已 `succeeded` 后跳过整个 Agent/LLM 链，仅补偿调用 Dispatcher；PostgreSQL 唯一约束收敛为同一 active Intent。Task 缺失、持久层错误或未分类异常使 Job 安全失败或重试，不能伪装为正常跳过。
+
 ## Risks / Trade-offs
 
 - 状态机和执行器增加实现复杂度，但保持在现有 PostgreSQL/Job/Execution 基础之内，避免第二工作流引擎。

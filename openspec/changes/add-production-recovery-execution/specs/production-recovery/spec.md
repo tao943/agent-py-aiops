@@ -155,3 +155,32 @@ PostgreSQL executor SHALL 仅终止自身 fresh probe 在服务端固定 databas
 - **WHEN** 系统读取旧 `aiops_recovery_approval_requests` 记录
 - **THEN** 记录 MUST 标记为 legacy 且 `executionPermitted=false`
 - **AND** MUST NOT 被转换为新 Intent 的有效批准
+
+### Requirement: Alert-triggered automatic intent dispatch
+
+系统 SHALL 仅为 Alertmanager webhook 持久化层创建、且成功完成的诊断自动派生正式 Recovery Intent。可信触发来源 MUST 由服务端覆盖写入，不能从 webhook payload、客户端、Prompt、Chat 或模型输出透传。
+
+#### Scenario: Alertmanager diagnosis succeeds
+- **WHEN** webhook ingestion 创建的诊断持久化为 `succeeded` 且恢复提案通过现有确定性策略门
+- **THEN** durable diagnosis Job MUST 调用现有 `RecoveryIntentService` 创建或复用正式 Intent
+- **AND** Compose 与 PostgreSQL MUST 分别保持现有自动排队和人工审批策略
+
+#### Scenario: Untrusted payload claims Alertmanager origin
+- **WHEN** 客户端或 webhook payload 提供任意 `triggerSource`
+- **THEN** ingestion repository MUST 使用服务端值 `alertmanager` 覆盖 webhook 创建任务的来源
+- **AND** 手动与 Chat 创建的诊断 MUST NOT 获得该来源标记
+
+#### Scenario: Diagnosis Job retries after intent persistence
+- **WHEN** Intent 已持久化但 diagnosis Job 尚未标记成功即崩溃
+- **THEN** 重试 MUST 跳过 Agent、RAG、MCP 和 LLM
+- **AND** MUST 复用同一 active Intent 与 recovery Job
+
+#### Scenario: Cancellation arrives before dispatch
+- **WHEN** 诊断已持久化成功但 Job 在 Intent 派生前收到取消请求
+- **THEN** handler MUST NOT 创建 Recovery Intent 或 recovery Job
+- **AND** MUST 保持取消语义
+
+#### Scenario: Automatic dispatch emits an event
+- **WHEN** 自动派生创建、复用或安全跳过
+- **THEN** diagnosis Job MUST 追加仅包含公开 outcome、reason code、Intent ID 和 status 的持久事件
+- **AND** 事件 MUST NOT 包含 trusted snapshot、凭据、DSN、PID、SQL、绝对路径、stdout/stderr 或原始异常

@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.alert_ingestion.repositories import AlertIncidentRecord, IncidentNotActive
@@ -18,7 +19,7 @@ from super_ai.chat.aiops_bridge import (
     build_aiops_bridge_tools,
 )
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.models import AlertIncidentModel, UserModel
+from super_ai.memory.models import AlertIncidentModel, DiagnosticTaskModel, UserModel
 from super_ai.memory.repositories import (
     DiagnosticEvidenceRecord,
     DiagnosticReportRecord,
@@ -402,6 +403,14 @@ async def test_postgresql_scheduler_reuses_one_task_and_job(
         second = await repository.schedule_for_incident(
             owner_user_id="owner_a", incident_id="incident_a", note="retry"
         )
+        async with session_factory() as session:
+            task = (
+                await session.scalars(
+                    select(DiagnosticTaskModel).where(
+                        DiagnosticTaskModel.id == first.diagnostic_task_id
+                    )
+                )
+            ).one()
     finally:
         await engine.dispose()
 
@@ -409,6 +418,7 @@ async def test_postgresql_scheduler_reuses_one_task_and_job(
     assert first.background_job_id == second.background_job_id
     assert first.reused is False
     assert second.reused is True
+    assert "triggerSource" not in task.input_payload
 
 
 @pytest.mark.asyncio

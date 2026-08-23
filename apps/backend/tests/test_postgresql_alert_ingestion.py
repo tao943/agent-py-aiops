@@ -29,6 +29,7 @@ def _write(
     group_hash: str = "a" * 64,
     payload_hash: str | None = None,
     live: bool = False,
+    task_input_payload: dict[str, object] | None = None,
 ) -> IngestionWrite:
     received_at = datetime(2026, 8, 22, 1, 0, tzinfo=timezone.utc) + timedelta(
         milliseconds=sequence
@@ -50,6 +51,7 @@ def _write(
         starts_at=received_at,
         scenario_id=("APY-LIVE-ORDER-POOL-LEAK-001" if live else None),
         run_id=("closure-001" if live else None),
+        task_input_payload=task_input_payload,
     )
 
 
@@ -96,8 +98,37 @@ async def test_twenty_concurrent_firings_create_one_incident_task_and_job(
     assert task.input_payload == {
         "query": "Investigate HighLatency affecting order-service.",
         "alert": {"labels": {"service": "order-service"}},
+        "triggerSource": "alertmanager",
     }
     assert "executionPermitted" not in task.input_payload
+
+
+async def test_alert_source_marker_overrides_untrusted_task_payload(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_user(session_factory)
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    try:
+        await repository.apply(
+            _write(
+                1,
+                task_input_payload={
+                    "query": "untrusted query",
+                    "triggerSource": "manual",
+                },
+            )
+        )
+        async with session_factory() as session:
+            task = (await session.scalars(select(DiagnosticTaskModel))).one()
+    finally:
+        await engine.dispose()
+
+    assert task.input_payload == {
+        "query": "untrusted query",
+        "triggerSource": "alertmanager",
+    }
 
 
 async def test_identical_delivery_retry_updates_count_but_deduplicates_event(

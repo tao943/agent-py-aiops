@@ -375,16 +375,18 @@ class SQLAlchemyAlertIngestionRepository:
         suffix = created_id.removeprefix("incident_")
         task_id = f"diagnostic_{suffix}"
         job_id = f"job_{suffix}"
+        task_input_payload = dict(
+            write.task_input_payload
+            or {"query": write.query, "alert": write.safe_alert}
+        )
+        task_input_payload["triggerSource"] = "alertmanager"
         session.add(
             DiagnosticTaskModel(
                 id=task_id,
                 owner_user_id=write.owner_user_id,
                 status="accepted",
                 query=write.query,
-                input_payload=(
-                    write.task_input_payload
-                    or {"query": write.query, "alert": write.safe_alert}
-                ),
+                input_payload=task_input_payload,
                 result_payload={},
                 created_at=write.received_at,
                 updated_at=write.received_at,
