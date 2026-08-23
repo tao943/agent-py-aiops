@@ -184,8 +184,10 @@ Agent middleware model-call limit = 2
 `ModelCallLimitMiddleware` 而产生第四次调用。direct 分支不消费预留调用。Rewriter 使用独立、
 有界 timeout；timeout 不延长整个 Chat deadline，且超时后立刻使用原查询。
 
-第一版使用现有配置的 Chat model，不增加 `queryRewriteModel` 配置项。后续只有在真实 Eval
-证明时延不可接受时，才单独评估小模型路由。
+真实 A/B 已证明主 Chat model 的 Rewriter 时延不稳定，因此增加独立的
+`queryRewriteModel` 配置。主 Agent、Validator、Embedding 和 Rerank 配置保持不变；当前
+Rewriter 使用 `qwen3.7-flash`，并复用相同供应商、API Key、Base URL、温度、重试策略和
+模型能力表。配置缺失时为兼容旧项目回退到 `chatModel`。
 
 ## 缓存
 
@@ -216,7 +218,7 @@ Agent middleware model-call limit = 2
 | 必需 token/identifier/否定语义丢失 | 使用原查询 | `rewrite_semantic_guard_failed` |
 | canonical retrieval 失败 | 保持现有 Retrieval 错误行为 | 现有错误码 |
 
-Rewriter timeout 固定为 15.0 秒，并受整个 Chat deadline 约束。Rewriter 降级不伪装为重写
+Rewriter timeout 固定为 25.0 秒，并受整个 Chat deadline 约束。Rewriter 降级不伪装为重写
 成功，也不阻止 canonical retrieval。检索自身失败仍按现有
 `KnowledgeRetrievalError` 处理，不能被 Rewriter 吞掉。
 
@@ -245,6 +247,11 @@ Milvus、CLS 或 Docker。
 Benchmark 增加一组多轮追问派生查询，对比 rewrite off/on 的 Document Recall@1、Recall@3、
 MRR、forbidden Top-1、模型调用数和平均/P95 时延。现有 64 条独立检索查询继续作为 direct
 回归，不应因启用自适应路由而下降。
+
+10 条多轮小样本的门禁使用 Recall@3 ≥ 0.90，避免 0.95 在离散样本上等价于强制 10/10；
+Recall@1 ≥ 0.80、MRR ≥ 0.85、citation completeness = 1.00 保持不变。Forbidden Top-1
+仍要求 ≤ 0.05，不能通过修改标签或放宽门禁消除失败；必须保留失败样本并从重写、初召回、
+融合排序、Rerank 或知识卡重叠中定位原因。
 
 ## 验收标准
 
