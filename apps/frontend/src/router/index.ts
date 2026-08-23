@@ -7,11 +7,13 @@ import {
 
 import WorkspaceLayout from "../layouts/WorkspaceLayout.vue";
 import AuthView from "../views/AuthView.vue";
-import AiopsView from "../views/AiopsView.vue";
+import AgentConfigurationView from "../views/AgentConfigurationView.vue";
 import ChatView from "../views/ChatView.vue";
+import IncidentCenterView from "../views/IncidentCenterView.vue";
+import IncidentWorkspaceView from "../views/IncidentWorkspaceView.vue";
+import IntegrationsView from "../views/IntegrationsView.vue";
 import KnowledgeView from "../views/KnowledgeView.vue";
-import McpView from "../views/McpView.vue";
-import WorkspacePlaceholderView from "../views/WorkspacePlaceholderView.vue";
+import SystemStatusView from "../views/SystemStatusView.vue";
 
 export interface AuthRouteAccess {
   initialize(): Promise<void>;
@@ -22,7 +24,10 @@ export function createAppRouter(auth: AuthRouteAccess): Router {
   const router = createRouter({
     history: typeof window === "undefined" ? createMemoryHistory() : createWebHistory(),
     routes: [
-      { path: "/", redirect: "/chat" },
+      { path: "/", redirect: "/incidents" },
+      { path: "/chat", redirect: "/assistant" },
+      { path: "/aiops", redirect: "/incidents" },
+      { path: "/mcp", redirect: "/integrations" },
       {
         path: "/login",
         name: "login",
@@ -43,32 +48,50 @@ export function createAppRouter(auth: AuthRouteAccess): Router {
         meta: { requiresAuth: true },
         children: [
           {
-            path: "chat",
-            name: "chat",
+            path: "incidents",
+            name: "incidents",
+            component: IncidentCenterView,
+            meta: { title: "事件中心" }
+          },
+          {
+            path: "incidents/:incidentId",
+            name: "incident-workspace",
+            component: IncidentWorkspaceView,
+            meta: { title: "调查工作台" }
+          },
+          {
+            path: "assistant",
+            name: "assistant",
             component: ChatView,
-            meta: { title: "对话" }
+            meta: { title: "运维助手" }
           },
           {
             path: "knowledge",
             name: "knowledge",
             component: KnowledgeView,
-            meta: { title: "知识库" }
+            meta: { title: "知识中心" }
           },
           {
-            path: "aiops",
-            name: "aiops",
-            component: AiopsView,
-            meta: { title: "智能诊断" }
+            path: "agent-config",
+            name: "agent-config",
+            component: AgentConfigurationView,
+            meta: { title: "Agent 配置" }
           },
           {
-            path: "mcp",
-            name: "mcp",
-            component: McpView,
-            meta: { title: "MCP 连接" }
+            path: "integrations",
+            name: "integrations",
+            component: IntegrationsView,
+            meta: { title: "集成中心" }
+          },
+          {
+            path: "system",
+            name: "system",
+            component: SystemStatusView,
+            meta: { title: "系统状态" }
           }
         ]
       },
-      { path: "/:pathMatch(.*)*", redirect: "/chat" }
+      { path: "/:pathMatch(.*)*", redirect: "/incidents" }
     ]
   });
 
@@ -82,7 +105,7 @@ export function createAppRouter(auth: AuthRouteAccess): Router {
       return { path: "/login", query: { redirect: to.fullPath } };
     }
     if (publicOnly && auth.isAuthenticated()) {
-      return { path: "/chat" };
+      return { path: "/incidents" };
     }
     return true;
   });

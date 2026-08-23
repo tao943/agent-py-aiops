@@ -1,29 +1,45 @@
 <script setup lang="ts">
-import { Activity, BookOpen, Cable, MessageSquare } from "lucide-vue-next";
+import {
+  Bot,
+  BookOpen,
+  Cable,
+  HeartPulse,
+  MessageSquare,
+  SearchCheck,
+  Siren
+} from "lucide-vue-next";
 
-defineProps<{ readonly activePath: string }>();
+const props = defineProps<{ readonly activePath: string }>();
 
 const entries = [
-  { icon: MessageSquare, label: "对话", to: "/chat" },
-  { icon: BookOpen, label: "知识库", to: "/knowledge" },
-  { icon: Activity, label: "智能诊断", to: "/aiops" },
-  { icon: Cable, label: "MCP 连接", to: "/mcp" }
+  { icon: Siren, label: "事件中心", to: "/incidents", match: "center" },
+  { icon: SearchCheck, label: "调查工作台", to: "/incidents", match: "investigation" },
+  { icon: MessageSquare, label: "运维助手", to: "/assistant", match: "prefix" },
+  { icon: BookOpen, label: "知识中心", to: "/knowledge", match: "prefix" },
+  { icon: Bot, label: "Agent 配置", to: "/agent-config", match: "prefix" },
+  { icon: Cable, label: "集成中心", to: "/integrations", match: "prefix" },
+  { icon: HeartPulse, label: "系统状态", to: "/system", match: "prefix" }
 ] as const;
+
+function isActive(entry: typeof entries[number]): boolean {
+  if (entry.match === "center") return props.activePath === "/incidents";
+  if (entry.match === "investigation") return props.activePath.startsWith("/incidents/");
+  return props.activePath === entry.to || props.activePath.startsWith(`${entry.to}/`);
+}
 </script>
 
 <template>
   <nav class="workspace-navigation" aria-label="工作区导航">
-    <template v-for="entry in entries" :key="entry.to">
+    <template v-for="entry in entries" :key="`${entry.label}-${entry.to}`">
       <RouterLink
         :to="entry.to"
         class="workspace-navigation__link"
-        :class="{ 'workspace-navigation__link--active': activePath === entry.to }"
-        :aria-current="activePath === entry.to ? 'page' : undefined"
+        :class="{ 'workspace-navigation__link--active': isActive(entry) }"
+        :aria-current="isActive(entry) ? 'page' : undefined"
       >
         <component :is="entry.icon" :size="18" stroke-width="1.8" aria-hidden="true" />
         <span>{{ entry.label }}</span>
       </RouterLink>
-      <slot v-if="entry.to === '/chat' && activePath === '/chat'" name="chat-history" />
     </template>
   </nav>
 </template>

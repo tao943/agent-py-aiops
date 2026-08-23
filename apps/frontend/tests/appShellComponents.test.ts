@@ -31,8 +31,7 @@ describe("application shell components", () => {
 
   it("uses Chinese labels for the active workspace route", () => {
     const wrapper = mount(WorkspaceNavigation, {
-      props: { activePath: "/chat" },
-      slots: { "chat-history": '<div data-testid="chat-history-slot">历史对话插槽</div>' },
+      props: { activePath: "/incidents/incident-1" },
       global: {
         stubs: {
           RouterLink: {
@@ -44,13 +43,18 @@ describe("application shell components", () => {
     });
 
     expect(wrapper.attributes("aria-label")).toBe("工作区导航");
-    expect(wrapper.get('[aria-current="page"]').text()).toContain("对话");
-    expect(wrapper.get('[data-testid="chat-history-slot"]').text()).toBe("历史对话插槽");
-    expect(wrapper.text()).toContain("知识库");
-    expect(wrapper.text()).toContain("智能诊断");
-    const markup = wrapper.html();
-    expect(markup.indexOf("历史对话插槽")).toBeGreaterThan(markup.indexOf('href="/chat"'));
-    expect(markup.indexOf("历史对话插槽")).toBeLessThan(markup.indexOf('href="/knowledge"'));
+    expect(wrapper.get('[aria-current="page"]').text()).toContain("调查工作台");
+    for (const label of [
+      "事件中心",
+      "调查工作台",
+      "运维助手",
+      "知识中心",
+      "Agent 配置",
+      "集成中心",
+      "系统状态"
+    ]) {
+      expect(wrapper.text()).toContain(label);
+    }
   });
 
   it("automatically dismisses global feedback three seconds after the latest message", async () => {

@@ -27,7 +27,29 @@ describe("application shell router", () => {
     await router.push("/register");
     await router.isReady();
 
-    expect(router.currentRoute.value.path).toBe("/chat");
+    expect(router.currentRoute.value.path).toBe("/incidents");
+  });
+
+  it("uses the event center as the authenticated home and registers every workspace", async () => {
+    const router = createAppRouter({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      isAuthenticated: () => true
+    });
+
+    await router.push("/");
+    await router.isReady();
+
+    expect(router.currentRoute.value.path).toBe("/incidents");
+    const paths = router.getRoutes().map((route) => route.path);
+    expect(paths).toEqual(expect.arrayContaining([
+      "/incidents",
+      "/incidents/:incidentId",
+      "/assistant",
+      "/knowledge",
+      "/agent-config",
+      "/integrations",
+      "/system"
+    ]));
   });
 
   it("holds dismissible normalized feedback in application state", () => {

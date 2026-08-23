@@ -92,6 +92,5 @@ function saveChatConfiguration(systemPromptId: string, skillIds: readonly string
 .chat-view__conversation > header p { color: var(--text-tertiary); font-size: 0.72rem; font-weight: 650; margin: 0; }
 .chat-view__conversation > header h2 { font-size: 0.92rem; font-weight: 660; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-view__settings { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; min-width: 0; }
-.chat-view :deep(button:focus), .chat-view :deep(a:focus), .chat-view :deep(input:focus), .chat-view :deep(select:focus), .chat-view :deep(textarea:focus), .chat-view :deep(button:focus-visible), .chat-view :deep(a:focus-visible), .chat-view :deep(input:focus-visible), .chat-view :deep(select:focus-visible), .chat-view :deep(textarea:focus-visible) { outline: none; outline-offset: 0; }
 @media (max-width: 1120px) { .chat-view { grid-template-columns: minmax(0, 1fr); height: auto; } .chat-view__conversation { min-height: 36rem; } .chat-view__settings { grid-column: 1; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto; } }
 </style>
