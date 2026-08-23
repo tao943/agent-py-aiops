@@ -23,5 +23,6 @@ export * from "./openapi";
 export * from "./protected-data";
 export * from "./retrieval";
 export * from "./responses";
+export * from "./recovery";
 export * from "./sse";
 export * from "./vector";

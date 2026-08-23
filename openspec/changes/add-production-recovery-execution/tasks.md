@@ -1,6 +1,6 @@
 ## 1. Contracts and persistence
 
-- [ ] 1.1 Add shared recovery contracts, stable errors, domain types and safe public projections.
+- [x] 1.1 Add shared recovery contracts, stable errors, domain types and safe public projections.
 - [ ] 1.2 Add disabled-by-default recovery configuration and unique diagnostic selectors.
 - [ ] 1.3 Add Alembic revision `202608230001`, ORM models and owner-scoped repository protocols.
 - [ ] 1.4 Implement conflict-safe repository transitions and atomic Intent/Job/Event units of work.
@@ -29,4 +29,3 @@
 - [ ] 5.2 Pass isolated real Compose auto-recovery and approved PostgreSQL blocker acceptance.
 - [ ] 5.3 Update frontend implementation plan to consume full recovery API and use migration `202608230002` for Agent configuration.
 - [ ] 5.4 Sync operator documentation, run strict OpenSpec/Ruff/Pyright/focused pytest gates and record verification evidence.
-

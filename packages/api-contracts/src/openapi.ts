@@ -930,6 +930,87 @@ export const OPENAPI_CONTRACT = {
           ...protectedErrorResponses
         }
       }
+    },
+    "/aiops/diagnostics/{diagnosticId}/recovery-intents": {
+      post: {
+        operationId: "createRecoveryIntent",
+        summary: "Create a governed recovery intent from a completed diagnostic",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/CreateRecoveryIntentRequest")
+        },
+        responses: {
+          "201": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}": {
+      get: {
+        operationId: "getRecoveryIntent",
+        summary: "Read an owned governed recovery intent",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:approve": {
+      post: {
+        operationId: "approveRecoveryIntent",
+        summary: "Approve an owned recovery intent for the confirmed incident",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/ApproveRecoveryIntentRequest")
+        },
+        responses: {
+          "202": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:reject": {
+      post: {
+        operationId: "rejectRecoveryIntent",
+        summary: "Reject an owned recovery intent",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:cancel": {
+      post: {
+        operationId: "cancelRecoveryIntent",
+        summary: "Cancel an owned recovery intent before execution claim",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}/events": {
+      get: {
+        operationId: "listRecoveryIntentEvents",
+        summary: "Read append-only public recovery audit events",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        parameters: [{ name: "afterSequence", in: "query", required: false }],
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryEventListApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
     }
   },
   components: {
@@ -1985,6 +2066,84 @@ export const OPENAPI_CONTRACT = {
           items: { type: "array", items: { $ref: "#/components/schemas/ActiveAlert" } }
         }
       },
+      RecoveryCheck: {
+        type: "object",
+        required: ["key", "status", "safeSummary", "checkedAt"],
+        properties: {
+          key: { type: "string" },
+          status: { enum: ["passed", "failed", "pending"] },
+          safeSummary: { type: "string" },
+          checkedAt: { type: ["string", "null"] }
+        },
+        additionalProperties: false
+      },
+      RecoveryIntent: {
+        type: "object",
+        required: [
+          "id", "incidentId", "diagnosticTaskId", "reportId", "action", "targetKey",
+          "riskTier", "automaticEligible", "approvalRequired", "status",
+          "proposalFingerprint", "createdAt", "approvalExpiresAt", "startedAt",
+          "completedAt", "safeReasonCode", "executionSummary", "verification"
+        ],
+        properties: {
+          id: { type: "string" },
+          incidentId: { type: "string" },
+          diagnosticTaskId: { type: "string" },
+          reportId: { type: "string" },
+          action: { enum: ["restart_compose_service", "terminate_postgres_blocker"] },
+          targetKey: { type: "string" },
+          riskTier: { enum: ["low", "high"] },
+          automaticEligible: { type: "boolean" },
+          approvalRequired: { type: "boolean" },
+          status: {
+            enum: [
+              "proposed", "awaiting_approval", "queued", "revalidating", "executing",
+              "verifying", "recovered", "denied", "rejected", "expired", "cancelled",
+              "verification_failed", "manual_intervention"
+            ]
+          },
+          proposalFingerprint: { type: "string" },
+          createdAt: { type: "string" },
+          approvalExpiresAt: { type: ["string", "null"] },
+          startedAt: { type: ["string", "null"] },
+          completedAt: { type: ["string", "null"] },
+          safeReasonCode: { type: ["string", "null"] },
+          executionSummary: { type: ["string", "null"] },
+          verification: { type: "array", items: { $ref: "#/components/schemas/RecoveryCheck" } }
+        },
+        additionalProperties: false
+      },
+      RecoveryAuditEvent: {
+        type: "object",
+        required: [
+          "sequence", "type", "fromStatus", "toStatus", "safeReasonCode",
+          "safeSummary", "durationMs", "createdAt"
+        ],
+        properties: {
+          sequence: { type: "integer", minimum: 1 },
+          type: { type: "string" },
+          fromStatus: { type: ["string", "null"] },
+          toStatus: { type: "string" },
+          safeReasonCode: { type: ["string", "null"] },
+          safeSummary: { type: "string" },
+          durationMs: { type: ["integer", "null"] },
+          createdAt: { type: "string" }
+        },
+        additionalProperties: false
+      },
+      CreateRecoveryIntentRequest: {
+        type: "object",
+        properties: { note: { type: "string" } },
+        additionalProperties: false
+      },
+      ApproveRecoveryIntentRequest: {
+        type: "object",
+        required: ["incidentIdConfirmation"],
+        properties: { incidentIdConfirmation: { type: "string" } },
+        additionalProperties: false
+      },
+      RecoveryIntentApiResponse: { type: "object" },
+      RecoveryEventListApiResponse: { type: "object" },
       AiopsDiagnosticReport: {
         type: "object",
         required: ["id", "title", "content", "payload", "evidenceIds", "createdAt"],

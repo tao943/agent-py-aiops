@@ -45,10 +45,43 @@ import {
   type VectorChunkMetadata,
   type ToolCallSseEvent,
   type ToolCallAudit,
-  type SseEvent
+  type SseEvent,
+  type RecoveryIntent
 } from "../src";
 
 describe("HTTP response contracts", () => {
+  it("publishes a closed safe production recovery contract", () => {
+    const intent: RecoveryIntent = {
+      id: "recovery_1",
+      incidentId: "incident_1",
+      diagnosticTaskId: "diagnostic_1",
+      reportId: "report_1",
+      action: "restart_compose_service",
+      targetKey: "live-eval-order-api",
+      riskTier: "low",
+      automaticEligible: true,
+      approvalRequired: false,
+      status: "queued",
+      proposalFingerprint: "a".repeat(64),
+      createdAt: "2026-08-23T08:00:00Z",
+      approvalExpiresAt: null,
+      startedAt: null,
+      completedAt: null,
+      safeReasonCode: null,
+      executionSummary: null,
+      verification: []
+    };
+
+    expect(intent.status).toBe("queued");
+    expect(API_ERROR_CODES.RECOVERY_EXECUTION_UNCERTAIN.httpStatus).toBe(409);
+    expect(OPENAPI_CONTRACT.paths["/aiops/recovery-intents/{intentId}"]?.get).toBeDefined();
+    expect(OPENAPI_CONTRACT.components.schemas.RecoveryIntent).toBeDefined();
+    const serialized = JSON.stringify(intent).toLowerCase();
+    for (const forbidden of ["command", "composepath", "connectionstring", "sql", "pid", "exception"]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
   it("publishes only adaptive and manual chat memory modes", () => {
     expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.mode).toEqual({
       enum: ["adaptive", "manual"]
