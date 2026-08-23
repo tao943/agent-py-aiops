@@ -31,6 +31,22 @@ deterministic rules MUST instantiate a code-owned trusted template and MUST NOT 
 - **WHEN** a tool result contains password, token, authorization, secret, or API-key shaped fields
 - **THEN** Fact Adapter MUST omit those fields from facts, checkpoints, prompts, and public API payloads
 
+### Requirement: LLM Adjudicator output is structured and safely diagnosable
+
+Workflow SHALL request the provider-supported structured-output contract for each bounded Adjudicator batch.
+It SHALL validate the returned hypothesis IDs, Evidence IDs, complete batch coverage, transition legality, and
+causal coverage locally. It SHALL persist only allowlisted rejection codes and MUST NOT persist raw model output,
+provider exception text, hidden reasoning, or response fragments.
+
+#### Scenario: Model returns a syntactically valid but ungrounded batch
+- **WHEN** an Adjudicator response references an unknown hypothesis or Evidence ID
+- **THEN** Workflow MUST reject the complete batch without applying a partial transition
+- **AND** it MUST record `unknown_identifier` and `incomplete_batch` without recording model content
+
+#### Scenario: Format correction cannot complete before the deadline
+- **WHEN** the first response is rejected and the soft deadline prevents the correction attempt
+- **THEN** Workflow MUST record `soft_deadline_exceeded` and fail closed without a root-cause decision
+
 ### Requirement: Validation is deterministic first and risk-routed
 
 Workflow SHALL always run Deterministic Validator. It SHALL call LLM Validator only when a code-computed risk
@@ -56,6 +72,12 @@ score rules, or fixture values.
 - **WHEN** one request has HTTP 504, upstream connect success, read deadline elapsed, independently healthy upstream and gateway probes, and an incident-scoped upstream-timeout event
 - **THEN** Workflow SHALL support upstream response timeout
 - **AND** every closed competitor MUST cite the direct current-task Evidence that closes it
+
+#### Scenario: PostgreSQL row-lock facts form a cross-tool causal chain
+- **WHEN** current-task public Evidence confirms a PostgreSQL Lock wait, a blocker-to-waiter edge, database reachability, a timed-out business probe, and matching contention and timeout log events
+- **THEN** Workflow SHALL support PostgreSQL row-lock blocking
+- **AND** it SHALL refute connectivity failure and an unlocked slow query using their direct counter-evidence
+- **AND** it SHALL project separate trigger, mechanism, and impact observations
 
 #### Scenario: One required fact is absent or belongs to another task
 - **WHEN** any required fact is absent, contradicted, or its Evidence ID is not owned by the current task

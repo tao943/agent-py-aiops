@@ -176,6 +176,57 @@ def _service(repositories: object, provider: object = object()) -> AiopsDiagnost
     )
 
 
+def test_adjudicator_payload_classifies_unknown_identifiers_without_model_text() -> None:
+    assessments = (
+        HypothesisAssessment(
+            hypothesis_id="cause-a",
+            disposition="unresolved",
+            evidence_ids=(),
+            reason_code="awaiting_public_evidence",
+            assessment_source="deterministic",
+        ),
+    )
+
+    with pytest.raises(ValueError) as captured:
+        diagnostics_module._apply_llm_adjudication_payload(  # pyright: ignore[reportPrivateUsage]
+            assessments=assessments,
+            text=json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "hypothesisId": "foreign-cause",
+                            "disposition": "supported",
+                            "evidenceIds": ["foreign-evidence"],
+                            "reasonCode": "must_not_be_persisted",
+                        }
+                    ]
+                }
+            ),
+            unresolved_hypothesis_ids={"cause-a"},
+            public_evidence_ids={"ev-a"},
+        )
+
+    assert getattr(captured.value, "safe_codes", ()) == (
+        "unknown_identifier",
+        "incomplete_batch",
+    )
+
+
+def test_adjudicator_payload_classifies_invalid_json_without_leaking_content() -> None:
+    sentinel = "SENSITIVE_ADJUDICATOR_SENTINEL"
+
+    with pytest.raises(ValueError) as captured:
+        diagnostics_module._apply_llm_adjudication_payload(  # pyright: ignore[reportPrivateUsage]
+            assessments=(),
+            text=f"not-json-{sentinel}",
+            unresolved_hypothesis_ids=set(),
+            public_evidence_ids=set(),
+        )
+
+    assert getattr(captured.value, "safe_codes", ()) == ("json_parse_failed",)
+    assert sentinel not in str(captured.value)
+
+
 def _order_pool_hypotheses() -> list[dict[str, object]]:
     return [
         {"id": hypothesis_id, "description": hypothesis_id.replace("_", " ")}
@@ -2720,6 +2771,106 @@ async def test_v4_adjudicator_retries_one_invalid_batch_within_model_budget(
     assert assessments[0]["disposition"] == "supported"
     assert payload["adjudicationAttempts"] == 2
     assert payload["adjudicationErrorCategory"] == "corrected_invalid_batch"
+
+
+@pytest.mark.asyncio
+async def test_v4_adjudicator_uses_provider_structured_output_and_persists_safe_codes(
+    migrated_database_url: str,
+) -> None:
+    sentinel = "SENSITIVE_RAW_ADJUDICATOR_SENTINEL"
+
+    class StructuredInvoker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, prompt: object) -> dict[str, object]:
+            del prompt
+            self.calls += 1
+            return {
+                "raw": sentinel,
+                "parsed": None,
+                "parsing_error": ValueError(sentinel),
+            }
+
+    class StructuredModel:
+        def __init__(self) -> None:
+            self.invoker = StructuredInvoker()
+            self.methods: list[object] = []
+
+        def with_structured_output(
+            self,
+            _schema: type[object],
+            **kwargs: object,
+        ) -> StructuredInvoker:
+            self.methods.append(kwargs.get("method"))
+            assert kwargs.get("include_raw") is True
+            return self.invoker
+
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            raise AssertionError("raw model must not be used when structured output is available")
+
+    class Provider:
+        structured_output_method = "json_mode"
+
+        def __init__(self) -> None:
+            self.model = StructuredModel()
+
+        def create_chat_model(self) -> StructuredModel:
+            return self.model
+
+    engine = create_memory_engine(migrated_database_url)
+    try:
+        repositories = create_sqlalchemy_memory_repositories(
+            create_memory_session_factory(engine)
+        )
+        task = await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id="v4-adjudicator-safe-structured-errors",
+            status="running",
+            query="Resolve one cause.",
+            input_payload={},
+        )
+        provider = Provider()
+        await _service(repositories, provider)._hypothesis_adjudicator(  # pyright: ignore[reportPrivateUsage]
+            cast(
+                Any,
+                {
+                    "owner_user_id": task.owner_user_id,
+                    "task_id": task.id,
+                    "public_hypotheses": [
+                        {"id": "cause-a", "description": "First cause."}
+                    ],
+                    "hypothesis_assessments": _initial_hypothesis_assessments(
+                        [{"id": "cause-a"}]
+                    ),
+                    "diagnostic_facts": [
+                        {
+                            "key": "InspectA.signal",
+                            "value": True,
+                            "evidenceId": "ev-a",
+                            "sourceTool": "InspectPostgres",
+                            "quality": "direct",
+                            "public": True,
+                        }
+                    ],
+                    "observation_decisions": [],
+                },
+            )
+        )
+        steps = await repositories.diagnostics.list_steps(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+        )
+        payload = steps[-1].payload
+    finally:
+        await engine.dispose()
+
+    assert provider.model.methods == ["json_mode"]
+    assert provider.model.invoker.calls == 2
+    assert payload["adjudicationErrorCategory"] == "retry_exhausted"
+    assert payload["adjudicationErrorCodes"] == ["schema_invalid"]
+    assert sentinel not in json.dumps(payload, ensure_ascii=False)
 
 
 @pytest.mark.asyncio

@@ -66,10 +66,9 @@ class LiveCompositeEvidenceMcpClient:
         records = parse_cls_search_records(output)
         matching = tuple(record for record in records if _matches_scope(record, scope))
         return {
-            "benchmarkEvidenceId": _cls_evidence_id(scope.scenario_id),
             "recordCount": len(matching),
             "rejectedRecordCount": len(records) - len(matching),
-            "records": matching[:10],
+            "records": tuple(_public_cls_record(record) for record in matching[:10]),
         }
 
     async def get_langchain_tools(self) -> list[Any]:
@@ -193,15 +192,24 @@ def _matches_scope(record: Mapping[str, object], scope: LiveClsScope) -> bool:
     )
 
 
-def _cls_evidence_id(scenario_id: str) -> str:
-    identifiers = {
-        "APY-LIVE-PG-LOCK-001": "cls-live-request-timeout",
-        "APY-LIVE-PG-DEADLOCK-001": "cls-live-database-deadlock",
-        "APY-LIVE-REDIS-MAXCLIENTS-001": "cls-live-redis-connection-rejected",
-        "APY-LIVE-NGINX-TIMEOUT-001": "cls-live-nginx-upstream-timeout",
-        "APY-LIVE-ORDER-POOL-LEAK-001": "cls-order-connection-lifecycle",
+_PUBLIC_CLS_FIELDS = frozenset(
+    {
+        "event",
+        "service",
+        "component",
+        "generation",
+        "timestamp",
+        "level",
+        "environment",
+        "request_id",
     }
-    try:
-        return identifiers[scenario_id]
-    except KeyError as exc:
-        raise McpClientError("CLS Live scenario is not supported.") from exc
+)
+
+
+def _public_cls_record(record: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key in _PUBLIC_CLS_FIELDS
+        and (value is None or isinstance(value, str | int | float | bool))
+    }

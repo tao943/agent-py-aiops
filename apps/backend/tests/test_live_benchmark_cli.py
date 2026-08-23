@@ -489,6 +489,7 @@ def test_cli_builds_existing_postgres_runtime_through_registry() -> None:
     assert components.driver_name == "postgres_lock_wait"
     assert isinstance(components.driver, PostgresLockScenarioDriver)
     assert isinstance(components.recovery, PostgresLiveRecoveryService)
+    assert components.cls_record_provider is not None
 
 
 def test_cli_builds_postgres_deadlock_runtime_through_registry() -> None:

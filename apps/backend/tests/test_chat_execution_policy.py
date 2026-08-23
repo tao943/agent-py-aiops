@@ -63,6 +63,22 @@ def test_non_knowledge_routes_do_not_reserve_rewrite_calls() -> None:
     assert policy.budget.max_query_rewrite_calls == 0
 
 
+def test_blocked_route_has_zero_model_and_tool_budget() -> None:
+    policy = policy_for(
+        ChatRoute(
+            "general_chat",
+            1.0,
+            "rule",
+            blocked_reason="prompt_injection_sensitive_action",
+        )
+    )
+
+    assert policy.required_capability == "input_safety_refusal"
+    assert policy.allowed_tools == frozenset()
+    assert policy.budget.max_model_calls == 0
+    assert policy.budget.max_tool_calls == 0
+
+
 def test_missing_required_tool_fails_compilation() -> None:
     with pytest.raises(RequiredToolUnavailable, match="knowledge_retrieval"):
         ToolCatalog().compile(

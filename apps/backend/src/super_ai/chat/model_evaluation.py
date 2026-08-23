@@ -94,6 +94,26 @@ class ConversationModelEvalRecorder(Protocol):
     async def fail(self, envelope: EvaluationRunEnvelope) -> object: ...
 
 
+class InjectedTimeoutChatModel:
+    """Evaluation-only model boundary that never delegates to a provider."""
+
+    model_name = "evaluation-injected-timeout"
+
+    async def ainvoke(self, input: object) -> object:
+        del input
+        raise TimeoutError("evaluation_injected_timeout")
+
+
+class _CountingChatModel:
+    def __init__(self, delegate: ChatModel) -> None:
+        self._delegate = delegate
+        self.call_count = 0
+
+    async def ainvoke(self, input: object) -> object:
+        self.call_count += 1
+        return await self._delegate.ainvoke(input)
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationModelScenarioResult:
     id: str
@@ -121,6 +141,9 @@ class ConversationModelEvalResult:
     degraded_fallback_accuracy: float
     prompt_injection_safety: float
     model_call_count: int
+    model_boundary_attempt_count: int
+    scenario_attempt_count: int
+    injected_failure_count: int
     failures: tuple[str, ...]
     scenario_results: tuple[ConversationModelScenarioResult, ...]
     passed: bool
@@ -135,6 +158,10 @@ class ConversationModelEvalResult:
             "degradedFallbackAccuracy": self.degraded_fallback_accuracy,
             "promptInjectionSafety": self.prompt_injection_safety,
             "modelCallCount": self.model_call_count,
+            "providerCallCount": self.model_call_count,
+            "modelBoundaryAttemptCount": self.model_boundary_attempt_count,
+            "scenarioAttemptCount": self.scenario_attempt_count,
+            "injectedFailureCount": self.injected_failure_count,
             "failures": list(self.failures),
             "passed": self.passed,
             "databasePending": self.database_pending,
@@ -194,6 +221,10 @@ async def run_conversation_model_eval(
             "degradedFallbackAccuracy": result.degraded_fallback_accuracy,
             "promptInjectionSafety": result.prompt_injection_safety,
             "modelCallCount": result.model_call_count,
+            "providerCallCount": result.model_call_count,
+            "modelBoundaryAttemptCount": result.model_boundary_attempt_count,
+            "scenarioAttemptCount": result.scenario_attempt_count,
+            "injectedFailureCount": result.injected_failure_count,
         },
         result_payload={
             "failures": list(result.failures),
@@ -217,6 +248,9 @@ async def run_conversation_model_eval(
         degraded_fallback_accuracy=result.degraded_fallback_accuracy,
         prompt_injection_safety=result.prompt_injection_safety,
         model_call_count=result.model_call_count,
+        model_boundary_attempt_count=result.model_boundary_attempt_count,
+        scenario_attempt_count=result.scenario_attempt_count,
+        injected_failure_count=result.injected_failure_count,
         failures=result.failures,
         scenario_results=result.scenario_results,
         passed=result.passed,
@@ -229,13 +263,19 @@ async def run_conversation_model_eval(
 async def _evaluate_model_scenarios(
     *, model: ChatModel, bridge: ConversationModelEvalBridge
 ) -> ConversationModelEvalResult:
-    router = ChatIntentRouter(LlmStructuredRouterModel(model))
+    provider = _CountingChatModel(model)
+    router = ChatIntentRouter(LlmStructuredRouterModel(provider))
+    injected_timeout = InjectedTimeoutChatModel()
     results: list[ConversationModelScenarioResult] = []
-    model_call_count = 0
+    model_boundary_attempt_count = 0
+    injected_failure_count = 0
     for scenario in MODEL_SCENARIOS:
-        model_call_count += 1
         if scenario.kind in {"route", "prompt_injection"}:
             route = await router.route(scenario.user_content)
+            if route.source == "model" or (
+                route.source == "fallback" and route.blocked_reason is None
+            ):
+                model_boundary_attempt_count += 1
             if scenario.kind == "prompt_injection":
                 safe = (
                     route.intent not in {"start_diagnostic", "recovery_request"}
@@ -267,8 +307,15 @@ async def _evaluate_model_scenarios(
             continue
 
         structured = await bridge.read_structured(scenario.id)
+        explanation_model: ChatModel | InjectedTimeoutChatModel
+        if scenario.id == "explanation_timeout":
+            explanation_model = injected_timeout
+            injected_failure_count += 1
+        else:
+            explanation_model = provider
+        model_boundary_attempt_count += 1
         try:
-            response = await model.ainvoke(
+            response = await explanation_model.ainvoke(
                 _safe_explanation_prompt(scenario.id, structured)
             )
             public_text = _response_text(response)
@@ -298,11 +345,20 @@ async def _evaluate_model_scenarios(
                     ),
                 )
             )
-    return _aggregate_results(tuple(results), model_call_count=model_call_count)
+    return _aggregate_results(
+        tuple(results),
+        model_call_count=provider.call_count,
+        model_boundary_attempt_count=model_boundary_attempt_count,
+        injected_failure_count=injected_failure_count,
+    )
 
 
 def _aggregate_results(
-    results: tuple[ConversationModelScenarioResult, ...], *, model_call_count: int
+    results: tuple[ConversationModelScenarioResult, ...],
+    *,
+    model_call_count: int,
+    model_boundary_attempt_count: int,
+    injected_failure_count: int,
 ) -> ConversationModelEvalResult:
     by_id = {item.id: item for item in results}
     route_ids = ("ambiguous_incident", "ambiguous_knowledge")
@@ -322,6 +378,9 @@ def _aggregate_results(
         ),
         prompt_injection_safety=_rate([by_id["prompt_injection"].passed]),
         model_call_count=model_call_count,
+        model_boundary_attempt_count=model_boundary_attempt_count,
+        scenario_attempt_count=len(results),
+        injected_failure_count=injected_failure_count,
         failures=failures,
         scenario_results=results,
         passed=not failures,

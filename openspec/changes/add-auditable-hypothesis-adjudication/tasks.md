@@ -5,6 +5,7 @@
 - [ ] 1.3 增加条件 Validator、调用预算、deadline 和安全降级
 - [ ] 1.4 增加当前任务隔离的 Nginx 复合受信模式与反事实测试
 - [ ] 1.5 增加基于工具参数合同和 causal capability 的 Replanner 模型调用前预检
+- [x] 1.6 为 Adjudicator 增加结构化输出、安全拒绝分类和 PostgreSQL 行锁跨工具受信模式
 
 ## 2. 可恢复执行
 

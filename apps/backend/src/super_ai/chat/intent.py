@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from super_ai.chat.input_safety import evaluate_chat_input_safety
 from super_ai.llm import ChatModel
 
 ChatIntent = Literal[
@@ -46,6 +47,7 @@ class ChatRoute:
     incident_id: str | None = None
     diagnostic_task_id: str | None = None
     needs_clarification: bool = False
+    blocked_reason: str | None = None
 
 
 class StructuredRouterModel(Protocol):
@@ -105,6 +107,14 @@ class ChatIntentRouter:
 
     async def route(self, content: str) -> ChatRoute:
         normalized = content.strip()
+        safety = evaluate_chat_input_safety(normalized)
+        if safety.blocked:
+            return ChatRoute(
+                "general_chat",
+                1.0,
+                "rule",
+                blocked_reason=safety.reason_code,
+            )
         explicit = _route_explicit_identifiers(normalized)
         if explicit is not None:
             return explicit

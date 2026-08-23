@@ -16,6 +16,7 @@ from super_ai.aiops.adjudication import (
 
 _NGINX_PATTERN_ID = "nginx_upstream_read_timeout"
 _ORDER_POOL_PATTERN_ID = "order_connection_checkout_without_checkin"
+_POSTGRES_LOCK_PATTERN_ID = "postgres_row_lock_blocking"
 _GATEWAY_HEALTH_MAX_LATENCY_MS = 250
 _REQUIRED_HYPOTHESES = frozenset(
     {
@@ -32,6 +33,13 @@ _ORDER_POOL_REQUIRED_HYPOTHESES = frozenset(
         "order_slow_statement",
         "order_database_lock_wait",
         "order_database_unreachable",
+    }
+)
+_POSTGRES_LOCK_REQUIRED_HYPOTHESES = frozenset(
+    {
+        "postgres_lock_blocking",
+        "postgres_slow_query_without_lock",
+        "postgres_connectivity_failure",
     }
 )
 
@@ -64,6 +72,13 @@ def resolve_trusted_patterns(
         return _resolve_nginx_timeout(ordered, by_id, public)
     if _ORDER_POOL_REQUIRED_HYPOTHESES.issubset(by_id):
         return _resolve_order_pool_lifecycle(
+            ordered,
+            by_id,
+            public,
+            evidence_provenance=evidence_provenance,
+        )
+    if _POSTGRES_LOCK_REQUIRED_HYPOTHESES.issubset(by_id):
+        return _resolve_postgres_lock(
             ordered,
             by_id,
             public,
@@ -298,6 +313,186 @@ def _order_pool_provenance_is_valid(
         and len({item.task_id for item in selected}) == 1
         and len({item.source_fingerprint for item in selected}) == len(selected)
     )
+
+
+def _resolve_postgres_lock(
+    ordered: tuple[HypothesisAssessment, ...],
+    by_id: dict[str, HypothesisAssessment],
+    public: Sequence[DiagnosticFact],
+    *,
+    evidence_provenance: Mapping[str, TrustedEvidenceProvenance] | None,
+) -> TrustedPatternResolution:
+    matched = _match_postgres_lock(public)
+    if matched is None or not _order_pool_provenance_is_valid(
+        public,
+        matched,
+        evidence_provenance=evidence_provenance,
+    ):
+        return TrustedPatternResolution(ordered, (), ())
+    sessions_id, graph_id, health_id, cls_id = matched
+    transitions: tuple[tuple[str, Disposition, tuple[str, ...], str], ...] = (
+        (
+            "postgres_lock_blocking",
+            "supported",
+            (sessions_id, graph_id, health_id, cls_id),
+            "trusted_postgres_row_lock_blocking",
+        ),
+        (
+            "postgres_slow_query_without_lock",
+            "refuted",
+            (sessions_id, graph_id),
+            "confirmed_lock_wait_rules_out_unlocked_slow_query",
+        ),
+        (
+            "postgres_connectivity_failure",
+            "refuted",
+            (health_id,),
+            "database_reachable_during_lock_wait",
+        ),
+    )
+    resolved = dict(by_id)
+    for hypothesis_id, disposition, evidence_ids, reason_code in transitions:
+        resolved[hypothesis_id] = apply_deterministic_transition(
+            resolved[hypothesis_id],
+            disposition=disposition,
+            evidence_ids=evidence_ids,
+            reason_code=reason_code,
+        )
+    common: dict[str, object] = {
+        "supports": ["postgres_lock_blocking"],
+        "refutes": [],
+        "assessmentSource": "deterministic",
+        "causalRoleOrigin": "trusted_compound_pattern",
+    }
+    observations: tuple[dict[str, object], ...] = (
+        {
+            **common,
+            "purpose": "Establish the transaction-held row-lock trigger.",
+            "summary": (
+                "A blocker transaction is the lock holder for the order row lock while "
+                "PostgreSQL reports a confirmed blocker-to-waiter edge."
+            ),
+            "evidenceIds": [sessions_id, graph_id],
+            "causalRole": "trigger",
+        },
+        {
+            **common,
+            "purpose": "Establish the PostgreSQL lock-wait mechanism.",
+            "summary": (
+                "The confirmed blocking edge causes the order status update waiting session "
+                "to wait on the held row lock; PostgreSQL reports a Lock wait event while "
+                "the incident log records database contention."
+            ),
+            "evidenceIds": [sessions_id, graph_id, cls_id],
+            "causalRole": "mechanism",
+        },
+        {
+            **common,
+            "purpose": "Establish the business request timeout impact.",
+            "summary": (
+                "The database remains reachable, but the blocked business probe times out "
+                "and the incident log records the corresponding request timeout."
+            ),
+            "evidenceIds": [health_id, cls_id],
+            "causalRole": "impact",
+        },
+    )
+    return TrustedPatternResolution(
+        tuple(resolved[item.hypothesis_id] for item in ordered),
+        observations,
+        (_POSTGRES_LOCK_PATTERN_ID,),
+    )
+
+
+def _match_postgres_lock(
+    facts: Sequence[DiagnosticFact],
+) -> tuple[str, str, str, str] | None:
+    wait_event = _one_fact(
+        facts,
+        "InspectPostgresSessions.waitEventType",
+        "Lock",
+    )
+    waiting_operation = _one_fact(
+        facts,
+        "InspectPostgresSessions.waitingOperation",
+        "order_status_update",
+    )
+    blocker_edge = _one_fact(
+        facts,
+        "InspectPostgresLockGraph.blockerEdgeConfirmed",
+        True,
+    )
+    blocker_role = _one_fact(
+        facts,
+        "InspectPostgresLockGraph.blockerRole",
+        "transaction",
+    )
+    locked_resource = _one_fact(
+        facts,
+        "InspectPostgresLockGraph.lockedResource",
+        "order_row",
+    )
+    reachable = _one_fact(
+        facts,
+        "VerifyServiceHealth.databaseReachable",
+        True,
+    )
+    probe_timeout = _one_fact(
+        facts,
+        "VerifyServiceHealth.businessProbeTimedOut",
+        True,
+    )
+    cls_contention = _one_contains_fact(
+        facts,
+        "SearchLog.records.event",
+        "database_contention",
+    )
+    cls_timeout = _one_contains_fact(
+        facts,
+        "SearchLog.records.event",
+        "request_timeout",
+    )
+    required = (
+        wait_event,
+        waiting_operation,
+        blocker_edge,
+        blocker_role,
+        locked_resource,
+        reachable,
+        probe_timeout,
+        cls_contention,
+        cls_timeout,
+    )
+    if any(item is None for item in required):
+        return None
+    assert wait_event is not None
+    assert waiting_operation is not None
+    assert blocker_edge is not None
+    assert blocker_role is not None
+    assert locked_resource is not None
+    assert reachable is not None
+    assert probe_timeout is not None
+    assert cls_contention is not None
+    assert cls_timeout is not None
+    sessions_ids = {wait_event.evidence_id, waiting_operation.evidence_id}
+    graph_ids = {
+        blocker_edge.evidence_id,
+        blocker_role.evidence_id,
+        locked_resource.evidence_id,
+    }
+    health_ids = {reachable.evidence_id, probe_timeout.evidence_id}
+    cls_ids = {cls_contention.evidence_id, cls_timeout.evidence_id}
+    if any(len(items) != 1 for items in (sessions_ids, graph_ids, health_ids, cls_ids)):
+        return None
+    evidence_ids = (
+        next(iter(sessions_ids)),
+        next(iter(graph_ids)),
+        next(iter(health_ids)),
+        next(iter(cls_ids)),
+    )
+    if len(set(evidence_ids)) != 4:
+        return None
+    return evidence_ids
 
 
 def _match_order_pool_lifecycle(

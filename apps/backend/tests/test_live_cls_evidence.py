@@ -13,6 +13,7 @@ from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
     LiveClsRecordProvider,
     McpClsSearcher,
+    PostgresLockClsRecordProvider,
     build_cls_search_arguments,
     build_live_cls_records,
 )
@@ -35,6 +36,54 @@ OBSERVATION = LiveFaultObservation(
     (LiveCheck("waiter_has_lock_event", True), LiveCheck("blocker_edge_confirmed", True)),
 )
 NOW = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_provider_requires_all_three_observation_checks() -> None:
+    provider = PostgresLockClsRecordProvider()
+    incomplete = LiveFaultObservation(
+        SCENARIO.id,
+        (
+            LiveCheck("waiter_has_lock_event", True),
+            LiveCheck("blocker_edge_confirmed", True),
+            LiveCheck("business_probe_timed_out", False),
+        ),
+    )
+
+    with pytest.raises(LiveInfrastructureError) as captured:
+        await provider.records(
+            identity=IDENTITY,
+            scenario=SCENARIO,
+            observation=incomplete,
+            now=NOW,
+        )
+
+    assert captured.value.category == "cls_observation_unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_provider_emits_timeout_after_confirmed_observation() -> None:
+    observation = LiveFaultObservation(
+        SCENARIO.id,
+        (
+            LiveCheck("waiter_has_lock_event", True),
+            LiveCheck("blocker_edge_confirmed", True),
+            LiveCheck("business_probe_timed_out", True),
+        ),
+    )
+
+    records = await PostgresLockClsRecordProvider().records(
+        identity=IDENTITY,
+        scenario=SCENARIO,
+        observation=observation,
+        now=NOW,
+    )
+
+    assert {record["event"] for record in records} == {
+        "request_received",
+        "database_contention",
+        "request_timeout",
+    }
 
 
 def test_cls_search_arguments_are_derived_from_the_exact_live_scope() -> None:
@@ -283,7 +332,7 @@ async def test_order_pool_preparer_rejects_cross_run_provider_records() -> None:
     (
         (
             "APY-LIVE-PG-LOCK-001",
-            {"request_received", "database_contention", "alert_fired"},
+            {"request_received", "database_contention", "request_timeout"},
         ),
         (
             "APY-LIVE-PG-DEADLOCK-001",

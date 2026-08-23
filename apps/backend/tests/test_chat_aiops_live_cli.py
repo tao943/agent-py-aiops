@@ -27,6 +27,13 @@ def parse(*extra: str):  # type: ignore[no-untyped-def]
     )
 
 
+def test_chat_live_cli_supplies_disabled_auto_closure_contract() -> None:
+    arguments = parse()
+
+    assert arguments.auto_closure is False
+    assert arguments.resume is False
+
+
 @pytest.mark.asyncio
 async def test_chat_live_cli_requires_both_explicit_external_call_flags(
     monkeypatch: pytest.MonkeyPatch,

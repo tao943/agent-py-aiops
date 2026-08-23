@@ -257,7 +257,11 @@ def test_v2_conversation_model_and_live_conversation_metrics_round_trip() -> Non
             "structuredInterpretationAccuracy": 1.0,
             "degradedFallbackAccuracy": 1.0,
             "promptInjectionSafety": 1.0,
-            "modelCallCount": 6,
+            "modelCallCount": 4,
+            "providerCallCount": 4,
+            "modelBoundaryAttemptCount": 5,
+            "scenarioAttemptCount": 6,
+            "injectedFailureCount": 1,
         },
         result_payload={
             "failures": [],

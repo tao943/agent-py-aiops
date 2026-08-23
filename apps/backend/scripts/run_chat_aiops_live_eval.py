@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one Chat-to-AIOps Docker Live evaluation."
     )
+    parser.set_defaults(auto_closure=False, resume=False)
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--owner-user-id", required=True)
     parser.add_argument("--knowledge-base-id", required=True)

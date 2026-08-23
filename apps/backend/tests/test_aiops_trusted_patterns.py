@@ -48,6 +48,19 @@ _ORDER_POOL_HYPOTHESES = (
     "order_database_lock_wait",
     "order_database_unreachable",
 )
+_POSTGRES_LOCK_SCENARIO = (
+    Path(__file__).resolve().parents[3]
+    / "benchmarks"
+    / "agentpy"
+    / "live"
+    / "APY-LIVE-PG-LOCK-001"
+)
+
+_POSTGRES_LOCK_HYPOTHESES = (
+    "postgres_lock_blocking",
+    "postgres_slow_query_without_lock",
+    "postgres_connectivity_failure",
+)
 
 
 def _assessments() -> tuple[HypothesisAssessment, ...]:
@@ -250,6 +263,161 @@ def _order_pool_provenance(
         )
         for evidence_id, fact in by_evidence.items()
     }
+
+
+def _postgres_lock_assessments() -> tuple[HypothesisAssessment, ...]:
+    return tuple(
+        HypothesisAssessment(
+            hypothesis_id=hypothesis_id,
+            disposition="unresolved",
+            evidence_ids=(),
+            reason_code="awaiting_public_evidence",
+            assessment_source="deterministic",
+        )
+        for hypothesis_id in _POSTGRES_LOCK_HYPOTHESES
+    )
+
+
+def _postgres_lock_facts() -> tuple[DiagnosticFact, ...]:
+    return (
+        _fact(
+            "InspectPostgresSessions.waitEventType",
+            "Lock",
+            "ev-sessions",
+            "InspectPostgresSessions",
+        ),
+        _fact(
+            "InspectPostgresSessions.waitingOperation",
+            "order_status_update",
+            "ev-sessions",
+            "InspectPostgresSessions",
+        ),
+        _fact(
+            "InspectPostgresLockGraph.blockerEdgeConfirmed",
+            True,
+            "ev-lock-graph",
+            "InspectPostgresLockGraph",
+        ),
+        _fact(
+            "InspectPostgresLockGraph.blockerRole",
+            "transaction",
+            "ev-lock-graph",
+            "InspectPostgresLockGraph",
+        ),
+        _fact(
+            "InspectPostgresLockGraph.lockedResource",
+            "order_row",
+            "ev-lock-graph",
+            "InspectPostgresLockGraph",
+        ),
+        _fact(
+            "VerifyServiceHealth.databaseReachable",
+            True,
+            "ev-health",
+            "VerifyServiceHealth",
+        ),
+        _fact(
+            "VerifyServiceHealth.businessProbeTimedOut",
+            True,
+            "ev-health",
+            "VerifyServiceHealth",
+        ),
+        _fact(
+            "SearchLog.records.event",
+            ("request_received", "database_contention", "request_timeout"),
+            "ev-cls",
+            "SearchLog",
+        ),
+    )
+
+
+def _postgres_lock_provenance() -> dict[str, TrustedEvidenceProvenance]:
+    by_evidence = {fact.evidence_id: fact for fact in _postgres_lock_facts()}
+    return {
+        evidence_id: TrustedEvidenceProvenance(
+            evidence_id=evidence_id,
+            owner_user_id="owner-postgres-lock",
+            task_id="task-postgres-lock",
+            source_fingerprint=f"source:{fact.source_tool}",
+            source_domain=("log" if fact.source_tool == "SearchLog" else "runtime"),
+            tool_name=fact.source_tool,
+        )
+        for evidence_id, fact in by_evidence.items()
+    }
+
+
+def test_postgres_lock_pattern_closes_cross_tool_causal_chain() -> None:
+    facts = _postgres_lock_facts()
+
+    result = resolve_trusted_patterns(
+        assessments=_postgres_lock_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_postgres_lock_provenance(),
+    )
+
+    by_id = {item.hypothesis_id: item for item in result.assessments}
+    assert by_id["postgres_lock_blocking"].disposition == "supported"
+    assert by_id["postgres_slow_query_without_lock"].disposition == "refuted"
+    assert by_id["postgres_connectivity_failure"].disposition == "refuted"
+    assert result.matched_pattern_ids == ("postgres_row_lock_blocking",)
+    assert [item["causalRole"] for item in result.observations] == [
+        "trigger",
+        "mechanism",
+        "impact",
+    ]
+
+
+def test_postgres_lock_pattern_uses_public_semantics_for_complete_live_score() -> None:
+    facts = _postgres_lock_facts()
+    result = resolve_trusted_patterns(
+        assessments=_postgres_lock_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_postgres_lock_provenance(),
+    )
+    summaries = tuple(str(item["summary"]) for item in result.observations)
+    decision = RootCauseDecision(
+        component="postgresql",
+        mechanism="row_lock_blocking",
+        trigger=summaries[0],
+        causal_chain=summaries,
+        evidence_ids=tuple(sorted(fact.evidence_id for fact in facts)),
+        confidence=0.95,
+    )
+
+    semantic = score_root_cause_semantics(
+        decision,
+        load_live_oracle(_POSTGRES_LOCK_SCENARIO),
+    )
+
+    assert semantic.total == 20
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    (
+        "InspectPostgresSessions.waitEventType",
+        "InspectPostgresLockGraph.blockerEdgeConfirmed",
+        "VerifyServiceHealth.databaseReachable",
+        "VerifyServiceHealth.businessProbeTimedOut",
+        "SearchLog.records.event",
+    ),
+)
+def test_postgres_lock_pattern_fails_closed_when_required_fact_is_missing(
+    missing_key: str,
+) -> None:
+    facts = tuple(fact for fact in _postgres_lock_facts() if fact.key != missing_key)
+
+    result = resolve_trusted_patterns(
+        assessments=_postgres_lock_assessments(),
+        facts=facts,
+        trusted_evidence_ids=frozenset(fact.evidence_id for fact in facts),
+        evidence_provenance=_postgres_lock_provenance(),
+    )
+
+    assert all(item.disposition == "unresolved" for item in result.assessments)
+    assert result.matched_pattern_ids == ()
 
 
 def test_trusted_evidence_provenance_is_a_public_immutable_contract() -> None:

@@ -18,6 +18,7 @@ from super_ai.evaluation.live.domain import (
 )
 from super_ai.memory.models import utc_now
 from super_ai.memory.repositories import (
+    ChatSessionRecord,
     PendingChatActionRecord,
     PendingChatActionRepository,
 )
@@ -48,6 +49,21 @@ class ConfirmedActionExecutionAwaiter(Protocol):
     async def await_executed(
         self, *, owner_user_id: str, action_id: str
     ) -> PendingChatActionRecord: ...
+
+
+class ChatLiveSessionRepository(Protocol):
+    async def get_session(
+        self, *, owner_user_id: str, session_id: str
+    ) -> ChatSessionRecord | None: ...
+
+    async def create_session(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        title: str | None = None,
+        created_at: datetime | None = None,
+    ) -> ChatSessionRecord: ...
 
 
 class ChatLiveBridge(Protocol):
@@ -140,6 +156,7 @@ class ChatLiveEntryAdapter:
         owner_user_id: str,
         incident_id: str,
         client_request_id: str,
+        chat_run_id: str | None = None,
     ) -> PendingChatActionRecord:
         """Validate owner scope and create/reuse an unexecuted Pending Action."""
 
@@ -154,7 +171,7 @@ class ChatLiveEntryAdapter:
             owner_user_id=owner_user_id,
             session_id=_evaluation_session_id(owner_user_id, client_request_id),
             incident_id=incident_id,
-            chat_run_id=client_request_id,
+            chat_run_id=chat_run_id,
             note="Live evaluation entered through confirmation-gated Chat.",
         )
         if action.action_type != "start_diagnostic":
@@ -240,11 +257,13 @@ class ChatEntryLiveDiagnosticAdapter:
         self,
         *,
         owner_user_id: str,
+        session_repository: ChatLiveSessionRepository,
         pending_repository: PendingChatActionRepository,
         report_bridge: ChatLiveBridge,
         diagnostic_delegate: ApplicationLiveDiagnostic,
     ) -> None:
         self._owner_user_id = owner_user_id
+        self._session_repository = session_repository
         self._pending_repository = pending_repository
         self._report_bridge = report_bridge
         self._diagnostic_delegate = diagnostic_delegate
@@ -283,10 +302,21 @@ class ChatEntryLiveDiagnosticAdapter:
             bridge=incident_bridge,
             execution_awaiter=awaiter,
         )
+        session_id = _evaluation_session_id(self._owner_user_id, run_id)
+        if await self._session_repository.get_session(
+            owner_user_id=self._owner_user_id,
+            session_id=session_id,
+        ) is None:
+            await self._session_repository.create_session(
+                owner_user_id=self._owner_user_id,
+                session_id=session_id,
+                title="Chat Live evaluation",
+            )
         action = await entry.request_start_from_incident(
             owner_user_id=self._owner_user_id,
             incident_id=evidence_context.incident_id,
             client_request_id=run_id,
+            chat_run_id=None,
         )
         if action.status != "pending" or action.execution_result_id is not None:
             raise ChatLiveEntryError("Chat Live request bypassed confirmation.")

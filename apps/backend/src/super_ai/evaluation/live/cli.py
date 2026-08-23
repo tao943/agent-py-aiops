@@ -49,6 +49,7 @@ from super_ai.evaluation.live.cls_evidence import (
     LiveClsLogUploader,
     LiveClsRecordProvider,
     McpClsSearcher,
+    PostgresLockClsRecordProvider,
 )
 from super_ai.evaluation.live.diagnostics import (
     ApplicationLiveDiagnosticAdapter,
@@ -421,6 +422,7 @@ async def _run_live_command(
                 raise RuntimeError("Pending Chat Action repository is required for Chat Live.")
             chat_diagnostic = ChatEntryLiveDiagnosticAdapter(
                 owner_user_id=cast(str, arguments.owner_user_id),
+                session_repository=repositories.chat,
                 pending_repository=pending_repository,
                 report_bridge=AiopsBridgeService(
                     incidents=_UnavailableIncidentQueries(),
@@ -1380,6 +1382,7 @@ def build_live_scenario_registry() -> LiveScenarioRegistry:
             driver=driver,
             recovery=PostgresLiveRecoveryService(driver),
             component_evidence_factory=LivePostgresEvidenceMcpClient,
+            cls_record_provider=PostgresLockClsRecordProvider(),
         )
 
     registry.register("APY-LIVE-PG-LOCK-001", postgres_lock_components)

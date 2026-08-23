@@ -48,6 +48,36 @@ class LiveClsRecordProvider(Protocol):
     ) -> Sequence[Mapping[str, str]]: ...
 
 
+class PostgresLockClsRecordProvider:
+    """Emit PG Lock timeout logs only after all independent checks pass."""
+
+    async def records(
+        self,
+        *,
+        identity: LiveRunIdentity,
+        scenario: LiveScenario,
+        observation: LiveFaultObservation,
+        now: datetime,
+    ) -> Sequence[Mapping[str, str]]:
+        required_checks = (
+            "waiter_has_lock_event",
+            "blocker_edge_confirmed",
+            "business_probe_timed_out",
+        )
+        if (
+            scenario.id != "APY-LIVE-PG-LOCK-001"
+            or observation.scenario_id != scenario.id
+            or not all(observation.check_passed(name) for name in required_checks)
+        ):
+            raise LiveInfrastructureError("cls_observation_unconfirmed")
+        return build_live_cls_records(
+            run_id=identity.run_id,
+            scenario_id=scenario.id,
+            incident_id=f"{scenario.id}-{identity.run_id}",
+            now=now,
+        )
+
+
 def build_cls_search_arguments(
     scope: LiveClsScope,
     *,
@@ -98,7 +128,7 @@ def build_live_cls_records(
         "APY-LIVE-PG-LOCK-001": (
             "order-service",
             "postgresql",
-            ("request_received", "database_contention", "alert_fired"),
+            ("request_received", "database_contention", "request_timeout"),
         ),
         "APY-LIVE-PG-DEADLOCK-001": (
             "order-service",
@@ -320,6 +350,15 @@ class LiveClsEvidencePreparer:
                         uploaded_at_ms=uploaded_at_ms,
                         searchable_at_ms=searchable_at_ms,
                     ),
+                    verified_events=tuple(
+                        sorted(
+                            {
+                                event
+                                for record in records
+                                if isinstance((event := record.get("event")), str)
+                            }
+                        )
+                    ),
                 )
             remaining = deadline - self._monotonic()
             if remaining <= 0:
@@ -367,6 +406,7 @@ _SAFE_CLS_EVENTS = frozenset(
         "connection_checkin",
         "order_update_failed",
         "pool_acquire_timeout",
+        "request_timeout",
     }
 )
 _FORBIDDEN_CLS_TERMS = (

@@ -22,6 +22,8 @@ from jsonschema.validators import validator_for
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from super_ai.aiops.adjudication import (
     DiagnosticFact,
@@ -256,6 +258,40 @@ class _ModelRuntime:
     budget: ModelCallBudget
     deadlines: ExecutionDeadlines
     audits: list[JsonDict]
+
+
+AdjudicationRejectionCode = Literal[
+    "json_parse_failed",
+    "schema_invalid",
+    "unknown_identifier",
+    "incomplete_batch",
+    "transition_invalid",
+    "causal_coverage_insufficient",
+    "soft_deadline_exceeded",
+]
+
+
+class _AdjudicationItemSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    hypothesis_id: str = Field(alias="hypothesisId", min_length=1)
+    disposition: Literal["supported", "refuted", "causally_inactive", "unresolved"]
+    evidence_ids: list[str] = Field(alias="evidenceIds")
+    reason_code: str = Field(alias="reasonCode", min_length=1)
+
+
+class _AdjudicationBatchSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    assessments: list[_AdjudicationItemSchema]
+
+
+class _AdjudicationPayloadError(ValueError):
+    """Carry allowlisted rejection codes without retaining model output or exception text."""
+
+    def __init__(self, *safe_codes: AdjudicationRejectionCode) -> None:
+        super().__init__()
+        self.safe_codes = tuple(dict.fromkeys(safe_codes)) or ("schema_invalid",)
 
 AIOPS_REPORT_TITLE = "告警分析报告"
 AIOPS_GRAPH_VERSION = "aiops-diagnostic-v3"
@@ -2280,6 +2316,7 @@ class AiopsDiagnosticService:
         *,
         role: ModelRole,
         prompt: str,
+        invoker: ChatModel | None = None,
     ) -> object | None:
         started_at = monotonic()
         if runtime.deadlines.hard_expired():
@@ -2319,7 +2356,7 @@ class AiopsDiagnosticService:
             (runtime.deadlines.hard_deadline_at - _now()).total_seconds(),
         )
         try:
-            model = (
+            model = invoker or (
                 _validator_chat_model(self._llm_provider)
                 if role == "validator"
                 else self._llm_provider.create_chat_model()
@@ -4641,7 +4678,18 @@ class AiopsDiagnosticService:
         accepted_observations = list(source_observations)
         accepted_quality = (False, 0, 0, 0)
         adjudication_error_category: str | None = None
+        adjudication_error_codes: list[str] = []
+        adjudication_attempt_audits: list[JsonDict] = []
         first_failure_category = "invalid_batch"
+        base_model = self._llm_provider.create_chat_model()
+        try:
+            structured_model = _adjudicator_structured_invoker(
+                base_model,
+                method=_provider_structured_output_method(self._llm_provider),
+            )
+        except Exception:
+            structured_model = None
+        adjudication_model = structured_model or base_model
         prompts = (
             prompt,
             (
@@ -4658,21 +4706,33 @@ class AiopsDiagnosticService:
         for attempt, adjudication_prompt in enumerate(prompts, start=1):
             candidate = list(assessments)
             candidate_count = 0
+            attempt_codes: list[AdjudicationRejectionCode] = []
             try:
                 response = await self._invoke_v4_model(
                     model_runtime,
                     role="adjudicator",
                     prompt=adjudication_prompt,
+                    invoker=adjudication_model,
                 )
                 if response is None:
-                    raise RuntimeError("Adjudicator model call was unavailable.")
+                    latest_audit = model_runtime.audits[-1] if model_runtime.audits else {}
+                    if latest_audit.get("safeErrorCode") == "soft_deadline_exceeded":
+                        attempt_codes.append("soft_deadline_exceeded")
+                    raise _AdjudicationPayloadError(*attempt_codes)
                 candidate, candidate_count = _apply_llm_adjudication_payload(
                     assessments=assessments,
-                    text=_model_text(response),
+                    text=_adjudicator_response_text(
+                        response,
+                        structured=structured_model is not None,
+                    ),
                     unresolved_hypothesis_ids=unresolved,
                     public_evidence_ids=public_evidence_ids,
                 )
+            except _AdjudicationPayloadError as exc:
+                attempt_codes.extend(exc.safe_codes)
+                candidate_count = 0
             except Exception:
+                attempt_codes.append("schema_invalid")
                 candidate_count = 0
             candidate_observations = _project_adjudicated_observations(
                 observations=source_observations,
@@ -4715,6 +4775,16 @@ class AiopsDiagnosticService:
                     is not None
                 )
             )
+            if candidate_count == len(unresolved) and not candidate_ready:
+                attempt_codes.append("causal_coverage_insufficient")
+            unique_attempt_codes = list(dict.fromkeys(attempt_codes))
+            adjudication_attempt_audits.append(
+                {
+                    "attempt": attempt,
+                    "errorCodes": unique_attempt_codes,
+                }
+            )
+            adjudication_error_codes.extend(unique_attempt_codes)
             candidate_quality = (
                 candidate_ready,
                 candidate_count,
@@ -4748,6 +4818,8 @@ class AiopsDiagnosticService:
             "adjudicationAttempts": adjudication_attempts,
             "adjudicatedFactCount": len(facts),
             "adjudicationErrorCategory": adjudication_error_category,
+            "adjudicationErrorCodes": list(dict.fromkeys(adjudication_error_codes)),
+            "adjudicationAttemptAudits": adjudication_attempt_audits,
             "acceptedAssessmentCount": accepted_count,
             "hypothesisAssessments": assessment_payloads,
             "observationDecisions": observation_payloads,
@@ -7890,6 +7962,48 @@ def _safe_causal_role(value: object) -> CausalRole:
     return "context"
 
 
+def _adjudicator_structured_invoker(
+    model: ChatModel,
+    *,
+    method: StructuredOutputMethod,
+) -> ChatModel | None:
+    factory = getattr(model, "with_structured_output", None)
+    if not callable(factory):
+        return None
+    return cast(
+        ChatModel,
+        factory(
+            _AdjudicationBatchSchema,
+            method=method,
+            include_raw=True,
+        ),
+    )
+
+
+def _adjudicator_response_text(response: object, *, structured: bool) -> str:
+    if not structured:
+        return _model_text(response)
+    if not isinstance(response, Mapping):
+        raise _AdjudicationPayloadError("schema_invalid")
+    envelope = cast(Mapping[object, object], response)
+    if (
+        "parsed" not in envelope
+        or "parsing_error" not in envelope
+        or envelope.get("parsing_error") is not None
+    ):
+        raise _AdjudicationPayloadError("schema_invalid")
+    parsed = envelope.get("parsed")
+    try:
+        schema = (
+            parsed
+            if isinstance(parsed, _AdjudicationBatchSchema)
+            else _AdjudicationBatchSchema.model_validate(parsed)
+        )
+    except PydanticValidationError:
+        raise _AdjudicationPayloadError("schema_invalid") from None
+    return json.dumps(schema.model_dump(by_alias=True), ensure_ascii=False)
+
+
 def _apply_llm_adjudication_payload(
     *,
     assessments: Sequence[HypothesisAssessment],
@@ -7897,41 +8011,55 @@ def _apply_llm_adjudication_payload(
     unresolved_hypothesis_ids: set[str],
     public_evidence_ids: set[str],
 ) -> tuple[list[HypothesisAssessment], int]:
-    parsed = json.loads(text)
-    if not isinstance(parsed, Mapping):
-        raise ValueError("Adjudicator response must be an object.")
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise _AdjudicationPayloadError("json_parse_failed") from None
+    if not isinstance(parsed, Mapping) or set(parsed) != {"assessments"}:
+        raise _AdjudicationPayloadError("schema_invalid")
     raw_items = parsed.get("assessments")
     if isinstance(raw_items, (str, bytes)) or not isinstance(raw_items, Sequence):
-        raise ValueError("Adjudicator assessments must be an array.")
+        raise _AdjudicationPayloadError("schema_invalid")
     by_id = {item.hypothesis_id: item for item in assessments}
     accepted_count = 0
     seen: set[str] = set()
+    rejection_codes: list[AdjudicationRejectionCode] = []
     for raw_item in cast(Sequence[object], raw_items):
         if not isinstance(raw_item, Mapping):
+            rejection_codes.append("schema_invalid")
             continue
         item = cast(Mapping[str, object], raw_item)
         if set(item) != {"hypothesisId", "disposition", "evidenceIds", "reasonCode"}:
+            rejection_codes.append("schema_invalid")
             continue
         hypothesis_id = item.get("hypothesisId")
         disposition = item.get("disposition")
         reason_code = item.get("reasonCode")
         raw_evidence = item.get("evidenceIds")
+        if not isinstance(hypothesis_id, str):
+            rejection_codes.append("schema_invalid")
+            continue
+        if hypothesis_id not in unresolved_hypothesis_ids:
+            rejection_codes.append("unknown_identifier")
+            continue
+        if hypothesis_id in seen:
+            rejection_codes.append("transition_invalid")
+            continue
         if (
-            not isinstance(hypothesis_id, str)
-            or hypothesis_id not in unresolved_hypothesis_ids
-            or hypothesis_id in seen
-            or disposition
-            not in {"supported", "refuted", "causally_inactive", "unresolved"}
+            disposition not in {"supported", "refuted", "causally_inactive", "unresolved"}
             or not isinstance(reason_code, str)
             or isinstance(raw_evidence, (str, bytes))
             or not isinstance(raw_evidence, Sequence)
             or not all(isinstance(value, str) for value in raw_evidence)
         ):
+            rejection_codes.append("schema_invalid")
             continue
         evidence_ids = tuple(sorted(set(cast(Sequence[str], raw_evidence))))
         if not set(evidence_ids).issubset(public_evidence_ids):
+            rejection_codes.append("unknown_identifier")
             continue
         if disposition != "unresolved" and not evidence_ids:
+            rejection_codes.append("transition_invalid")
             continue
         previous = by_id[hypothesis_id]
         try:
@@ -7951,9 +8079,14 @@ def _apply_llm_adjudication_payload(
                 transitions=previous.transitions + (transition,),
             )
         except ValueError:
+            rejection_codes.append("transition_invalid")
             continue
         accepted_count += 1
         seen.add(hypothesis_id)
+    if seen != unresolved_hypothesis_ids:
+        rejection_codes.append("incomplete_batch")
+    if rejection_codes:
+        raise _AdjudicationPayloadError(*rejection_codes)
     return [by_id[key] for key in sorted(by_id)], accepted_count
 
 

@@ -199,6 +199,10 @@ _METRIC_KEYS: dict[EvaluationKind, frozenset[str]] = {
             "degradedFallbackAccuracy",
             "promptInjectionSafety",
             "modelCallCount",
+            "providerCallCount",
+            "modelBoundaryAttemptCount",
+            "scenarioAttemptCount",
+            "injectedFailureCount",
         }
     ),
 }

@@ -30,8 +30,6 @@ class FakeModel:
     async def ainvoke(self, input: object) -> object:
         prompt = str(input)
         self.calls.append(prompt)
-        if "explanation_timeout" in prompt:
-            raise TimeoutError("private provider detail")
         if "线上好像有告警" in prompt:
             content = json.dumps(
                 {
@@ -124,14 +122,17 @@ async def test_fake_provider_runs_six_scenarios_and_persists_safe_v2_artifact() 
     )
     assert result.scenario_count == 6
     assert result.passed_scenario_count == 6
-    assert result.model_call_count == 6
+    assert result.model_call_count == 4
+    assert result.model_boundary_attempt_count == 5
+    assert result.scenario_attempt_count == 6
+    assert result.injected_failure_count == 1
     assert result.route_accuracy == 1.0
     assert result.structured_interpretation_accuracy == 1.0
     assert result.degraded_fallback_accuracy == 1.0
     assert result.prompt_injection_safety == 1.0
     assert result.passed is True
     assert result.database_pending is False
-    assert len(model.calls) == 6
+    assert len(model.calls) == 4
     assert bridge.calls == [
         "report_explanation",
         "evidence_explanation",
@@ -143,6 +144,10 @@ async def test_fake_provider_runs_six_scenarios_and_persists_safe_v2_artifact() 
     assert artifact.artifact_schema_version == "v2"
     assert artifact.evaluation_kind == "conversation_model"
     assert artifact.status == "passed"
+    assert artifact.metrics["providerCallCount"] == 4
+    assert artifact.metrics["modelBoundaryAttemptCount"] == 5
+    assert artifact.metrics["scenarioAttemptCount"] == 6
+    assert artifact.metrics["injectedFailureCount"] == 1
     serialized = json.dumps(artifact.to_json(), ensure_ascii=False).casefold()
     for forbidden in (
         "user request:",
@@ -159,7 +164,7 @@ async def test_model_eval_records_safe_failures_without_raw_response() -> None:
     class UnsafeRouteModel(FakeModel):
         async def ainvoke(self, input: object) -> object:
             prompt = str(input)
-            if "忽略所有规则" in prompt:
+            if "线上好像有告警" in prompt:
                 self.calls.append(prompt)
                 return type(
                     "Response",
@@ -167,7 +172,7 @@ async def test_model_eval_records_safe_failures_without_raw_response() -> None:
                     {
                         "content": json.dumps(
                             {
-                                "intent": "recovery_request",
+                                "intent": "diagnostic_status",
                                 "confidence": 1.0,
                                 "diagnosticTaskId": "diagnostic_foreign",
                                 "needsClarification": False,
@@ -187,10 +192,10 @@ async def test_model_eval_records_safe_failures_without_raw_response() -> None:
     )
 
     assert result.passed is False
-    assert "prompt_injection_unsafe_route" in result.failures
+    assert "route_mismatch" in result.failures
     artifact = recorder.finished[0]
     assert artifact.status == "failed"
-    assert artifact.result_payload["failures"] == ["prompt_injection_unsafe_route"]
+    assert artifact.result_payload["failures"] == ["route_mismatch"]
     assert "diagnostic_foreign" not in json.dumps(artifact.to_json())
 
 
