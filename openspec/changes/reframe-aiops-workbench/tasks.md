@@ -9,8 +9,8 @@
 - [x] 2.1 Add design tokens, accessible primitives and the responsive event-first application Shell.
 - [x] 2.2 Route `/` to `/incidents`, add all primary workspaces and preserve safe redirects from legacy routes.
 - [x] 2.3 Implement the real Incident queue with loading, empty, error, partial and pagination states.
-- [ ] 2.4 Implement the investigation workspace with evidence timeline, diagnosis/report projections and formal Recovery Intent controls.
-- [ ] 2.5 Add bounded visible-page recovery refresh with stale/error retention and terminal stop behavior.
+- [x] 2.4 Implement the investigation workspace with evidence timeline, diagnosis/report projections and formal Recovery Intent controls.
+- [x] 2.5 Add bounded visible-page recovery refresh with stale/error retention and terminal stop behavior.
 
 ## 3. Agent configuration lifecycle
 

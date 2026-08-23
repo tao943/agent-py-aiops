@@ -10,6 +10,98 @@ import type {
   SseEvent
 } from "@agent-py/api-contracts";
 
+export type PublicSpecialistStatus = "supported" | "refuted" | "inconclusive" | "failed" | "timeout" | "unknown";
+
+export interface PublicSpecialistResult {
+  readonly role: string;
+  readonly status: PublicSpecialistStatus;
+  readonly safeSummary: string;
+}
+
+export interface PublicInvestigationResult {
+  readonly agentMode: "single" | "multi" | "unknown";
+  readonly specialists: readonly PublicSpecialistResult[];
+  readonly validatorOrigin: string;
+  readonly validatorMessage: string;
+  readonly executionPermitted: boolean | null;
+  readonly rootCauseSummary: string;
+  readonly recoverySummary: string;
+  readonly configurationVersionIds: readonly string[];
+}
+
+export function toPublicInvestigationResult(
+  chain: AiopsDiagnosticEvidenceChain | null
+): PublicInvestigationResult {
+  const payload = chain?.task.resultPayload ?? {};
+  const mode = text(payload.agentMode);
+  const validation = record(payload.validation);
+  const recoveryPolicy = record(payload.recoveryPolicy);
+  const decision = record(payload.decision);
+  const recovery = record(payload.recovery);
+  const origin = text(validation.validationOrigin) ?? text(payload.validationOrigin) ?? "unknown";
+  const specialists = array(payload.specialistResults).flatMap((item) => {
+    const value = record(item);
+    const role = text(value.role);
+    if (role === null) return [];
+    const status = specialistStatus(text(value.status));
+    return [{
+      role,
+      status,
+      safeSummary: text(value.safeSummary) ?? specialistFallback(status)
+    }];
+  });
+  return {
+    agentMode: mode === "single" || mode === "multi" ? mode : "unknown",
+    specialists,
+    validatorOrigin: origin,
+    validatorMessage: validatorMessage(origin),
+    executionPermitted: typeof recoveryPolicy.executionPermitted === "boolean"
+      ? recoveryPolicy.executionPermitted
+      : null,
+    rootCauseSummary: text(decision.safeSummary) ?? text(payload.rootCauseSummary) ?? "尚未提供根因结论",
+    recoverySummary: text(recovery.safeSummary) ?? text(payload.recoverySummary) ?? "尚未生成恢复提案",
+    configurationVersionIds: array(payload.configurationVersionIds)
+      .filter((item): item is string => typeof item === "string")
+      .slice(0, 8)
+  };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function array(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function text(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function specialistStatus(value: string | null): PublicSpecialistStatus {
+  return value === "supported" || value === "refuted" || value === "inconclusive" ||
+    value === "failed" || value === "timeout" ? value : "unknown";
+}
+
+function specialistFallback(status: PublicSpecialistStatus): string {
+  if (status === "inconclusive") return "当前证据不足，未形成独立结论";
+  if (status === "timeout") return "该调查分支未在时限内返回";
+  if (status === "failed") return "该调查分支暂时不可用";
+  return "未提供可公开的分支摘要";
+}
+
+function validatorMessage(origin: string): string {
+  if (origin === "deterministic_grounded_fallback") {
+    return "语义核验不可用，确定性证据通过，已转人工复核";
+  }
+  if (origin === "llm_confirmed" || origin === "llm_semantic") return "语义核验已完成";
+  if (origin === "deterministic") return "确定性证据核验已完成";
+  if (origin === "llm_failed") return "语义核验失败，禁止自动执行";
+  return "核验状态未提供";
+}
+
 import { ApiClientError } from "../api/apiClient";
 import { createAiopsClient, type AiopsClient } from "../aiops/aiopsClient";
 import { useFeedbackStore } from "./feedback";
@@ -36,6 +128,7 @@ export const useAiopsStore = defineStore("aiops", () => {
   const isRunning = ref(false);
   const errorMessage = ref<string | null>(null);
   const savedCaseDocumentId = ref<string | null>(null);
+  let resumedDiagnosticId: string | null = null;
 
   function reportError(error: unknown): void {
     const message = toUserFacingError(error);
@@ -148,6 +241,33 @@ export const useAiopsStore = defineStore("aiops", () => {
     });
   }
 
+  async function resumeDiagnostic(diagnosticId: string): Promise<void> {
+    if (resumedDiagnosticId === diagnosticId) return;
+    resumedDiagnosticId = diagnosticId;
+    isRunning.value = true;
+    errorMessage.value = null;
+    liveEvents.value = [];
+    try {
+      await loadEvidenceChain(diagnosticId);
+      if (activeTask.value?.status !== "accepted" && activeTask.value?.status !== "running") return;
+      for await (const event of client.streamDiagnostic(diagnosticId)) {
+        liveEvents.value = [...liveEvents.value, event];
+        if (event.type === "error") reportError(new ApiClientError(event.error));
+      }
+      await Promise.all([
+        loadEvidenceChain(diagnosticId),
+        reloadHistory(),
+        reloadDiagnosticCases().catch(() => undefined)
+      ]);
+    } catch (error) {
+      reportError(error);
+      throw error;
+    } finally {
+      isRunning.value = false;
+      resumedDiagnosticId = null;
+    }
+  }
+
   return {
     activeDiagnosticId,
     activeAlerts,
@@ -193,6 +313,7 @@ export const useAiopsStore = defineStore("aiops", () => {
     diagnoseAlert,
     refreshActiveAlerts: reloadActiveAlerts,
     refreshDiagnosticCases: reloadDiagnosticCases,
+    resumeDiagnostic,
     runDiagnostic,
     cancelActive: async (): Promise<void> => {
       const jobId = activeTask.value?.backgroundJob?.id;

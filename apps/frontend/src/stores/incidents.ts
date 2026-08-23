@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 
 import type {
   DiagnoseIncidentResponse,
+  IncidentDetail,
   IncidentSeverity,
   IncidentStatus,
   IncidentSummary
@@ -34,6 +35,9 @@ export const useIncidentStore = defineStore("incidents", () => {
   const stale = ref(false);
   const diagnosingIds = ref<readonly string[]>([]);
   const lastDiagnosis = ref<DiagnoseIncidentResponse | null>(null);
+  const detail = ref<IncidentDetail | null>(null);
+  const isDetailLoading = ref(false);
+  const detailErrorMessage = ref<string | null>(null);
 
   const visibleIncidents = computed(() => items.value.filter((item) =>
     (statusFilter.value === "all" || item.status === statusFilter.value) &&
@@ -128,6 +132,22 @@ export const useIncidentStore = defineStore("incidents", () => {
     }
   }
 
+  async function loadDetail(incidentId: string): Promise<IncidentDetail> {
+    isDetailLoading.value = true;
+    detailErrorMessage.value = null;
+    try {
+      const response = await client.getIncident(incidentId);
+      detail.value = response.incident;
+      selectedId.value = response.incident.id;
+      return response.incident;
+    } catch (error) {
+      detailErrorMessage.value = toUserFacingError(error);
+      throw error;
+    } finally {
+      isDetailLoading.value = false;
+    }
+  }
+
   return {
     items,
     selectedId,
@@ -141,6 +161,9 @@ export const useIncidentStore = defineStore("incidents", () => {
     stale,
     diagnosingIds,
     lastDiagnosis,
+    detail,
+    isDetailLoading,
+    detailErrorMessage,
     visibleIncidents,
     selectedIncident,
     metrics,
@@ -155,6 +178,7 @@ export const useIncidentStore = defineStore("incidents", () => {
       severityFilter.value = value;
       ensureSelection();
     },
-    startDiagnostic
+    startDiagnostic,
+    loadDetail
   };
 });

@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AiopsDiagnosticEvidenceChain,
@@ -168,12 +168,30 @@ describe("AIOps store", () => {
     expect(store.errorMessage).toBe("服务暂时不可用，请稍后重试。");
     expect(store.liveEvents).toEqual([failed]);
   });
+
+  it("resumes the event stream for a persisted running diagnostic and reconciles completion", async () => {
+    const getEvidenceChain = vi.fn()
+      .mockResolvedValueOnce(chainWithStatus("running"))
+      .mockResolvedValueOnce(chain());
+    setAiopsClientFactoryForTests(() => fakeClient({ getEvidenceChain }));
+    setActivePinia(createPinia());
+    const store = useAiopsStore();
+
+    await store.resumeDiagnostic("diagnostic_1");
+
+    expect(store.liveEvents.map((event) => event.type)).toEqual(events.map((event) => event.type));
+    expect(store.activeTask?.status).toBe("succeeded");
+    expect(getEvidenceChain).toHaveBeenCalledTimes(2);
+  });
 });
 
-function fakeClient(options: { readonly streamed?: readonly SseEvent[] } = {}): AiopsClient {
+function fakeClient(options: {
+  readonly streamed?: readonly SseEvent[];
+  readonly getEvidenceChain?: AiopsClient["getEvidenceChain"];
+} = {}): AiopsClient {
   return {
     createDiagnostic: async () => task(),
-    getEvidenceChain: async () => chain(),
+    getEvidenceChain: options.getEvidenceChain ?? (async () => chain()),
     listActiveAlerts: async () => ({ items: [] }),
     listDiagnosticCases: async () => ({ items: [] }),
     listDiagnostics: async () => ({ items: [task()] }),
@@ -188,4 +206,9 @@ function fakeClient(options: { readonly streamed?: readonly SseEvent[] } = {}): 
       for (const event of options.streamed ?? events) yield event;
     }
   };
+}
+
+function chainWithStatus(status: AiopsDiagnosticSummary["status"]): AiopsDiagnosticEvidenceChain {
+  const value = chain();
+  return { ...value, task: { ...value.task, status, completedAt: null } };
 }
