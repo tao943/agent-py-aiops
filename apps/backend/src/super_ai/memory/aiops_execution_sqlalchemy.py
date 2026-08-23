@@ -129,6 +129,15 @@ class SQLAlchemyAiopsExecutionRepository(AiopsExecutionRepository):
             )
             if lease_valid:
                 return ExecutionClaimResult("wait", _execution_record(row))
+            if row.status == "running" and row.side_effecting:
+                row.status = "uncertain"
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.outcome_known = False
+                row.safe_error_code = "worker_lost_after_dispatch"
+                row.updated_at = now
+                await session.commit()
+                return ExecutionClaimResult("manual_review", _execution_record(row))
             row.status = "running"
             row.attempt_count += 1
             row.lease_owner = request.lease_owner

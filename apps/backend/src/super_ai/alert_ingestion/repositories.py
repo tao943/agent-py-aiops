@@ -16,6 +16,8 @@ AlertDisposition = Literal[
     "orphan_resolved",
 ]
 RedisMode = Literal["primary", "contended", "degraded", "postgresql"]
+IncidentStatus = Literal["active", "resolved"]
+VerificationStatus = Literal["pending", "passed", "failed", "not_applicable"]
 
 
 class AlertPersistenceError(RuntimeError):
@@ -38,6 +40,9 @@ class IngestionWrite:
     service: str
     severity: str
     starts_at: datetime | None
+    scenario_id: str | None = None
+    run_id: str | None = None
+    task_input_payload: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +62,44 @@ class IngestionResult:
         return self.disposition == "filtered"
 
 
+@dataclass(frozen=True, slots=True)
+class LiveAlertLifecycle:
+    incident_id: str
+    diagnostic_task_id: str
+    background_job_id: str
+    report_id: str | None
+    status: IncidentStatus
+    verification_status: VerificationStatus
+    verified_at: datetime | None
+    verification_summary: str | None
+
+    @property
+    def closed_verified(self) -> bool:
+        return self.status == "resolved" and self.verification_status == "passed"
+
+
 class AlertIngestionRepository(Protocol):
     async def apply(self, write: IngestionWrite) -> IngestionResult:
         """Apply exactly one authenticated delivery transactionally."""
         ...
+
+    async def get_live_lifecycle(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+    ) -> LiveAlertLifecycle | None: ...
+
+    async def record_verification(
+        self,
+        *,
+        owner_user_id: str,
+        source_id: str,
+        scenario_id: str,
+        run_id: str,
+        status: Literal["passed", "failed"],
+        summary: str,
+        verified_at: datetime,
+    ) -> LiveAlertLifecycle: ...

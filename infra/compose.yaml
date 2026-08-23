@@ -201,6 +201,22 @@ services:
       timeout: 2s
       retries: 30
 
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    profiles: ["live-eval"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      alertmanager:
+        condition: service_started
+      live-eval-order-api:
+        condition: service_healthy
+
   live-eval-nginx:
     image: nginx:1.30-alpine
     profiles: ["live-eval"]
@@ -224,3 +240,4 @@ volumes:
   minio-data:
   milvus-data:
   alertmanager-data:
+  prometheus-data:

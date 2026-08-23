@@ -13,7 +13,8 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import asyncpg
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from pydantic import BaseModel
 
 _ISOLATED_DATABASE = "agent_py_live_eval"
@@ -29,6 +30,12 @@ CREATE TABLE IF NOT EXISTS live_eval_orders (
     PRIMARY KEY (run_id, order_id)
 )
 """
+_METRIC_LABELS = ("service", "environment", "scenario_id", "run_id")
+_METRIC_LABEL_VALUES = (
+    "order-api",
+    "live-eval",
+    "APY-LIVE-ORDER-POOL-LEAK-001",
+)
 _UPSERT_ORDER = """
 INSERT INTO live_eval_orders (run_id, order_id, status)
 VALUES ($1, 'order-1', 'ready')
@@ -146,6 +153,7 @@ class OrderApiRuntime:
         self._active_run_id: str | None = None
         self._fault_token: str | None = None
         self._held_connections: list[ConnectionBoundary] = []
+        self._fault_request_ids: set[str] = set()
         self._events: list[dict[str, str]] = []
         self._waiters_observed = False
 
@@ -174,6 +182,7 @@ class OrderApiRuntime:
         self._active_run_id = run_id
         self._fault_token = fault_token
         self._waiters_observed = False
+        self._fault_request_ids.clear()
         self._events.clear()
 
     async def baseline_update(self, run_id: str, request_id: str) -> None:
@@ -185,7 +194,14 @@ class OrderApiRuntime:
         _validate_identifier(request_id, "request_id_invalid")
         if not secrets.compare_digest(self._fault_token or "", fault_token):
             raise OrderApiAccessError("fault_token_invalid")
-        connection = await self._pool.acquire(timeout=1.0)
+        if request_id in self._fault_request_ids:
+            return
+        self._fault_request_ids.add(request_id)
+        try:
+            connection = await self._pool.acquire(timeout=1.0)
+        except Exception:
+            self._fault_request_ids.discard(request_id)
+            raise
         await connection.execute(
             "SELECT set_config('application_name', $1, false)",
             _session_application_name(run_id, self._generation),
@@ -241,6 +257,23 @@ class OrderApiRuntime:
     def active_run_id(self) -> str | None:
         return self._active_run_id
 
+    def metric_snapshot(self) -> dict[str, int | str] | None:
+        """Return the bounded public state used only by the fixture metrics endpoint."""
+        if self._active_run_id is None:
+            return None
+        capacity = self._pool.get_size()
+        checked_out = len(self._held_connections)
+        free = self._pool.get_idle_size()
+        return {
+            "run_id": self._active_run_id,
+            "capacity": capacity,
+            "checked_out": checked_out,
+            "free": free,
+            "waiter_observed": int(self._waiters_observed),
+            "fault_active": int(checked_out > 0),
+            "business_probe_success": int(free > 0),
+        }
+
     async def clear_run(self, run_id: str) -> None:
         if self._active_run_id is None:
             return
@@ -255,6 +288,7 @@ class OrderApiRuntime:
             await self._pool.release(connection)
         self._active_run_id = None
         self._fault_token = None
+        self._fault_request_ids.clear()
         self._waiters_observed = False
         self._events.clear()
 
@@ -277,6 +311,53 @@ class OrderApiRuntime:
         )
         if len(self._events) > _MAX_EVENTS:
             del self._events[: len(self._events) - _MAX_EVENTS]
+
+
+class OrderApiMetrics:
+    """Render one active run with a private, per-request Prometheus registry."""
+
+    _GAUGES = (
+        ("agentpy_order_pool_capacity", "Configured order pool capacity.", "capacity"),
+        (
+            "agentpy_order_pool_checked_out",
+            "Connections held by the active order fixture.",
+            "checked_out",
+        ),
+        ("agentpy_order_pool_free", "Currently free order pool connections.", "free"),
+        (
+            "agentpy_order_pool_waiter_observed",
+            "Whether a business probe observed pool waiting.",
+            "waiter_observed",
+        ),
+        (
+            "agentpy_order_pool_fault_active",
+            "Whether the order pool leak fixture is active.",
+            "fault_active",
+        ),
+        (
+            "agentpy_order_business_probe_success",
+            "Whether a business probe can currently acquire a connection.",
+            "business_probe_success",
+        ),
+    )
+
+    def render(self, runtime: OrderApiRuntime) -> bytes:
+        registry = CollectorRegistry(auto_describe=True)
+        snapshot = runtime.metric_snapshot()
+        if snapshot is None:
+            return generate_latest(registry)
+        run_id = str(snapshot["run_id"])
+        _validate_identifier(run_id, "run_id_invalid")
+        label_values = (*_METRIC_LABEL_VALUES, run_id)
+        for name, description, snapshot_key in self._GAUGES:
+            gauge = Gauge(
+                name,
+                description,
+                _METRIC_LABELS,
+                registry=registry,
+            )
+            gauge.labels(*label_values).set(float(snapshot[snapshot_key]))
+        return generate_latest(registry)
 
 
 class StartRunRequest(BaseModel):
@@ -335,6 +416,14 @@ def create_app() -> FastAPI:
             "generation": runtime.generation,
             "activeRunId": runtime.active_run_id,
         }
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        runtime: OrderApiRuntime = app.state.runtime
+        return Response(
+            content=OrderApiMetrics().render(runtime),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.post("/internal/runs/start")
     async def start_run(

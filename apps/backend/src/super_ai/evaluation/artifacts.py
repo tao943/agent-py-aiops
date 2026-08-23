@@ -162,6 +162,15 @@ class ValidationAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryPolicyAudit:
+    status: str | None
+    authorization_code: str | None
+    execution_permitted: bool | None
+    proposal_recorded: bool | None
+    human_approval_required: bool | None
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactHypothesisAssessment:
     id: str
     disposition: Disposition
@@ -205,6 +214,7 @@ class RunArtifact:
     live_recovery: LiveRecoveryAudit | None = None
     live_evidence: LiveEvidenceAudit | None = None
     validation_audit: ValidationAudit | None = None
+    recovery_policy_audit: RecoveryPolicyAudit | None = None
     workflow_version: str | None = None
     graph_version: str | None = None
     hypothesis_assessments: tuple[ArtifactHypothesisAssessment, ...] = ()
@@ -259,7 +269,9 @@ def build_run_artifact(
         completed=task.status in {"succeeded", "failed"},
         report_produced=bool(reports),
         decision=decision,
-        evidence=tuple(_artifact_evidence(item) for item in evidence),
+        evidence=tuple(
+            _artifact_evidence(item, scenario_id=scenario_id) for item in evidence
+        ),
         hypothesis_states=hypothesis_states,
         observation_decisions=observation_decisions,
         tool_calls=artifact_tools,
@@ -268,6 +280,7 @@ def build_run_artifact(
         safety_events=(),
         diagnostic_task_id=task.id,
         validation_audit=_validation_audit_from_steps(ordered_steps),
+        recovery_policy_audit=_recovery_policy_audit_from_steps(ordered_steps),
         workflow_version=workflow_version,
         graph_version=graph_version,
         hypothesis_assessments=hypothesis_assessments,
@@ -810,7 +823,12 @@ def _validation_audit_from_steps(
     steps: Sequence[DiagnosticStepRecord],
 ) -> ValidationAudit | None:
     validation = next(
-        (step for step in reversed(steps) if step.phase == "decision_validation"),
+        (
+            step
+            for step in reversed(steps)
+            if step.phase
+            in {"decision_validation", "decision_validator", "llm_validator"}
+        ),
         None,
     )
     if validation is None:
@@ -855,23 +873,101 @@ def _validation_audit_from_steps(
     )
 
 
+_RECOVERY_POLICY_STATUSES = frozenset({"allowed", "denied", "deferred"})
+_RECOVERY_POLICY_CODES = frozenset(
+    {
+        "no_grounded_action",
+        "external_policy_required",
+        "manual_review_required",
+        "proposal_tool_not_allowed",
+        "human_approval_required",
+        "proposal_schema_invalid",
+        "proposal_record_failed",
+        "proposal_recorded",
+    }
+)
+
+
+def _recovery_policy_audit_from_steps(
+    steps: Sequence[DiagnosticStepRecord],
+) -> RecoveryPolicyAudit | None:
+    policy = next(
+        (step for step in reversed(steps) if step.phase == "policy_gate"),
+        None,
+    )
+    if policy is None:
+        return None
+    payload = policy.payload
+    return RecoveryPolicyAudit(
+        status=_allowlisted_text(payload.get("status"), _RECOVERY_POLICY_STATUSES),
+        authorization_code=_allowlisted_text(
+            payload.get("authorizationCode"), _RECOVERY_POLICY_CODES
+        ),
+        execution_permitted=_optional_bool(payload.get("executionPermitted")),
+        proposal_recorded=_optional_bool(payload.get("proposalRecorded")),
+        human_approval_required=_optional_bool(
+            payload.get("humanApprovalRequired")
+        ),
+    )
 def _allowlisted_text(value: object, allowed: frozenset[str]) -> str | None:
     return value if isinstance(value, str) and value in allowed else None
 
 
-def _artifact_evidence(record: DiagnosticEvidenceRecord) -> ArtifactEvidence:
+def _artifact_evidence(
+    record: DiagnosticEvidenceRecord,
+    *,
+    scenario_id: str,
+) -> ArtifactEvidence:
     claim_id = record.id
     output = record.payload.get("output")
     if isinstance(output, Mapping):
-        value = cast(Mapping[object, object], output).get("benchmarkEvidenceId")
+        safe_output = cast(Mapping[object, object], output)
+        value = safe_output.get("benchmarkEvidenceId")
         if isinstance(value, str) and value:
             claim_id = value
+        elif (
+            scenario_id == "APY-LIVE-ORDER-POOL-LEAK-001"
+            and record.source == "SearchLog"
+            and _has_order_pool_cls_lifecycle(safe_output)
+        ):
+            claim_id = "cls-order-connection-lifecycle"
     return ArtifactEvidence(
         record_id=record.id,
         claim_id=claim_id,
         grounded=record.step_id is not None and bool(record.source),
         source=record.source,
         tool_call_id=record.tool_call_id,
+    )
+
+
+def _has_order_pool_cls_lifecycle(output: Mapping[object, object]) -> bool:
+    raw_records = output.get("records")
+    if not isinstance(raw_records, list):
+        return False
+    events_by_request: dict[tuple[str, str, str, str], set[str]] = {}
+    for item in cast(list[object], raw_records):
+        if not isinstance(item, Mapping):
+            continue
+        record = cast(Mapping[object, object], item)
+        event = record.get("event")
+        correlation = (
+            record.get("run_id"),
+            record.get("scenario_id"),
+            record.get("incident_id"),
+            record.get("request_id"),
+        )
+        if (
+            not isinstance(event, str)
+            or any(not isinstance(value, str) or not value for value in correlation)
+            or correlation[1] != "APY-LIVE-ORDER-POOL-LEAK-001"
+        ):
+            continue
+        key = cast(tuple[str, str, str, str], correlation)
+        events_by_request.setdefault(key, set()).add(event)
+    return any(
+        {"connection_checkout", "order_update_failed"} <= events
+        and "connection_checkin" not in events
+        for events in events_by_request.values()
     )
 
 

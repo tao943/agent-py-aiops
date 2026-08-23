@@ -116,6 +116,50 @@ async def test_uncertain_side_effect_is_never_reclaimed(
 
 
 @pytest.mark.asyncio
+async def test_expired_side_effect_lease_becomes_manual_review_without_replay(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    task_id = f"expired-recovery-task-{uuid4().hex}"
+    key = f"expired-recovery-{uuid4().hex}"
+    try:
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        await repositories.diagnostics.create_task(
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            status="running",
+            query="Test abandoned recovery lease.",
+            input_payload={},
+        )
+        repository = SQLAlchemyAiopsExecutionRepository(
+            session_factory,
+            owner_user_id="benchmark-user",
+            task_id=task_id,
+            graph_version="order-pool-auto-closure-v1",
+        )
+        expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await repository.claim(
+            _claim(key, "crashed-worker", expired, side_effecting=True)
+        )
+
+        retried = await repository.claim(
+            _claim(
+                key,
+                "replacement-worker",
+                datetime.now(timezone.utc) + timedelta(minutes=1),
+                side_effecting=True,
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    assert retried.action == "manual_review"
+    assert retried.record.status == "uncertain"
+    assert retried.record.attempt_count == 1
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_and_writes_round_trip_idempotently(
     migrated_database_url: str,
 ) -> None:

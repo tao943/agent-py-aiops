@@ -530,7 +530,10 @@ def _cls_search_audit_valid(artifact: RunArtifact) -> bool:
             and not isinstance(to_ms, bool)
             and isinstance(audit.from_ms, int)
             and isinstance(audit.to_ms, int)
-            and audit.from_ms <= from_ms < to_ms <= audit.to_ms
+            and (
+                audit.from_ms <= from_ms < to_ms <= audit.to_ms
+                or from_ms <= audit.from_ms < audit.to_ms <= to_ms
+            )
             and isinstance(query, str)
             and all(term in query for term in terms)
         ):

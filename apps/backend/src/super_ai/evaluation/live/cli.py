@@ -6,14 +6,17 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from super_ai.aiops.execution import ExecutionCoordinator
+from super_ai.aiops.execution import ExecutionCoordinator, ExecutionIdentity, ExecutionResult
 from super_ai.aiops.investigation import StrategyMode
+from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
+from super_ai.alert_ingestion.sqlalchemy import SQLAlchemyAlertIngestionRepository
 from super_ai.evaluation.archive import EvaluationArchive
 from super_ai.evaluation.artifacts import (
     InvestigationAudit,
@@ -21,12 +24,22 @@ from super_ai.evaluation.artifacts import (
     SpecialistRoleAudit,
 )
 from super_ai.evaluation.history import (
+    EvaluationRunEnvelope,
     EvaluationStatus,
     running_envelope,
     terminal_envelope,
 )
 from super_ai.evaluation.history import (
     validate_run_id as validate_evaluation_id,
+)
+from super_ai.evaluation.live.auto_closure import (
+    RECOVERY_GRAPH_VERSION,
+    LiveAutoClosureResult,
+    OrderPoolAutoClosureOrchestrator,
+    PersistedDiagnosticOutcomeLoader,
+)
+from super_ai.evaluation.live.auto_closure_state import (
+    SQLAlchemyAutoClosureStateRepository,
 )
 from super_ai.evaluation.live.cls_evidence import (
     LiveClsEvidencePreparer,
@@ -38,7 +51,13 @@ from super_ai.evaluation.live.diagnostics import (
     ApplicationLiveDiagnosticAdapter,
     LivePostgresEvidenceMcpClient,
 )
-from super_ai.evaluation.live.domain import EvidenceSource
+from super_ai.evaluation.live.domain import (
+    EvidenceSource,
+    LiveEvidenceContext,
+    LiveFaultObservation,
+    LiveRunIdentity,
+    LiveScenario,
+)
 from super_ai.evaluation.live.evidence_client import LiveMcpClient
 from super_ai.evaluation.live.failure_diagnostics import normalize_public_failed_checks
 from super_ai.evaluation.live.nginx_timeout import (
@@ -83,7 +102,11 @@ from super_ai.evaluation.live.runner import (
     LiveEvidencePreparer,
     LocalLiveEvidencePreparer,
 )
-from super_ai.evaluation.live.scenarios import validate_run_id
+from super_ai.evaluation.live.scenarios import (
+    load_live_oracle,
+    load_live_scenario,
+    validate_run_id,
+)
 from super_ai.evaluation.live.scoring import LiveEvaluationResult, score_live_run
 from super_ai.evaluation.persistence import EvaluationRepository
 from super_ai.evaluation.recording import EvaluationRunRecorder
@@ -119,6 +142,9 @@ _SAFE_RESULT_FIELDS = frozenset(
         "failureCategory",
         "failureStage",
         "authorizationCode",
+        "closedVerified",
+        "correlation",
+        "recoveryIntentId",
     }
 )
 
@@ -129,13 +155,68 @@ def build_live_recovery_coordinator(
     owner_user_id: str,
     diagnostic_task_id: str,
     run_id: str,
+    graph_version: str = "live-eval-v1",
 ) -> ExecutionCoordinator:
     repository = runtime_provider.execution_repository(
         owner_user_id=owner_user_id,
         task_id=diagnostic_task_id,
-        graph_version="live-eval-v1",
+        graph_version=graph_version,
     )
     return ExecutionCoordinator(repository, worker_id=f"live-recovery:{run_id}")
+
+
+class _TaskScopedRecoveryCoordinator:
+    def __init__(
+        self,
+        *,
+        runtime_provider: AiopsRuntimeRepositoryProvider,
+        owner_user_id: str,
+        run_id: str,
+    ) -> None:
+        self._runtime_provider = runtime_provider
+        self._owner_user_id = owner_user_id
+        self._run_id = run_id
+
+    async def run_once(
+        self,
+        identity: ExecutionIdentity,
+        operation: Callable[[], Awaitable[dict[str, object]]],
+        *,
+        outcome_known_on_error: bool,
+    ) -> ExecutionResult:
+        coordinator = build_live_recovery_coordinator(
+            runtime_provider=self._runtime_provider,
+            owner_user_id=self._owner_user_id,
+            diagnostic_task_id=identity.task_id,
+            run_id=self._run_id,
+            graph_version=RECOVERY_GRAPH_VERSION,
+        )
+        return await coordinator.run_once(
+            identity,
+            operation,
+            outcome_known_on_error=outcome_known_on_error,
+        )
+
+
+class _ScenarioEvidencePreparer:
+    def __init__(
+        self,
+        preparer: LiveEvidencePreparer,
+        scenario: LiveScenario,
+    ) -> None:
+        self._preparer = preparer
+        self._scenario = scenario
+
+    async def prepare(
+        self,
+        identity: LiveRunIdentity,
+        observation: LiveFaultObservation,
+    ) -> LiveEvidenceContext:
+        return await self._preparer.prepare(
+            identity=identity,
+            scenario=self._scenario,
+            observation=observation,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,7 +246,30 @@ def build_parser() -> argparse.ArgumentParser:
                 choices=("auto", "single", "multi"),
                 default="auto",
             )
+            command.add_argument(
+                "--auto-closure",
+                action="store_true",
+                help="Wait for the real Prometheus/Alertmanager Single-Agent closure.",
+            )
+            command.add_argument(
+                "--resume",
+                action="store_true",
+                help="Resume the exact persisted automatic-closure run.",
+            )
     return parser
+
+
+def _auto_closure_strategy(arguments: argparse.Namespace) -> StrategyMode:
+    automatic = bool(getattr(arguments, "auto_closure", False))
+    resume = bool(getattr(arguments, "resume", False))
+    strategy = cast(StrategyMode, arguments.strategy)
+    if resume and not automatic:
+        raise ValueError("--resume requires --auto-closure.")
+    if not automatic:
+        return strategy
+    if strategy == "multi":
+        raise ValueError("Automatic closure does not permit Multi Agent strategy.")
+    return "single"
 
 
 def safe_output(
@@ -218,6 +322,24 @@ def main(argv: list[str] | None = None) -> int:
 async def _run_live_command(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, object], int]:
+    try:
+        effective_strategy = _auto_closure_strategy(arguments)
+    except ValueError:
+        return (
+            safe_output(
+                command="run",
+                scenario_id=cast(str, arguments.scenario),
+                run_id=cast(str, arguments.run_id),
+                status="infra_invalid",
+                result={
+                    "validity": "INFRA_INVALID",
+                    "failureCategory": "auto_closure_arguments_invalid",
+                },
+            ),
+            2,
+        )
+    if bool(arguments.auto_closure):
+        return await _run_auto_closure_command(arguments)
     config_path = cast(str | None, arguments.config)
     evidence_source = cast(EvidenceSource, arguments.evidence_source)
     engine = create_memory_engine(config_path=config_path)
@@ -250,7 +372,7 @@ async def _run_live_command(
             accessible_knowledge_base_ids=(cast(str, arguments.knowledge_base_id),),
             owner_user_id=cast(str, arguments.owner_user_id),
             workflow_version="evidence-driven-v4",
-            investigation_strategy=cast(StrategyMode, arguments.strategy),
+            investigation_strategy=effective_strategy,
             cls_mcp_client=cls_mcp_client,
             component_evidence_factory=components.component_evidence_factory,
         )
@@ -274,7 +396,7 @@ async def _run_live_command(
             recovery=components.recovery,
             evaluator=_LiveScoringEvaluator(
                 evidence_source,
-                investigation_strategy=cast(StrategyMode, arguments.strategy),
+                investigation_strategy=effective_strategy,
             ),
             recovery_coordinator_factory=recovery_coordinator_factory,
         )
@@ -291,11 +413,190 @@ async def _run_live_command(
             execute=execute,
             recorder=recorder,
             campaign_id=cast(str | None, arguments.campaign_id),
-            investigation_strategy=cast(StrategyMode, arguments.strategy),
+            investigation_strategy=effective_strategy,
         )
     finally:
         await engine.dispose()
     write_safe_report(LIVE_REPORT_ROOT / f"{arguments.run_id}.json", payload)
+    return payload, exit_code
+
+
+async def _run_auto_closure_command(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, object], int]:
+    scenario_id = cast(str, arguments.scenario)
+    run_id = cast(str, arguments.run_id)
+    if scenario_id != "APY-LIVE-ORDER-POOL-LEAK-001":
+        return (
+            safe_output(
+                command="run",
+                scenario_id=scenario_id,
+                run_id=run_id,
+                status="infra_invalid",
+                result={
+                    "validity": "INFRA_INVALID",
+                    "failureCategory": "auto_closure_scenario_unsupported",
+                },
+            ),
+            2,
+        )
+    config_path = cast(str | None, arguments.config)
+    evidence_source = cast(EvidenceSource, arguments.evidence_source)
+    owner_user_id = cast(str, arguments.owner_user_id)
+    archive = EvaluationArchive.from_config(config_path=config_path)
+    existing = None
+    if bool(arguments.resume):
+        try:
+            existing = archive.load(run_id)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and existing.status != "running":
+            payload = safe_output(
+                command="run",
+                scenario_id=scenario_id,
+                run_id=run_id,
+                status=existing.status,
+                result={
+                    "validity": existing.validity or "INFRA_INVALID",
+                    "passed": existing.passed is True,
+                    "authorizationCode": existing.result_payload.get(
+                        "authorizationCode"
+                    ),
+                    "closedVerified": existing.result_payload.get("closedVerified"),
+                    "correlation": existing.result_payload.get("correlation"),
+                    "recoveryIntentId": existing.result_payload.get("recoveryIntentId"),
+                    "evidenceSource": evidence_source,
+                },
+            )
+            exit_code = (
+                0
+                if existing.status == "passed"
+                else 2
+                if existing.status == "infra_invalid"
+                else 1
+            )
+            return payload, exit_code
+
+    engine = create_memory_engine(config_path=config_path)
+    session_factory = create_memory_session_factory(engine)
+    recorder = EvaluationRunRecorder(
+        archive=archive,
+        repository=EvaluationRepository(session_factory),
+    )
+    try:
+        components = build_live_scenario_registry().resolve(scenario_id)
+        driver = cast(OrderPoolLeakScenarioDriver, components.driver)
+        recovery = cast(OrderPoolRecoveryService, components.recovery)
+        scenario_path = LIVE_SCENARIO_ROOT / scenario_id
+        scenario = load_live_scenario(scenario_path)
+        oracle = load_live_oracle(scenario_path)
+        base_preparer, _ = build_live_evidence_runtime(
+            evidence_source=evidence_source,
+            config_path=config_path,
+            record_provider=components.cls_record_provider,
+        )
+        repositories = create_sqlalchemy_memory_repositories(session_factory)
+        runtime_provider = repositories.aiops_runtime
+        if runtime_provider is None:
+            raise RuntimeError("AIOps runtime repository is required for auto closure.")
+        closure_metrics = AlertIngestionMetrics()
+        orchestrator = OrderPoolAutoClosureOrchestrator(
+            owner_user_id=owner_user_id,
+            source_id="local-alertmanager",
+            driver=driver,
+            lifecycles=SQLAlchemyAlertIngestionRepository(session_factory),
+            diagnostic_loader=PersistedDiagnosticOutcomeLoader(repositories),
+            recovery=recovery,
+            recovery_coordinator=_TaskScopedRecoveryCoordinator(
+                runtime_provider=runtime_provider,
+                owner_user_id=owner_user_id,
+                run_id=run_id,
+            ),
+            evidence_preparer=_ScenarioEvidencePreparer(base_preparer, scenario),
+            state_repository=SQLAlchemyAutoClosureStateRepository(session_factory),
+            metrics=closure_metrics,
+            progress=lambda stage: print(
+                f"[auto-closure] {stage}",
+                file=sys.stderr,
+                flush=True,
+            ),
+        )
+
+        async def execute() -> LiveAutoClosureResult:
+            return await orchestrator.run(
+                scenario_id,
+                run_id=run_id,
+                resume=bool(arguments.resume),
+            )
+
+        def score(closure: LiveAutoClosureResult) -> LiveEvaluationResult | None:
+            if (
+                closure.diagnostic_artifact is None
+                or closure.observation is None
+                or closure.recovery is None
+                or closure.verification is None
+            ):
+                return None
+            return score_live_run(
+                closure.diagnostic_artifact,
+                oracle,
+                observation=closure.observation,
+                recovery=closure.recovery,
+                verification=closure.verification,
+                cleanup_succeeded=bool(
+                    closure.cleanup is not None and closure.cleanup.passed
+                ),
+                evidence_source=evidence_source,
+                investigation_strategy="single",
+            )
+
+        def timing() -> dict[str, int | float]:
+            snapshot = closure_metrics.snapshot().get("autoClosureStageLatencyMs")
+            if not isinstance(snapshot, Mapping):
+                return {}
+            result: dict[str, int | float] = {}
+            for stage in (
+                "detection",
+                "diagnosis",
+                "recovery",
+                "verification",
+                "resolved",
+                "total",
+            ):
+                value = snapshot.get(stage)
+                if isinstance(value, Mapping):
+                    total = value.get("sum")
+                    if isinstance(total, (int, float)) and not isinstance(total, bool):
+                        result[stage] = total
+            return result
+
+        payload, exit_code = await _run_auto_closure_once(
+            scenario_id=scenario_id,
+            run_id=run_id,
+            evidence_source=evidence_source,
+            execute=execute,
+            score=score,
+            stage_metrics=timing,
+            recorder=recorder,
+            running=existing,
+        )
+    except Exception:
+        async def fail_setup() -> LiveAutoClosureResult:
+            raise RuntimeError("auto_closure_setup_failed")
+
+        payload, exit_code = await _run_auto_closure_once(
+            scenario_id=scenario_id,
+            run_id=run_id,
+            evidence_source=evidence_source,
+            execute=fail_setup,
+            score=lambda closure: None,
+            stage_metrics=dict,
+            recorder=recorder,
+            running=existing,
+        )
+    finally:
+        await engine.dispose()
+    write_safe_report(LIVE_REPORT_ROOT / f"{run_id}.json", payload)
     return payload, exit_code
 
 
@@ -493,6 +794,188 @@ async def _run_live_once(
         0 if result.passed else 1
     )
     return payload, exit_code
+
+
+async def _run_auto_closure_once(
+    *,
+    scenario_id: str,
+    run_id: str,
+    evidence_source: EvidenceSource,
+    execute: Callable[[], Awaitable[LiveAutoClosureResult]],
+    score: Callable[[LiveAutoClosureResult], LiveEvaluationResult | None],
+    stage_metrics: Callable[[], Mapping[str, int | float]],
+    recorder: EvaluationRunRecorder,
+    running: EvaluationRunEnvelope | None = None,
+) -> tuple[dict[str, object], int]:
+    timestamp = datetime.now(timezone.utc)
+    active = (
+        running
+        if running is not None
+        else running_envelope(
+            run_id=run_id,
+            evaluation_kind="live",
+            scenario_id=scenario_id,
+            suite_version="v1",
+            metadata={
+                "workflowVersion": "order-pool-auto-closure-v1",
+                "evidenceSource": evidence_source,
+                "investigationStrategy": "single",
+                "investigationPolicyVersion": "investigation-router-v1",
+            },
+            created_at=timestamp,
+            started_at=timestamp,
+        )
+    )
+    if active.status != "running":
+        raise ValueError("Automatic closure resume requires a running evaluation.")
+    start = await recorder.start(active)
+    try:
+        closure = await execute()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        await recorder.fail(
+            terminal_envelope(
+                running=active,
+                status="interrupted",
+                validity=None,
+                passed=None,
+                metrics={"cleanupSucceeded": False},
+                result_payload={"failures": ["interrupted"]},
+                diagnostic_task_id=None,
+                failure_category=None,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        raise
+    except Exception:
+        terminal = terminal_envelope(
+            running=active,
+            status="infra_invalid",
+            validity="INFRA_INVALID",
+            passed=None,
+            metrics={"cleanupSucceeded": False},
+            result_payload={"failures": ["auto_closure_runtime_error"]},
+            diagnostic_task_id=None,
+            failure_category="auto_closure_runtime_error",
+            completed_at=datetime.now(timezone.utc),
+        )
+        finish = await recorder.fail(terminal)
+        payload = safe_output(
+            command="run",
+            scenario_id=scenario_id,
+            run_id=run_id,
+            status="infra_invalid",
+            result={
+                "validity": "INFRA_INVALID",
+                "failureCategory": "auto_closure_runtime_error",
+                "evidenceSource": evidence_source,
+            },
+        )
+        return payload, 2
+
+    scored = score(closure)
+    passed = bool(
+        closure.validity == "VALID_PASS"
+        and closure.closed_verified
+        and scored is not None
+        and scored.passed
+    )
+    status: EvaluationStatus = (
+        "passed"
+        if passed
+        else "infra_invalid"
+        if closure.validity == "INFRA_INVALID"
+        else "failed"
+    )
+    validity = (
+        "VALID_FAIL"
+        if closure.validity == "VALID_PASS" and not passed
+        else closure.validity
+    )
+    timing = stage_metrics()
+    metrics: dict[str, object] = {
+        "verificationPassed": bool(
+            closure.verification is not None and closure.verification.passed
+        ),
+        "cleanupSucceeded": bool(
+            closure.cleanup is not None and closure.cleanup.passed
+        ),
+        "closedVerified": closure.closed_verified,
+        "mttdMs": _bounded_duration(timing.get("detection")),
+        "diagnosisMs": _bounded_duration(timing.get("diagnosis")),
+        "recoveryMs": _bounded_duration(timing.get("recovery")),
+        "verificationMs": _bounded_duration(timing.get("verification")),
+        "resolvedMs": _bounded_duration(timing.get("resolved")),
+        "mttrMs": _bounded_duration(timing.get("total")),
+    }
+    failures = [] if passed else [closure.authorization_code]
+    correlation = {
+        "incidentId": closure.correlation.incident_id,
+        "diagnosticTaskId": closure.correlation.diagnostic_task_id,
+        "backgroundJobId": closure.correlation.background_job_id,
+        "reportId": closure.correlation.report_id,
+    }
+    result_payload: dict[str, object] = {
+        "failures": failures,
+        "authorizationCode": closure.authorization_code,
+        "closedVerified": closure.closed_verified,
+        "correlation": correlation,
+        "recoveryIntentId": closure.recovery_intent_id,
+    }
+    if scored is not None:
+        metrics.update({"total": scored.total, "rawTotal": scored.raw_total})
+        result_payload["hardGate"] = scored.hard_gate
+        if not passed:
+            result_payload["failures"] = list(
+                dict.fromkeys([*failures, *scored.failures])
+            )
+        if scored.investigation_metrics is not None:
+            metrics["durationMs"] = scored.investigation_metrics.duration_ms
+            metrics["modelCallCount"] = scored.investigation_metrics.model_call_count
+    terminal = terminal_envelope(
+        running=active,
+        status=status,
+        validity=validity,
+        passed=passed if status != "infra_invalid" else None,
+        metrics=metrics,
+        result_payload=result_payload,
+        diagnostic_task_id=closure.correlation.diagnostic_task_id,
+        failure_category=None if passed else closure.authorization_code,
+        completed_at=datetime.now(timezone.utc),
+    )
+    finish = await recorder.finish(terminal) if passed else await recorder.fail(terminal)
+    public_result: dict[str, object] = {
+        "validity": validity,
+        "passed": passed,
+        "authorizationCode": closure.authorization_code,
+        "closedVerified": closure.closed_verified,
+        "correlation": correlation,
+        "recoveryIntentId": closure.recovery_intent_id,
+        "evidenceSource": evidence_source,
+    }
+    if scored is not None:
+        public_result.update(
+            total=scored.total,
+            rawTotal=scored.raw_total,
+            hardGate=scored.hard_gate,
+            failures=result_payload["failures"],
+        )
+    payload = safe_output(
+        command="run",
+        scenario_id=scenario_id,
+        run_id=run_id,
+        status=status,
+        result=public_result,
+    )
+    exit_code = 0 if passed else 2 if status == "infra_invalid" else 1
+    if start.database_pending or finish.database_pending:
+        exit_code = 2
+    return payload, exit_code
+
+
+def _bounded_duration(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, min(round(value), 86_400_000))
 
 
 def _cleanup_metrics(error: BaseException) -> dict[str, object]:
@@ -993,3 +1476,7 @@ def _sanitize_stored_report(payload: Mapping[str, object]) -> dict[str, object]:
         status=cast(str, status),
         result=result,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

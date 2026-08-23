@@ -550,6 +550,17 @@ class AlertIncidentModel(Base):
             "status",
             "updated_at",
         ),
+        Index(
+            "ix_aiops_alert_incidents_live_correlation",
+            "owner_user_id",
+            "source_id",
+            "scenario_id",
+            "run_id",
+        ),
+        CheckConstraint(
+            "verification_status IN ('pending', 'passed', 'failed', 'not_applicable')",
+            name="ck_alert_incidents_verification_status",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
@@ -558,6 +569,8 @@ class AlertIncidentModel(Base):
     )
     source_id: Mapped[str] = mapped_column(String(120), nullable=False)
     group_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    scenario_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     alert_name: Mapped[str] = mapped_column(String(256), nullable=False)
     service: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -565,6 +578,11 @@ class AlertIncidentModel(Base):
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="not_applicable"
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_summary: Mapped[str | None] = mapped_column(String(512), nullable=True)
     delivery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     diagnostic_task_id: Mapped[str | None] = mapped_column(
         ForeignKey("aiops_diagnostic_tasks.id", ondelete="SET NULL"), nullable=True, index=True
@@ -644,6 +662,39 @@ class EvaluationRunModel(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LiveAutoClosureStateModel(Base):
+    """Trusted resumable state for one isolated Live auto-closure run."""
+
+    __tablename__ = "aiops_live_auto_closure_states"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('baseline_ready','fault_injected','alert_detected',"
+            "'diagnosis_completed','recovery_dispatched','recovery_completed',"
+            "'verification_recorded','resolved')",
+            name="ck_live_auto_closure_states_stage",
+        ),
+        CheckConstraint("version >= 0", name="ck_live_auto_closure_states_version"),
+        Index(
+            "ix_live_auto_closure_states_updated_at",
+            "updated_at",
+        ),
+    )
+
+    owner_user_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    scenario_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
 
 
 class EvaluationResultModel(Base):

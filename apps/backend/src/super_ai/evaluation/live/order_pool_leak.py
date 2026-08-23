@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -15,7 +16,9 @@ from typing import Protocol, cast
 from urllib.parse import urlparse
 
 import httpx
+from prometheus_client.parser import text_string_to_metric_families
 
+from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.domain import (
     LiveCheck,
@@ -55,6 +58,21 @@ def _default_compose_file() -> Path:
     return Path(__file__).resolve().parents[6] / "infra" / "compose.yaml"
 
 
+def _validate_order_pool_base_url(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or parsed.port != 18082
+        or parsed.path not in {"", "/"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Order pool Live Eval must use loopback port 18082.")
+
+
 @dataclass(frozen=True, slots=True)
 class OrderPoolLiveConfig:
     base_url: str = "http://127.0.0.1:18082"
@@ -65,18 +83,7 @@ class OrderPoolLiveConfig:
     service_name: str = _SERVICE_NAME
 
     def __post_init__(self) -> None:
-        parsed = urlparse(self.base_url)
-        if (
-            parsed.scheme != "http"
-            or parsed.hostname not in {"127.0.0.1", "localhost"}
-            or parsed.port != 18082
-            or parsed.path not in {"", "/"}
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Order pool Live Eval must use loopback port 18082.")
+        _validate_order_pool_base_url(self.base_url)
         if self.service_name != _SERVICE_NAME:
             raise ValueError("Order pool Live Eval service name is fixed.")
         if not self.compose_file.is_file() or self.compose_file.name != "compose.yaml":
@@ -382,7 +389,7 @@ class OrderPoolLiveRunAudit:
 class _OrderPoolRun:
     fault_token: str
     original_generation: str
-    unrelated_sessions_before: frozenset[str]
+    unrelated_session_fingerprints: frozenset[str]
     recovery_started: bool = False
     recovery_completed: bool = False
 
@@ -399,6 +406,50 @@ class OrderPoolLeakScenarioDriver:
         self._api = api
         self._postgres = postgres
         self._runs: dict[str, _OrderPoolRun] = {}
+
+    def export_resume_state(self, identity: LiveRunIdentity) -> dict[str, object]:
+        run = self._runs[identity.run_id]
+        return {
+            "originalGeneration": run.original_generation,
+            "unrelatedSessionFingerprints": sorted(
+                run.unrelated_session_fingerprints
+            ),
+        }
+
+    def restore(
+        self,
+        identity: LiveRunIdentity,
+        state: Mapping[str, object],
+    ) -> None:
+        if set(state) != {
+            "originalGeneration",
+            "unrelatedSessionFingerprints",
+        }:
+            raise ValueError("order_pool_resume_state_invalid")
+        generation = state.get("originalGeneration")
+        fingerprints = state.get("unrelatedSessionFingerprints")
+        if (
+            not isinstance(generation, str)
+            or not generation
+            or len(generation) > 96
+            or not isinstance(fingerprints, list)
+            or len(fingerprints) > 128
+            or any(
+                not isinstance(item, str)
+                or len(item) != 64
+                or any(character not in "0123456789abcdef" for character in item)
+                for item in fingerprints
+            )
+        ):
+            raise ValueError("order_pool_resume_state_invalid")
+        fault_token = hashlib.sha256(
+            f"{identity.run_token}:order-pool-fault".encode()
+        ).hexdigest()
+        self._runs[identity.run_id] = _OrderPoolRun(
+            fault_token=fault_token,
+            original_generation=generation,
+            unrelated_session_fingerprints=frozenset(cast(Sequence[str], fingerprints)),
+        )
 
     async def preflight(self, identity: LiveRunIdentity) -> None:
         health = await self._api.health()
@@ -422,7 +473,9 @@ class OrderPoolLeakScenarioDriver:
         self._runs[identity.run_id] = _OrderPoolRun(
             fault_token=fault_token,
             original_generation=generation,
-            unrelated_sessions_before=await self._postgres.unrelated_sessions(),
+            unrelated_session_fingerprints=_fingerprint_sessions(
+                await self._postgres.unrelated_sessions()
+            ),
         )
 
     async def inject(self, identity: LiveRunIdentity) -> LiveFaultObservation:
@@ -501,7 +554,9 @@ class OrderPoolLeakScenarioDriver:
                 LiveCheck("postgres_healthy", await self._postgres.database_reachable()),
                 LiveCheck(
                     "unrelated_sessions_preserved",
-                    run.unrelated_sessions_before.issubset(unrelated_after),
+                    run.unrelated_session_fingerprints.issubset(
+                        _fingerprint_sessions(unrelated_after)
+                    ),
                 ),
                 LiveCheck("scoped_recovery_recorded", run.recovery_completed),
             )
@@ -661,6 +716,225 @@ class OrderPoolRuntimeEvidenceMcpClient:
         raise McpClientError("Order pool Live evidence tool is not allowed.")
 
 
+@dataclass(frozen=True, slots=True)
+class OrderPoolMetricSnapshot:
+    capacity: int
+    checked_out: int
+    free: int
+    waiter_observed: bool
+    fault_active: bool
+    business_probe_success: bool
+
+    @property
+    def pool_at_capacity(self) -> bool:
+        return self.checked_out == self.capacity
+
+
+class OrderPoolMetricsBoundary(Protocol):
+    async def snapshot(self, run_id: str) -> OrderPoolMetricSnapshot: ...
+
+
+class ResidentOrderPoolPostgresBoundary(Protocol):
+    async def database_reachable(self) -> bool: ...
+
+    async def run_scoped_session_count(self, run_id: str) -> int: ...
+
+    async def lock_wait_observed(self, run_id: str) -> bool: ...
+
+
+_ORDER_POOL_METRICS = frozenset(
+    {
+        "agentpy_order_pool_capacity",
+        "agentpy_order_pool_checked_out",
+        "agentpy_order_pool_free",
+        "agentpy_order_pool_waiter_observed",
+        "agentpy_order_pool_fault_active",
+        "agentpy_order_business_probe_success",
+    }
+)
+_ORDER_POOL_BOOLEAN_METRICS = frozenset(
+    {
+        "agentpy_order_pool_waiter_observed",
+        "agentpy_order_pool_fault_active",
+        "agentpy_order_business_probe_success",
+    }
+)
+_ORDER_POOL_METRICS_MAX_BODY_BYTES = 256 * 1024
+
+
+class HttpOrderPoolMetricsReader:
+    """Read one exact, bounded public Order Pool Prometheus snapshot."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: float = 3.0,
+        max_body_bytes: int = _ORDER_POOL_METRICS_MAX_BODY_BYTES,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        _validate_order_pool_base_url(base_url)
+        if timeout_seconds <= 0 or not 1 <= max_body_bytes <= 1024 * 1024:
+            raise ValueError("Order pool metrics reader limits are invalid.")
+        self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
+        self._max_body_bytes = max_body_bytes
+        self._transport = transport
+
+    async def snapshot(self, run_id: str) -> OrderPoolMetricSnapshot:
+        expected_labels = {
+            "service": "order-api",
+            "environment": "live-eval",
+            "scenario_id": SCENARIO_ID,
+            "run_id": run_id,
+        }
+        try:
+            body = await self._read_body()
+            values: dict[str, int] = {}
+            for family in text_string_to_metric_families(body):
+                for sample in family.samples:
+                    if sample.name not in _ORDER_POOL_METRICS:
+                        continue
+                    if dict(sample.labels) != expected_labels:
+                        continue
+                    if sample.name in values:
+                        raise ValueError("duplicate metric")
+                    numeric = float(sample.value)
+                    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+                        raise ValueError("invalid metric value")
+                    values[sample.name] = int(numeric)
+            if set(values) != _ORDER_POOL_METRICS:
+                raise ValueError("incomplete metric snapshot")
+            if any(values[name] not in {0, 1} for name in _ORDER_POOL_BOOLEAN_METRICS):
+                raise ValueError("invalid boolean metric")
+            capacity = values["agentpy_order_pool_capacity"]
+            checked_out = values["agentpy_order_pool_checked_out"]
+            free = values["agentpy_order_pool_free"]
+            fault_active = values["agentpy_order_pool_fault_active"]
+            business_probe_success = values["agentpy_order_business_probe_success"]
+            if (
+                not 1 <= capacity <= 16
+                or checked_out > capacity
+                or checked_out + free != capacity
+                or fault_active != int(checked_out > 0)
+                or business_probe_success != int(free > 0)
+            ):
+                raise ValueError("contradictory metric snapshot")
+        except (httpx.HTTPError, UnicodeError, ValueError):
+            raise McpClientError("Order pool metrics evidence is unavailable.") from None
+        return OrderPoolMetricSnapshot(
+            capacity=capacity,
+            checked_out=checked_out,
+            free=free,
+            waiter_observed=bool(values["agentpy_order_pool_waiter_observed"]),
+            fault_active=bool(fault_active),
+            business_probe_success=bool(business_probe_success),
+        )
+
+    async def _read_body(self) -> str:
+        content = bytearray()
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+            follow_redirects=False,
+            transport=self._transport,
+        ) as client:
+            async with client.stream("GET", f"{self._base_url}/metrics") as response:
+                if response.status_code != 200:
+                    raise httpx.HTTPStatusError(
+                        "Order pool metrics returned a non-success status.",
+                        request=response.request,
+                        response=response,
+                    )
+                async for chunk in response.aiter_bytes():
+                    if len(content) + len(chunk) > self._max_body_bytes:
+                        raise ValueError("metrics response too large")
+                    content.extend(chunk)
+        return content.decode("utf-8", errors="strict")
+
+
+class ResidentOrderPoolEvidenceMcpClient:
+    """Reconstruct read-only evidence in the resident backend process."""
+
+    def __init__(
+        self,
+        *,
+        scope: AutomaticLiveEvidenceScope,
+        metrics_reader: OrderPoolMetricsBoundary,
+        postgres_observer: ResidentOrderPoolPostgresBoundary,
+    ) -> None:
+        if scope.scenario_id != SCENARIO_ID:
+            raise ValueError("Order pool resident evidence requires the matching scenario.")
+        self._scope = scope
+        self._metrics_reader = metrics_reader
+        self._postgres = postgres_observer
+
+    async def discover_tools(self) -> Sequence[McpToolDefinition]:
+        schema: dict[str, object] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        return tuple(
+            McpToolDefinition(name, description, schema, "order-pool-live")
+            for name, description in (
+                ("InspectOrderPoolState", "Read the current run's bounded pool metrics."),
+                (
+                    "InspectOrderDatabaseSessions",
+                    "Read current-run PostgreSQL session and lock-wait state.",
+                ),
+                (
+                    "VerifyOrderDatabaseReachability",
+                    "Read database reachability and bounded business probe state.",
+                ),
+            )
+        )
+
+    async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        if arguments:
+            raise McpClientError("Order pool resident evidence arguments are invalid.")
+        if name == "InspectOrderPoolState":
+            snapshot = await self._metrics_reader.snapshot(self._scope.run_id)
+            return {
+                "benchmarkEvidenceId": "order-pool-saturated",
+                "poolAtCapacity": snapshot.pool_at_capacity,
+                "freeConnections": snapshot.free,
+                "waiterObserved": snapshot.waiter_observed,
+            }
+        if name == "InspectOrderDatabaseSessions":
+            try:
+                snapshot = await self._metrics_reader.snapshot(self._scope.run_id)
+                reachable = await self._postgres.database_reachable()
+                sessions = await self._postgres.run_scoped_session_count(
+                    self._scope.run_id
+                )
+                lock_wait = await self._postgres.lock_wait_observed(self._scope.run_id)
+            except Exception:
+                raise McpClientError(
+                    "Order pool PostgreSQL evidence is unavailable."
+                ) from None
+            return {
+                "benchmarkEvidenceId": "order-db-sessions",
+                "databaseReachable": reachable,
+                "runScopedSessionsPresent": sessions >= snapshot.capacity,
+                "lockWaitObserved": lock_wait,
+            }
+        if name == "VerifyOrderDatabaseReachability":
+            try:
+                reachable = await self._postgres.database_reachable()
+            except Exception:
+                raise McpClientError(
+                    "Order pool PostgreSQL evidence is unavailable."
+                ) from None
+            snapshot = await self._metrics_reader.snapshot(self._scope.run_id)
+            return {
+                "benchmarkEvidenceId": "order-pool-acquire-timeout",
+                "databaseReachable": reachable,
+                "businessProbeTimedOut": not snapshot.business_probe_success,
+            }
+        raise McpClientError("Order pool resident evidence tool is not allowed.")
+
+
 class OrderPoolClsRecordProvider:
     def __init__(self, driver: OrderPoolLeakScenarioDriver) -> None:
         self._driver = driver
@@ -701,3 +975,10 @@ def _count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RuntimeError("order_pool_count_invalid")
     return value
+
+
+def _fingerprint_sessions(values: Sequence[str] | frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        hashlib.sha256(f"order-pool-session:{value}".encode()).hexdigest()
+        for value in values
+    )

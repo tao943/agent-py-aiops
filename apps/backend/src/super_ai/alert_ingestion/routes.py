@@ -74,6 +74,7 @@ def create_alert_ingestion_router(
             try:
                 await runtime.start()
             except Exception as exc:
+                metrics.record_runtime_wake_failure()
                 emit_event(
                     logger,
                     "alert.ingestion.worker_wakeup_failed",

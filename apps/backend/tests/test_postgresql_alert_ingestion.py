@@ -15,6 +15,7 @@ from super_ai.memory.models import (
     AlertEventModel,
     AlertIncidentModel,
     BackgroundJobModel,
+    DiagnosticReportModel,
     DiagnosticTaskModel,
     UserModel,
 )
@@ -27,6 +28,7 @@ def _write(
     filtered: bool = False,
     group_hash: str = "a" * 64,
     payload_hash: str | None = None,
+    live: bool = False,
 ) -> IngestionWrite:
     received_at = datetime(2026, 8, 22, 1, 0, tzinfo=timezone.utc) + timedelta(
         milliseconds=sequence
@@ -46,6 +48,8 @@ def _write(
         service="order-service",
         severity="critical",
         starts_at=received_at,
+        scenario_id=("APY-LIVE-ORDER-POOL-LEAK-001" if live else None),
+        run_id=("closure-001" if live else None),
     )
 
 
@@ -210,3 +214,100 @@ async def test_commit_failure_is_safely_wrapped_and_rolls_back_all_rows(
 
     assert incident_count == task_count == job_count == 0
     assert recovered.disposition == "incident_created"
+
+
+async def test_live_lifecycle_lookup_is_exact_and_includes_persisted_report(
+    migrated_database_url: str,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_user(session_factory)
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    try:
+        created = await repository.apply(_write(1, live=True))
+        async with session_factory() as session, session.begin():
+            session.add(
+                DiagnosticReportModel(
+                    id="report-live-1",
+                    owner_user_id="owner",
+                    task_id=created.diagnostic_task_id,
+                    title="Live diagnosis",
+                    content="Safe report",
+                    payload={"safe": True},
+                    created_at=datetime(2026, 8, 22, 1, 1, tzinfo=timezone.utc),
+                )
+            )
+
+        lifecycle = await repository.get_live_lifecycle(
+            owner_user_id="owner",
+            source_id="local-alertmanager",
+            scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+            run_id="closure-001",
+        )
+        cross_tenant = await repository.get_live_lifecycle(
+            owner_user_id="other-owner",
+            source_id="local-alertmanager",
+            scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+            run_id="closure-001",
+        )
+    finally:
+        await engine.dispose()
+
+    assert lifecycle is not None
+    assert lifecycle.incident_id == created.incident_id
+    assert lifecycle.diagnostic_task_id == created.diagnostic_task_id
+    assert lifecycle.background_job_id == created.background_job_id
+    assert lifecycle.report_id == "report-live-1"
+    assert lifecycle.status == "active"
+    assert lifecycle.verification_status == "pending"
+    assert cross_tenant is None
+
+
+@pytest.mark.parametrize("verification_first", [True, False])
+async def test_resolved_and_verification_converge_in_either_order(
+    migrated_database_url: str,
+    verification_first: bool,
+) -> None:
+    engine = create_memory_engine(migrated_database_url)
+    session_factory = create_memory_session_factory(engine)
+    await _seed_user(session_factory)
+    repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    verification_time = datetime(2026, 8, 22, 1, 2, tzinfo=timezone.utc)
+    try:
+        await repository.apply(_write(1, live=True))
+        if verification_first:
+            await repository.record_verification(
+                owner_user_id="owner",
+                source_id="local-alertmanager",
+                scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+                run_id="closure-001",
+                status="passed",
+                summary="six independent checks passed",
+                verified_at=verification_time,
+            )
+            await repository.apply(_write(2, status="resolved", live=True))
+        else:
+            await repository.apply(_write(2, status="resolved", live=True))
+            await repository.record_verification(
+                owner_user_id="owner",
+                source_id="local-alertmanager",
+                scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+                run_id="closure-001",
+                status="passed",
+                summary="six independent checks passed",
+                verified_at=verification_time,
+            )
+        lifecycle = await repository.get_live_lifecycle(
+            owner_user_id="owner",
+            source_id="local-alertmanager",
+            scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+            run_id="closure-001",
+        )
+    finally:
+        await engine.dispose()
+
+    assert lifecycle is not None
+    assert lifecycle.status == "resolved"
+    assert lifecycle.verification_status == "passed"
+    assert lifecycle.verified_at == verification_time
+    assert lifecycle.closed_verified

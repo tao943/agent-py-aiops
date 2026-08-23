@@ -68,6 +68,70 @@ def test_parser_builds_stable_diagnostic_query() -> None:
     )
 
 
+def test_parser_accepts_allowlisted_live_correlation_labels() -> None:
+    payload = _payload()
+    alert = payload["alerts"][0]  # type: ignore[index]
+    alert["labels"].update(  # type: ignore[index]
+        {
+            "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "run_id": "closure-001",
+        }
+    )
+
+    delivery = parse_alertmanager_delivery(json.dumps(payload).encode(), max_alerts=50)
+
+    assert delivery.alerts[0].labels["scenario_id"] == (
+        "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    assert delivery.alerts[0].labels["run_id"] == "closure-001"
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("scenario_id", "APY-LIVE-UNKNOWN-001"),
+        ("run_id", "../closure-001"),
+        ("run_id", "r" * 81),
+        ("oracle", "primary cause"),
+        ("recovery_target", "backend"),
+        ("executionPermitted", "true"),
+    ],
+)
+def test_parser_rejects_unsafe_live_correlation_or_authority_labels(
+    label: str,
+    value: str,
+) -> None:
+    payload = _payload()
+    alert = payload["alerts"][0]  # type: ignore[index]
+    alert["labels"].update(  # type: ignore[index]
+        {
+            "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "run_id": "closure-001",
+            label: value,
+        }
+    )
+
+    with pytest.raises(AlertPayloadError):
+        parse_alertmanager_delivery(json.dumps(payload).encode(), max_alerts=50)
+
+
+def test_parser_rejects_mixed_live_correlation_within_one_group() -> None:
+    payload = _payload()
+    first = payload["alerts"][0]  # type: ignore[index]
+    first["labels"].update(  # type: ignore[index]
+        {
+            "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "run_id": "closure-001",
+        }
+    )
+    second = json.loads(json.dumps(first))
+    second["labels"]["run_id"] = "closure-002"
+    payload["alerts"] = [first, second]
+
+    with pytest.raises(AlertPayloadError):
+        parse_alertmanager_delivery(json.dumps(payload).encode(), max_alerts=50)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("version", "3"), ("status", "unknown"), ("groupKey", ""), ("alerts", [])],

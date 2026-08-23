@@ -382,6 +382,33 @@ def test_cls_live_score_rejects_wrong_search_scope() -> None:
     assert "cls_search_audit_invalid" in result.failures
 
 
+def test_cls_live_score_accepts_search_window_containing_indexed_scope() -> None:
+    artifact = passing_cls_artifact()
+    search = artifact.tool_calls[-1]
+    artifact = replace(
+        artifact,
+        tool_calls=artifact.tool_calls[:-1]
+        + (
+            replace(
+                search,
+                arguments={**search.arguments, "From": 500, "To": 20_000},
+            ),
+        ),
+    )
+
+    result = score_live_run(
+        artifact,
+        load_live_oracle(SCENARIO),
+        observation=OBSERVATION,
+        recovery=RECOVERY,
+        verification=VERIFICATION,
+        evidence_source="cls",
+    )
+
+    assert result.citation_audit == 10
+    assert "cls_search_audit_invalid" not in result.failures
+
+
 def test_cross_run_evidence_is_a_hard_gate() -> None:
     artifact = replace(
         passing_cls_artifact(),

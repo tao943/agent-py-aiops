@@ -18,6 +18,7 @@ from super_ai.aiops.diagnostics import (
 )
 from super_ai.aiops.investigation import EvidenceClaim, InvestigationRouterPolicy
 from super_ai.aiops.model_budget import ExecutionDeadlines
+from super_ai.aiops.reasoning import RootCauseValidationDecision
 from super_ai.aiops.specialists import (
     SharedRunContext,
     SpecialistAssignment,
@@ -4087,6 +4088,27 @@ async def _run_semantic_validator(
         await engine.dispose()
 
 
+def test_v4_semantic_validator_projects_trusted_success_origin() -> None:
+    valid = RootCauseValidationDecision(
+        status="valid",
+        evidence_ids=("evidence-id",),
+        unsupported_fields=(),
+        missing_evidence=(),
+        summary="Public evidence supports the candidate.",
+    )
+    invalid = RootCauseValidationDecision(
+        status="invalid",
+        evidence_ids=("evidence-id",),
+        unsupported_fields=("mechanism",),
+        missing_evidence=(),
+        summary="The mechanism is unsupported.",
+    )
+
+    assert diagnostics_module._semantic_validation_origin(valid) == "llm_confirmed"  # pyright: ignore[reportPrivateUsage]
+    assert diagnostics_module._semantic_validation_origin(invalid) == "llm_semantic"  # pyright: ignore[reportPrivateUsage]
+    assert diagnostics_module._semantic_validation_origin(None) == "llm_failed"  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.mark.asyncio
 async def test_v4_semantic_validator_uses_configured_json_mode(
     migrated_database_url: str,
@@ -4101,7 +4123,7 @@ async def test_v4_semantic_validator_uses_configured_json_mode(
 
     validation = cast(dict[str, object], update["decision_validation"])
     assert model.structured_output_methods == ["json_mode"]
-    assert validation["validationOrigin"] == "llm_semantic"
+    assert validation["validationOrigin"] == "llm_confirmed"
     assert validation["semanticValidationStatus"] == "valid"
     assert validation["semanticValidationAttempts"] == 1
     assert validation["validationModel"] == "validator-test-model"

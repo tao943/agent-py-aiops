@@ -118,6 +118,22 @@ async def test_fault_path_keeps_checked_out_connection_and_records_real_lifecycl
 
 
 @pytest.mark.asyncio
+async def test_fault_request_retry_is_idempotent() -> None:
+    module = _load_order_api()
+    pool = FakePool(max_size=3)
+    runtime = _runtime(module, pool)
+
+    await runtime.start_run("run-1", "fault-token")
+    await runtime.execute_fault("run-1", "fault-token", "request-1")
+    await runtime.execute_fault("run-1", "fault-token", "request-1")
+
+    assert (await runtime.state("run-1"))["checkedOut"] == 1
+    assert [item["event"] for item in await runtime.events("run-1")].count(
+        "connection_checkout"
+    ) == 1
+
+
+@pytest.mark.asyncio
 async def test_normal_probe_returns_connection_and_updates_run_scoped_order() -> None:
     module = _load_order_api()
     pool = FakePool(max_size=3)
@@ -170,6 +186,69 @@ async def test_run_scope_token_and_cleanup_are_fail_closed_and_idempotent() -> N
     await runtime.clear_run("run-1")
     await runtime.clear_run("run-1")
     assert pool.checked_out == []
+
+
+@pytest.mark.asyncio
+async def test_metrics_expose_only_bounded_public_order_pool_state() -> None:
+    module = _load_order_api()
+    pool = FakePool(max_size=1)
+    runtime = _runtime(module, pool)
+    await runtime.start_run("metrics-001", "private-fault-token")
+    await runtime.execute_fault(
+        "metrics-001", "private-fault-token", "request-1"
+    )
+    assert not await runtime.probe(
+        "metrics-001", timeout_seconds=0.1, request_id="probe-1"
+    )
+
+    body = module.OrderApiMetrics().render(runtime).decode("utf-8")
+
+    assert "agentpy_order_pool_capacity" in body
+    assert "agentpy_order_pool_checked_out" in body
+    assert "agentpy_order_pool_free" in body
+    assert "agentpy_order_pool_waiter_observed" in body
+    assert "agentpy_order_pool_fault_active" in body
+    assert "agentpy_order_business_probe_success" in body
+    assert 'service="order-api"' in body
+    assert 'environment="live-eval"' in body
+    assert 'scenario_id="APY-LIVE-ORDER-POOL-LEAK-001"' in body
+    assert 'run_id="metrics-001"' in body
+    assert "private-fault-token" not in body
+    assert "run_token" not in body
+    assert "fault_token" not in body
+
+
+@pytest.mark.asyncio
+async def test_clear_run_removes_run_scoped_metric_series() -> None:
+    module = _load_order_api()
+    runtime = _runtime(module, FakePool(max_size=1))
+    await runtime.start_run("metrics-001", "private-fault-token")
+
+    await runtime.clear_run("metrics-001")
+
+    body = module.OrderApiMetrics().render(runtime).decode("utf-8")
+    assert "metrics-001" not in body
+    assert "scenario_id" not in body
+
+
+def test_factory_exposes_public_metrics_without_control_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_order_api()
+    for key, value in {
+        "POSTGRES_HOST": "postgres",
+        "POSTGRES_PORT": "5432",
+        "POSTGRES_USER": "agent_py",
+        "POSTGRES_PASSWORD": "secret",
+        "POSTGRES_DB": "agent_py_live_eval",
+        "LIVE_ORDER_API_CONTROL_TOKEN": "control-token",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    app = module.create_app()
+
+    route = next(route for route in app.routes if getattr(route, "path", None) == "/metrics")
+    assert "GET" in route.methods
 
 
 def test_factory_loads_environment_and_fails_closed(

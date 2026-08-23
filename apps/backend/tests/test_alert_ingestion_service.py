@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,16 +9,29 @@ from super_ai.alert_ingestion.domain import AlertmanagerDelivery, NormalizedAler
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
 from super_ai.alert_ingestion.redis_runtime import AlertLease
 from super_ai.alert_ingestion.repositories import IngestionResult, IngestionWrite, RedisMode
-from super_ai.alert_ingestion.service import AlertIngestionService
+from super_ai.alert_ingestion.service import AlertIngestionService, _live_task_input
 
 
-def _delivery(*, environment: str = "test") -> AlertmanagerDelivery:
+def _delivery(
+    *,
+    environment: str = "test",
+    live_correlation: bool = False,
+) -> AlertmanagerDelivery:
+    correlation = (
+        {
+            "scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+            "run_id": "closure-001",
+        }
+        if live_correlation
+        else {}
+    )
     alert = NormalizedAlert(
         labels={
             "alertname": "HighLatency",
             "service": "order-service",
             "severity": "critical",
             "environment": environment,
+            **correlation,
         },
         annotations={"summary": "slow requests"},
         starts_at="2026-08-22T01:00:00Z",
@@ -133,6 +146,11 @@ def test_metrics_have_exact_request_failure_and_latency_semantics() -> None:
     metrics.record_success("incident_resolved", "primary", latency_ms=3.0)
     metrics.record_success("orphan_resolved", "primary", latency_ms=1.0)
     metrics.record_success("filtered", "degraded", latency_ms=5.0)
+    metrics.record_runtime_wake_failure()
+    metrics.record_verification("passed")
+    metrics.record_verification("failed")
+    metrics.record_stage_latency("detection", latency_ms=7.0)
+    metrics.record_stage_latency("recovery", latency_ms=8.0)
 
     snapshot = metrics.snapshot()
 
@@ -144,8 +162,19 @@ def test_metrics_have_exact_request_failure_and_latency_semantics() -> None:
     assert snapshot["orphanResolvedTotal"] == 1
     assert snapshot["filteredTotal"] == 1
     assert snapshot["redisDegradedTotal"] == 1
+    assert snapshot["runtimeWakeFailedTotal"] == 1
+    assert snapshot["verifiedClosureTotal"] == 1
+    assert snapshot["verificationFailedTotal"] == 1
     assert snapshot["ingestionLatencyMs"] == {"count": 6, "sum": 21.0, "max": 6.0}
     assert snapshot["diagnosisEnqueueLatencyMs"] == {"count": 1, "sum": 6.0, "max": 6.0}
+    assert snapshot["autoClosureStageLatencyMs"] == {
+        "detection": {"count": 1, "sum": 7.0, "max": 7.0},
+        "diagnosis": {"count": 0, "sum": 0.0, "max": 0.0},
+        "recovery": {"count": 1, "sum": 8.0, "max": 8.0},
+        "verification": {"count": 0, "sum": 0.0, "max": 0.0},
+        "resolved": {"count": 0, "sum": 0.0, "max": 0.0},
+        "total": {"count": 0, "sum": 0.0, "max": 0.0},
+    }
 
 
 async def test_lease_is_released_when_repository_fails() -> None:
@@ -175,3 +204,68 @@ def test_service_parses_start_time_and_builds_only_safe_alert_input() -> None:
     assert write.safe_alert["labels"] == _delivery().alerts[0].labels
     assert "ownerUserId" not in write.safe_alert
     assert "executionPermitted" not in write.safe_alert
+
+
+def test_service_builds_exact_live_correlation_without_webhook_authority() -> None:
+    write = AlertIngestionService.build_write(
+        _source(),
+        _delivery(live_correlation=True),
+        filtered=False,
+        received_at=datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert write.scenario_id == "APY-LIVE-ORDER-POOL-LEAK-001"
+    assert write.run_id == "closure-001"
+    assert write.task_input_payload is not None
+    assert write.task_input_payload["benchmarkScenarioId"] == (
+        "APY-LIVE-ORDER-POOL-LEAK-001"
+    )
+    assert write.task_input_payload["benchmarkMode"] == "live"
+    assert write.task_input_payload["automaticClosureMode"] is True
+    assert write.task_input_payload["investigationStrategyMode"] == "single"
+    assert write.task_input_payload["workflowVersion"] == "evidence-driven-v4"
+    assert write.task_input_payload["graphVersion"] == "aiops-diagnostic-v3"
+    assert "decisionVocabulary" in write.task_input_payload
+    scope = write.task_input_payload["liveEvidenceScope"]
+    starts_at = datetime(2026, 8, 22, 1, 0, tzinfo=timezone.utc)
+    assert scope == {
+        "runId": "closure-001",
+        "scenarioId": "APY-LIVE-ORDER-POOL-LEAK-001",
+        "incidentId": "APY-LIVE-ORDER-POOL-LEAK-001-closure-001",
+        "fromMs": int((starts_at - timedelta(minutes=5)).timestamp() * 1000),
+        "toMs": int((starts_at + timedelta(minutes=30)).timestamp() * 1000),
+    }
+    serialized = str(write.task_input_payload)
+    for forbidden in (
+        "Region",
+        "TopicId",
+        "SecretId",
+        "SecretKey",
+        "recoveryTarget",
+        "ground_truth",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "run_id", "starts_at"),
+    [
+        ("../APY-LIVE-ORDER-POOL-LEAK-001", "closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-PG-LOCK-001", "closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-ORDER-POOL-LEAK-001", "../closure-001", "2026-08-22T01:00:00Z"),
+        ("APY-LIVE-ORDER-POOL-LEAK-001", "closure-001", "not-a-time"),
+    ],
+)
+def test_live_task_input_rejects_untrusted_scope_components(
+    scenario_id: str,
+    run_id: str,
+    starts_at: str,
+) -> None:
+    with pytest.raises(ValueError, match="Live evidence scope"):
+        _live_task_input(
+            scenario_id=scenario_id,
+            run_id=run_id,
+            starts_at=starts_at,
+            query="Investigate the alert.",
+            safe_alert={},
+        )

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 
 from super_ai.aiops import RootCauseDecision
@@ -12,16 +13,19 @@ from super_ai.aiops.investigation import (
     TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     build_investigator_capabilities,
 )
+from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
 from super_ai.evaluation import RunArtifact
 from super_ai.evaluation.live.diagnostics import build_live_diagnostic_input
 from super_ai.evaluation.live.domain import LiveRunIdentity
 from super_ai.evaluation.live.order_pool_leak import (
     ComposeServiceRestarter,
+    HttpOrderPoolMetricsReader,
     OrderPoolLeakScenarioDriver,
     OrderPoolLiveConfig,
     OrderPoolRecoveryService,
     OrderPoolRuntimeEvidenceMcpClient,
     PostgresOrderPoolObserver,
+    ResidentOrderPoolEvidenceMcpClient,
 )
 from super_ai.evaluation.live.postgres import PostgresConnectionConfig
 from super_ai.evaluation.live.scenarios import load_live_scenario, validate_run_id
@@ -314,6 +318,28 @@ async def test_driver_confirms_pool_saturation_without_claiming_the_cause() -> N
 
 
 @pytest.mark.asyncio
+async def test_driver_resume_state_is_safe_and_restores_recovery_identity() -> None:
+    driver, api, postgres = _driver()
+    identity = validate_run_id("order-pool-resume")
+    await driver.preflight(identity)
+    await driver.baseline(identity)
+
+    resume_state = driver.export_resume_state(identity)
+    restored = OrderPoolLeakScenarioDriver(
+        driver._config,  # noqa: SLF001 - verifies a new-process driver instance
+        api=api,
+        postgres=postgres,
+    )
+    restored.restore(identity, resume_state)
+
+    serialized = str(resume_state)
+    assert "stable-a" not in serialized
+    assert "stable-b" not in serialized
+    assert resume_state["originalGeneration"] == "gen-1"
+    assert restored.recovery_eligible(identity)
+
+
+@pytest.mark.asyncio
 async def test_recovery_restarts_only_owned_isolated_instance_once() -> None:
     driver, api, _ = _driver()
     restarter = FakeRestarter(api)
@@ -421,6 +447,193 @@ async def test_runtime_evidence_is_read_only_partial_and_answer_isolated() -> No
     assert "primary_cause" not in serialized
     with pytest.raises(McpClientError):
         await client.call_tool("InspectOrderPoolState", {"run_id": "other"})
+
+
+def _automatic_scope(run_id: str = "run-1") -> AutomaticLiveEvidenceScope:
+    return AutomaticLiveEvidenceScope(
+        run_id=run_id,
+        scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",
+        incident_id=f"APY-LIVE-ORDER-POOL-LEAK-001-{run_id}",
+        from_ms=1_777_000_000_000,
+        to_ms=1_777_001_800_000,
+    )
+
+
+def _metrics_body(
+    run_id: str = "run-1",
+    *,
+    overrides: Mapping[str, str] | None = None,
+    extra_labels: str = "",
+) -> str:
+    values = {
+        "agentpy_order_pool_capacity": "3",
+        "agentpy_order_pool_checked_out": "3",
+        "agentpy_order_pool_free": "0",
+        "agentpy_order_pool_waiter_observed": "1",
+        "agentpy_order_pool_fault_active": "1",
+        "agentpy_order_business_probe_success": "0",
+    }
+    values.update(overrides or {})
+    labels = (
+        f'service="order-api",environment="live-eval",'
+        f'scenario_id="APY-LIVE-ORDER-POOL-LEAK-001",run_id="{run_id}"'
+        f"{extra_labels}"
+    )
+    return "".join(
+        f"# TYPE {name} gauge\n{name}{{{labels}}} {value}\n"
+        for name, value in values.items()
+    )
+
+
+class FakeResidentPostgresObserver:
+    def __init__(
+        self,
+        *,
+        sessions: int = 3,
+        reachable: bool = True,
+        lock_wait: bool = False,
+    ) -> None:
+        self.sessions = sessions
+        self.reachable = reachable
+        self.lock_wait = lock_wait
+        self.run_ids: list[str] = []
+
+    async def database_reachable(self) -> bool:
+        return self.reachable
+
+    async def run_scoped_session_count(self, run_id: str) -> int:
+        self.run_ids.append(run_id)
+        return self.sessions
+
+    async def lock_wait_observed(self, run_id: str) -> bool:
+        self.run_ids.append(run_id)
+        return self.lock_wait
+
+
+def _metrics_reader(
+    handler: httpx.MockTransport,
+    *,
+    max_body_bytes: int = 256 * 1024,
+) -> HttpOrderPoolMetricsReader:
+    return HttpOrderPoolMetricsReader(
+        "http://127.0.0.1:18082",
+        transport=handler,
+        max_body_bytes=max_body_bytes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resident_client_builds_three_independent_live_observations() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=_metrics_body(), request=request)
+    )
+    postgres = FakeResidentPostgresObserver()
+    client = ResidentOrderPoolEvidenceMcpClient(
+        scope=_automatic_scope(),
+        metrics_reader=_metrics_reader(transport),
+        postgres_observer=postgres,
+    )
+
+    tools = await client.discover_tools()
+    pool = cast(dict[str, object], await client.call_tool("InspectOrderPoolState", {}))
+    sessions = cast(
+        dict[str, object],
+        await client.call_tool("InspectOrderDatabaseSessions", {}),
+    )
+    health = cast(
+        dict[str, object],
+        await client.call_tool("VerifyOrderDatabaseReachability", {}),
+    )
+
+    assert {tool.name for tool in tools} == {
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    assert pool == {
+        "benchmarkEvidenceId": "order-pool-saturated",
+        "poolAtCapacity": True,
+        "freeConnections": 0,
+        "waiterObserved": True,
+    }
+    assert sessions == {
+        "benchmarkEvidenceId": "order-db-sessions",
+        "databaseReachable": True,
+        "runScopedSessionsPresent": True,
+        "lockWaitObserved": False,
+    }
+    assert health == {
+        "benchmarkEvidenceId": "order-pool-acquire-timeout",
+        "databaseReachable": True,
+        "businessProbeTimedOut": True,
+    }
+    assert set(postgres.run_ids) == {"run-1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        _metrics_body("foreign-run"),
+        _metrics_body().replace("agentpy_order_pool_free", "missing_pool_free"),
+        _metrics_body() + _metrics_body(),
+        _metrics_body(overrides={"agentpy_order_pool_capacity": "NaN"}),
+        _metrics_body(overrides={"agentpy_order_pool_checked_out": "Inf"}),
+        _metrics_body(overrides={"agentpy_order_pool_free": "-1"}),
+        _metrics_body(overrides={"agentpy_order_pool_capacity": "3.5"}),
+        _metrics_body(overrides={"agentpy_order_pool_checked_out": "2"}),
+        _metrics_body(extra_labels=',unexpected="value"'),
+    ],
+)
+async def test_metrics_reader_fails_closed_on_ambiguous_snapshot(body: str) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=body, request=request)
+    )
+
+    with pytest.raises(McpClientError, match="metrics"):
+        await _metrics_reader(transport).snapshot("run-1")
+
+
+@pytest.mark.asyncio
+async def test_metrics_reader_rejects_redirect_oversize_and_timeout() -> None:
+    redirect = httpx.MockTransport(
+        lambda request: httpx.Response(
+            302,
+            headers={"location": "http://example.invalid/metrics"},
+            request=request,
+        )
+    )
+    with pytest.raises(McpClientError, match="metrics"):
+        await _metrics_reader(redirect).snapshot("run-1")
+
+    oversized = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"x" * 129, request=request)
+    )
+    with pytest.raises(McpClientError, match="metrics"):
+        await _metrics_reader(oversized, max_body_bytes=128).snapshot("run-1")
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("safe timeout", request=request)
+
+    with pytest.raises(McpClientError, match="metrics"):
+        await _metrics_reader(httpx.MockTransport(timeout)).snapshot("run-1")
+
+
+@pytest.mark.asyncio
+async def test_resident_client_rejects_arguments_and_unknown_tools() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text=_metrics_body(), request=request)
+    )
+    client = ResidentOrderPoolEvidenceMcpClient(
+        scope=_automatic_scope(),
+        metrics_reader=_metrics_reader(transport),
+        postgres_observer=FakeResidentPostgresObserver(),
+    )
+
+    with pytest.raises(McpClientError):
+        await client.call_tool("InspectOrderPoolState", {"run_id": "foreign"})
+    with pytest.raises(McpClientError):
+        await client.call_tool("RestartService", {})
 
 
 @pytest.mark.asyncio

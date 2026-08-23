@@ -22,7 +22,13 @@ def test_alertmanager_groups_lifecycles_and_uses_bearer_secret_file() -> None:
     configuration = _read("infra/alertmanager/alertmanager.yml")
 
     assert "receiver: agent-py-webhook" in configuration
-    assert "group_by: [alertname, service, environment, run_id]" in configuration
+    assert (
+        "group_by: [alertname, service, environment, scenario_id, run_id]"
+        in configuration
+    )
+    assert "group_wait: 1s" in configuration
+    assert "group_interval: 5s" in configuration
+    assert "repeat_interval: 1m" in configuration
     assert "http://nginx/aiops/alerts/webhook/alertmanager/local-alertmanager" in configuration
     assert "send_resolved: true" in configuration
     assert "max_alerts: 50" in configuration

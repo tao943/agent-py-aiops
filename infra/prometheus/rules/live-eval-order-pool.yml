@@ -1,0 +1,23 @@
+groups:
+  - name: agentpy-live-eval-order-pool
+    interval: 2s
+    rules:
+      - alert: OrderApiConnectionPoolExhausted
+        expr: |
+          (agentpy_order_pool_fault_active == 1)
+          and on (service, environment, scenario_id, run_id)
+          (agentpy_order_pool_free == 0)
+          and on (service, environment, scenario_id, run_id)
+          (agentpy_order_pool_checked_out == agentpy_order_pool_capacity)
+          and on (service, environment, scenario_id, run_id)
+          (agentpy_order_pool_waiter_observed == 1)
+          and on (service, environment, scenario_id, run_id)
+          (agentpy_order_business_probe_success == 0)
+        for: 4s
+        labels:
+          severity: critical
+          service: order-api
+          environment: live-eval
+          scenario_id: APY-LIVE-ORDER-POOL-LEAK-001
+        annotations:
+          summary: Order API connection pool is exhausted in the isolated Live Eval.

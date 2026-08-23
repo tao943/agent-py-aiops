@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -14,10 +15,13 @@ from super_ai.aiops.diagnostics import (
     bind_trusted_tool_arguments,
     build_generic_live_plan,
     build_grounded_fallback_decision,
+    build_task_local_trusted_tool_arguments,
+    canonicalize_public_tool_output,
     merge_live_log_plan_step,
     merge_trusted_live_hypothesis_bindings,
     plan_matches_tool_contracts,
 )
+from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.aiops.investigation import (
     TRUSTED_DIAGNOSTIC_TOOL_CAPABILITIES,
     InvestigationRoute,
@@ -680,6 +684,372 @@ def test_trusted_tool_arguments_replace_only_the_execution_scope() -> None:
     }
     assert bound[1] == model_plan[1]
     assert model_plan[0]["arguments"] == {"Query": "*"}
+
+
+def _official_cls_search_definition(*, server_name: str = "cls") -> McpToolDefinition:
+    return McpToolDefinition(
+        "SearchLog",
+        "Search scoped CLS logs.",
+        {
+            "type": "object",
+            "properties": {
+                "Region": {"type": "string"},
+                "TopicId": {"type": "string"},
+                "From": {"type": "integer"},
+                "To": {"type": "integer"},
+                "Query": {"type": "string"},
+                "Limit": {"type": "integer"},
+            },
+            "required": ["Region", "TopicId", "From", "To", "Query", "Limit"],
+            "additionalProperties": False,
+        },
+        server_name=server_name,
+    )
+
+
+def _task_scope(run_id: str) -> dict[str, object]:
+    scenario_id = "APY-LIVE-ORDER-POOL-LEAK-001"
+    return {
+        "liveEvidenceScope": {
+            "runId": run_id,
+            "scenarioId": scenario_id,
+            "incidentId": f"{scenario_id}-{run_id}",
+            "fromMs": 1_787_360_100_000,
+            "toMs": 1_787_362_200_000,
+        }
+    }
+
+
+def test_alert_task_builds_exact_backend_owned_cls_arguments() -> None:
+    arguments = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-001"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(_official_cls_search_definition(),),
+    )
+
+    assert arguments == {
+        "SearchLog": {
+            "Region": "ap-guangzhou",
+            "TopicId": "topic-live",
+            "From": 1_787_360_100_000,
+            "To": 1_787_362_200_000,
+            "Query": (
+                'run_id:"closure-001" AND '
+                'scenario_id:"APY-LIVE-ORDER-POOL-LEAK-001" AND '
+                'incident_id:"APY-LIVE-ORDER-POOL-LEAK-001-closure-001"'
+            ),
+            "Limit": 20,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "task_input,definition",
+    [
+        (_task_scope("closure-001"), _official_cls_search_definition(server_name="other")),
+        (
+            {
+                "liveEvidenceScope": {
+                    **cast(dict[str, object], _task_scope("closure-001")["liveEvidenceScope"]),
+                    "incidentId": "foreign-incident",
+                }
+            },
+            _official_cls_search_definition(),
+        ),
+        (
+            {
+                "liveEvidenceScope": {
+                    **cast(dict[str, object], _task_scope("closure-001")["liveEvidenceScope"]),
+                    "runId": "../closure-001",
+                }
+            },
+            _official_cls_search_definition(),
+        ),
+    ],
+)
+def test_task_local_cls_scope_fails_closed(
+    task_input: Mapping[str, object],
+    definition: McpToolDefinition,
+) -> None:
+    assert build_task_local_trusted_tool_arguments(
+        task_input,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    ) == {}
+
+
+def test_concurrent_task_scopes_do_not_share_cls_arguments() -> None:
+    definition = _official_cls_search_definition()
+    first = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-001"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    )
+    second = build_task_local_trusted_tool_arguments(
+        _task_scope("closure-002"),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        tool_definitions=(definition,),
+    )
+
+    assert first["SearchLog"]["Query"] != second["SearchLog"]["Query"]
+    assert "closure-002" not in cast(str, first["SearchLog"]["Query"])
+    assert "closure-001" not in cast(str, second["SearchLog"]["Query"])
+
+
+def test_diagnostic_service_keeps_task_scopes_out_of_singleton_state() -> None:
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+    )
+    definition = _official_cls_search_definition()
+
+    first = service._trusted_arguments_for_state(  # pyright: ignore[reportPrivateUsage]
+        {
+            "task_local_live_scope": True,
+            "live_evidence_scope": _task_scope("closure-001")["liveEvidenceScope"],
+        },
+        (definition,),
+    )
+    second = service._trusted_arguments_for_state(  # pyright: ignore[reportPrivateUsage]
+        {
+            "task_local_live_scope": True,
+            "live_evidence_scope": _task_scope("closure-002")["liveEvidenceScope"],
+        },
+        (definition,),
+    )
+
+    assert first != second
+    assert service._trusted_tool_arguments == {}  # pyright: ignore[reportPrivateUsage]
+
+
+class _ScopedClient:
+    def __init__(self, definitions: Sequence[McpToolDefinition]) -> None:
+        self.definitions = tuple(definitions)
+        self.calls: list[str] = []
+
+    async def discover_tools(self) -> Sequence[McpToolDefinition]:
+        return self.definitions
+
+    async def call_tool(self, name: str, arguments: Mapping[str, object]) -> object:
+        del arguments
+        self.calls.append(name)
+        return {"tool": name}
+
+    async def get_langchain_tools(self) -> list[Any]:
+        return []
+
+
+def _automatic_state(run_id: str, *, include_scope: bool = True) -> dict[str, object]:
+    state: dict[str, object] = {
+        "automatic_closure_mode": True,
+        "benchmark_mode": "live",
+        "benchmark_scenario_id": "APY-LIVE-ORDER-POOL-LEAK-001",
+    }
+    if include_scope:
+        state["live_evidence_scope"] = _task_scope(run_id)["liveEvidenceScope"]
+    return state
+
+
+def _runtime_definitions() -> tuple[McpToolDefinition, ...]:
+    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    return tuple(
+        McpToolDefinition(name, name, schema, "order-pool-live")
+        for name in (
+            "InspectOrderPoolState",
+            "InspectOrderDatabaseSessions",
+            "VerifyOrderDatabaseReachability",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_composes_exact_task_local_read_only_tools() -> None:
+    owner = _ScopedClient(
+        (
+            _official_cls_search_definition(),
+            McpToolDefinition("RestartService", "write", {}, "unsafe"),
+        )
+    )
+    created_runs: list[str] = []
+
+    def resident_factory(scope: Any) -> _ScopedClient:
+        created_runs.append(scope.run_id)
+        return _ScopedClient(_runtime_definitions())
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=resident_factory,
+    )
+
+    client = await service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+        "owner",
+        _automatic_state("closure-001"),
+    )
+
+    assert {item.name for item in await client.discover_tools()} == {
+        "SearchLog",
+        "InspectOrderPoolState",
+        "InspectOrderDatabaseSessions",
+        "VerifyOrderDatabaseReachability",
+    }
+    with pytest.raises(McpClientError):
+        await client.call_tool("RestartService", {})
+    assert created_runs == ["closure-001"]
+
+
+@pytest.mark.asyncio
+async def test_service_missing_automatic_scope_gets_empty_client() -> None:
+    owner = _ScopedClient((_official_cls_search_definition(),))
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=lambda scope: _ScopedClient(
+            _runtime_definitions()
+        ),
+    )
+
+    client = await service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+        "owner",
+        _automatic_state("closure-001", include_scope=False),
+    )
+
+    assert await client.discover_tools() == ()
+    with pytest.raises(McpClientError):
+        await client.call_tool("SearchLog", {})
+
+
+@pytest.mark.asyncio
+async def test_service_concurrent_task_clients_never_share_run_scope() -> None:
+    owner = _ScopedClient((_official_cls_search_definition(),))
+    runtime_clients: dict[str, _ScopedClient] = {}
+
+    def resident_factory(scope: Any) -> _ScopedClient:
+        client = _ScopedClient(_runtime_definitions())
+        runtime_clients[scope.run_id] = client
+        return client
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, object()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=owner,
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+        resident_order_pool_client_factory=resident_factory,
+    )
+
+    first, second = await asyncio.gather(
+        service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+            "owner", _automatic_state("closure-001")
+        ),
+        service._mcp_client_for(  # pyright: ignore[reportPrivateUsage]
+            "owner", _automatic_state("closure-002")
+        ),
+    )
+    await first.call_tool("InspectOrderPoolState", {})
+    await second.call_tool("InspectOrderPoolState", {})
+
+    assert set(runtime_clients) == {"closure-001", "closure-002"}
+    assert runtime_clients["closure-001"].calls == ["InspectOrderPoolState"]
+    assert runtime_clients["closure-002"].calls == ["InspectOrderPoolState"]
+
+
+def test_official_cls_output_is_canonicalized_before_fact_extraction() -> None:
+    records = [
+        {"LogJson": json.dumps({"event": "connection_checkout", "component": "order-api"})},
+        {"LogJson": json.dumps({"event": "order_update_failed", "component": "order-api"})},
+        {"LogJson": json.dumps({"event": "pool_acquire_timeout", "component": "order-api"})},
+    ]
+    official_output = [{"type": "text", "text": json.dumps(records)}]
+
+    canonical = canonicalize_public_tool_output("SearchLog", official_output)
+    facts = extract_public_facts(
+        (
+            PublicToolObservation(
+                tool_name="SearchLog",
+                evidence_id="evidence-cls",
+                output=cast(Mapping[str, object], canonical),
+            ),
+        )
+    )
+
+    event_fact = next(fact for fact in facts if fact.key == "SearchLog.records.event")
+    assert event_fact.value == (
+        "connection_checkout",
+        "order_update_failed",
+        "pool_acquire_timeout",
+    )
+
+
+@pytest.mark.asyncio
+async def test_required_cls_scope_rejects_non_cls_search_log_from_the_plan() -> None:
+    class SearchOnlyModel:
+        async def ainvoke(self, prompt: object) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "id": "search-untrusted-server",
+                            "tool": "SearchLog",
+                            "arguments": {
+                                "Region": "foreign",
+                                "TopicId": "foreign",
+                                "From": 1,
+                                "To": 2,
+                                "Query": "*",
+                                "Limit": 20,
+                            },
+                            "purpose": "Search logs.",
+                            "testsHypotheses": [],
+                            "causalIntent": "context",
+                        }
+                    ]
+                }
+            )
+
+    class Provider:
+        def create_chat_model(self) -> SearchOnlyModel:
+            return SearchOnlyModel()
+
+    service = AiopsDiagnosticService(
+        repositories=cast(Any, object()),
+        llm_provider=cast(Any, Provider()),
+        retrieval_tool=cast(Any, object()),
+        mcp_client=cast(Any, object()),
+        cls_region="ap-guangzhou",
+        cls_topic_id="topic-live",
+    )
+
+    plan, _origin = await service._create_plan(  # pyright: ignore[reportPrivateUsage]
+        query="Investigate the alert.",
+        alert={},
+        sop_hits=(),
+        no_sop_matched=True,
+        tool_definitions=(_official_cls_search_definition(server_name="other"),),
+        known_hypotheses=(),
+        trusted_tool_arguments={},
+        require_trusted_log_scope=True,
+    )
+
+    assert all(step["tool"] != "SearchLog" for step in plan)
 
 
 @pytest.mark.asyncio

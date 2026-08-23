@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from hashlib import sha256
 from typing import cast
@@ -22,11 +23,25 @@ _LABEL_KEYS = frozenset(
         "instance",
         "job",
         "run_id",
+        "scenario_id",
         "incident_id",
         "trace_id",
     }
 )
 _ANNOTATION_KEYS = frozenset({"summary", "description", "sop"})
+_LIVE_SCENARIO_ID = "APY-LIVE-ORDER-POOL-LEAK-001"
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_FORBIDDEN_AUTHORITY_KEYS = frozenset(
+    {
+        "executionpermitted",
+        "groundtruth",
+        "oracle",
+        "primarycause",
+        "readgroundtruth",
+        "recoveryaction",
+        "recoverytarget",
+    }
+)
 
 
 def parse_alertmanager_delivery(
@@ -51,6 +66,7 @@ def parse_alertmanager_delivery(
     if not 1 <= len(typed_alerts) <= max_alerts:
         raise AlertPayloadError("Alertmanager alerts count is invalid.")
     alerts = tuple(_normalize_alert(value) for value in typed_alerts)
+    _validate_group_correlation(alerts)
     external_origin = _safe_origin(raw.get("externalURL"))
     receiver, receiver_truncated = _bounded(raw.get("receiver"), 256)
     truncated_alerts = _non_negative_int(raw.get("truncatedAlerts", 0))
@@ -93,12 +109,15 @@ def _normalize_alert(value: object) -> NormalizedAlert:
     if not isinstance(value, dict):
         raise AlertPayloadError("Each Alertmanager alert must be an object.")
     raw = cast(Mapping[str, object], value)
+    _reject_authority_fields(raw.get("labels"))
+    _reject_authority_fields(raw.get("annotations"))
     labels, label_truncated = _allowlisted_map(raw.get("labels"), _LABEL_KEYS, 256)
     annotations, annotation_truncated = _allowlisted_map(
         raw.get("annotations"), _ANNOTATION_KEYS, 2048
     )
     starts_at, starts_truncated = _optional_bounded(raw.get("startsAt"), 256)
     ends_at, ends_truncated = _optional_bounded(raw.get("endsAt"), 256)
+    _validate_live_correlation(labels)
     return NormalizedAlert(
         labels=labels,
         annotations=annotations,
@@ -107,6 +126,44 @@ def _normalize_alert(value: object) -> NormalizedAlert:
         generator_origin=_safe_origin(raw.get("generatorURL")),
         truncated=(label_truncated or annotation_truncated or starts_truncated or ends_truncated),
     )
+
+
+def _reject_authority_fields(value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    mapping = cast(Mapping[object, object], value)
+    for key in mapping:
+        if not isinstance(key, str):
+            continue
+        normalized = "".join(character for character in key.casefold() if character.isalnum())
+        if normalized in _FORBIDDEN_AUTHORITY_KEYS:
+            raise AlertPayloadError("Alertmanager labels cannot grant diagnostic authority.")
+
+
+def _validate_live_correlation(labels: Mapping[str, str]) -> None:
+    scenario_id = labels.get("scenario_id")
+    if scenario_id is None:
+        return
+    if scenario_id != _LIVE_SCENARIO_ID:
+        raise AlertPayloadError("Alertmanager Live scenario is not allowlisted.")
+    run_id = labels.get("run_id")
+    if (
+        run_id is None
+        or not _RUN_ID_RE.fullmatch(run_id)
+        or ".." in run_id
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise AlertPayloadError("Alertmanager Live run ID is invalid.")
+
+
+def _validate_group_correlation(alerts: tuple[NormalizedAlert, ...]) -> None:
+    correlations = {
+        (alert.labels.get("scenario_id"), alert.labels.get("run_id"))
+        for alert in alerts
+    }
+    if len(correlations) != 1:
+        raise AlertPayloadError("Alertmanager group has mixed Live correlation labels.")
 
 
 def _allowlisted_map(
