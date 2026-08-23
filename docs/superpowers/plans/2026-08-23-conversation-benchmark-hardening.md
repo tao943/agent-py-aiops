@@ -13,7 +13,7 @@
 - Add no dependency and change no score threshold.
 - Never expose benchmark/oracle identifiers to Agent-visible output.
 - Blocked input performs zero Router LLM, Agent LLM, query rewrite, and tool calls.
-- Timeout failure is deterministic and separately counted from paid provider calls.
+- Timeout failure is deterministic and separately counted from paid provider calls; six scenarios produce four provider calls, five model-boundary attempts, and one injected failure.
 - PG Lock timeout evidence requires the same run/scenario/incident scope and a real timeout observation.
 - Use unique pytest basetemp/cache paths because the legacy `var/pytest` directory is inaccessible on this Windows host.
 - Preserve immutable prior artifacts; all real reruns use new Run IDs.
@@ -39,7 +39,7 @@
 - [ ] Add failing unit tests for Chinese/English override-plus-sensitive-action inputs, benign educational text, and ordering before explicit identifier/model routing.
 - [ ] Run `uv run pytest tests/test_chat_intent_router.py -q --basetemp=var/pytest-safety-red -o cache_dir=var/cache-safety-red`; expect the malicious cases to route to a high-risk intent or call the model.
 - [ ] Implement the pure two-signal classifier with bounded normalization and allowlisted reason code.
-- [ ] Add failing streaming tests asserting blocked requests persist one user and one assistant message, return a fixed refusal, and invoke neither runner nor tools/title generation.
+- [ ] Add failing streaming tests asserting blocked requests persist one user and one assistant message, return a fixed refusal, and invoke neither memory preparation/refresh, query rewrite, runner, tools, nor title generation. Cover fresh messages and the existing `existing_user_message_id`/`assistant_message_id` idempotent persistence contract.
 - [ ] Run the streaming tests and observe the missing blocked branch.
 - [ ] Implement the blocked streaming branch and a zero-budget blocked execution policy; store only `blockedReason` in route metadata.
 - [ ] Run intent, streaming, execution-policy and Conversation Model tests; expect all pass.
@@ -55,9 +55,9 @@
 
 **Interfaces:**
 - Produces evaluation-only `InjectedTimeoutChatModel` delegating no call and raising `TimeoutError` for the degraded scenario.
-- Metrics distinguish `modelCallCount` (paid provider calls), `scenarioAttemptCount`, and `injectedFailureCount`.
+- Metrics distinguish `providerCallCount` (paid provider calls), `modelBoundaryAttemptCount`, `scenarioAttemptCount`, and `injectedFailureCount`.
 
-- [ ] Add a failing test using a provider that always succeeds; assert `explanation_timeout` still degrades, provider calls equal five, and injected failures equal one.
+- [ ] Add a failing test using a provider that always succeeds; assert `explanation_timeout` still degrades, provider calls equal four, model-boundary attempts equal five, scenario attempts equal six, and injected failures equal one. Prompt Injection contributes no provider or model-boundary call.
 - [ ] Run the focused test and verify current `fallback_not_exercised` failure.
 - [ ] Implement scenario-specific injected timeout without changing production provider configuration.
 - [ ] Extend v2 metric allowlists and persistence tests for the two new bounded counters.
@@ -95,12 +95,12 @@
 
 **Interfaces:**
 - Produces `PostgresLockClsRecordProvider.records(...)` requiring all three observation checks.
-- Agent-visible `SearchLog` output contains counts and records but no `benchmarkEvidenceId`.
-- Evaluator-only artifact projection maps a scoped PG Lock `request_timeout` event to `cls-live-request-timeout`.
+- Agent-visible `SearchLog` output contains counts and allowlisted event facts, but no `benchmarkEvidenceId`, `run_id`, `scenario_id`, or `incident_id`.
+- Evaluator-only artifact projection receives trusted raw tool-audit scope and maps a PG Lock `request_timeout` event to `cls-live-request-timeout` only after run/scenario/incident all match.
 
 - [ ] Add failing tests that the provider refuses an unconfirmed observation and emits `request_timeout` only for a confirmed observation.
-- [ ] Add failing tests that Composite output contains no benchmark identifier.
-- [ ] Add failing artifact tests for: valid timeout maps; empty records, `database_contention` only, and wrong scenario do not map.
+- [ ] Add failing tests that Composite output contains none of the four benchmark/scope identifiers while preserving bounded operational event fields.
+- [ ] Add failing artifact tests for: valid timeout maps; empty records, `database_contention` only, wrong run, wrong scenario, and wrong incident do not map.
 - [ ] Implement the provider, safe event allowlist update, registry wiring, and evaluator-only mapping.
 - [ ] Run CLS, evidence-client, artifact and scoring tests; expect all pass with answer-isolation assertions.
 - [ ] Run Ruff and Pyright on all Live files.
@@ -114,10 +114,9 @@
 **Interfaces:**
 - Consumes all prior tasks and produces immutable real evaluation artifacts in Archive and PostgreSQL.
 
-- [ ] Run the complete Conversation/Live focused pytest set with a unique basetemp; expect zero failures.
+- [ ] Run the complete Conversation/Live focused pytest set with a unique basetemp; explicitly include Chat Live CLI defaults, evaluation-session-before-Pending-Action, and nullable `chat_run_id` adapter/repository contracts; expect zero failures.
 - [ ] Run Ruff, targeted Pyright, and `git diff --check`; expect clean output.
-- [ ] Run real six-scenario Conversation Model Eval with a new Run ID; require 6/6, five provider calls, one injected timeout, and prompt-injection safety 1.0.
+- [ ] Run real six-scenario Conversation Model Eval with a new Run ID; require 6/6, four provider calls, five model-boundary attempts, one injected timeout, and prompt-injection safety 1.0.
 - [ ] Run real Chat PG Lock Live with a new Run ID; require valid scoring, all three evidence milestones, recovery verification and cleanup success.
 - [ ] Verify JSON, Evaluation Archive and PostgreSQL terminal records for both runs.
 - [ ] Update the acceptance report with Git SHA, commands, metrics, old-vs-new comparison and any remaining valid capability miss.
-

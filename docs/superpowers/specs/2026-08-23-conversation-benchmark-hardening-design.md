@@ -58,8 +58,10 @@ GitHub 候选：
 ### 4.2 确定性 timeout Eval
 
 `explanation_timeout` 使用评测专用 timeout model boundary，稳定抛出 `TimeoutError`。真实 provider
-只执行其他五个场景。结果分别记录 provider 调用数、注入失败数和场景尝试数，避免把注入调用
-计入真实额度。该场景验证安全降级分类和持久化，不声称供应商稳定性。
+只执行其余四个需要模型的场景；Prompt Injection 在安全门终止，timeout 在评测边界注入。结果分别
+记录 `providerCallCount=4`、`modelBoundaryAttemptCount=5`、`scenarioAttemptCount=6` 和
+`injectedFailureCount=1`，避免把注入调用或安全门短路计入真实额度。该场景验证安全降级分类和
+持久化，不声称供应商稳定性。
 
 ### 4.3 PG Lock 真实 timeout 与 CLS claim
 
@@ -70,9 +72,11 @@ timeout)` 证明同一更新在 deadline 内未完成，并将 `business_probe_t
 PG Lock 专用 `LiveClsRecordProvider` 只有在 wait event、blocking edge 和 business timeout 三项均通过
 时才生成含 `request_timeout` 的 run-scoped 日志。`request_timeout` 加入 CLS 安全事件 allowlist。
 
-Composite Tool 返回给 Agent 的仍只有受限 records/counts，不返回 benchmark claim。Artifact projector
-在 evaluator-only 边界中，仅当持久化的 `SearchLog` records 含本场景 `request_timeout` 时映射为
-`cls-live-request-timeout`。空记录、其他事件或其他 scenario 均保持普通 Evidence ID。
+Composite Tool 返回给 Agent 的仅包含字段白名单内的事件事实和计数，不返回
+`benchmarkEvidenceId`、`run_id`、`scenario_id` 或 `incident_id`。原始作用域只保留在受信 tool audit / Eval
+context。Artifact projector 必须在可信 Live scope 已附加或被显式传入后运行；仅当原始记录的
+run/scenario/incident 三项完全匹配且事件为 `request_timeout` 时，才在 evaluator-only 边界映射为
+`cls-live-request-timeout`。空记录、其他事件、错 run、错 scenario 或错 incident 均不映射。
 
 ## 5. 错误处理
 
@@ -86,8 +90,7 @@ Composite Tool 返回给 Agent 的仍只有受限 records/counts，不返回 ben
 
 - 中英文 Prompt Injection 组合被阻断，普通“解释什么是 prompt injection”不误杀。
 - 被阻断请求 Router/Agent/Tool 调用数均为 0，消息与安全 reason 可审计。
-- Conversation Model Eval 六场景通过；provider 调用数为 5，注入 timeout 为 1。
+- Conversation Model Eval 六场景通过；provider 调用数为 4，模型边界尝试为 5，注入 timeout 为 1。
 - PG Lock observation 包含三项通过检查；CLS records 包含 run-scoped `request_timeout`。
 - 没有 timeout 记录时 Live required evidence 仍失败；有合格记录时三项里程碑全部通过。
 - 真实 Chat Live 得到有效终态，恢复验证和 cleanup 必须继续通过。
-
