@@ -202,7 +202,7 @@ def _state_from_row(row: LiveAutoClosureStateModel) -> AutoClosureState:
     if stage not in _STAGE_ORDER:
         raise AutoClosureStateConflict("auto_closure_stage_invalid")
     return AutoClosureState(
-        stage=cast(AutoClosureStage, stage),
+        stage=stage,
         driver_state=cast(dict[str, object], driver_state),
         observation=_observation_from_payload(payload.get("observation")),
         correlation=_optional_correlation(payload.get("correlation")),
@@ -233,31 +233,45 @@ def _observation_from_payload(value: object) -> LiveFaultObservation | None:
         return None
     if not isinstance(value, dict):
         raise AutoClosureStateConflict("auto_closure_observation_invalid")
-    scenario_id = value.get("scenarioId")
-    checks = value.get("checks")
-    facts = value.get("safeFacts")
+    payload = cast(dict[str, object], value)
+    scenario_id = payload.get("scenarioId")
+    checks = payload.get("checks")
+    facts = payload.get("safeFacts")
     if (
         not isinstance(scenario_id, str)
         or not isinstance(checks, list)
         or not isinstance(facts, list)
     ):
         raise AutoClosureStateConflict("auto_closure_observation_invalid")
-    try:
-        parsed_checks = tuple(
-            LiveCheck(str(item["name"]), item["passed"] is True)
-            for item in checks
-            if isinstance(item, dict)
-        )
-        parsed_facts = tuple(
-            (str(item[0]), item[1])
-            for item in facts
-            if isinstance(item, list) and len(item) == 2
-        )
-    except (KeyError, TypeError) as exc:
-        raise AutoClosureStateConflict("auto_closure_observation_invalid") from exc
-    if len(parsed_checks) != len(checks) or len(parsed_facts) != len(facts):
-        raise AutoClosureStateConflict("auto_closure_observation_invalid")
-    return LiveFaultObservation(scenario_id, parsed_checks, parsed_facts)
+    parsed_checks: list[LiveCheck] = []
+    for raw_check in cast(list[object], checks):
+        if not isinstance(raw_check, dict):
+            raise AutoClosureStateConflict("auto_closure_observation_invalid")
+        check = cast(dict[str, object], raw_check)
+        name = check.get("name")
+        passed = check.get("passed")
+        if not isinstance(name, str) or not isinstance(passed, bool):
+            raise AutoClosureStateConflict("auto_closure_observation_invalid")
+        parsed_checks.append(LiveCheck(name, passed))
+
+    parsed_facts: list[tuple[str, str | int | float | bool]] = []
+    for raw_fact in cast(list[object], facts):
+        if not isinstance(raw_fact, list):
+            raise AutoClosureStateConflict("auto_closure_observation_invalid")
+        fact = cast(list[object], raw_fact)
+        if len(fact) != 2:
+            raise AutoClosureStateConflict("auto_closure_observation_invalid")
+        key, fact_value = fact
+        if not isinstance(key, str) or not isinstance(
+            fact_value, (str, int, float, bool)
+        ):
+            raise AutoClosureStateConflict("auto_closure_observation_invalid")
+        parsed_facts.append((key, fact_value))
+    return LiveFaultObservation(
+        scenario_id,
+        tuple(parsed_checks),
+        tuple(parsed_facts),
+    )
 
 
 def _optional_dict(value: object) -> dict[str, object] | None:
@@ -271,9 +285,12 @@ def _optional_dict(value: object) -> dict[str, object] | None:
 def _optional_correlation(value: object) -> dict[str, str | None] | None:
     if value is None:
         return None
-    if not isinstance(value, dict) or any(
+    if not isinstance(value, dict):
+        raise AutoClosureStateConflict("auto_closure_correlation_invalid")
+    correlation = cast(dict[object, object], value)
+    if any(
         not isinstance(key, str) or item is not None and not isinstance(item, str)
-        for key, item in value.items()
+        for key, item in correlation.items()
     ):
         raise AutoClosureStateConflict("auto_closure_correlation_invalid")
     return cast(dict[str, str | None], value)

@@ -433,12 +433,12 @@ class OrderPoolLeakScenarioDriver:
             or not generation
             or len(generation) > 96
             or not isinstance(fingerprints, list)
-            or len(fingerprints) > 128
+            or len(cast(list[object], fingerprints)) > 128
             or any(
                 not isinstance(item, str)
                 or len(item) != 64
                 or any(character not in "0123456789abcdef" for character in item)
-                for item in fingerprints
+                for item in cast(list[object], fingerprints)
             )
         ):
             raise ValueError("order_pool_resume_state_invalid")
@@ -803,7 +803,7 @@ class HttpOrderPoolMetricsReader:
                     if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
                         raise ValueError("invalid metric value")
                     values[sample.name] = int(numeric)
-            if set(values) != _ORDER_POOL_METRICS:
+            if set(values) != set(_ORDER_POOL_METRICS):
                 raise ValueError("incomplete metric snapshot")
             if any(values[name] not in {0, 1} for name in _ORDER_POOL_BOOLEAN_METRICS):
                 raise ValueError("invalid boolean metric")

@@ -859,7 +859,11 @@ def _automatic_state(run_id: str, *, include_scope: bool = True) -> dict[str, ob
 
 
 def _runtime_definitions() -> tuple[McpToolDefinition, ...]:
-    schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
     return tuple(
         McpToolDefinition(name, name, schema, "order-pool-live")
         for name in (

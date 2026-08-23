@@ -613,7 +613,7 @@ async def _run_auto_closure_command(
             snapshot = closure_metrics.snapshot().get("autoClosureStageLatencyMs")
             if not isinstance(snapshot, Mapping):
                 return {}
-            stage_snapshots = cast(Mapping[str, object], snapshot)
+            stage_metrics = cast(Mapping[str, object], snapshot)
             result: dict[str, int | float] = {}
             for stage in (
                 "detection",
@@ -623,7 +623,7 @@ async def _run_auto_closure_command(
                 "resolved",
                 "total",
             ):
-                value = stage_snapshots.get(stage)
+                value = stage_metrics.get(stage)
                 if isinstance(value, Mapping):
                     total = cast(Mapping[str, object], value).get("sum")
                     if isinstance(total, (int, float)) and not isinstance(total, bool):
