@@ -9,6 +9,7 @@ from super_ai.memory.repositories import DiagnosticEvidenceRecord
 from super_ai.recovery.config import (
     ComposeRecoveryTarget,
     DiagnosticSelector,
+    PostgresLockResource,
     PostgresRecoveryTarget,
     ProductionRecoverySettings,
 )
@@ -40,14 +41,19 @@ def _settings() -> ProductionRecoverySettings:
     postgres = PostgresRecoveryTarget(
         target_key="agent-py-postgres",
         database_config_key="backend",
+        database_identity="agent_py_test",
         diagnostic_selector=DiagnosticSelector(
             component="postgresql",
             mechanisms=("row_lock_blocking",),
             required_evidence_facts=(
                 "InspectPostgresLockGraph.blockerEdgeConfirmed",
                 "InspectPostgresLockGraph.blockerRole",
+                "InspectPostgresLockGraph.lockedResource",
             ),
         ),
+        lock_resource_mappings={
+            "order_row": PostgresLockResource("order_row", "live_eval", "orders")
+        },
     )
     return ProductionRecoverySettings(
         enabled=True,
@@ -112,7 +118,12 @@ def _evidence(evidence_id: str, source: str, output: dict[str, object]) -> Diagn
                 _evidence(
                     "ev-lock",
                     "InspectPostgresLockGraph",
-                    {"blockerEdgeConfirmed": True, "blockerRole": "transaction", "pid": 43210},
+                    {
+                        "blockerEdgeConfirmed": True,
+                        "blockerRole": "transaction",
+                        "lockedResource": "order_row",
+                        "pid": 43210,
+                    },
                 ),
             ),
             "terminate_postgres_blocker",
@@ -134,6 +145,11 @@ def test_resolves_live_diagnostics_from_validated_facts_only(
     assert proposal.canonical_arguments == {}
     assert "pid" not in str(proposal.trusted_snapshot).lower()
     assert "scenario" not in str(proposal.trusted_snapshot).lower()
+    if expected_action == "terminate_postgres_blocker":
+        fingerprint = proposal.trusted_snapshot["lockRelationshipFingerprint"]
+        assert isinstance(fingerprint, str)
+        assert len(fingerprint) == 64
+        assert "orders" not in str(proposal.trusted_snapshot)
 
 
 @pytest.mark.parametrize(
@@ -165,4 +181,3 @@ def test_rejects_unvalidated_unsupported_or_incomplete_proposals(
     decision = ValidatedDiagnosticDecision(**values)  # type: ignore[arg-type]
 
     assert RecoveryProposalAdapter().resolve(decision, evidence, _settings()) is None
-

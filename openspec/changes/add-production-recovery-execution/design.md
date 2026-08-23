@@ -32,7 +32,7 @@ Worker 在 claim 前重新读取 Incident、当前配置、报告、证据和审
 
 ### Two bounded executors
 
-Compose 只执行固定 argv `docker compose -f <resolved allowlisted file> restart <allowlisted service>`，不使用 shell。PostgreSQL 只终止 fresh probe 唯一确认的 client blocker，使用参数化调用；PID 不来自模型、前端或旧证据。
+Compose 只执行固定 argv `docker compose -f <resolved allowlisted file> restart <allowlisted service>`，不使用 shell。PostgreSQL target 还必须把诊断中的逻辑锁资源映射到固定 schema/relation，并绑定 named database identity；Intent 仅保存不可逆 relationship fingerprint。执行器只终止 fresh probe 在该物理边界内唯一确认且与指纹匹配的 client blocker，使用参数化调用；PID 不来自模型、前端或旧证据。
 
 ### Independent verification
 
@@ -48,4 +48,3 @@ Compose 要求容器身份变化、health、业务探针和 Incident resolved；
 - Compose 重启是缓解，不是永久修复；验证成功仍需审计记录该限制。
 - Alertmanager resolved 可能晚于服务恢复，因此 verifier 使用有界窗口；超时进入 verification failed，不重复动作。
 - PostgreSQL 会话终止不可撤销，因此始终人工审批且只允许唯一 fresh blocker。
-

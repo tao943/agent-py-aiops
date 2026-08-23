@@ -15,7 +15,10 @@ cp config/user.project.template.json config/user.project.json
 `config/user.project.json` 中显式开启全局开关并配置受控 target，恢复 Worker 才可能排队；
 提交的模板不会包含 Compose 绝对路径、数据库连接串或凭据。Compose 自动恢复还要求 target
 显式 `automaticRecoveryEnabled=true`，PostgreSQL blocker 终止始终需要当前 Incident owner
-在 600 秒内审批。
+在 600 秒内审批。每个 PostgreSQL target 还必须配置 `databaseIdentity` 和非空
+`lockResourceMappings`，把诊断使用的逻辑资源（例如 `order_row`）映射到固定的
+schema/relation。该映射只保存在被忽略的本地配置中，不进入 API；PID 始终来自执行前 fresh
+probe，模型、Prompt、旧 Evidence 和客户端均不能指定。
 
 ## 项目交付后的个人配置
 

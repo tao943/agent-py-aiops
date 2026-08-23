@@ -9,6 +9,7 @@ import pytest
 from super_ai.recovery.config import (
     ComposeRecoveryTarget,
     DiagnosticSelector,
+    PostgresLockResource,
     PostgresRecoveryTarget,
     ProductionRecoverySettings,
 )
@@ -38,7 +39,9 @@ def _settings(*, enabled: bool = True, automatic: bool = True) -> ProductionReco
     postgres = PostgresRecoveryTarget(
         "postgres-target",
         "backend",
+        "agent_py_test",
         DiagnosticSelector("postgresql", ("row_lock_blocking",), ("Lock.edge",)),
+        {"order_row": PostgresLockResource("order_row", "live_eval", "orders")},
     )
     return ProductionRecoverySettings(
         enabled,

@@ -105,7 +105,7 @@ Compose executor SHALL 仅对服务端解析的白名单文件和固定服务执
 
 ### Requirement: Approved PostgreSQL blocker termination
 
-PostgreSQL executor SHALL 仅终止自身 fresh probe 确认的唯一 client blocker，且 SHALL 拒绝 waiter、自身连接、后台进程、多个 blocker、身份变化或未识别关系。
+PostgreSQL executor SHALL 仅终止自身 fresh probe 在服务端固定 database identity 与 schema/relation 映射内确认的唯一 client blocker。Intent SHALL 只保存由逻辑资源和确定性事实生成的私有 relationship fingerprint；执行器 SHALL 拒绝 fingerprint 漂移、waiter、自身连接、后台进程、多个 blocker、身份变化或未识别关系。
 
 #### Scenario: Fresh unique blocker matches approved proposal
 - **WHEN** blocker/waiter/database/lock fingerprint 匹配且 approval 有效
@@ -155,4 +155,3 @@ PostgreSQL executor SHALL 仅终止自身 fresh probe 确认的唯一 client blo
 - **WHEN** 系统读取旧 `aiops_recovery_approval_requests` 记录
 - **THEN** 记录 MUST 标记为 legacy 且 `executionPermitted=false`
 - **AND** MUST NOT 被转换为新 Intent 的有效批准
-

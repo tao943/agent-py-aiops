@@ -33,14 +33,23 @@ def _postgres_target(**overrides: object) -> dict[str, object]:
     target: dict[str, object] = {
         "targetKey": "agent-py-postgres",
         "databaseConfigKey": "backend",
+        "databaseIdentity": "agent_py_test",
         "diagnosticSelector": {
             "component": "postgresql",
             "mechanisms": ["row_lock_blocking"],
             "requiredEvidenceFacts": [
                 "InspectPostgresLockGraph.blockerEdgeConfirmed",
                 "InspectPostgresLockGraph.blockerRole",
+                "InspectPostgresLockGraph.lockedResource",
             ],
         },
+        "lockResourceMappings": [
+            {
+                "logicalResource": "order_row",
+                "schema": "live_eval",
+                "relation": "orders",
+            }
+        ],
     }
     target.update(overrides)
     return target
@@ -89,6 +98,13 @@ def test_loads_isolated_compose_and_postgres_targets(tmp_path: Path) -> None:
     assert compose.service == "live-eval-order-api"
     assert compose.automatic_recovery_enabled is True
     assert settings.postgres_targets["agent-py-postgres"].database_config_key == "backend"
+    assert settings.postgres_targets["agent-py-postgres"].database_identity == "agent_py_test"
+    assert (
+        settings.postgres_targets["agent-py-postgres"]
+        .lock_resource_mappings["order_row"]
+        .relation
+        == "orders"
+    )
     assert settings.selector_target("order-api", "exception_path_connection_not_released") == (
         "live-eval-order-api"
     )
@@ -139,7 +155,11 @@ def test_rejects_ambiguous_diagnostic_selectors(tmp_path: Path) -> None:
         diagnosticSelector={
             "component": "order-api",
             "mechanisms": ["exception_path_connection_not_released"],
-            "requiredEvidenceFacts": ["InspectPostgresLockGraph.blockerEdgeConfirmed"],
+            "requiredEvidenceFacts": [
+                "InspectPostgresLockGraph.blockerEdgeConfirmed",
+                "InspectPostgresLockGraph.blockerRole",
+                "InspectPostgresLockGraph.lockedResource",
+            ],
         }
     )
     with pytest.raises(ProjectConfigurationError, match="diagnostic selectors"):
@@ -194,3 +214,31 @@ def test_public_target_summary_never_exposes_resolved_path(tmp_path: Path) -> No
         ],
     }
     assert str(tmp_path).lower() not in str(summary).lower()
+
+
+@pytest.mark.parametrize(
+    "mappings",
+    [
+        [],
+        [{"logicalResource": "order_row", "schema": "bad-name", "relation": "orders"}],
+        [
+            {"logicalResource": "order_row", "schema": "live_eval", "relation": "orders"},
+            {"logicalResource": "order_row", "schema": "live_eval", "relation": "orders_2"},
+        ],
+        [
+            {"logicalResource": "order_row", "schema": "live_eval", "relation": "orders"},
+            {"logicalResource": "other_row", "schema": "live_eval", "relation": "orders"},
+        ],
+    ],
+)
+def test_rejects_missing_unsafe_or_ambiguous_postgres_resource_mappings(
+    tmp_path: Path,
+    mappings: list[object],
+) -> None:
+    with pytest.raises(ProjectConfigurationError, match="lockResourceMappings"):
+        load_production_recovery_settings(
+            raw_config=_config(
+                postgres_targets=[_postgres_target(lockResourceMappings=mappings)]
+            ),
+            project_root=tmp_path,
+        )

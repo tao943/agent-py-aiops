@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -9,7 +10,7 @@ from typing import cast
 from super_ai.aiops.facts import PublicToolObservation, extract_public_facts
 from super_ai.memory.repositories import DiagnosticEvidenceRecord
 from super_ai.recovery.config import ProductionRecoverySettings
-from super_ai.recovery.contracts import RecoveryAction
+from super_ai.recovery.contracts import RecoveryAction, canonical_json
 
 _ALLOWED_VALIDATOR_ORIGINS = frozenset(
     {"deterministic", "llm_confirmed", "deterministic_grounded_fallback"}
@@ -70,23 +71,52 @@ class RecoveryProposalAdapter:
         required = target.diagnostic_selector.required_evidence_facts
         if not set(required).issubset(fact_keys):
             return None
+        required_values: dict[str, object] = {}
+        for key in required:
+            values = [fact.value for fact in facts if fact.key == key]
+            if len(values) != 1:
+                return None
+            required_values[key] = values[0]
         action: RecoveryAction = (
             "restart_compose_service"
             if compose is not None
             else "terminate_postgres_blocker"
         )
+        trusted_snapshot: dict[str, object] = {
+            "component": decision.component,
+            "mechanism": decision.mechanism,
+            "evidenceFactKeys": list(sorted(required)),
+            "validatorOrigin": decision.validator_origin,
+        }
+        if postgres is not None:
+            logical_resource = required_values.get(
+                "InspectPostgresLockGraph.lockedResource"
+            )
+            if (
+                not isinstance(logical_resource, str)
+                or logical_resource not in postgres.lock_resource_mappings
+            ):
+                return None
+            trusted_snapshot.update(
+                {
+                    "lockResourceKey": logical_resource,
+                    "lockRelationshipFingerprint": lock_relationship_fingerprint(
+                        target_key=target_key,
+                        database_config_key=postgres.database_config_key,
+                        database_identity=postgres.database_identity,
+                        component=decision.component,
+                        mechanism=decision.mechanism,
+                        required_values=required_values,
+                    ),
+                }
+            )
         return RecoveryProposal(
             action=action,
             target_key=target_key,
             canonical_arguments={},
             evidence_ids=tuple(sorted(linked_ids)),
             validator_origin=decision.validator_origin,
-            trusted_snapshot={
-                "component": decision.component,
-                "mechanism": decision.mechanism,
-                "evidenceFactKeys": list(sorted(required)),
-                "validatorOrigin": decision.validator_origin,
-            },
+            trusted_snapshot=trusted_snapshot,
         )
 
 
@@ -115,3 +145,23 @@ def _string_mapping(value: object) -> Mapping[str, object] | None:
     if not all(isinstance(key, str) for key in mapping):
         return None
     return cast(Mapping[str, object], mapping)
+
+
+def lock_relationship_fingerprint(
+    *,
+    target_key: str,
+    database_config_key: str,
+    database_identity: str,
+    component: str,
+    mechanism: str,
+    required_values: Mapping[str, object],
+) -> str:
+    material = {
+        "component": component,
+        "databaseConfigKey": database_config_key,
+        "databaseIdentity": database_identity,
+        "mechanism": mechanism,
+        "requiredFacts": dict(required_values),
+        "targetKey": target_key,
+    }
+    return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()

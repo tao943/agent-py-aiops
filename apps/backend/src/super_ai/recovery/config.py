@@ -13,6 +13,7 @@ from super_ai.project_config import ProjectConfigurationError, load_project_conf
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,95}$")
 _FACT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,159}$")
+_SQL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 
@@ -48,10 +49,19 @@ class ComposeRecoveryTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class PostgresLockResource:
+    logical_resource: str
+    schema: str
+    relation: str
+
+
+@dataclass(frozen=True, slots=True)
 class PostgresRecoveryTarget:
     target_key: str
     database_config_key: str
+    database_identity: str
     diagnostic_selector: DiagnosticSelector
+    lock_resource_mappings: dict[str, PostgresLockResource]
 
     def public_summary(self) -> dict[str, object]:
         return {
@@ -157,8 +167,20 @@ def _postgres_targets(value: object) -> dict[str, PostgresRecoveryTarget]:
         targets[target_key] = PostgresRecoveryTarget(
             target_key=target_key,
             database_config_key=_identifier(raw, "databaseConfigKey"),
+            database_identity=_identifier(raw, "databaseIdentity"),
             diagnostic_selector=_diagnostic_selector(raw.get("diagnosticSelector")),
+            lock_resource_mappings=_lock_resource_mappings(
+                raw.get("lockResourceMappings")
+            ),
         )
+        if set(targets[target_key].diagnostic_selector.required_evidence_facts) != {
+            "InspectPostgresLockGraph.blockerEdgeConfirmed",
+            "InspectPostgresLockGraph.blockerRole",
+            "InspectPostgresLockGraph.lockedResource",
+        }:
+            raise ProjectConfigurationError(
+                "PostgreSQL diagnosticSelector has invalid relationship facts"
+            )
     return targets
 
 
@@ -192,6 +214,28 @@ def _diagnostic_selector(value: object) -> DiagnosticSelector:
         pattern=_FACT_KEY,
     )
     return DiagnosticSelector(component, mechanisms, required_facts)
+
+
+def _lock_resource_mappings(value: object) -> dict[str, PostgresLockResource]:
+    items = _array(value, "lockResourceMappings")
+    if not items:
+        raise ProjectConfigurationError(
+            "Project config array is invalid: lockResourceMappings"
+        )
+    result: dict[str, PostgresLockResource] = {}
+    physical: set[tuple[str, str]] = set()
+    for item in items:
+        raw = _mapping(item, "lockResourceMappings item")
+        logical = _identifier(raw, "logicalResource")
+        schema = _sql_identifier(raw, "schema")
+        relation = _sql_identifier(raw, "relation")
+        if logical in result or (schema, relation) in physical:
+            raise ProjectConfigurationError(
+                "Project config array is invalid: lockResourceMappings"
+            )
+        result[logical] = PostgresLockResource(logical, schema, relation)
+        physical.add((schema, relation))
+    return result
 
 
 def _compose_file(raw: Mapping[str, object], project_root: Path) -> Path:
@@ -267,6 +311,15 @@ def _identifier(raw: Mapping[str, object], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value.strip()):
         raise ProjectConfigurationError(f"Project config identifier is invalid: {key}")
+    return value.strip()
+
+
+def _sql_identifier(raw: Mapping[str, object], key: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not _SQL_IDENTIFIER.fullmatch(value.strip()):
+        raise ProjectConfigurationError(
+            "Project config array is invalid: lockResourceMappings"
+        )
     return value.strip()
 
 
