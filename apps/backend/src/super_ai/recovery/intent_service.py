@@ -82,7 +82,7 @@ class RecoveryIntentService:
             diagnostic_task_id=diagnostic_task_id,
             report=report,
         )
-        decision = _validated_decision(report.payload)
+        decision = validated_diagnostic_decision(report.payload)
         proposal = (
             self._adapter.resolve(decision, evidence, self._settings)
             if decision is not None
@@ -178,7 +178,7 @@ class RecoveryIntentService:
         return tuple(item for item in evidence if item.id in linked_ids)
 
 
-def _validated_decision(
+def validated_diagnostic_decision(
     payload: Mapping[str, object],
 ) -> ValidatedDiagnosticDecision | None:
     root = _mapping(payload.get("rootCauseDecision"))

@@ -470,7 +470,7 @@ git commit -m "feat: terminate approved postgres blockers safely"
 - Produces: `build_production_recovery_handler(app) -> JobHandler`; registers `production_recovery`.
 - Consumes: Task 4 repository, Task 5 policy, Task 6/7 executor registry, `ExecutionCoordinator`, `BackgroundJobContext`.
 
-- [ ] **Step 1: Write state progression tests**
+- [x] **Step 1: Write state progression tests**
 
 Assert exact sequence:
 
@@ -480,7 +480,7 @@ queued -> revalidating -> executing -> verifying -> recovered
 
 and append safe audit/job events at every transition. Cancellation is honored before `executing`; after execution claim it returns invalid transition.
 
-- [ ] **Step 2: Write at-most-once restart tests**
+- [x] **Step 2: Write at-most-once restart tests**
 
 Simulate duplicate job delivery, concurrent Workers, Worker crash before claim, crash after side-effect claim, operation timeout, and verification failure. Assert executor invocation count is `0` before a failed preflight and at most `1` after claim; an expired `running` side-effect lease with no completed result maps to `manual_intervention`.
 
@@ -496,7 +496,7 @@ Use this explicit restart table:
 
 Set each executor timeout lower than the execution lease and configure the coordinator lease as `executor_timeout + 30 seconds`; test the invariant so a normal bounded action cannot outlive its claim.
 
-- [ ] **Step 3: Implement execution identity**
+- [x] **Step 3: Implement execution identity**
 
 ```python
 ExecutionIdentity(
@@ -512,15 +512,15 @@ ExecutionIdentity(
 
 Call `run_once(..., outcome_known_on_error=False)` once dispatch may have occurred. Clearly pre-dispatch failures bypass `run_once` or use known outcomes; never allow Background Job retry to re-enter an uncertain side effect. A completed execution record is a durable hand-off to verification, not an uncertain result.
 
-- [ ] **Step 4: Re-authorize immediately before the side-effect claim**
+- [x] **Step 4: Re-authorize immediately before the side-effect claim**
 
 The handler reloads owner-scoped Incident, report, linked evidence, current configuration and approval, recomputes the proposal fingerprint, then calls `RecoveryPolicy.evaluate_execution()`. Require Incident active, recovery enabled, target still allowlisted, Compose auto flag still enabled when automatic, report/evidence unchanged and approval fresh/bound when required. Any drift appends a safe event and transitions to `manual_intervention` or an explicit denied terminal state with zero executor calls.
 
-- [ ] **Step 5: Register the durable handler**
+- [x] **Step 5: Register the durable handler**
 
 Add `background_runtime.register("production_recovery", build_production_recovery_handler(app))`. Recovery job uses `max_attempts=1`; durable leasing still permits another Worker to pick up only before the side-effect execution claim.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run from `apps/backend`: `uv run pytest tests/test_recovery_worker.py tests/test_recovery_worker_restart.py -q`
 

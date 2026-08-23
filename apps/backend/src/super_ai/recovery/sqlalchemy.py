@@ -235,6 +235,9 @@ class SQLAlchemyRecoveryIntentRepository:
         safe_summary: str,
         now: datetime,
         duration_ms: int | None = None,
+        execution_key: str | None = None,
+        execution_summary: str | None = None,
+        verification_checks: tuple[RecoveryCheck, ...] | None = None,
     ) -> RecoveryIntentRecord | None:
         async with self._session_factory() as session, session.begin():
             row = await session.scalar(
@@ -253,6 +256,16 @@ class SQLAlchemyRecoveryIntentRepository:
             row.status = to_status
             row.safe_reason_code = safe_reason_code
             row.updated_at = now
+            if execution_key is not None:
+                if row.execution_key not in {None, execution_key}:
+                    raise RecoveryStateConflict("recovery_execution_identity_changed")
+                row.execution_key = execution_key
+            if execution_summary is not None:
+                row.execution_summary = execution_summary[:512]
+            if verification_checks is not None:
+                row.verification_checks = [
+                    check.public_payload() for check in verification_checks
+                ]
             if to_status == "executing" and row.started_at is None:
                 row.started_at = now
             if to_status in {

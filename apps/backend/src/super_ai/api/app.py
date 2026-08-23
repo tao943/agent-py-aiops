@@ -166,6 +166,7 @@ from super_ai.observability import (
     set_request_id,
 )
 from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.recovery.worker import build_production_recovery_handler
 from super_ai.redis_runtime import (
     RedisRuntimeSettings,
     create_redis_client,
@@ -469,6 +470,7 @@ def create_app(
         )
     )
     incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    app.state.alert_incident_repository = incident_repository
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
         diagnostics=repositories.diagnostics,
@@ -503,6 +505,9 @@ def create_app(
     )
     background_runtime.register(
         "pending_chat_action", _pending_chat_action_job_handler(app)
+    )
+    background_runtime.register(
+        "production_recovery", build_production_recovery_handler(app)
     )
     app.state.background_job_runtime = background_runtime
     composed_redis_settings = redis_settings

@@ -9,6 +9,7 @@ from typing import Protocol
 from super_ai.recovery.contracts import (
     RecoveryAction,
     RecoveryAuditEventRecord,
+    RecoveryCheck,
     RecoveryIntentRecord,
     RecoveryRiskTier,
     RecoveryStatus,
@@ -99,6 +100,9 @@ class RecoveryIntentRepository(Protocol):
         safe_summary: str,
         now: datetime,
         duration_ms: int | None = None,
+        execution_key: str | None = None,
+        execution_summary: str | None = None,
+        verification_checks: tuple[RecoveryCheck, ...] | None = None,
     ) -> RecoveryIntentRecord | None: ...
 
     async def reject(
