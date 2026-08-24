@@ -18,7 +18,7 @@
 - Vulture, Deptry, and Knip are fixed-version advisory tools only. Do not add them to `pyproject.toml`, `package.json`, `uv.lock`, or `package-lock.json`; never use Knip `--fix` or `--allow-remove-files`.
 - The only allowed product-tree changes are the eight frontend paths named in Task 2. No backend, shared-contract, dependency, infrastructure, benchmark, config, OpenSpec, CI, or public documentation file may remain changed in the final diff.
 - Local frontend checks must use sanitized configuration created by `scripts/ci/prepare_test_config.py`; never copy or read real `config/project.json` or `config/user.project.json` from another worktree.
-- Do not run the full local backend pytest suite. This change has no backend diff; remote Linux/Python 3.13 CI remains the final full-suite gate.
+- Do not run the full local backend pytest suite. Record successful baseline run `32702871796` for `ac68239`, run local Ruff and strict Pyright on the final branch, and expect the path-filtered PR to select frontend rather than backend jobs.
 - The temporary design and implementation plan are process assets. They must be removed from the final tree before publication, while remaining recoverable from branch history.
 
 ---
@@ -82,7 +82,32 @@ npm run frontend:build
 
 Expected: all commands pass before cleanup. If any command fails, stop and report the baseline failure instead of editing product code.
 
-- [ ] **Step 4: Reproduce the exact Knip candidates without modifying files**
+- [ ] **Step 4: Record the successful backend baseline and run local backend quality gates**
+
+Run from the repository root:
+
+```powershell
+$run = gh run view 32702871796 --json headSha,conclusion,jobs | ConvertFrom-Json
+if ($run.conclusion -ne 'success' -or -not $run.headSha.StartsWith('ac68239')) {
+  throw 'Reviewed main CI run is not a successful ac68239 baseline'
+}
+$requiredJobs = @('backend-quality', 'backend-tests')
+foreach ($name in $requiredJobs) {
+  $job = $run.jobs | Where-Object name -eq $name
+  if ($null -eq $job -or $job.conclusion -ne 'success') {
+    throw "Baseline backend job did not pass: $name"
+  }
+}
+Push-Location apps/backend
+uv sync --frozen
+uv run ruff check .
+uv run pyright
+Pop-Location
+```
+
+Expected: GitHub run `32702871796` is a successful full-suite run for merge commit `ac68239`; local Ruff and strict Pyright both pass. Do not run local full pytest.
+
+- [ ] **Step 5: Reproduce the exact Knip candidates without modifying files**
 
 Run:
 
@@ -113,7 +138,7 @@ apps/frontend/src/ui/asyncStatus.ts: AsyncStatusTone
 
 If the candidate set differs, stop and re-evaluate the design rather than broadening the deletion set.
 
-- [ ] **Step 5: Reproduce and classify the Python Vulture findings**
+- [ ] **Step 6: Reproduce and classify the Python Vulture findings**
 
 Run from `apps/backend`:
 
@@ -131,7 +156,7 @@ rg -n '\.set\([^\r\n]*ex=|class RedisJsonClient' src tests
 
 Disposition: retain all four names. They are required keyword parameter names in `Protocol` boundaries matching redis-py or LangChain call signatures; deleting or renaming them would weaken or break structural typing. Do not edit backend files.
 
-- [ ] **Step 6: Reproduce and classify dependency-only findings**
+- [ ] **Step 7: Reproduce and classify dependency-only findings**
 
 Run from `apps/backend`:
 
@@ -157,7 +182,7 @@ Disposition: retain every dependency.
 
 Do not edit `pyproject.toml` or `uv.lock`.
 
-- [ ] **Step 7: Confirm Task 1 produced no tracked changes**
+- [ ] **Step 8: Confirm Task 1 produced no tracked changes**
 
 Run from the repository root:
 
@@ -186,41 +211,76 @@ Expected: no manifest or lockfile diff; no uncommitted tracked file changes. Do 
 - Consumes: the exact Knip candidate set and five-gate evidence from Task 1.
 - Produces: the same runtime behavior with no unreachable view, no unused navigation constant, and no unnecessary public TypeScript symbols.
 
-- [ ] **Step 1: Prove the view and navigation constant have no static, dynamic, test, script, or documentation entry**
+- [ ] **Step 1: Apply the five-gate evidence check to all nine candidates across every tracked path**
 
 Run:
 
 ```powershell
-$viewHits = rg -n 'WorkspacePlaceholderView|placeholder-view' apps packages scripts docs README.md AGENTS.md `
-  --glob '!apps/frontend/src/views/WorkspacePlaceholderView.vue' `
-  --glob '!docs/superpowers/**'
-if ($LASTEXITCODE -eq 0) { throw "Unexpected placeholder references: $viewHits" }
-if ($LASTEXITCODE -ne 1) { throw 'Placeholder reference scan failed' }
-$labelHits = rg -n 'WORKBENCH_NAVIGATION_LABELS' apps packages scripts docs README.md AGENTS.md --glob '!docs/superpowers/**'
-if (($labelHits | Measure-Object).Count -ne 1) { throw "Navigation label references changed: $labelHits" }
+$placeholderFiles = @(git ls-files '*WorkspacePlaceholderView.vue')
+if ($placeholderFiles.Count -ne 1 -or $placeholderFiles[0] -ne 'apps/frontend/src/views/WorkspacePlaceholderView.vue') {
+  throw "Placeholder file target changed: $($placeholderFiles -join ', ')"
+}
+$viewHits = git grep -n -E 'WorkspacePlaceholderView|placeholder-view' -- . `
+  ':(exclude)apps/frontend/src/views/WorkspacePlaceholderView.vue' `
+  ':(exclude)docs/superpowers/**'
+if ($LASTEXITCODE -eq 0) { throw "Unexpected external placeholder reference: $viewHits" }
+if ($LASTEXITCODE -ne 1) { throw 'Tracked placeholder reference scan failed' }
+
+$expectedCounts = [ordered]@{
+  WORKBENCH_NAVIGATION_LABELS = 1
+  formatBytes = 3
+  CreateAgentDraftRequest = 2
+  AuthSnapshot = 2
+  ProtectedDataSnapshot = 2
+  PublicSpecialistStatus = 4
+  PublicSpecialistResult = 2
+  AsyncStatusTone = 2
+}
+foreach ($symbol in $expectedCounts.Keys) {
+  $hits = @(git grep -n -w $symbol -- . ':(exclude)docs/superpowers/**')
+  if ($hits.Count -ne $expectedCounts[$symbol]) {
+    throw "Tracked references changed for ${symbol}: $($hits -join [Environment]::NewLine)"
+  }
+  $foreign = $hits | Where-Object {
+    $_ -notmatch [regex]::Escape((@{
+      WORKBENCH_NAVIGATION_LABELS = 'apps/frontend/src/foundation.ts'
+      formatBytes = 'apps/frontend/src/knowledge/documentPolicy.ts'
+      CreateAgentDraftRequest = 'apps/frontend/src/agentConfiguration/agentConfigurationClient.ts'
+      AuthSnapshot = 'apps/frontend/src/authState.ts'
+      ProtectedDataSnapshot = 'apps/frontend/src/protectedDataState.ts'
+      PublicSpecialistStatus = 'apps/frontend/src/stores/aiops.ts'
+      PublicSpecialistResult = 'apps/frontend/src/stores/aiops.ts'
+      AsyncStatusTone = 'apps/frontend/src/ui/asyncStatus.ts'
+    })[$symbol])
+  }
+  if ($foreign) { throw "Cross-file consumer found for ${symbol}: $($foreign -join ', ')" }
+}
+
+$router = Get-Content -Raw 'apps/frontend/src/router/index.ts'
+if ($router -match 'WorkspacePlaceholder') { throw 'Current router still registers the placeholder view' }
+$realViews = @(
+  'AuthView', 'AgentConfigurationView', 'ChatView', 'IncidentCenterView',
+  'IncidentWorkspaceView', 'IntegrationsView', 'KnowledgeView', 'SystemStatusView'
+)
+foreach ($view in $realViews) {
+  if ($router -notmatch [regex]::Escape($view)) { throw "Expected concrete route view missing: $view" }
+}
+$viewHistory = git log --all --oneline --follow -- apps/frontend/src/views/WorkspacePlaceholderView.vue
+$labelHistory = git log --all --oneline -S'WORKBENCH_NAVIGATION_LABELS' -- apps/frontend/src/foundation.ts
+if (-not $viewHistory -or -not $labelHistory) { throw 'Candidate history evidence is missing' }
 ```
 
-Expected: no placeholder reference outside its own filename/content, and exactly one navigation-label hit at its definition. Git history shows both came from the obsolete workbench shell/baseline and current routes use explicit real views.
+Expected: the file has no external tracked reference; every symbol is referenced only within its defining file, including scans of `.github/`, `infra/`, `config/`, `openspec/`, tests, scripts, docs, packages, and apps. The current router registers concrete product views, while Git history identifies the placeholder/label list as obsolete shell-era assets. The seven internalized symbols keep their implementations and consumers, so product capability is preserved.
 
-- [ ] **Step 2: Delete only the unreachable placeholder view**
+- [ ] **Step 2: Remove the tightly related obsolete workbench-shell assets**
 
-Use `apply_patch` to delete the complete tracked file:
+Use `apply_patch` to delete the complete tracked view:
 
 ```diff
 *** Delete File: apps/frontend/src/views/WorkspacePlaceholderView.vue
 ```
 
-Then verify:
-
-```powershell
-if (Test-Path 'apps/frontend/src/views/WorkspacePlaceholderView.vue') { throw 'Placeholder view still exists' }
-```
-
-Expected: the file is absent; no other view or router file changes.
-
-- [ ] **Step 3: Remove only the unused navigation constant**
-
-In `apps/frontend/src/foundation.ts`, delete this complete block and leave all health/contract functions unchanged:
+In the same tightly related shell cleanup, delete this complete block from `apps/frontend/src/foundation.ts` and leave all health/contract functions unchanged:
 
 ```typescript
 export const WORKBENCH_NAVIGATION_LABELS = [
@@ -234,57 +294,141 @@ export const WORKBENCH_NAVIGATION_LABELS = [
 ] as const;
 ```
 
-Expected: imports and the four existing exported foundation functions remain byte-for-byte unchanged.
+Verify and commit only this shell group:
 
-- [ ] **Step 4: Internalize the seven symbols that are used only within their defining files**
+Run:
 
-Make these exact declaration changes; do not rename a symbol or alter its body:
+```powershell
+if (Test-Path 'apps/frontend/src/views/WorkspacePlaceholderView.vue') { throw 'Placeholder view still exists' }
+npm --workspace apps/frontend run test -- `
+  tests/foundation.test.ts tests/contracts.test.ts `
+  tests/appShellRouter.test.ts tests/appShellComponents.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/views/WorkspacePlaceholderView.vue apps/frontend/src/foundation.ts
+git diff --cached --check
+git commit -m "chore: remove obsolete workbench shell surface"
+```
+
+Expected: the shell group is independently green and committed; concrete router views and foundation health functions remain unchanged.
+
+- [ ] **Step 3: Internalize the knowledge-document formatting helper**
+
+In `apps/frontend/src/knowledge/documentPolicy.ts`, make only this declaration change:
 
 ```diff
 -export function formatBytes(bytes: number): string {
 +function formatBytes(bytes: number): string {
+```
 
+Run and commit:
+
+```powershell
+npm --workspace apps/frontend run test -- tests/knowledgeComponents.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/knowledge/documentPolicy.ts
+git diff --cached --check
+git commit -m "chore: internalize knowledge format helper"
+```
+
+Expected: upload validation behavior passes; `formatBytes` remains used internally but is no longer public.
+
+- [ ] **Step 4: Internalize the Agent configuration draft request type**
+
+In `apps/frontend/src/agentConfiguration/agentConfigurationClient.ts`, make only this declaration change:
+
+```diff
 -export interface CreateAgentDraftRequest {
 +interface CreateAgentDraftRequest {
+```
 
+Run and commit:
+
+```powershell
+npm --workspace apps/frontend run test -- `
+  tests/agentConfigurationClient.test.ts `
+  tests/agentConfigurationStore.test.ts `
+  tests/agentConfigurationView.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/agentConfiguration/agentConfigurationClient.ts
+git diff --cached --check
+git commit -m "chore: internalize agent draft request type"
+```
+
+Expected: the public `AgentConfigurationClient` remains structurally usable and all Agent configuration tests pass.
+
+- [ ] **Step 5: Internalize the two legacy state snapshot types**
+
+Make only these declaration changes:
+
+```diff
+// apps/frontend/src/authState.ts
 -export interface AuthSnapshot {
 +interface AuthSnapshot {
 
+// apps/frontend/src/protectedDataState.ts
 -export interface ProtectedDataSnapshot {
 +interface ProtectedDataSnapshot {
+```
 
+Run and commit this tightly related state-layer group:
+
+```powershell
+npm --workspace apps/frontend run test -- tests/auth.test.ts tests/protectedData.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/authState.ts apps/frontend/src/protectedDataState.ts
+git diff --cached --check
+git commit -m "chore: internalize frontend state snapshots"
+```
+
+Expected: both state factories retain the same `snapshot()` return shape and all state behavior tests pass.
+
+- [ ] **Step 6: Internalize the AIOps specialist projection types**
+
+In `apps/frontend/src/stores/aiops.ts`, make only these two declaration changes:
+
+```diff
 -export type PublicSpecialistStatus =
 +type PublicSpecialistStatus =
 
 -export interface PublicSpecialistResult {
 +interface PublicSpecialistResult {
+```
 
+Run and commit:
+
+```powershell
+npm --workspace apps/frontend run test -- `
+  tests/aiopsStore.test.ts tests/investigationWorkspace.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/stores/aiops.ts
+git diff --cached --check
+git commit -m "chore: internalize aiops specialist projections"
+```
+
+Expected: the exported `PublicInvestigationResult` and projection function retain the same runtime/public shape.
+
+- [ ] **Step 7: Internalize the asynchronous-status tone type**
+
+In `apps/frontend/src/ui/asyncStatus.ts`, make only this declaration change:
+
+```diff
 -export type AsyncStatusTone =
 +type AsyncStatusTone =
 ```
 
-Expected: public functions/interfaces that legitimately consume these structural types remain exported; only the unnecessary export modifiers are removed.
-
-- [ ] **Step 5: Run focused behavior tests before the broad frontend gate**
-
-Run:
+Run and commit:
 
 ```powershell
-npm --workspace apps/frontend run test -- `
-  tests/foundation.test.ts `
-  tests/contracts.test.ts `
-  tests/knowledgeComponents.test.ts `
-  tests/agentConfigurationClient.test.ts `
-  tests/agentConfigurationStore.test.ts `
-  tests/auth.test.ts `
-  tests/protectedData.test.ts `
-  tests/aiopsStore.test.ts `
-  tests/chineseWorkspace.test.ts
+npm --workspace apps/frontend run test -- tests/chineseWorkspace.test.ts
+npm run frontend:typecheck
+git add -- apps/frontend/src/ui/asyncStatus.ts
+git diff --cached --check
+git commit -m "chore: internalize async status tone"
 ```
 
-Expected: every selected Vitest file passes. No new test is required because runtime behavior is unchanged and the red/green contract is the Knip issue set.
+Expected: all user-visible Chinese status labels and tones remain unchanged.
 
-- [ ] **Step 6: Prove the exact Knip issue set is gone**
+- [ ] **Step 8: Prove the exact Knip issue set is gone**
 
 Run:
 
@@ -299,7 +443,7 @@ npx --yes knip@6.32.2 `
 
 Expected: exit code 0 and no findings. Do not add ignores or a committed Knip configuration to obtain a clean result.
 
-- [ ] **Step 7: Run frontend/static gates and inspect the exact diff**
+- [ ] **Step 9: Run frontend/static gates and inspect the exact diff**
 
 Run:
 
@@ -308,8 +452,8 @@ npm run contracts:typecheck
 npm run frontend:typecheck
 npm run frontend:test
 npm run frontend:build
-git diff --check
-$changed = git diff --name-only
+git diff --check origin/main...HEAD
+$changed = git diff --name-only origin/main...HEAD
 $expected = @(
   'apps/frontend/src/agentConfiguration/agentConfigurationClient.ts',
   'apps/frontend/src/authState.ts',
@@ -324,19 +468,7 @@ $difference = Compare-Object $expected ($changed | Sort-Object)
 if ($difference) { throw "Unexpected product diff: $($difference | Out-String)" }
 ```
 
-Expected: all gates pass and exactly the eight reviewed paths are changed.
-
-- [ ] **Step 8: Commit the focused code-governance result**
-
-Run:
-
-```powershell
-git add -- apps/frontend/src
-git diff --cached --check
-git commit -m "chore: remove unused frontend surface"
-```
-
-Expected: one commit containing one deleted Vue view, one deleted constant, and seven removed `export` modifiers.
+Expected: all gates pass and exactly the eight reviewed paths differ from `origin/main`. `git status --short` is clean because each independently reviewable group has already been committed.
 
 ---
 
@@ -408,11 +540,15 @@ npm --workspace packages/api-contracts run test
 npm run frontend:typecheck
 npm run frontend:test
 npm run frontend:build
+Push-Location apps/backend
+uv run ruff check .
+uv run pyright
+Pop-Location
 git diff --check origin/main...HEAD
 git status --short --branch
 ```
 
-Expected: Knip produces no finding; every check passes; the worktree is clean and ahead of `origin/main` only by the reviewed commits.
+Expected: Knip produces no finding; frontend, shared-contract, Ruff, and strict Pyright checks pass; the worktree is clean and ahead of `origin/main` only by the reviewed commits. The PR's path-filtered remote run is expected to skip backend jobs, so run `32702871796` remains the recorded successful backend full-suite baseline.
 
 - [ ] **Step 4: Prepare publication without performing unapproved remote operations**
 
@@ -421,6 +557,7 @@ Summarize in the PR body:
 - Knip started with 1 unused file, 2 unused exports, and 5 unused exported-type groups, then finished with zero findings in the two workspaces.
 - Vulture's four findings were required Protocol keyword parameters and were preserved.
 - Deptry's seven dependency candidates were package-name, dynamic-import, framework-runtime, or CLI false positives and were preserved.
+- Main run `32702871796` passed backend Ruff, strict Pyright, and the full offline pytest suite at baseline commit `ac68239`; final local Ruff/Pyright also passed.
 - Runtime behavior, backend, contracts, manifests, locks, benchmarks, RAG cards, specs, infrastructure, CI, and GitHub settings were not changed.
 - List the exact commands from Task 3 Step 3.
 
