@@ -425,6 +425,117 @@ class UserChatSkillModel(Base):
     )
 
 
+class AgentConfigurationResourceModel(Base):
+    """Owner-scoped Prompt or Skill identity."""
+
+    __tablename__ = "agent_config_resources"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id", "kind", "name", name="uq_agent_config_resources_owner_kind_name"
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "kind",
+            "legacy_resource_id",
+            name="uq_agent_config_resources_legacy",
+        ),
+        Index(
+            "ix_agent_config_resources_owner_kind_updated",
+            "owner_user_id",
+            "kind",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    legacy_resource_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentConfigurationVersionModel(Base):
+    """Immutable-after-publish Prompt or Skill revision."""
+
+    __tablename__ = "agent_config_versions"
+    __table_args__ = (
+        UniqueConstraint("resource_id", "version", name="uq_agent_config_versions_number"),
+        Index("ix_agent_config_versions_owner_resource", "owner_user_id", "resource_id", "version"),
+        Index(
+            "uq_agent_config_versions_one_draft",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("status = 'draft'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_config_resources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    validation_warnings: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentConfigurationBindingModel(Base):
+    """Current published configuration selected for one server-owned node."""
+
+    __tablename__ = "agent_config_bindings"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "node", name="uq_agent_config_bindings_owner_node"),
+        Index("ix_agent_config_bindings_owner_updated", "owner_user_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node: Mapped[str] = mapped_column(String(48), nullable=False)
+    prompt_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_config_versions.id", ondelete="RESTRICT"), nullable=True
+    )
+    skill_version_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentConfigurationAuditEventModel(Base):
+    """Append-only, secret-safe configuration mutation audit."""
+
+    __tablename__ = "agent_config_audit_events"
+    __table_args__ = (
+        Index("ix_agent_config_audit_owner_created", "owner_user_id", "created_at", "event_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    version_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    node: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    safe_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ChatMessageModel(Base):
     """Persisted chat message."""
 
@@ -511,6 +622,9 @@ class ChatAgentRunModel(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_event_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    agent_configuration_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -902,6 +1016,9 @@ class DiagnosticTaskModel(Base):
     query: Mapped[str] = mapped_column(Text, nullable=False)
     input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    agent_configuration_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

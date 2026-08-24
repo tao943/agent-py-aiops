@@ -2250,6 +2250,9 @@ def create_sqlalchemy_memory_repositories(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> MemoryRepositories:
     """Create a repository bundle backed by SQLAlchemy sessions."""
+    from super_ai.memory.agent_configuration_sqlalchemy import (
+        SQLAlchemyAgentConfigurationRepository,
+    )
     from super_ai.memory.aiops_execution_sqlalchemy import (
         SQLAlchemyAiopsRuntimeRepositoryProvider,
     )
@@ -2289,6 +2292,7 @@ def create_sqlalchemy_memory_repositories(
         recovery_approvals=SQLAlchemyRecoveryApprovalRequestRepository(session_factory),
         pending_chat_actions=SQLAlchemyPendingChatActionRepository(session_factory),
         recovery_intents=SQLAlchemyRecoveryIntentRepository(session_factory),
+        agent_configurations=SQLAlchemyAgentConfigurationRepository(session_factory),
     )
 
 
