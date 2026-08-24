@@ -17,4 +17,8 @@ coverage/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 .worktrees/
+.codex/
+.superpowers/
+docs/superpowers/
+docs/changes/
 infra/secrets/*

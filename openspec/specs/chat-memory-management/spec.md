@@ -51,7 +51,7 @@ TBD - created by archiving change add-session-memory-modes. Update Purpose after
 - **THEN** 后端 MUST 合并已有摘要和新历史并推进压缩边界
 
 ### Requirement: Compression preserves full history
-记忆压缩 SHALL 只改变模型上下文的摘要和边界，MUST NOT 删除或改写 SQLite 中的原始聊天消息。
+记忆压缩 SHALL 只改变模型上下文的摘要和边界，MUST NOT 删除或改写 PostgreSQL 中的原始聊天消息。
 
 #### Scenario: User reads compressed session
 - **WHEN** user 读取已经执行过压缩的会话历史

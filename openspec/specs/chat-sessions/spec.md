@@ -2,14 +2,14 @@
 
 ## Purpose
 
-定义由后端内存存储、共享契约和tenant作用域的前端状态支持的已认证聊天会话和消息生命周期行为。
+定义由 PostgreSQL 持久化、共享契约和 tenant 作用域的前端状态支持的已认证聊天会话和消息生命周期行为。
 ## Requirements
 ### Requirement: Authenticated chat session lifecycle
 系统 SHALL 允许经过身份验证的 users 从后端 APIs 创建、列出、读取、清除和删除他们自己的聊天会话。
 
 #### Scenario: 创建聊天会话
 - **WHEN** 已认证的 user 可使用可选标题创建聊天会话
-- **THEN** 后端 MUST 将会话持久化到 SQLite 中，使用当前 user 的 owner ID 并返回已创建的会话。
+- **THEN** 后端 MUST 将会话持久化到 PostgreSQL 中，使用当前 user 的 owner ID 并返回已创建的会话。
 
 #### Scenario: List chat sessions
 - **WHEN** 已认证的 user 列出聊天会话

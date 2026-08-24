@@ -28,8 +28,8 @@ packages/api-contracts/ 前后端共享的 TypeScript HTTP、错误码、OpenAPI
 config/                 可提交模板和被忽略的本地 JSON 配置
 infra/                  PostgreSQL、etcd、MinIO、Milvus、Attu、Alertmanager 的 Compose 资产
 scripts/                macOS/Linux 与 Windows 本机启动器、文档图生成器
-openspec/               主规格、活动变更和归档
-docs/                   VitePress 文档、安装指南、教程与 OpenSpec WIKI
+openspec/specs/         已合并行为的规范要求
+docs/                   精选架构、安装、运行手册与评测文档
 ```
 
 不要在仓库中另建平行的后端包、前端应用或重复契约目录。后端模块必须位于 `apps/backend/src/super_ai/`，并使用 `from super_ai...` 导入，绝不能使用 `from src.super_ai...`。
@@ -37,8 +37,7 @@ docs/                   VitePress 文档、安装指南、教程与 OpenSpec WIK
 ## 事实来源与变更范围
 
 - 当前功能概览和启动方式见 `README.md`。
-- 行为要求见 `openspec/specs/<capability>/spec.md`。
-- 正在开发的变更位于 `openspec/changes/<change-id>/`；已归档内容只用于追溯，不是编辑目标。
+- 已合并行为要求见 `openspec/specs/<capability>/spec.md`；代码、测试与主规格不一致时，应在同一变更中同步主规格。
 - 配置字段以 `config/*.template.json` 和配置加载代码为准。
 - HTTP/SSE 的 TypeScript 公共类型以 `packages/api-contracts/src/` 为准。
 - 不要顺手重构无关代码，不要覆盖用户已有改动，不要提交缓存、构建产物、本地数据库或凭据。
@@ -157,14 +156,14 @@ cp config/user.project.template.json config/user.project.json
 
 以下修改必须补测试：权限边界、Repository、迁移、API envelope、错误码、SSE 格式与终止行为、后台任务恢复/重试/取消、向量过滤、MCP 审计、前端 store/client 状态转换和关键响应式布局。不要删除测试、放宽断言、关闭 strict 检查或加入无条件 skip 来让构建通过。
 
-## OpenSpec 与 WIKI
+## OpenSpec 与文档
 
-- 新功能、用户可见行为变化、API/数据模型调整或跨模块重构，应先创建一个聚焦的 OpenSpec change，再实现其中 tasks。
+- 新功能、用户可见行为变化、API/数据模型调整或跨模块重构，可在功能分支创建一个聚焦的 OpenSpec change 供评审，再实现其中 tasks。
 - 纯拼写修复、说明性文档同步或不改变行为的机械维护可直接修改，但不得借此绕过实际规格变化。
-- proposal、design、tasks、delta spec 和相关 WIKI 默认使用简体中文；规范关键标题（如 `Requirement`、`Scenario`）、API 路径、标识符和协议名保留原格式。
+- proposal、design、tasks 和 delta spec 默认使用简体中文；规范关键标题（如 `Requirement`、`Scenario`）、API 路径、标识符和协议名保留原格式。
 - 每项需求必须有可验证的 `Scenario`，tasks 中必须包含测试或验证步骤。
-- 创建或归档 change 后，使用仓库的 `wiki-sync` 流程同步 `docs/changes/`，并确保 VitePress 可构建。
-- 完成实现后，先核对 tasks、运行验证并确认主规格一致，再归档；不要把未完成 change 标记为完成。
+- 合并前必须把已接受的 delta 同步到 `openspec/specs/`，确认主规格与实现一致，并从最终分支树移除该 change 目录。
+- `docs/` 只维护面向当前产品的架构、安装、运行手册、评测、教程与示例，不把 Agent 计划或 change 历史作为公开导航。
 
 ## 文档与 Git
 
