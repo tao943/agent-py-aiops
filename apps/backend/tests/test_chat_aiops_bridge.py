@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from super_ai.alert_ingestion.repositories import AlertIncidentRecord, IncidentNotActive
@@ -18,12 +19,14 @@ from super_ai.chat.aiops_bridge import (
     build_aiops_bridge_tools,
 )
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.models import AlertIncidentModel, UserModel
+from super_ai.memory.models import AlertIncidentModel, DiagnosticTaskModel, UserModel
 from super_ai.memory.repositories import (
     DiagnosticEvidenceRecord,
     DiagnosticReportRecord,
     DiagnosticTaskRecord,
 )
+from super_ai.recovery.contracts import RecoveryIntentRecord
+from super_ai.recovery.repository import RecoveryIntentCreateResult
 
 NOW = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
@@ -65,6 +68,19 @@ class FakeIncidentQueries:
     ) -> AlertIncidentRecord | None:
         item = self.items.get(incident_id)
         return item if item is not None and item.owner_user_id == owner_user_id else None
+
+    async def get_by_diagnostic_task(
+        self, *, owner_user_id: str, diagnostic_task_id: str
+    ) -> AlertIncidentRecord | None:
+        return next(
+            (
+                item
+                for item in self.items.values()
+                if item.owner_user_id == owner_user_id
+                and item.diagnostic_task_id == diagnostic_task_id
+            ),
+            None,
+        )
 
 
 class FakeDiagnostics:
@@ -187,6 +203,19 @@ def _bridge() -> AiopsBridgeService:
     )
 
 
+class FakeFormalRecoveryIntents:
+    async def create_result(self, **_: object) -> RecoveryIntentCreateResult:
+        return RecoveryIntentCreateResult(
+            RecoveryIntentRecord(
+                "intent_a", "owner_a", "incident_a", "diagnostic_a", "report_a",
+                "terminate_postgres_blocker", "postgres", "high", False, True,
+                "awaiting_approval", "a" * 64, ("evidence_a",), {}, {}, NOW,
+                None, None, None, None, None, (),
+            ),
+            False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_list_active_incidents_returns_only_owned_safe_summaries() -> None:
     items = await _bridge().list_active_incidents(owner_user_id="owner_a", limit=10)
@@ -273,6 +302,28 @@ async def test_recovery_request_only_creates_pending_non_executable_approval() -
     assert result.execution_permitted is False
     assert "approve" not in result.to_payload()
     assert "execute" not in result.to_payload()
+    assert result.to_payload()["legacy"] is True
+
+
+@pytest.mark.asyncio
+async def test_confirmed_chat_action_creates_formal_intent_without_approval() -> None:
+    bridge = AiopsBridgeService(
+        incidents=FakeIncidentQueries(),
+        diagnostics=FakeDiagnostics(),  # type: ignore[arg-type]
+        recovery_intents=FakeFormalRecoveryIntents(),  # type: ignore[arg-type]
+    )
+
+    result = await bridge.create_recovery_approval_request(
+        owner_user_id="owner_a",
+        task_id="diagnostic_a",
+        reason="Create an intent for operator review.",
+        chat_run_id="run_a",
+    )
+
+    assert result.id == "intent_a"
+    assert result.status == "awaiting_approval"
+    assert result.execution_permitted is False
+    assert result.legacy is False
 
 
 @pytest.mark.asyncio
@@ -352,6 +403,14 @@ async def test_postgresql_scheduler_reuses_one_task_and_job(
         second = await repository.schedule_for_incident(
             owner_user_id="owner_a", incident_id="incident_a", note="retry"
         )
+        async with session_factory() as session:
+            task = (
+                await session.scalars(
+                    select(DiagnosticTaskModel).where(
+                        DiagnosticTaskModel.id == first.diagnostic_task_id
+                    )
+                )
+            ).one()
     finally:
         await engine.dispose()
 
@@ -359,6 +418,7 @@ async def test_postgresql_scheduler_reuses_one_task_and_job(
     assert first.background_job_id == second.background_job_id
     assert first.reused is False
     assert second.reused is True
+    assert "triggerSource" not in task.input_payload
 
 
 @pytest.mark.asyncio

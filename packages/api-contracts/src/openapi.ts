@@ -930,6 +930,230 @@ export const OPENAPI_CONTRACT = {
           ...protectedErrorResponses
         }
       }
+    },
+    "/aiops/incidents": {
+      get: {
+        operationId: "listAiopsIncidents",
+        summary: "List the current owner's incident projections",
+        tags: ["aiops-incidents"],
+        security: bearerSecurity,
+        parameters: [
+          { name: "cursor", in: "query", required: false },
+          { name: "limit", in: "query", required: false },
+          { name: "status", in: "query", required: false },
+          { name: "severity", in: "query", required: false },
+          { name: "service", in: "query", required: false }
+        ],
+        responses: {
+          "200": okResponse("#/components/schemas/IncidentListApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/incidents/{incidentId}": {
+      get: {
+        operationId: "getAiopsIncident",
+        summary: "Read one owned incident investigation projection",
+        tags: ["aiops-incidents"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/IncidentDetailApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/incidents/{incidentId}:diagnose": {
+      post: {
+        operationId: "diagnoseAiopsIncident",
+        summary: "Idempotently schedule diagnosis for an owned active Incident",
+        tags: ["aiops-incidents"],
+        security: bearerSecurity,
+        requestBody: {
+          required: false,
+          content: jsonContent("#/components/schemas/DiagnoseIncidentRequest")
+        },
+        responses: {
+          "200": okResponse("#/components/schemas/DiagnoseIncidentApiResponse"),
+          "202": okResponse("#/components/schemas/DiagnoseIncidentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/diagnostics/{diagnosticId}/recovery-intents": {
+      post: {
+        operationId: "createRecoveryIntent",
+        summary: "Create a governed recovery intent from a completed diagnostic",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/CreateRecoveryIntentRequest")
+        },
+        responses: {
+          "201": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}": {
+      get: {
+        operationId: "getRecoveryIntent",
+        summary: "Read an owned governed recovery intent",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:approve": {
+      post: {
+        operationId: "approveRecoveryIntent",
+        summary: "Approve an owned recovery intent for the confirmed incident",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/ApproveRecoveryIntentRequest")
+        },
+        responses: {
+          "202": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:reject": {
+      post: {
+        operationId: "rejectRecoveryIntent",
+        summary: "Reject an owned recovery intent",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}:cancel": {
+      post: {
+        operationId: "cancelRecoveryIntent",
+        summary: "Cancel an owned recovery intent before execution claim",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryIntentApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/aiops/recovery-intents/{intentId}/events": {
+      get: {
+        operationId: "listRecoveryIntentEvents",
+        summary: "Read append-only public recovery audit events",
+        tags: ["aiops-recovery"],
+        security: bearerSecurity,
+        parameters: [{ name: "afterSequence", in: "query", required: false }],
+        responses: {
+          "200": okResponse("#/components/schemas/RecoveryEventListApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/resources": {
+      get: {
+        operationId: "listAgentConfigurationResources",
+        summary: "List the current owner's Agent configuration library",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/AgentConfigurationLibraryApiResponse"),
+          ...protectedErrorResponses
+        }
+      },
+      post: {
+        operationId: "createAgentConfigurationResource",
+        summary: "Create an owned Agent configuration resource and draft",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/CreateAgentResourceRequest")
+        },
+        responses: {
+          "201": okResponse("#/components/schemas/AgentResourceMutationApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/versions/{versionId}": {
+      put: {
+        operationId: "updateAgentConfigurationDraft",
+        summary: "Update an owned draft Agent configuration version",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/UpdateAgentDraftRequest")
+        },
+        responses: {
+          "200": okResponse("#/components/schemas/AgentResourceMutationApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/versions/{versionId}:publish": {
+      post: {
+        operationId: "publishAgentConfigurationVersion",
+        summary: "Publish an immutable owned Agent configuration version",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/AgentResourceMutationApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/versions/{versionId}:deprecate": {
+      post: {
+        operationId: "deprecateAgentConfigurationVersion",
+        summary: "Deprecate an owned published Agent configuration version",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        responses: {
+          "200": okResponse("#/components/schemas/AgentResourceMutationApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/bindings/{node}": {
+      put: {
+        operationId: "updateAgentConfigurationBinding",
+        summary: "Bind published configuration versions to an allowed Agent node",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        requestBody: {
+          required: true,
+          content: jsonContent("#/components/schemas/UpdateAgentBindingRequest")
+        },
+        responses: {
+          "200": okResponse("#/components/schemas/AgentBindingMutationApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
+    },
+    "/agent-configuration/audit": {
+      get: {
+        operationId: "listAgentConfigurationAudit",
+        summary: "List append-only owned Agent configuration audit events",
+        tags: ["agent-configuration"],
+        security: bearerSecurity,
+        parameters: [{ name: "cursor", in: "query", required: false }],
+        responses: {
+          "200": okResponse("#/components/schemas/AgentConfigurationAuditListApiResponse"),
+          ...protectedErrorResponses
+        }
+      }
     }
   },
   components: {
@@ -1000,19 +1224,36 @@ export const OPENAPI_CONTRACT = {
           meta: { $ref: "#/components/schemas/ApiResponseMeta" }
         }
       },
+      RuntimeDependencyReadiness: {
+        type: "object",
+        required: ["name", "status", "safeSummary"],
+        properties: {
+          name: { enum: ["postgresql", "milvus", "llm", "mcp", "redis"] },
+          status: { enum: ["ready", "unavailable"] },
+          safeSummary: { type: "string" },
+          latencyMs: { type: "number", minimum: 0 }
+        },
+        additionalProperties: false
+      },
+      RuntimeReadiness: {
+        type: "object",
+        required: ["status", "checkedAt", "dependencies"],
+        properties: {
+          status: { enum: ["ready", "degraded"] },
+          checkedAt: { type: "string" },
+          dependencies: {
+            type: "array",
+            items: { $ref: "#/components/schemas/RuntimeDependencyReadiness" }
+          }
+        },
+        additionalProperties: false
+      },
       RuntimeReadinessResponse: {
         type: "object",
         required: ["ok", "data", "meta"],
         properties: {
           ok: { enum: ["true"] },
-          data: {
-            type: "object",
-            required: ["status", "dependencies"],
-            properties: {
-              status: { enum: ["ready", "degraded"] },
-              dependencies: { type: "object", additionalProperties: true }
-            }
-          },
+          data: { $ref: "#/components/schemas/RuntimeReadiness" },
           meta: { $ref: "#/components/schemas/ApiResponseMeta" }
         }
       },
@@ -1983,6 +2224,356 @@ export const OPENAPI_CONTRACT = {
         required: ["items"],
         properties: {
           items: { type: "array", items: { $ref: "#/components/schemas/ActiveAlert" } }
+        }
+      },
+      IncidentSummary: {
+        type: "object",
+        required: [
+          "id", "status", "alertName", "service", "severity", "firstSeenAt", "lastSeenAt",
+          "updatedAt", "deliveryCount", "diagnosticTaskId", "diagnosticStatus",
+          "verificationStatus", "currentStage", "source", "environment", "assignee",
+          "agentMode", "approvalStatus", "recoveryMode", "recoveryExecutionStatus",
+          "recoveryIntentId", "productionRecoveryExecution"
+        ],
+        properties: {
+          id: { type: "string" },
+          status: { enum: ["active", "resolved"] },
+          alertName: { type: "string" },
+          service: { type: ["string", "null"] },
+          severity: { enum: ["critical", "high", "medium", "low", "info", "unknown"] },
+          firstSeenAt: { type: "string" },
+          lastSeenAt: { type: "string" },
+          updatedAt: { type: "string" },
+          deliveryCount: { type: "integer", minimum: 1 },
+          diagnosticTaskId: { type: ["string", "null"] },
+          diagnosticStatus: {
+            oneOf: [
+              { enum: ["accepted", "running", "succeeded", "failed", "cancelled"] },
+              { type: "null" }
+            ]
+          },
+          verificationStatus: { enum: ["pending", "passed", "failed", "not_available"] },
+          currentStage: { enum: ["alert", "investigation", "decision", "recovery", "verification", "closed"] },
+          source: { type: ["string", "null"] },
+          environment: { type: ["string", "null"] },
+          assignee: { type: ["string", "null"] },
+          agentMode: { oneOf: [{ enum: ["single", "multi"] }, { type: "null" }] },
+          approvalStatus: {
+            oneOf: [{ enum: ["pending", "approved", "rejected", "expired"] }, { type: "null" }]
+          },
+          recoveryMode: { enum: ["automatic", "manual_review", "not_available"] },
+          recoveryExecutionStatus: {
+            enum: [
+              "proposed", "awaiting_approval", "queued", "revalidating", "executing",
+              "verifying", "recovered", "denied", "rejected", "expired", "cancelled",
+              "verification_failed", "manual_intervention", "not_available"
+            ]
+          },
+          recoveryIntentId: { type: ["string", "null"] },
+          productionRecoveryExecution: { type: "boolean" }
+        },
+        additionalProperties: false
+      },
+      IncidentDetail: {
+        type: "object",
+        required: [
+          "id", "status", "alertName", "service", "severity", "firstSeenAt", "lastSeenAt",
+          "updatedAt", "deliveryCount", "diagnosticTaskId", "diagnosticStatus",
+          "verificationStatus", "currentStage", "source", "environment", "assignee",
+          "agentMode", "approvalStatus", "recoveryMode", "recoveryExecutionStatus",
+          "recoveryIntentId", "productionRecoveryExecution", "summary", "alertLabels",
+          "alertAnnotations", "evidenceChain", "recoveryIntent", "recoveryEvents"
+        ],
+        properties: {
+          id: { type: "string" }, status: { enum: ["active", "resolved"] },
+          alertName: { type: "string" }, service: { type: ["string", "null"] },
+          severity: { enum: ["critical", "high", "medium", "low", "info", "unknown"] },
+          firstSeenAt: { type: "string" }, lastSeenAt: { type: "string" }, updatedAt: { type: "string" },
+          deliveryCount: { type: "integer", minimum: 1 }, diagnosticTaskId: { type: ["string", "null"] },
+          diagnosticStatus: {
+            oneOf: [
+              { enum: ["accepted", "running", "succeeded", "failed", "cancelled"] },
+              { type: "null" }
+            ]
+          },
+          verificationStatus: { enum: ["pending", "passed", "failed", "not_available"] },
+          currentStage: { enum: ["alert", "investigation", "decision", "recovery", "verification", "closed"] },
+          source: { type: ["string", "null"] }, environment: { type: ["string", "null"] },
+          assignee: { type: ["string", "null"] },
+          agentMode: { oneOf: [{ enum: ["single", "multi"] }, { type: "null" }] },
+          approvalStatus: {
+            oneOf: [{ enum: ["pending", "approved", "rejected", "expired"] }, { type: "null" }]
+          },
+          recoveryMode: { enum: ["automatic", "manual_review", "not_available"] },
+          recoveryExecutionStatus: { type: "string" }, recoveryIntentId: { type: ["string", "null"] },
+          productionRecoveryExecution: { type: "boolean" }, summary: { type: ["string", "null"] },
+          alertLabels: { type: "object", additionalProperties: { type: "string" } },
+          alertAnnotations: { type: "object", additionalProperties: { type: "string" } },
+          evidenceChain: {
+            oneOf: [
+              { $ref: "#/components/schemas/AiopsDiagnosticEvidenceChainResponse" },
+              { type: "null" }
+            ]
+          },
+          recoveryIntent: { oneOf: [{ $ref: "#/components/schemas/RecoveryIntent" }, { type: "null" }] },
+          recoveryEvents: { type: "array", items: { $ref: "#/components/schemas/RecoveryAuditEvent" } }
+        },
+        additionalProperties: false
+      },
+      IncidentListApiResponse: {
+        type: "object",
+        required: ["ok", "data", "meta"],
+        properties: {
+          ok: { enum: ["true"] },
+          data: {
+            type: "object",
+            required: ["items", "nextCursor"],
+            properties: {
+              items: { type: "array", items: { $ref: "#/components/schemas/IncidentSummary" } },
+              nextCursor: { type: ["string", "null"] }
+            },
+            additionalProperties: false
+          },
+          meta: { $ref: "#/components/schemas/ApiResponseMeta" }
+        }
+      },
+      IncidentDetailApiResponse: {
+        type: "object",
+        required: ["ok", "data", "meta"],
+        properties: {
+          ok: { enum: ["true"] },
+          data: {
+            type: "object",
+            required: ["incident"],
+            properties: { incident: { $ref: "#/components/schemas/IncidentDetail" } },
+            additionalProperties: false
+          },
+          meta: { $ref: "#/components/schemas/ApiResponseMeta" }
+        }
+      },
+      DiagnoseIncidentRequest: {
+        type: "object",
+        properties: { note: { type: "string" } },
+        additionalProperties: false
+      },
+      DiagnoseIncidentApiResponse: { type: "object" },
+      RecoveryCheck: {
+        type: "object",
+        required: ["key", "status", "safeSummary", "checkedAt"],
+        properties: {
+          key: { type: "string" },
+          status: { enum: ["passed", "failed", "pending"] },
+          safeSummary: { type: "string" },
+          checkedAt: { type: ["string", "null"] }
+        },
+        additionalProperties: false
+      },
+      RecoveryIntent: {
+        type: "object",
+        required: [
+          "id", "incidentId", "diagnosticTaskId", "reportId", "action", "targetKey",
+          "riskTier", "automaticEligible", "approvalRequired", "status",
+          "proposalFingerprint", "createdAt", "approvalExpiresAt", "startedAt",
+          "completedAt", "safeReasonCode", "executionSummary", "verification"
+        ],
+        properties: {
+          id: { type: "string" },
+          incidentId: { type: "string" },
+          diagnosticTaskId: { type: "string" },
+          reportId: { type: "string" },
+          action: { enum: ["restart_compose_service", "terminate_postgres_blocker"] },
+          targetKey: { type: "string" },
+          riskTier: { enum: ["low", "high"] },
+          automaticEligible: { type: "boolean" },
+          approvalRequired: { type: "boolean" },
+          status: {
+            enum: [
+              "proposed", "awaiting_approval", "queued", "revalidating", "executing",
+              "verifying", "recovered", "denied", "rejected", "expired", "cancelled",
+              "verification_failed", "manual_intervention"
+            ]
+          },
+          proposalFingerprint: { type: "string" },
+          createdAt: { type: "string" },
+          approvalExpiresAt: { type: ["string", "null"] },
+          startedAt: { type: ["string", "null"] },
+          completedAt: { type: ["string", "null"] },
+          safeReasonCode: { type: ["string", "null"] },
+          executionSummary: { type: ["string", "null"] },
+          verification: { type: "array", items: { $ref: "#/components/schemas/RecoveryCheck" } }
+        },
+        additionalProperties: false
+      },
+      RecoveryAuditEvent: {
+        type: "object",
+        required: [
+          "sequence", "type", "fromStatus", "toStatus", "safeReasonCode",
+          "safeSummary", "durationMs", "createdAt"
+        ],
+        properties: {
+          sequence: { type: "integer", minimum: 1 },
+          type: { type: "string" },
+          fromStatus: { type: ["string", "null"] },
+          toStatus: { type: "string" },
+          safeReasonCode: { type: ["string", "null"] },
+          safeSummary: { type: "string" },
+          durationMs: { type: ["integer", "null"] },
+          createdAt: { type: "string" }
+        },
+        additionalProperties: false
+      },
+      CreateRecoveryIntentRequest: {
+        type: "object",
+        properties: { note: { type: "string" } },
+        additionalProperties: false
+      },
+      ApproveRecoveryIntentRequest: {
+        type: "object",
+        required: ["incidentIdConfirmation"],
+        properties: { incidentIdConfirmation: { type: "string" } },
+        additionalProperties: false
+      },
+      RecoveryIntentApiResponse: { type: "object" },
+      RecoveryEventListApiResponse: { type: "object" },
+      AgentConfigurationCapabilities: {
+        type: "object",
+        required: ["canManageConfiguration"],
+        properties: { canManageConfiguration: { type: "boolean" } },
+        additionalProperties: false
+      },
+      AgentResource: {
+        type: "object",
+        required: ["id", "kind", "name", "description", "createdAt", "updatedAt"],
+        properties: {
+          id: { type: "string" },
+          kind: { enum: ["prompt", "skill"] },
+          name: { type: "string" },
+          description: { type: ["string", "null"] },
+          createdAt: { type: "string" },
+          updatedAt: { type: "string" }
+        },
+        additionalProperties: false
+      },
+      AgentResourceVersion: {
+        type: "object",
+        required: ["id", "resourceId", "version", "status", "content", "spec", "createdAt", "publishedAt"],
+        properties: {
+          id: { type: "string" },
+          resourceId: { type: "string" },
+          version: { type: "integer", minimum: 1 },
+          status: { enum: ["draft", "published", "deprecated"] },
+          content: { type: "string" },
+          spec: { type: "object", additionalProperties: true },
+          createdAt: { type: "string" },
+          publishedAt: { type: ["string", "null"] }
+        },
+        additionalProperties: false
+      },
+      AgentBinding: {
+        type: "object",
+        required: ["id", "node", "promptVersionId", "skillVersionIds", "updatedAt"],
+        properties: {
+          id: { type: "string" },
+          node: {
+            enum: [
+              "conversation", "planner", "replanner", "investigator_runtime",
+              "investigator_log", "investigator_change", "adjudicator", "validator",
+              "recovery_planner", "report"
+            ]
+          },
+          promptVersionId: { type: ["string", "null"] },
+          skillVersionIds: { type: "array", items: { type: "string" } },
+          updatedAt: { type: "string" }
+        },
+        additionalProperties: false
+      },
+      AgentConfigurationLibraryApiResponse: {
+        type: "object",
+        required: ["ok", "data", "meta"],
+        properties: {
+          ok: { enum: ["true"] },
+          data: {
+            type: "object",
+            required: ["resources", "versions", "bindings", "capabilities"],
+            properties: {
+              resources: { type: "array", items: { $ref: "#/components/schemas/AgentResource" } },
+              versions: { type: "array", items: { $ref: "#/components/schemas/AgentResourceVersion" } },
+              bindings: { type: "array", items: { $ref: "#/components/schemas/AgentBinding" } },
+              capabilities: { $ref: "#/components/schemas/AgentConfigurationCapabilities" }
+            },
+            additionalProperties: false
+          },
+          meta: { $ref: "#/components/schemas/ApiResponseMeta" }
+        }
+      },
+      CreateAgentResourceRequest: {
+        type: "object",
+        required: ["kind", "name", "content"],
+        properties: {
+          kind: { enum: ["prompt", "skill"] },
+          name: { type: "string" },
+          description: { type: "string" },
+          content: { type: "string" },
+          spec: { type: "object", additionalProperties: true }
+        },
+        additionalProperties: false
+      },
+      UpdateAgentDraftRequest: {
+        type: "object",
+        required: ["name", "content", "spec"],
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          content: { type: "string" },
+          spec: { type: "object", additionalProperties: true }
+        },
+        additionalProperties: false
+      },
+      UpdateAgentBindingRequest: {
+        type: "object",
+        required: ["promptVersionId", "skillVersionIds"],
+        properties: {
+          promptVersionId: { type: ["string", "null"] },
+          skillVersionIds: { type: "array", items: { type: "string" } }
+        },
+        additionalProperties: false
+      },
+      AgentResourceMutationApiResponse: { type: "object" },
+      AgentBindingMutationApiResponse: { type: "object" },
+      AgentConfigurationAuditEvent: {
+        type: "object",
+        required: [
+          "id", "resourceId", "versionId", "bindingId", "action", "actorUserId",
+          "safeSummary", "createdAt"
+        ],
+        properties: {
+          id: { type: "string" }, resourceId: { type: ["string", "null"] },
+          versionId: { type: ["string", "null"] }, bindingId: { type: ["string", "null"] },
+          action: {
+            enum: [
+              "resource_created", "draft_saved", "version_published",
+              "version_deprecated", "binding_updated"
+            ]
+          },
+          actorUserId: { type: "string" }, safeSummary: { type: "string" }, createdAt: { type: "string" }
+        },
+        additionalProperties: false
+      },
+      AgentConfigurationAuditListApiResponse: {
+        type: "object",
+        required: ["ok", "data", "meta"],
+        properties: {
+          ok: { enum: ["true"] },
+          data: {
+            type: "object",
+            required: ["items", "nextCursor"],
+            properties: {
+              items: { type: "array", items: { $ref: "#/components/schemas/AgentConfigurationAuditEvent" } },
+              nextCursor: { type: ["string", "null"] }
+            },
+            additionalProperties: false
+          },
+          meta: { $ref: "#/components/schemas/ApiResponseMeta" }
         }
       },
       AiopsDiagnosticReport: {

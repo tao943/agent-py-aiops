@@ -13,6 +13,9 @@ hero:
     - theme: alt
       text: 项目基础
       link: /foundation
+    - theme: alt
+      text: AIOps 工作台
+      link: /aiops-workbench
 
 features:
   - title: OpenSpec 变更
@@ -21,4 +24,6 @@ features:
     details: 提供 macOS、Linux 和 Windows 的依赖安装与本地启动说明。
   - title: AIOps 实践
     details: 查看真实日志、告警、知识检索与诊断案例的使用文档。
+  - title: 事件优先工作台
+    details: 查看事件中心、调查工作台、Agent 配置、集成和系统状态的当前运行语义。
 ---

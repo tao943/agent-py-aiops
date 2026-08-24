@@ -425,6 +425,117 @@ class UserChatSkillModel(Base):
     )
 
 
+class AgentConfigurationResourceModel(Base):
+    """Owner-scoped Prompt or Skill identity."""
+
+    __tablename__ = "agent_config_resources"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id", "kind", "name", name="uq_agent_config_resources_owner_kind_name"
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "kind",
+            "legacy_resource_id",
+            name="uq_agent_config_resources_legacy",
+        ),
+        Index(
+            "ix_agent_config_resources_owner_kind_updated",
+            "owner_user_id",
+            "kind",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    legacy_resource_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentConfigurationVersionModel(Base):
+    """Immutable-after-publish Prompt or Skill revision."""
+
+    __tablename__ = "agent_config_versions"
+    __table_args__ = (
+        UniqueConstraint("resource_id", "version", name="uq_agent_config_versions_number"),
+        Index("ix_agent_config_versions_owner_resource", "owner_user_id", "resource_id", "version"),
+        Index(
+            "uq_agent_config_versions_one_draft",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("status = 'draft'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_config_resources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    validation_warnings: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentConfigurationBindingModel(Base):
+    """Current published configuration selected for one server-owned node."""
+
+    __tablename__ = "agent_config_bindings"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "node", name="uq_agent_config_bindings_owner_node"),
+        Index("ix_agent_config_bindings_owner_updated", "owner_user_id", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node: Mapped[str] = mapped_column(String(48), nullable=False)
+    prompt_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_config_versions.id", ondelete="RESTRICT"), nullable=True
+    )
+    skill_version_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentConfigurationAuditEventModel(Base):
+    """Append-only, secret-safe configuration mutation audit."""
+
+    __tablename__ = "agent_config_audit_events"
+    __table_args__ = (
+        Index("ix_agent_config_audit_owner_created", "owner_user_id", "created_at", "event_id"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    version_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    node: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    safe_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ChatMessageModel(Base):
     """Persisted chat message."""
 
@@ -511,6 +622,9 @@ class ChatAgentRunModel(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_event_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    agent_configuration_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -624,6 +738,158 @@ class RecoveryApprovalRequestModel(Base):
     execution_permitted: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProductionRecoveryIntentModel(Base):
+    """Immutable grounded recovery proposal plus its governed lifecycle."""
+
+    __tablename__ = "production_recovery_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('restart_compose_service','terminate_postgres_blocker')",
+            name="ck_production_recovery_intents_action",
+        ),
+        CheckConstraint("risk_tier IN ('low','high')", name="ck_production_recovery_intents_risk"),
+        CheckConstraint(
+            "status IN ('proposed','awaiting_approval','queued','revalidating',"
+            "'executing','verifying','recovered','denied','rejected','expired',"
+            "'cancelled','verification_failed','manual_intervention')",
+            name="ck_production_recovery_intents_status",
+        ),
+        CheckConstraint(
+            "char_length(proposal_fingerprint) = 64",
+            name="ck_production_recovery_intents_proposal_fingerprint",
+        ),
+        CheckConstraint(
+            "execution_key IS NULL OR char_length(execution_key) = 64",
+            name="ck_production_recovery_intents_execution_key",
+        ),
+        Index(
+            "uq_production_recovery_intents_active_proposal",
+            "owner_user_id",
+            "proposal_fingerprint",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('proposed','awaiting_approval','queued','revalidating',"
+                "'executing','verifying')"
+            ),
+        ),
+        Index(
+            "ix_production_recovery_intents_owner_incident_created",
+            "owner_user_id",
+            "incident_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    incident_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_alert_incidents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    diagnostic_task_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    report_id: Mapped[str] = mapped_column(
+        ForeignKey("aiops_diagnostic_reports.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    target_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    canonical_arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    proposal_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    validator_origin: Mapped[str] = mapped_column(String(80), nullable=False)
+    policy_authorization_code: Mapped[str] = mapped_column(String(120), nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    automatic_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    background_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("background_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    approval_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    trusted_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    execution_summary: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    verification_checks: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    safe_reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProductionRecoveryApprovalModel(Base):
+    """Owner decision bound to one immutable recovery proposal fingerprint."""
+
+    __tablename__ = "production_recovery_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('approved','rejected')",
+            name="ck_production_recovery_approvals_decision",
+        ),
+        CheckConstraint(
+            "char_length(proposal_fingerprint) = 64",
+            name="ck_production_recovery_approvals_proposal_fingerprint",
+        ),
+        UniqueConstraint(
+            "intent_id", "proposal_fingerprint", name="uq_production_recovery_approval_proposal"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        ForeignKey("production_recovery_intents.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    approver_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    incident_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    proposal_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProductionRecoveryAuditEventModel(Base):
+    """Append-only public-safe recovery transition event."""
+
+    __tablename__ = "production_recovery_audit_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "intent_id", "sequence", name="uq_production_recovery_audit_sequence"
+        ),
+        Index(
+            "ix_production_recovery_audit_owner_intent_sequence",
+            "owner_user_id",
+            "intent_id",
+            "sequence",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        ForeignKey("production_recovery_intents.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    safe_reason_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    safe_summary: Mapped[str] = mapped_column(String(512), nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class PendingChatActionModel(Base):
@@ -750,6 +1016,9 @@ class DiagnosticTaskModel(Base):
     query: Mapped[str] = mapped_column(Text, nullable=False)
     input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    agent_configuration_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

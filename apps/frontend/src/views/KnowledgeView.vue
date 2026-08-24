@@ -51,7 +51,7 @@ function uploadDocument(file: File, chunking: import("@agent-py/api-contracts").
 <template>
   <section class="knowledge-view" aria-label="知识库工作区">
     <header class="knowledge-view__header">
-      <div><p>你的知识库</p><h2>文档与索引</h2><span>上传 SOP、复盘和运行手册，让模型在需要时检索可靠来源。</span></div>
+      <div><p>AIOPS KNOWLEDGE</p><h2>知识卡与运行手册</h2><span>管理故障知识卡、SOP、复盘与排查博客，并观察真实索引状态。</span></div>
       <label v-if="knowledge.knowledgeBases.length > 1" class="knowledge-view__base"><span>当前知识库</span><select :value="knowledge.selectedKnowledgeBaseId ?? ''" :disabled="knowledge.isLoading" aria-label="当前知识库" @change="run(() => knowledge.selectKnowledgeBase(($event.target as HTMLSelectElement).value))"><option v-for="base in knowledge.knowledgeBases" :key="base.id" :value="base.id">{{ base.name }}</option></select></label>
     </header>
 

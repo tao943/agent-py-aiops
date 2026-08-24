@@ -23,14 +23,17 @@ describe("chat workspace layout", () => {
     );
   });
 
-  it("uses a conversation-first desktop grid without a second history surface", () => {
+  it("uses a conversation-only workspace without embedded configuration editors", () => {
     expect(chatViewSource).toMatch(
-      /\.chat-view\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(18rem, 22rem\);/s
+      /\.chat-view\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s
     );
     expect(chatViewSource).not.toContain("ChatSessionList");
     expect(chatViewSource).not.toContain("chat-view__mobile-history");
     expect(chatViewSource).not.toContain('aria-label="查看历史对话"');
     expect(chatViewSource).not.toContain("minmax(13rem, 16rem) minmax(0, 1fr)");
+    expect(chatViewSource).not.toContain("ChatPromptSidebar");
+    expect(chatViewSource).not.toContain("ChatSkillSidebar");
+    expect(chatViewSource).toContain("/agent-config?node=conversation");
   });
 
   it("keeps the composer fixed and renders user messages like assistant messages", () => {
@@ -41,9 +44,8 @@ describe("chat workspace layout", () => {
     expect(transcriptSource).toMatch(/\.chat-transcript__message p\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
   });
 
-  it("removes focus rectangles from the chat workspace and composer", () => {
+  it("keeps visible keyboard focus in the chat workspace", () => {
     expect(composerSource).not.toContain(".chat-composer__field:focus-within");
-    expect(chatViewSource).toMatch(/\.chat-view :deep\(button:focus\)[^}]*outline:\s*none;/s);
-    expect(chatViewSource).toContain(".chat-view :deep(textarea:focus-visible)");
+    expect(chatViewSource).not.toMatch(/outline:\s*none/);
   });
 });

@@ -1,18 +1,15 @@
 <script setup lang="ts">
-import { CircleDot, LogOut, Sparkles, TriangleAlert } from "lucide-vue-next";
+import { CircleDot, LogOut, ShieldCheck, TriangleAlert } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import WorkspaceNavigation from "../components/WorkspaceNavigation.vue";
-import ChatSessionList from "../components/ChatSessionList.vue";
 import { createRuntimeHealthClient } from "../runtimeHealth";
 import { useAuthStore } from "../stores/auth";
-import { useChatStore } from "../stores/chat";
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
-const chat = useChatStore();
 const routeTitle = computed(() => (typeof route.meta.title === "string" ? route.meta.title : "工作台"));
 const initials = computed(() => auth.user?.displayName.slice(0, 1).toUpperCase() ?? "用");
 const isConnected = ref(true);
@@ -33,31 +30,17 @@ async function logout(): Promise<void> {
   }
 }
 
-function runChat(operation: () => Promise<unknown>): void {
-  void operation().catch(() => undefined);
-}
 </script>
 
 <template>
   <div class="workspace-layout">
     <aside class="workspace-layout__rail">
-      <RouterLink class="workspace-layout__brand" to="/chat" aria-label="Super AI 工作台">
-        <Sparkles :size="19" stroke-width="1.8" aria-hidden="true" />
-        <span>Super AI</span>
-        <small>智能工作台</small>
+      <RouterLink class="workspace-layout__brand" to="/incidents" aria-label="Agent Py AIOps 工作台">
+        <ShieldCheck :size="20" stroke-width="1.8" aria-hidden="true" />
+        <span>Agent Py</span>
+        <small>AIOps 控制台</small>
       </RouterLink>
-      <WorkspaceNavigation :active-path="route.path">
-        <template #chat-history>
-          <ChatSessionList
-            :active-session-id="chat.activeSessionId"
-            :sessions="chat.sessions"
-            variant="rail"
-            @create="runChat(chat.newSession)"
-            @delete="runChat(() => chat.deleteSession($event))"
-            @select="runChat(() => chat.selectSession($event))"
-          />
-        </template>
-      </WorkspaceNavigation>
+      <WorkspaceNavigation :active-path="route.path" />
       <div class="workspace-layout__account">
         <span class="workspace-layout__avatar" aria-hidden="true">{{ initials }}</span>
         <span class="workspace-layout__identity">
@@ -72,7 +55,7 @@ function runChat(operation: () => Promise<unknown>): void {
     <section class="workspace-layout__main">
       <header class="workspace-layout__header">
         <div>
-          <p>AI 工作台</p>
+          <p>AIOps 工作台</p>
           <h1>{{ routeTitle }}</h1>
         </div>
         <span class="workspace-layout__status" :class="{ 'workspace-layout__status--degraded': !isConnected }" role="status" aria-live="polite">
@@ -110,5 +93,5 @@ function runChat(operation: () => Promise<unknown>): void {
 .workspace-layout__status--degraded { color: var(--status-danger-text); }
 .workspace-layout__content { height: 100%; min-height: 0; overflow: hidden; width: 100%; }
 .workspace-layout__mobile-nav { display: none; }
-@media (max-width: 760px) { .workspace-layout { display: block; padding-bottom: 4.75rem; } .workspace-layout__rail { display: none; } .workspace-layout__header { min-height: 4.25rem; padding: 0.75rem 1rem; } .workspace-layout__header h1 { font-size: 1.05rem; } .workspace-layout__status { font-size: 0.7rem; } .workspace-layout__content { padding: 1rem; } .workspace-layout__mobile-nav { background: var(--rail); border-top: 1px solid rgb(255 255 255 / 9%); bottom: 0; display: block; left: 0; padding: 0.25rem 0.35rem calc(0.25rem + env(safe-area-inset-bottom)); position: fixed; right: 0; z-index: 10; } .workspace-layout__mobile-nav :deep(.workspace-navigation) { display: grid; gap: 0.15rem; grid-template-columns: repeat(4, 1fr); } .workspace-layout__mobile-nav :deep(.workspace-navigation__link) { border-radius: 0.45rem; flex-direction: column; font-size: 0.66rem; gap: 0.2rem; justify-content: center; min-height: 3.85rem; padding: 0.3rem; } }
+@media (max-width: 760px) { .workspace-layout { display: block; padding-bottom: 4.75rem; } .workspace-layout__rail { display: none; } .workspace-layout__header { min-height: 4.25rem; padding: 0.75rem 1rem; } .workspace-layout__header h1 { font-size: 1.05rem; } .workspace-layout__status { font-size: 0.7rem; } .workspace-layout__content { padding: 0; } .workspace-layout__mobile-nav { background: var(--rail); border-top: 1px solid rgb(255 255 255 / 9%); bottom: 0; display: block; left: 0; overflow-x: auto; padding: 0.25rem 0.35rem calc(0.25rem + env(safe-area-inset-bottom)); position: fixed; right: 0; z-index: 10; } .workspace-layout__mobile-nav :deep(.workspace-navigation) { display: grid; gap: 0.15rem; grid-auto-columns: minmax(4.5rem, 1fr); grid-auto-flow: column; } .workspace-layout__mobile-nav :deep(.workspace-navigation__link) { border-radius: 0.45rem; flex-direction: column; font-size: 0.66rem; gap: 0.2rem; justify-content: center; min-height: 3.85rem; padding: 0.3rem; } }
 </style>

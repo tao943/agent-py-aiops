@@ -189,6 +189,19 @@ class OrderApiRuntime:
         if not await self.probe(run_id, timeout_seconds=1.0, request_id=request_id):
             raise OrderApiConflictError("baseline_probe_timed_out")
 
+    async def business_ready(self) -> bool:
+        try:
+            connection = await self._pool.acquire(timeout=1.0)
+        except (TimeoutError, OSError):
+            return False
+        try:
+            await connection.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+        finally:
+            await self._pool.release(connection)
+
     async def execute_fault(self, run_id: str, fault_token: str, request_id: str) -> None:
         self._require_active_run(run_id)
         _validate_identifier(request_id, "request_id_invalid")
@@ -416,6 +429,12 @@ def create_app() -> FastAPI:
             "generation": runtime.generation,
             "activeRunId": runtime.active_run_id,
         }
+
+    @app.get("/probe")
+    async def business_probe() -> dict[str, str]:
+        if not await app.state.runtime.business_ready():
+            raise HTTPException(status_code=503, detail="business_probe_failed")
+        return {"status": "ok"}
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Response:

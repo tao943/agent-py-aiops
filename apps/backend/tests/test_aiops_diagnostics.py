@@ -4,6 +4,8 @@ import json
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -16,11 +18,17 @@ from super_ai.api.app import AiopsDiagnosticRunner, create_app
 from super_ai.llm import LlmProvider, RerankResult
 from super_ai.mcp_client import LocalMcpClient, McpClientError, McpToolDefinition
 from super_ai.memory.database import create_memory_engine, create_memory_session_factory
-from super_ai.memory.repositories import DiagnosticTaskRecord, TenantScopeError
+from super_ai.memory.repositories import (
+    DiagnosticMemoryRepository,
+    DiagnosticTaskRecord,
+    TenantScopeError,
+)
 from super_ai.memory.sqlalchemy import create_sqlalchemy_memory_repositories
 from super_ai.redis_runtime.rate_limit import RateLimitDecision
 from super_ai.retrieval import KnowledgeRetrievalTool
 from super_ai.vector_store import StoredVectorChunk, VectorSearchResult
+
+TEST_PROJECT_CONFIG = Path(__file__).resolve().parents[3] / "config" / "project.test.json"
 
 
 class FakeEmbeddingModel:
@@ -437,6 +445,7 @@ async def test_diagnostic_no_sop_and_mcp_failure_are_explicit(
 @dataclass
 class FakeAiopsRunner:
     calls: list[str] = field(default_factory=lambda: [])
+    diagnostics: DiagnosticMemoryRepository | None = None
 
     async def stream(
         self,
@@ -445,6 +454,15 @@ class FakeAiopsRunner:
         accessible_knowledge_base_ids: Sequence[str],
     ) -> AsyncIterator[dict[str, object]]:
         self.calls.append(task.id)
+        if self.diagnostics is None:
+            raise RuntimeError("Fake diagnostic repository is unavailable.")
+        await self.diagnostics.update_task(
+            owner_user_id=task.owner_user_id,
+            task_id=task.id,
+            status="succeeded",
+            result_payload={},
+            completed_at=datetime.now(timezone.utc),
+        )
         yield {
             "id": "evt_1",
             "type": "task.status",
@@ -478,15 +496,23 @@ class AllowAllRateLimits:
 @pytest.mark.asyncio
 async def test_aiops_stream_requires_task_owner_and_falls_back_when_redis_is_unavailable(
     migrated_database_url: str,
+    tmp_path: Path,
 ) -> None:
     runner = FakeAiopsRunner()
+    project_config_path = tmp_path / "project.json"
+    project_config_path.write_text(
+        TEST_PROJECT_CONFIG.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     app = create_app(
         database_url=migrated_database_url,
+        project_config_path=project_config_path,
         aiops_diagnostic_runner=cast(AiopsDiagnosticRunner, runner),
         redis_client=cast(Redis, UnavailableRedisClient()),
         vector_store=cast(Any, FakeVectorStore([])),
         rate_limit_service=AllowAllRateLimits(),
     )
+    runner.diagnostics = app.state.memory_repositories.diagnostics
     transport = httpx.ASGITransport(
         app=app
     )

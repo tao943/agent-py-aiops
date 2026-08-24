@@ -8,7 +8,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
+    from super_ai.agent_configuration.repositories import AgentConfigurationRepository
     from super_ai.chat.structured_memory import MemoryCasResult, StructuredChatMemory
+    from super_ai.recovery.repository import RecoveryIntentRepository
 
 ChatMemoryMode = str
 
@@ -93,6 +95,9 @@ class ChatRunRecord:
     updated_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    agent_configuration_snapshot: JsonDict = field(
+        default_factory=lambda: dict[str, object]()
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1374,6 +1379,7 @@ class ChatRunRepository(Protocol):
         request_fingerprint: str,
         content: str,
         metadata: JsonDict,
+        agent_configuration_snapshot: JsonDict | None = None,
     ) -> ChatRunCreateResult: ...
 
     async def get_owned(
@@ -1877,3 +1883,5 @@ class MemoryRepositories:
     chat_tool_executions: ChatToolExecutionRepository | None = None
     recovery_approvals: RecoveryApprovalRequestRepository | None = None
     pending_chat_actions: PendingChatActionRepository | None = None
+    recovery_intents: RecoveryIntentRepository | None = None
+    agent_configurations: AgentConfigurationRepository | None = None

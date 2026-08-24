@@ -30,7 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
+from super_ai.agent_configuration.routes import create_agent_configuration_router
+from super_ai.agent_configuration.runtime import AgentConfigurationRuntime
+from super_ai.agent_configuration.service import AgentConfigurationService
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
+from super_ai.aiops.incident_routes import create_incident_router
 from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
 from super_ai.alert_ingestion.config import load_alert_ingestion_settings
 from super_ai.alert_ingestion.metrics import AlertIngestionMetrics
@@ -166,6 +170,11 @@ from super_ai.observability import (
     set_request_id,
 )
 from super_ai.project_config import project_config_section, required_int, required_str
+from super_ai.recovery.api import create_recovery_router
+from super_ai.recovery.auto_dispatch import AutoRecoveryIntentDispatcher
+from super_ai.recovery.config import load_production_recovery_settings
+from super_ai.recovery.intent_service import RecoveryIntentService
+from super_ai.recovery.worker import build_production_recovery_handler
 from super_ai.redis_runtime import (
     RedisRuntimeSettings,
     create_redis_client,
@@ -456,10 +465,35 @@ def create_app(
     app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
     repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
+    agent_configuration_repository = repositories.agent_configurations
+    if agent_configuration_repository is None:
+        raise RuntimeError("Agent configuration repository is required.")
+    agent_configuration_service = AgentConfigurationService(agent_configuration_repository)
+    app.state.agent_configuration_service = agent_configuration_service
+    app.state.agent_configuration_runtime = AgentConfigurationRuntime(
+        agent_configuration_service,
+        node_tool_allowlists={
+            "conversation": frozenset(
+                {
+                    "get_current_time",
+                    "load_skill",
+                    "query_incident",
+                    "search_knowledge",
+                }
+            )
+        },
+    )
+    app.include_router(
+        create_agent_configuration_router(
+            current_user_dependency=_current_user,
+            service=agent_configuration_service,
+        )
+    )
     app.include_router(
         create_chat_runs_router(
             repositories=repositories,
             current_user_dependency=_current_user,
+            agent_configuration_runtime=app.state.agent_configuration_runtime,
         )
     )
     app.include_router(
@@ -469,6 +503,21 @@ def create_app(
         )
     )
     incident_repository = SQLAlchemyAlertIngestionRepository(session_factory)
+    app.state.alert_incident_repository = incident_repository
+    recovery_intents = repositories.recovery_intents
+    if recovery_intents is None:
+        raise RuntimeError("Production recovery intent repository is required.")
+    recovery_settings = load_production_recovery_settings(resolved_project_config_path)
+    recovery_intent_service = RecoveryIntentService(
+        diagnostics=repositories.diagnostics,
+        incidents=incident_repository,
+        intents=recovery_intents,
+        settings=recovery_settings,
+    )
+    app.state.auto_recovery_intent_dispatcher = AutoRecoveryIntentDispatcher(
+        diagnostics=repositories.diagnostics,
+        recovery_intents=recovery_intent_service,
+    )
     app.state.aiops_bridge_service = AiopsBridgeService(
         incidents=incident_repository,
         diagnostics=repositories.diagnostics,
@@ -477,6 +526,7 @@ def create_app(
             BridgeRecoveryApprovalRequestRepository | None,
             repositories.recovery_approvals,
         ),
+        recovery_intents=recovery_intent_service,
         tool_executions=repositories.chat_tool_executions,
     )
     app.state.vector_store = vector_store or build_default_milvus_vector_store(
@@ -504,7 +554,36 @@ def create_app(
     background_runtime.register(
         "pending_chat_action", _pending_chat_action_job_handler(app)
     )
+    background_runtime.register(
+        "production_recovery", build_production_recovery_handler(app)
+    )
     app.state.background_job_runtime = background_runtime
+    app.include_router(
+        create_incident_router(
+            current_user_dependency=_current_user,
+            repository=incident_repository,
+            scheduler=incident_repository,
+            runtime=background_runtime,
+        )
+    )
+
+    async def enforce_recovery_rate_limit(owner_id: str) -> None:
+        await enforce_rate_limit(
+            cast(RateLimitService, app.state.rate_limit_service),
+            owner_id=owner_id,
+            action="recovery.execute",
+        )
+
+    app.include_router(
+        create_recovery_router(
+            current_user_dependency=_current_user,
+            service=recovery_intent_service,
+            intents=recovery_intents,
+            settings=recovery_settings,
+            runtime=background_runtime,
+            rate_limit_guard=enforce_recovery_rate_limit,
+        )
+    )
     composed_redis_settings = redis_settings
     redis_configuration_error: str | None = None
     if composed_redis_settings is None and redis_client is None:
@@ -757,6 +836,38 @@ def create_app(
     ) -> object:
         jobs = await _background_job_repository(request).list(owner_user_id=user.id)
         return success_response(request, {"items": [_background_job_payload(job) for job in jobs]})
+
+    @app.get("/evaluation/runs")
+    async def list_evaluation_run_summaries(
+        request: Request,
+        _user: Annotated[UserRecord, Depends(_current_user)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> object:
+        repository = _memory_repositories(request).evaluations
+        if repository is None:
+            return success_response(request, {"items": []})
+        rows = await repository.list_runs_with_results()
+        selected = list(reversed(rows[-limit:]))
+        return success_response(
+            request,
+            {
+                "items": [
+                    {
+                        "runId": run.run_id,
+                        "evaluationKind": run.evaluation_kind,
+                        "scenarioId": run.scenario_id,
+                        "mode": run.mode,
+                        "status": run.status,
+                        "total": result.total if result is not None else None,
+                        "passed": result.passed if result is not None else None,
+                        "completedAt": (
+                            run.completed_at.isoformat() if run.completed_at else None
+                        ),
+                    }
+                    for run, result in selected
+                ]
+            },
+        )
 
     @app.get("/background-jobs/{job_id}")
     async def get_background_job(
@@ -1604,6 +1715,9 @@ def create_app(
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
             intent_router=_chat_intent_router(request),
+            agent_configuration_runtime=cast(
+                AgentConfigurationRuntime, request.app.state.agent_configuration_runtime
+            ),
         )
 
         async def event_stream() -> AsyncIterator[str]:
@@ -2092,6 +2206,9 @@ def _chat_run_job_handler(
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
             intent_router=_chat_intent_router(request),
+            agent_configuration_runtime=cast(
+                AgentConfigurationRuntime, app.state.agent_configuration_runtime
+            ),
         )
         await ChatRunJobHandler(
             repositories=repositories,
@@ -2137,14 +2254,47 @@ def _aiops_job_handler(
         )
         if task is None:
             raise RuntimeError("Diagnostic task is unavailable.")
-        runner = _aiops_diagnostic_runner(_request_for_app(app))
+        if task.status == "failed":
+            raise RuntimeError("Diagnostic execution failed.")
+        if task.status == "cancelled":
+            raise JobCancelled("Diagnostic execution was cancelled.")
+        if task.status not in {"accepted", "running", "succeeded"}:
+            raise RuntimeError("Diagnostic task has an unsupported status.")
         try:
-            async for event in runner.stream(
-                task=task,
-                accessible_knowledge_base_ids=(f"kb_{context.job.owner_user_id}",),
-            ):
-                await context.raise_if_cancelled()
-                await context.append_event(event)
+            if task.status != "succeeded":
+                runner = _aiops_diagnostic_runner(_request_for_app(app))
+                async for event in runner.stream(
+                    task=task,
+                    accessible_knowledge_base_ids=(
+                        f"kb_{context.job.owner_user_id}",
+                    ),
+                ):
+                    await context.raise_if_cancelled()
+                    await context.append_event(event)
+            updated = await repositories.diagnostics.get_task(
+                owner_user_id=task.owner_user_id,
+                task_id=task.id,
+            )
+            if updated is None:
+                raise RuntimeError("Diagnostic task is unavailable.")
+            if updated.status == "failed":
+                raise RuntimeError("Diagnostic execution failed.")
+            if updated.status == "cancelled":
+                raise JobCancelled("Diagnostic execution was cancelled.")
+            if updated.status != "succeeded":
+                raise RuntimeError("Diagnostic execution did not complete.")
+            await context.raise_if_cancelled()
+            dispatcher = cast(
+                AutoRecoveryIntentDispatcher,
+                app.state.auto_recovery_intent_dispatcher,
+            )
+            dispatch_result = await dispatcher.dispatch(
+                owner_user_id=updated.owner_user_id,
+                diagnostic_task_id=updated.id,
+            )
+            if dispatch_result.reason_code == "task_unavailable":
+                raise RuntimeError("Diagnostic task is unavailable.")
+            await context.append_event(dispatch_result.public_event())
         except JobCancelled:
             await repositories.diagnostics.update_task(
                 owner_user_id=task.owner_user_id,
@@ -2153,12 +2303,6 @@ def _aiops_job_handler(
                 completed_at=datetime.now(timezone.utc),
             )
             raise
-        updated = await repositories.diagnostics.get_task(
-            owner_user_id=task.owner_user_id,
-            task_id=task.id,
-        )
-        if updated is None or updated.status == "failed":
-            raise RuntimeError("Diagnostic execution failed.")
 
     return handle
 

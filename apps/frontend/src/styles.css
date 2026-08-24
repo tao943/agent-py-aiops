@@ -4,31 +4,36 @@
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --canvas: #f7f7f8;
-  --surface: #f7f7f8;
+  --surface-canvas: #f3f2ef;
+  --surface-panel: #fbfbf9;
   --surface-raised: #ffffff;
+  --nav-bg: #18211f;
+  --nav-hover: #25302d;
+  --canvas: var(--surface-canvas);
+  --surface: var(--surface-panel);
   --surface-inset: #f0f0f0;
   --surface-hover: #ececee;
   --surface-selected: #e9f7f2;
-  --rail: #202123;
-  --rail-hover: #2b2c2e;
+  --rail: var(--nav-bg);
+  --rail-hover: var(--nav-hover);
   --rail-text: #ececf1;
   --rail-muted: #a8a8b3;
-  --text-primary: #202123;
-  --text-secondary: #5a5b64;
+  --text-primary: #18201e;
+  --text-secondary: #56605c;
   --text-tertiary: #85858d;
   --line: #e5e5e7;
   --line-strong: #d4d4d8;
-  --accent: #0f8a68;
-  --accent-strong: #08745a;
+  --accent: #147d64;
+  --accent-strong: #0f6854;
   --accent-soft: #e5f6f0;
   --accent-border: #a9dfcf;
   --accent-focus: rgb(15 138 104 / 24%);
-  --focus-ring: rgb(32 33 35 / 20%);
+  --info: #2767b2;
+  --focus-ring: 0 0 0 3px rgb(39 103 178 / 28%);
   --success: #0c7a5f;
-  --danger: #c13f3f;
+  --danger: #b93838;
   --danger-soft: #fff1f0;
-  --warning: #9b6b12;
+  --warning: #a76512;
   --status-neutral-bg: #f1f1f3;
   --status-neutral-border: #dedee3;
   --status-neutral-text: #63636d;
@@ -45,8 +50,10 @@
   --status-danger-border: #f0bcb8;
   --status-danger-text: #b43834;
   --shadow-float: 0 12px 32px rgb(0 0 0 / 10%);
-  --radius-sm: 0.5rem;
-  --radius-md: 0.75rem;
+  --radius-control: 0.5rem;
+  --radius-panel: 0.75rem;
+  --radius-sm: var(--radius-control);
+  --radius-md: var(--radius-panel);
   --radius-lg: 1rem;
   --transition-fast: 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -59,7 +66,7 @@ button { background: transparent; border: 0; color: var(--text-primary); cursor:
 button:disabled { cursor: not-allowed; }
 a { color: inherit; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+:where(a, button, input, textarea, select, [tabindex]):focus-visible { box-shadow: var(--focus-ring); outline: 2px solid var(--info); outline-offset: 2px; }
 ::selection { background: #c9eee1; color: #17352c; }
 
 @media (prefers-reduced-motion: reduce) {

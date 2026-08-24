@@ -42,6 +42,46 @@ export const API_ERROR_CODES = {
     httpStatus: 404,
     message: "The requested resource was not found."
   },
+  RECOVERY_DISABLED: {
+    category: "business",
+    httpStatus: 409,
+    message: "Production recovery is disabled."
+  },
+  RECOVERY_NOT_ELIGIBLE: {
+    category: "business",
+    httpStatus: 409,
+    message: "The diagnostic is not eligible for governed recovery."
+  },
+  RECOVERY_APPROVAL_REQUIRED: {
+    category: "business",
+    httpStatus: 409,
+    message: "A current incident owner approval is required."
+  },
+  RECOVERY_APPROVAL_EXPIRED: {
+    category: "business",
+    httpStatus: 409,
+    message: "The recovery approval has expired."
+  },
+  RECOVERY_CONFIRMATION_MISMATCH: {
+    category: "validation",
+    httpStatus: 400,
+    message: "The incident confirmation does not match."
+  },
+  RECOVERY_INVALID_TRANSITION: {
+    category: "business",
+    httpStatus: 409,
+    message: "The recovery state does not allow this operation."
+  },
+  RECOVERY_EXECUTION_UNCERTAIN: {
+    category: "business",
+    httpStatus: 409,
+    message: "The recovery result is uncertain and requires manual intervention."
+  },
+  RECOVERY_TARGET_CHANGED: {
+    category: "business",
+    httpStatus: 409,
+    message: "Trusted recovery target facts changed before execution."
+  },
   VALIDATION_INVALID_ARGUMENT: {
     category: "validation",
     httpStatus: 400,

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,10 +22,12 @@ from super_ai.memory.models import (
     BackgroundJobModel,
     DiagnosticReportModel,
     DiagnosticTaskModel,
+    ProductionRecoveryIntentModel,
 )
 
 from .repositories import (
     AlertDisposition,
+    AlertIncidentPage,
     AlertIncidentRecord,
     AlertPersistenceError,
     DiagnosticScheduleResult,
@@ -30,6 +36,7 @@ from .repositories import (
     IncidentUnavailable,
     IngestionResult,
     IngestionWrite,
+    InvalidIncidentCursor,
     LiveAlertLifecycle,
     VerificationStatus,
 )
@@ -40,6 +47,48 @@ class SQLAlchemyAlertIngestionRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def list_owned(
+        self,
+        *,
+        owner_user_id: str,
+        status: Literal["active", "resolved", "all"],
+        limit: int,
+        cursor: str | None,
+    ) -> AlertIncidentPage:
+        bounded_limit = min(max(limit, 1), 100)
+        statement = select(AlertIncidentModel).where(
+            AlertIncidentModel.owner_user_id == owner_user_id
+        )
+        if status != "all":
+            statement = statement.where(AlertIncidentModel.status == status)
+        if cursor is not None:
+            cursor_updated_at, cursor_id = _decode_incident_cursor(cursor)
+            statement = statement.where(
+                or_(
+                    AlertIncidentModel.updated_at < cursor_updated_at,
+                    and_(
+                        AlertIncidentModel.updated_at == cursor_updated_at,
+                        AlertIncidentModel.id > cursor_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            AlertIncidentModel.updated_at.desc(), AlertIncidentModel.id.asc()
+        ).limit(bounded_limit + 1)
+        async with self._session_factory() as session:
+            rows = list((await session.scalars(statement)).all())
+            page_rows = rows[:bounded_limit]
+            records = await _project_incident_records(
+                session,
+                owner_user_id=owner_user_id,
+                rows=page_rows,
+            )
+        next_cursor = None
+        if len(rows) > bounded_limit and page_rows:
+            last = page_rows[-1]
+            next_cursor = _encode_incident_cursor(last.updated_at, last.id)
+        return AlertIncidentPage(items=tuple(records), next_cursor=next_cursor)
 
     async def list_active(
         self, *, owner_user_id: str, limit: int
@@ -64,6 +113,24 @@ class SQLAlchemyAlertIngestionRepository:
         statement = select(AlertIncidentModel).where(
             AlertIncidentModel.id == incident_id,
             AlertIncidentModel.owner_user_id == owner_user_id,
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+            if row is None:
+                return None
+            records = await _project_incident_records(
+                session,
+                owner_user_id=owner_user_id,
+                rows=[row],
+            )
+        return records[0]
+
+    async def get_by_diagnostic_task(
+        self, *, owner_user_id: str, diagnostic_task_id: str
+    ) -> AlertIncidentRecord | None:
+        statement = select(AlertIncidentModel).where(
+            AlertIncidentModel.owner_user_id == owner_user_id,
+            AlertIncidentModel.diagnostic_task_id == diagnostic_task_id,
         )
         async with self._session_factory() as session:
             row = (await session.scalars(statement)).one_or_none()
@@ -364,16 +431,18 @@ class SQLAlchemyAlertIngestionRepository:
         suffix = created_id.removeprefix("incident_")
         task_id = f"diagnostic_{suffix}"
         job_id = f"job_{suffix}"
+        task_input_payload = dict(
+            write.task_input_payload
+            or {"query": write.query, "alert": write.safe_alert}
+        )
+        task_input_payload["triggerSource"] = "alertmanager"
         session.add(
             DiagnosticTaskModel(
                 id=task_id,
                 owner_user_id=write.owner_user_id,
                 status="accepted",
                 query=write.query,
-                input_payload=(
-                    write.task_input_payload
-                    or {"query": write.query, "alert": write.safe_alert}
-                ),
+                input_payload=task_input_payload,
                 result_payload={},
                 created_at=write.received_at,
                 updated_at=write.received_at,
@@ -521,7 +590,239 @@ def _incident_record(row: AlertIncidentModel) -> AlertIncidentRecord:
         severity=row.severity,
         last_seen_at=row.last_seen_at,
         diagnostic_task_id=row.diagnostic_task_id,
+        source_id=row.source_id,
+        first_seen_at=row.starts_at or row.created_at,
+        updated_at=row.updated_at,
+        delivery_count=row.delivery_count,
+        verification_status=row.verification_status,
+        summary=row.verification_summary,
     )
+
+
+async def _project_incident_records(
+    session: AsyncSession,
+    *,
+    owner_user_id: str,
+    rows: list[AlertIncidentModel],
+) -> list[AlertIncidentRecord]:
+    if not rows:
+        return []
+    task_ids = [row.diagnostic_task_id for row in rows if row.diagnostic_task_id is not None]
+    incident_ids = [row.id for row in rows]
+    tasks: dict[str, DiagnosticTaskModel] = {}
+    reports: dict[str, DiagnosticReportModel] = {}
+    intents: dict[str, ProductionRecoveryIntentModel] = {}
+    environments: dict[str, str] = {}
+    if task_ids:
+        task_rows = list(
+            (
+                await session.scalars(
+                    select(DiagnosticTaskModel).where(
+                        DiagnosticTaskModel.owner_user_id == owner_user_id,
+                        DiagnosticTaskModel.id.in_(task_ids),
+                    )
+                )
+            ).all()
+        )
+        tasks = {task.id: task for task in task_rows}
+        report_rows = list(
+            (
+                await session.scalars(
+                    select(DiagnosticReportModel)
+                    .where(
+                        DiagnosticReportModel.owner_user_id == owner_user_id,
+                        DiagnosticReportModel.task_id.in_(task_ids),
+                    )
+                    .order_by(
+                        DiagnosticReportModel.task_id.asc(),
+                        DiagnosticReportModel.created_at.desc(),
+                        DiagnosticReportModel.id.desc(),
+                    )
+                )
+            ).all()
+        )
+        for report in report_rows:
+            reports.setdefault(report.task_id, report)
+    intent_rows = list(
+        (
+            await session.scalars(
+                select(ProductionRecoveryIntentModel)
+                .where(
+                    ProductionRecoveryIntentModel.owner_user_id == owner_user_id,
+                    ProductionRecoveryIntentModel.incident_id.in_(incident_ids),
+                )
+                .order_by(
+                    ProductionRecoveryIntentModel.incident_id.asc(),
+                    ProductionRecoveryIntentModel.created_at.desc(),
+                    ProductionRecoveryIntentModel.id.desc(),
+                )
+            )
+        ).all()
+    )
+    for intent in intent_rows:
+        intents.setdefault(intent.incident_id, intent)
+    event_rows = list(
+        (
+            await session.scalars(
+                select(AlertEventModel)
+                .where(
+                    AlertEventModel.owner_user_id == owner_user_id,
+                    AlertEventModel.incident_id.in_(incident_ids),
+                )
+                .order_by(
+                    AlertEventModel.incident_id.asc(),
+                    AlertEventModel.received_at.desc(),
+                    AlertEventModel.id.desc(),
+                )
+            )
+        ).all()
+    )
+    for event in event_rows:
+        if event.incident_id is None or event.incident_id in environments:
+            continue
+        environment = _allowlisted_environment(event.normalized_payload)
+        if environment is not None:
+            environments[event.incident_id] = environment
+    records: list[AlertIncidentRecord] = []
+    for row in rows:
+        task = tasks.get(row.diagnostic_task_id or "")
+        report = reports.get(row.diagnostic_task_id or "")
+        intent = intents.get(row.id)
+        records.append(
+            _incident_projection(
+                row,
+                task=task,
+                report=report,
+                intent=intent,
+                environment=environments.get(row.id),
+            )
+        )
+    return records
+
+
+def _incident_projection(
+    row: AlertIncidentModel,
+    *,
+    task: DiagnosticTaskModel | None,
+    report: DiagnosticReportModel | None,
+    intent: ProductionRecoveryIntentModel | None,
+    environment: str | None,
+) -> AlertIncidentRecord:
+    agent_mode = _agent_mode(task, report)
+    recovery_mode: Literal["automatic", "manual_review", "not_available"] = "not_available"
+    approval_status: Literal["pending", "approved", "rejected", "expired"] | None = None
+    if intent is not None:
+        recovery_mode = (
+            "automatic"
+            if intent.automatic_eligible and not intent.approval_required
+            else "manual_review"
+        )
+        approval_status = _approval_status(intent)
+    return AlertIncidentRecord(
+        id=row.id,
+        owner_user_id=row.owner_user_id,
+        status=row.status,
+        alert_name=row.alert_name,
+        service=row.service,
+        severity=row.severity,
+        last_seen_at=row.last_seen_at,
+        diagnostic_task_id=row.diagnostic_task_id,
+        source_id=row.source_id,
+        first_seen_at=row.starts_at or row.created_at,
+        updated_at=row.updated_at,
+        delivery_count=row.delivery_count,
+        diagnostic_status=task.status if task is not None else None,
+        verification_status=row.verification_status,
+        environment=environment,
+        agent_mode=agent_mode,
+        recovery_mode=recovery_mode,
+        approval_status=approval_status,
+        recovery_intent_id=intent.id if intent is not None else None,
+        recovery_execution_status=intent.status if intent is not None else None,
+        summary=report.title if report is not None else row.verification_summary,
+    )
+
+
+def _agent_mode(
+    task: DiagnosticTaskModel | None,
+    report: DiagnosticReportModel | None,
+) -> Literal["single", "multi"] | None:
+    candidates: list[object] = []
+    if report is not None:
+        candidates.extend((report.payload.get("agentMode"), report.payload.get("executionMode")))
+    if task is not None:
+        candidates.extend(
+            (task.result_payload.get("agentMode"), task.result_payload.get("executionMode"))
+        )
+    for candidate in candidates:
+        if candidate in {"single", "multi"}:
+            return cast(Literal["single", "multi"], candidate)
+    return None
+
+
+def _approval_status(
+    intent: ProductionRecoveryIntentModel,
+) -> Literal["pending", "approved", "rejected", "expired"] | None:
+    if not intent.approval_required:
+        return None
+    if intent.status == "awaiting_approval":
+        return "pending"
+    if intent.status == "rejected":
+        return "rejected"
+    if intent.status == "expired":
+        return "expired"
+    return "approved"
+
+
+def _allowlisted_environment(payload: dict[str, object]) -> str | None:
+    alerts = payload.get("alerts")
+    if not isinstance(alerts, list) or not alerts:
+        return None
+    first = cast(Sequence[object], alerts)[0]
+    if not isinstance(first, Mapping):
+        return None
+    labels = cast(Mapping[object, object], first).get("labels")
+    if not isinstance(labels, Mapping):
+        return None
+    environment = cast(Mapping[object, object], labels).get("environment")
+    if not isinstance(environment, str):
+        return None
+    bounded = environment.strip()
+    return bounded if 0 < len(bounded) <= 80 else None
+
+
+def _encode_incident_cursor(updated_at: datetime, incident_id: str) -> str:
+    payload = json.dumps(
+        [updated_at.isoformat(), incident_id],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_incident_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(cursor + padding, altchars=b"-_", validate=True)
+        decoded: object = json.loads(raw)
+        if (
+            not isinstance(decoded, list)
+            or len(cast(Sequence[object], decoded)) != 2
+        ):
+            raise ValueError
+        value = cast(Sequence[object], decoded)
+        updated_value, incident_value = value
+        if (
+            not isinstance(updated_value, str)
+            or not isinstance(incident_value, str)
+            or not incident_value
+        ):
+            raise ValueError
+        updated_at = datetime.fromisoformat(updated_value)
+        if updated_at.tzinfo is None:
+            raise ValueError
+    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise InvalidIncidentCursor("Invalid Incident cursor.") from exc
+    return updated_at, incident_value
 
 
 def _incident_query(incident: AlertIncidentModel, note: str | None) -> str:

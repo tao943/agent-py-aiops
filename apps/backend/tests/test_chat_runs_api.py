@@ -124,6 +124,7 @@ async def test_run_api_is_owner_scoped_and_replays_after_last_event_id(
 
     assert create_response.status_code == 202
     assert create_response.json()["data"]["status"] == "queued"
+    assert "agentConfigurationSnapshot" in create_response.json()["data"]
     assert active_response.json()["data"]["id"] == run_id
     assert forbidden_response.status_code == 404
     assert [line for line in replay_response.text.splitlines() if line.startswith("id: ")] == [

@@ -45,10 +45,154 @@ import {
   type VectorChunkMetadata,
   type ToolCallSseEvent,
   type ToolCallAudit,
-  type SseEvent
+  type SseEvent,
+  type RecoveryIntent,
+  type AgentBinding,
+  type AgentConfigurationCapabilities,
+  type AgentNode,
+  type AgentResource,
+  type AgentResourceVersion,
+  type AgentVersionStatus,
+  type IncidentDetail,
+  type IncidentListResponse,
+  type IncidentSummary,
+  type RuntimeReadiness
 } from "../src";
 
 describe("HTTP response contracts", () => {
+  it("publishes event-first incident and runtime projections", () => {
+    const incident: IncidentSummary = {
+      id: "incident_1",
+      status: "active",
+      alertName: "OrderPoolExhausted",
+      service: "order-service",
+      severity: "critical",
+      firstSeenAt: "2026-08-23T08:00:00Z",
+      lastSeenAt: "2026-08-23T08:05:00Z",
+      updatedAt: "2026-08-23T08:05:00Z",
+      deliveryCount: 3,
+      diagnosticTaskId: "diagnostic_1",
+      diagnosticStatus: "running",
+      verificationStatus: "pending",
+      currentStage: "investigation",
+      source: "local-alertmanager",
+      environment: null,
+      assignee: null,
+      agentMode: "multi",
+      approvalStatus: null,
+      recoveryMode: "automatic",
+      recoveryExecutionStatus: "executing",
+      recoveryIntentId: "intent_1",
+      productionRecoveryExecution: true
+    };
+    const detail: IncidentDetail = {
+      ...incident,
+      summary: "连接池耗尽告警正在调查",
+      alertLabels: { alertname: "OrderPoolExhausted" },
+      alertAnnotations: {},
+      evidenceChain: null,
+      recoveryIntent: null,
+      recoveryEvents: []
+    };
+    const list: IncidentListResponse = { items: [incident], nextCursor: "opaque" };
+    const readiness: RuntimeReadiness = {
+      status: "degraded",
+      checkedAt: "2026-08-23T08:05:00Z",
+      dependencies: [
+        { name: "postgresql", status: "ready", safeSummary: "数据库连接正常" },
+        { name: "milvus", status: "unavailable", safeSummary: "向量检索暂不可用" }
+      ]
+    };
+
+    expect(detail.currentStage).toBe("investigation");
+    expect(list.nextCursor).toBe("opaque");
+    expect(readiness.dependencies[0]?.name).toBe("postgresql");
+    expect(OPENAPI_CONTRACT.paths["/aiops/incidents"]?.get).toBeDefined();
+    expect(OPENAPI_CONTRACT.paths["/aiops/incidents/{incidentId}:diagnose"]?.post).toBeDefined();
+    expect(OPENAPI_CONTRACT.components.schemas.IncidentSummary).toBeDefined();
+  });
+
+  it("publishes closed versioned agent configuration contracts", () => {
+    const nodes: readonly AgentNode[] = [
+      "conversation",
+      "planner",
+      "replanner",
+      "investigator_runtime",
+      "investigator_log",
+      "investigator_change",
+      "adjudicator",
+      "validator",
+      "recovery_planner",
+      "report"
+    ];
+    const statuses: readonly AgentVersionStatus[] = ["draft", "published", "deprecated"];
+    const resource: AgentResource = {
+      id: "resource_1",
+      kind: "prompt",
+      name: "AIOps Planner",
+      description: "生成受约束的调查计划",
+      createdAt: "2026-08-23T08:00:00Z",
+      updatedAt: "2026-08-23T08:00:00Z"
+    };
+    const version: AgentResourceVersion = {
+      id: "version_1",
+      resourceId: resource.id,
+      version: 1,
+      status: "published",
+      content: "只根据可审计证据制定计划。",
+      spec: {},
+      createdAt: "2026-08-23T08:00:00Z",
+      publishedAt: "2026-08-23T08:01:00Z"
+    };
+    const binding: AgentBinding = {
+      id: "binding_1",
+      node: "planner",
+      promptVersionId: version.id,
+      skillVersionIds: [],
+      updatedAt: "2026-08-23T08:01:00Z"
+    };
+    const capabilities: AgentConfigurationCapabilities = { canManageConfiguration: true };
+
+    expect(nodes).toHaveLength(10);
+    expect(statuses).toEqual(["draft", "published", "deprecated"]);
+    expect(binding.node).toBe("planner");
+    expect(capabilities.canManageConfiguration).toBe(true);
+    expect(OPENAPI_CONTRACT.paths["/agent-configuration/resources"]?.get).toBeDefined();
+    expect(OPENAPI_CONTRACT.components.schemas.AgentResourceVersion).toBeDefined();
+  });
+
+  it("publishes a closed safe production recovery contract", () => {
+    const intent: RecoveryIntent = {
+      id: "recovery_1",
+      incidentId: "incident_1",
+      diagnosticTaskId: "diagnostic_1",
+      reportId: "report_1",
+      action: "restart_compose_service",
+      targetKey: "live-eval-order-api",
+      riskTier: "low",
+      automaticEligible: true,
+      approvalRequired: false,
+      status: "queued",
+      proposalFingerprint: "a".repeat(64),
+      createdAt: "2026-08-23T08:00:00Z",
+      approvalExpiresAt: null,
+      startedAt: null,
+      completedAt: null,
+      safeReasonCode: null,
+      executionSummary: null,
+      verification: []
+    };
+
+    expect(intent.status).toBe("queued");
+    expect(API_ERROR_CODES.RECOVERY_EXECUTION_UNCERTAIN.httpStatus).toBe(409);
+    expect(OPENAPI_CONTRACT.paths["/aiops/recovery-intents/{intentId}"]?.get).toBeDefined();
+    expect(OPENAPI_CONTRACT.components.schemas.RecoveryIntent).toBeDefined();
+    const serialized = JSON.stringify(intent).toLowerCase();
+    for (const forbidden of ["command", "composepath", "connectionstring", "sql", "pid", "exception"]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
   it("publishes only adaptive and manual chat memory modes", () => {
     expect(OPENAPI_CONTRACT.components.schemas.ChatMemoryState?.properties?.mode).toEqual({
       enum: ["adaptive", "manual"]

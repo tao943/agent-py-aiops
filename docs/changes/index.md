@@ -7,9 +7,13 @@ title: OpenSpec 变更
 ## 进行中
 
 - [add-agentpy-sre-benchmark](/changes/active/add-agentpy-sre-benchmark/)
+- [add-auditable-hypothesis-adjudication](/changes/active/add-auditable-hypothesis-adjudication/)
 - [add-blog-derived-retrieval-eval](/changes/active/add-blog-derived-retrieval-eval/)
 - [add-docker-live-postgres-lock-eval](/changes/active/add-docker-live-postgres-lock-eval/)
 - [add-knowledge-batch-import](/changes/active/add-knowledge-batch-import/)
+- [add-order-pool-leak-live-scenario](/changes/active/add-order-pool-leak-live-scenario/)
+- [add-production-recovery-execution](/changes/active/add-production-recovery-execution/)
+- [add-single-multi-agent-source-routing](/changes/active/add-single-multi-agent-source-routing/)
 - [expand-rag-retrieval-benchmark](/changes/active/expand-rag-retrieval-benchmark/)
 - [harden-aiops-decision-validation](/changes/active/harden-aiops-decision-validation/)
 - [migrate-postgresql-add-redis-runtime](/changes/active/migrate-postgresql-add-redis-runtime/)
@@ -17,6 +21,7 @@ title: OpenSpec 变更
 
 ## 已归档
 
+- [reframe-aiops-workbench](/changes/archive/2026-08-24-reframe-aiops-workbench/)
 - [add-nginx-rate-limit-gateway](/changes/archive/2026-08-09-add-nginx-rate-limit-gateway/)
 - [use-positive-idf-bm25](/changes/archive/2026-07-11-use-positive-idf-bm25/)
 - [show-retrieval-stage-ranks](/changes/archive/2026-07-11-show-retrieval-stage-ranks/)

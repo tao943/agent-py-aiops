@@ -150,6 +150,27 @@ async def test_normal_probe_returns_connection_and_updates_run_scoped_order() ->
 
 
 @pytest.mark.asyncio
+async def test_business_readiness_uses_a_real_database_round_trip() -> None:
+    module = _load_order_api()
+    pool = FakePool(max_size=1)
+    runtime = _runtime(module, pool)
+
+    assert await runtime.business_ready() is True
+    assert pool.checked_out == []
+    assert pool.released[-1].executions == [("SELECT 1", ())]
+
+
+@pytest.mark.asyncio
+async def test_business_readiness_fails_closed_when_pool_is_saturated() -> None:
+    module = _load_order_api()
+    pool = FakePool(max_size=1)
+    pool.checked_out.append(FakeConnection())
+    runtime = _runtime(module, pool)
+
+    assert await runtime.business_ready() is False
+
+
+@pytest.mark.asyncio
 async def test_saturated_pool_records_timeout_without_leaking_sensitive_state() -> None:
     module = _load_order_api()
     pool = FakePool(max_size=1)

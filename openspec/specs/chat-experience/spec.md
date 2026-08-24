@@ -5,19 +5,20 @@
 定义经过身份验证的、后端持久化的 Vue 聊天工作区，包括安全的流式助理输出、引用展示和工具调用活动。
 ## Requirements
 ### Requirement: Persisted conversation workspace
-前端 SHALL 通过共享的后端 API 合同提供经过身份验证的中文聊天工作区，该工作区创建、列出、选择和删除当前 user 的聊天会话。工作区 SHALL 优先处理活动对话，同时保持会话控制紧凑且易于访问。
+
+前端 SHALL 在 `/assistant` 通过共享后端 API 提供 owner-scoped 中文运维助手，创建、列出、选择和删除当前 user 的持久会话，并 SHALL 通过旧 `/chat` 路由安全重定向。
 
 #### Scenario: User opens the Chat workspace
-- **WHEN** 已认证的 user 打开 `/chat`
-- **THEN** 前端 MUST 仅从后端加载该 user 的会话，并用中文会话控制渲染最近更新的会话。
+- **WHEN** 已认证 user 打开 `/assistant` 或旧 `/chat`
+- **THEN** 应用 MUST 在 AIOps Shell 中加载仅属于该 user 的会话，并聚焦运维问答与 Incident 上下文
 
 #### Scenario: User starts and switches conversations
-- **WHEN** 一个 user 开始对话或选择现有会话
-- **THEN** 前端 MUST 通过后端创建或获取会话，并在聚焦的对话界面上渲染其持久化的消息历史。
+- **WHEN** user 开始新对话或选择现有会话
+- **THEN** 前端 MUST 通过后端创建或获取会话，并在聚焦的运维助手界面渲染持久化消息历史
 
 #### Scenario: User deletes a conversation
-- **WHEN** 一个 user 删除选定的聊天会话
-- **THEN** 前端 MUST 通过后端删除它，并从可见的会话列表中移除，而不依赖 localStorage。
+- **WHEN** user 删除选定的聊天会话
+- **THEN** 前端 MUST 通过后端删除它，并从可见会话列表移除，不得依赖 localStorage
 
 ### Requirement: Streaming chat interaction
 前端 SHALL 通过输入的聊天流式客户端发送提示，并将共享的 SSE 事件渲染为可见的中文对话进度。
@@ -63,29 +64,6 @@
 #### Scenario: Narrow screen renders chat controls
 - **WHEN** 在窄视口下查看工作区
 - **THEN** 会话选择、传记、创作器、源列表和工具活动控件 MUST 在不出现水平溢出的情况下仍可读且可操作。
-
-### Requirement: Chat assembly controls
-经过身份验证的 Chat 工作区 SHALL 让 user 可以在中文中查看、选择、确认和恢复其基于服务器的系统提示和多选标准 Skill 配置，并 SHALL 将系统提示词和 Skill 设置呈现为两个独立侧边栏。
-
-#### Scenario: User opens split chat configuration sidebars
-- **WHEN** 已认证的 user 打开 Chat 工作区
-- **THEN** 前端 MUST 通过共享合约加载当前配置，并显示“对话系统提示词设置”和“Skill 设置”两个独立侧边栏，而不以 localStorage 作为事实来源
-
-#### Scenario: User manages collapsible system prompts
-- **WHEN** user 在“对话系统提示词设置”侧边栏查看提示词
-- **THEN** 每个提示词 MUST 可折叠和展开，展开后可以编辑名称和正文、保存、删除，并且界面 MUST 只允许单选一个后续对话使用的系统提示词。
-
-#### Scenario: User manages multi-select standard Skills
-- **WHEN** user 在“Skill 设置”侧边栏查看 Skill
-- **THEN** 界面 MUST 显示标准 `SKILL.md` 上传规范、每个 Skill 的 name 和 description，允许上传、删除，并允许多选零个或多个 Skill 供后续对话 Agent 按需加载
-
-#### Scenario: User confirms an updated assembly
-- **WHEN** 选择提示或技能并确认
-- **THEN** 前端 MUST 通过类型化 API 客户端保存配置，显示保存的装配摘要，并用于后续消息。
-
-#### Scenario: Configuration action fails
-- **WHEN** 提示词或 Skill 的创建、保存、删除、上传或配置保存失败
-- **THEN** 前端 MUST 在相关侧边栏中显示中文错误，说明可恢复动作，MUST NOT 静默保留一个看似已保存的状态。
 
 ### Requirement: Collapsible assistant execution context
 聊天工作区 SHALL 会将每个助手消息的可用工具调用和模型提供的深度思考内容作为单独的中文、可使用键盘操作的、初始折叠的详细信息显示在该消息下方。
@@ -134,17 +112,6 @@
 #### Scenario: Chat view owns no duplicate session list
 - **WHEN** user 打开桌面 Web 对话工作区
 - **THEN** `ChatView` MUST NOT 渲染第二份历史会话列表或移动端专用会话入口
-
-### Requirement: Neutral chat focus treatment
-聊天界面的输入框和可聚焦控件 SHALL 不显示额外的焦点矩形，不得显示绿色或灰色 outline、边框变化或焦点光晕。
-
-#### Scenario: User focuses the chat composer
-- **WHEN** user 点击聊天输入框或通过键盘将焦点移入输入框
-- **THEN** 输入容器 MUST 保持未聚焦时的边框和阴影，MUST NOT 显示绿色或灰色矩形框
-
-#### Scenario: Keyboard focus moves across chat controls
-- **WHEN** keyboard user 在聊天界面的按钮、链接和表单控件间移动焦点
-- **THEN** 控件 MUST NOT 显示浏览器或应用注入的矩形 outline
 
 ### Requirement: Empty chat transcript remains blank
 聊天工作区 SHALL 在当前会话没有消息且不处于加载状态时保持消息记录区域空白，不得渲染通用空状态标题、说明或装饰标记。
@@ -229,3 +196,25 @@
 #### Scenario: 用户评价引用
 - **WHEN** 用户在引用详情中提交反馈
 - **THEN** 反馈 MUST 关联助手消息与 citation id。
+
+### Requirement: Published agent configuration at runtime
+
+运维助手 SHALL 只使用服务端已发布且绑定到 Chat 节点的 Prompt/Skill 版本快照，Chat 页面 SHALL NOT 提供常驻 Prompt/Skill 编辑侧栏。
+
+#### Scenario: User starts a configured chat run
+- **WHEN** owner 发送一条新消息
+- **THEN** 服务端 MUST 解析当前已发布 binding、保存不可变运行快照并按安全拼装规则执行
+- **AND** UI MUST 仅显示安全配置摘要而不是可编辑正文侧栏
+
+#### Scenario: No published binding exists
+- **WHEN** Chat 节点没有可用的 published binding
+- **THEN** 服务端 MUST 使用强制系统安全配置运行或返回稳定配置错误
+- **AND** MUST NOT 自动使用未发布 draft
+
+### Requirement: Visible keyboard focus in chat
+
+聊天界面的输入框和所有可聚焦控件 SHALL 使用 `:focus-visible` 提供清晰键盘焦点，同时避免对鼠标点击添加不必要焦点装饰。
+
+#### Scenario: Keyboard focus moves across chat controls
+- **WHEN** keyboard user 在输入框、按钮、链接和会话控件间移动焦点
+- **THEN** 当前控件 MUST 显示高对比、不会被裁切的焦点指示

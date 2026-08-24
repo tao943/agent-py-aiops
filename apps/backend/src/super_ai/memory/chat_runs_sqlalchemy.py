@@ -48,6 +48,7 @@ class SQLAlchemyChatRunRepository:
         request_fingerprint: str,
         content: str,
         metadata: JsonDict,
+        agent_configuration_snapshot: JsonDict | None = None,
     ) -> ChatRunCreateResult:
         _require_fingerprint(request_fingerprint)
         now = utc_now()
@@ -129,6 +130,7 @@ class SQLAlchemyChatRunRepository:
                 attempt_count=0,
                 last_event_sequence=0,
                 error_code=None,
+                agent_configuration_snapshot=agent_configuration_snapshot or {},
                 created_at=now,
                 updated_at=now,
                 started_at=None,
@@ -587,6 +589,7 @@ def _chat_run_record(row: ChatAgentRunModel) -> ChatRunRecord:
         updated_at=_ensure_utc(row.updated_at),
         started_at=_ensure_utc(row.started_at) if row.started_at else None,
         completed_at=_ensure_utc(row.completed_at) if row.completed_at else None,
+        agent_configuration_snapshot=dict(row.agent_configuration_snapshot),
     )
 
 
