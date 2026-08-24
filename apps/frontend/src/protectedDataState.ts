@@ -18,7 +18,7 @@ import {
 } from "./protectedDataClient";
 import { toUserFacingError } from "./ui/userFacingError";
 
-export interface ProtectedDataSnapshot {
+interface ProtectedDataSnapshot {
   readonly chatMessages: readonly ChatMessage[];
   readonly chatSessions: readonly ChatSessionSummary[];
   readonly errorMessage: string | null;

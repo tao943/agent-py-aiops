@@ -7,7 +7,7 @@ import {
 } from "./authClient";
 import { toUserFacingError } from "./ui/userFacingError";
 
-export interface AuthSnapshot {
+interface AuthSnapshot {
   readonly errorMessage: string | null;
   readonly isAuthenticated: boolean;
   readonly isLoading: boolean;
