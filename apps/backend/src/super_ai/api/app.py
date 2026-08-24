@@ -493,9 +493,7 @@ def create_app(
         create_chat_runs_router(
             repositories=repositories,
             current_user_dependency=_current_user,
-            agent_configuration_runtime=cast(
-                AgentConfigurationRuntime, app.state.agent_configuration_runtime
-            ),
+            agent_configuration_runtime=app.state.agent_configuration_runtime,
         )
     )
     app.include_router(
@@ -838,6 +836,38 @@ def create_app(
     ) -> object:
         jobs = await _background_job_repository(request).list(owner_user_id=user.id)
         return success_response(request, {"items": [_background_job_payload(job) for job in jobs]})
+
+    @app.get("/evaluation/runs")
+    async def list_evaluation_run_summaries(
+        request: Request,
+        _user: Annotated[UserRecord, Depends(_current_user)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    ) -> object:
+        repository = _memory_repositories(request).evaluations
+        if repository is None:
+            return success_response(request, {"items": []})
+        rows = await repository.list_runs_with_results()
+        selected = list(reversed(rows[-limit:]))
+        return success_response(
+            request,
+            {
+                "items": [
+                    {
+                        "runId": run.run_id,
+                        "evaluationKind": run.evaluation_kind,
+                        "scenarioId": run.scenario_id,
+                        "mode": run.mode,
+                        "status": run.status,
+                        "total": result.total if result is not None else None,
+                        "passed": result.passed if result is not None else None,
+                        "completedAt": (
+                            run.completed_at.isoformat() if run.completed_at else None
+                        ),
+                    }
+                    for run, result in selected
+                ]
+            },
+        )
 
     @app.get("/background-jobs/{job_id}")
     async def get_background_job(

@@ -7,6 +7,8 @@ import type { McpConnectionMutationRequest, McpTransport } from "@agent-py/api-c
 import AppLoadingState from "../components/AppLoadingState.vue";
 import { useMcpStore } from "../stores/mcp";
 
+withDefaults(defineProps<{ readonly embedded?: boolean }>(), { embedded: false });
+
 const mcp = useMcpStore();
 const draft = reactive<McpConnectionMutationRequest>({
   name: "",
@@ -50,14 +52,15 @@ function run(operation: () => Promise<void>): void {
 </script>
 
 <template>
-  <section class="mcp-view" aria-label="MCP 连接管理">
-    <header class="mcp-view__header">
-      <div><p>Agent 工具来源</p><h2>MCP 连接</h2><span>管理聊天与智能诊断可以使用的真实 MCP Server。</span></div>
+  <section class="mcp-view" :class="{ 'mcp-view--embedded': embedded }" aria-label="MCP 连接管理">
+    <header v-if="!embedded" class="mcp-view__header">
+      <div><p>Agent 工具来源</p><h2>MCP 连接</h2><span>管理运维助手与诊断流程可以调用的 MCP Server。</span></div>
       <button type="button" title="新建连接" @click="newConnection"><Plus :size="16" aria-hidden="true" />新建连接</button>
     </header>
     <AppLoadingState v-if="mcp.isLoading" label="正在加载 MCP 连接" />
     <div v-else class="mcp-view__workspace">
       <aside class="mcp-view__list" aria-label="MCP 连接列表">
+        <div v-if="embedded" class="mcp-view__list-heading"><span>MCP SERVERS</span><strong>工具连接</strong><button type="button" title="新建连接" @click="newConnection"><Plus :size="15" />新建</button></div>
         <button v-for="connection in mcp.connections" :key="connection.id" type="button" :class="{ 'mcp-view__connection--active': mcp.selectedId === connection.id }" @click="mcp.select(connection.id)">
           <span class="mcp-view__connection-icon"><Server :size="16" aria-hidden="true" /></span>
           <span><strong>{{ connection.name }}</strong><small>{{ connection.transport === 'sse' ? 'SSE' : 'Streamable HTTP' }} · {{ connection.enabled ? '已启用' : '已停用' }}</small></span>
@@ -100,12 +103,14 @@ function run(operation: () => Promise<void>): void {
 
 <style scoped>
 .mcp-view { background: var(--surface-raised); display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; }
+.mcp-view--embedded { grid-template-rows: minmax(0, 1fr); }
 .mcp-view__header { align-items: center; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 1.2rem clamp(1rem, 3vw, 2rem); }
 .mcp-view__header p, .mcp-view__editor header p, .mcp-view__inspection header p { color: var(--text-tertiary); font-size: 0.7rem; font-weight: 700; margin: 0 0 0.25rem; }
 .mcp-view__header h2 { font-size: 1.35rem; margin: 0; }
 .mcp-view__header span { color: var(--text-secondary); display: block; font-size: 0.78rem; margin-top: 0.3rem; }
 .mcp-view__header > button, .mcp-view__commands button { align-items: center; border: 1px solid var(--line-strong); border-radius: 0.4rem; display: inline-flex; font-size: 0.76rem; font-weight: 650; gap: 0.35rem; min-height: 2.2rem; padding: 0 0.7rem; }
 .mcp-view__workspace { display: grid; grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr); min-height: 0; }
+.mcp-view__list-heading { align-items: center; display: grid; gap: 0.15rem; grid-template-columns: minmax(0,1fr) auto; padding: 0.35rem 0.4rem 0.7rem; }.mcp-view__list-heading span { color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.08em; }.mcp-view__list-heading strong { font-size: 0.82rem; grid-column: 1; }.mcp-view__list-heading button { align-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius-control); display: inline-flex; font-size: 0.66rem; gap: 0.25rem; grid-column: 2; grid-row: 1 / span 2; min-height: 2.5rem; padding: 0 0.5rem; }
 .mcp-view__list { border-right: 1px solid var(--line); display: grid; gap: 0.35rem; overflow-y: auto; padding: 0.75rem; }
 .mcp-view__list > button { align-items: center; border-radius: 0.35rem; display: grid; gap: 0.6rem; grid-template-columns: auto minmax(0, 1fr) auto; padding: 0.7rem; text-align: left; }
 .mcp-view__list > button:hover, .mcp-view__connection--active { background: var(--surface-hover); }

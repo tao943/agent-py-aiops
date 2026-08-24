@@ -17,6 +17,7 @@ export * from "./chat";
 export * from "./chat-configuration";
 export * from "./documents";
 export * from "./errors";
+export * from "./evaluation-summary";
 export * from "./feedback";
 export * from "./indexing";
 export * from "./incidents";
