@@ -83,6 +83,11 @@ class AgentConfigurationService:
             owner_user_id=owner_user_id, resource_id=resource_id
         )
 
+    async def get_version(
+        self, *, owner_user_id: str, version_id: str
+    ) -> AgentVersionRecord:
+        return await self._require_version(owner_user_id=owner_user_id, version_id=version_id)
+
     async def create_draft(
         self,
         *,
@@ -203,6 +208,11 @@ class AgentConfigurationService:
 
     async def list_bindings(self, *, owner_user_id: str) -> list[AgentBindingRecord]:
         return await self._repository.list_bindings(owner_user_id=owner_user_id)
+
+    async def get_binding(
+        self, *, owner_user_id: str, node: AgentNode
+    ) -> AgentBindingRecord | None:
+        return await self._repository.get_binding(owner_user_id=owner_user_id, node=node)
 
     async def list_audit_events(
         self, *, owner_user_id: str, limit: int = 100

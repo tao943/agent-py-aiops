@@ -95,6 +95,7 @@ class ChatRunRecord:
     updated_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    agent_configuration_snapshot: JsonDict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1376,6 +1377,7 @@ class ChatRunRepository(Protocol):
         request_fingerprint: str,
         content: str,
         metadata: JsonDict,
+        agent_configuration_snapshot: JsonDict | None = None,
     ) -> ChatRunCreateResult: ...
 
     async def get_owned(

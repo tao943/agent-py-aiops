@@ -25,10 +25,12 @@ from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+from super_ai.agent_configuration.runtime import AgentConfigurationRuntime
 from super_ai.chat.aiops_bridge import AiopsBridgeService, build_aiops_bridge_tools
 from super_ai.chat.configuration import (
     DEFAULT_CHAT_PROMPT_CONTENT,
     DEFAULT_CHAT_PROMPT_LABEL,
+    MANDATORY_CHAT_SYSTEM_PROMPT,
     SelectedChatSkill,
     build_chat_system_prompt,
 )
@@ -442,11 +444,13 @@ class ChatStreamingService:
         agent_runner: ChatAgentRunner,
         memory_service: ChatMemoryService | None = None,
         intent_router: ChatIntentRouter | None = None,
+        agent_configuration_runtime: AgentConfigurationRuntime | None = None,
     ) -> None:
         self._repositories = repositories
         self._agent_runner = agent_runner
         self._memory_service = memory_service
         self._intent_router = intent_router
+        self._agent_configuration_runtime = agent_configuration_runtime
 
     async def stream_message(
         self,
@@ -552,8 +556,18 @@ class ChatStreamingService:
                 durationMs=elapsed_ms(started_at),
             )
             return
+        stored_snapshot: JsonDict | None = None
+        if chat_run_id is not None and self._repositories.chat_runs is not None:
+            durable_run = await self._repositories.chat_runs.get_owned(
+                owner_user_id=owner_user_id,
+                session_id=session.id,
+                run_id=chat_run_id,
+            )
+            if durable_run is not None:
+                stored_snapshot = durable_run.agent_configuration_snapshot
         system_prompt, selected_skills = await self.build_agent_configuration(
-            owner_user_id=owner_user_id
+            owner_user_id=owner_user_id,
+            stored_snapshot=stored_snapshot,
         )
         allowed_tools = allowed_tools_for(route.intent)
         if route.needs_clarification:
@@ -781,8 +795,36 @@ class ChatStreamingService:
         return system_prompt
 
     async def build_agent_configuration(
-        self, *, owner_user_id: str
+        self, *, owner_user_id: str, stored_snapshot: JsonDict | None = None
     ) -> tuple[str, tuple[SelectedChatSkill, ...]]:
+        if self._agent_configuration_runtime is not None:
+            if stored_snapshot:
+                snapshot = await self._agent_configuration_runtime.resolve_stored_snapshot(
+                    owner_user_id=owner_user_id,
+                    node="conversation",
+                    stored=stored_snapshot,
+                )
+            else:
+                snapshot = await self._agent_configuration_runtime.resolve_snapshot(
+                    owner_user_id=owner_user_id,
+                    node="conversation",
+                )
+            if snapshot.prompt_version_id is not None or snapshot.skill_version_ids:
+                selected = tuple(
+                    SelectedChatSkill(
+                        name=skill.name,
+                        description=skill.description,
+                        content=skill.content,
+                    )
+                    for skill in snapshot.skills
+                )
+                return (
+                    self._agent_configuration_runtime.assemble_system_prompt(
+                        MANDATORY_CHAT_SYSTEM_PROMPT,
+                        snapshot,
+                    ),
+                    selected,
+                )
         prompt_repository = self._repositories.chat_prompts
         skill_repository = self._repositories.chat_skills
         configuration_repository = self._repositories.chat_configurations

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from super_ai.agent_configuration.runtime import AgentConfigurationRuntime
 from super_ai.auth.repositories import UserRecord
 from super_ai.chat.pending_actions import PendingActionNotFound, PendingChatActionService
 from super_ai.chat.run_events import encode_run_sse, public_run_event
@@ -52,6 +53,7 @@ def create_chat_runs_router(
     *,
     repositories: MemoryRepositories,
     current_user_dependency: Callable[..., object],
+    agent_configuration_runtime: AgentConfigurationRuntime | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/chat/sessions/{session_id}/runs", tags=["chat"])
 
@@ -71,6 +73,12 @@ def create_chat_runs_router(
             raise HTTPException(status_code=422, detail="Chat content is required")
         metadata = sanitize_chat_metadata(body.metadata)
         fingerprint = _request_fingerprint(content, metadata)
+        configuration_snapshot: dict[str, object] = {}
+        if agent_configuration_runtime is not None:
+            resolved = await agent_configuration_runtime.resolve_snapshot(
+                owner_user_id=user.id, node="conversation"
+            )
+            configuration_snapshot = agent_configuration_runtime.public_snapshot(resolved)
         try:
             created = await runs.create_or_get(
                 owner_user_id=user.id,
@@ -79,6 +87,7 @@ def create_chat_runs_router(
                 request_fingerprint=fingerprint,
                 content=content,
                 metadata=metadata,
+                agent_configuration_snapshot=configuration_snapshot,
             )
         except Exception as exc:
             from super_ai.memory.repositories import ChatRunIdempotencyConflict

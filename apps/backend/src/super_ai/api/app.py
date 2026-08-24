@@ -30,6 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
+from super_ai.agent_configuration.routes import create_agent_configuration_router
+from super_ai.agent_configuration.runtime import AgentConfigurationRuntime
+from super_ai.agent_configuration.service import AgentConfigurationService
 from super_ai.aiops import AiopsDiagnosticService, DiagnosisCasePersistor
 from super_ai.aiops.incident_routes import create_incident_router
 from super_ai.aiops.tool_routing import AutomaticLiveEvidenceScope
@@ -462,10 +465,37 @@ def create_app(
     app.state.auth_service = AuthService(SQLAlchemyAuthRepository(session_factory))
     repositories = create_sqlalchemy_memory_repositories(session_factory)
     app.state.memory_repositories = repositories
+    agent_configuration_repository = repositories.agent_configurations
+    if agent_configuration_repository is None:
+        raise RuntimeError("Agent configuration repository is required.")
+    agent_configuration_service = AgentConfigurationService(agent_configuration_repository)
+    app.state.agent_configuration_service = agent_configuration_service
+    app.state.agent_configuration_runtime = AgentConfigurationRuntime(
+        agent_configuration_service,
+        node_tool_allowlists={
+            "conversation": frozenset(
+                {
+                    "get_current_time",
+                    "load_skill",
+                    "query_incident",
+                    "search_knowledge",
+                }
+            )
+        },
+    )
+    app.include_router(
+        create_agent_configuration_router(
+            current_user_dependency=_current_user,
+            service=agent_configuration_service,
+        )
+    )
     app.include_router(
         create_chat_runs_router(
             repositories=repositories,
             current_user_dependency=_current_user,
+            agent_configuration_runtime=cast(
+                AgentConfigurationRuntime, app.state.agent_configuration_runtime
+            ),
         )
     )
     app.include_router(
@@ -1655,6 +1685,9 @@ def create_app(
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
             intent_router=_chat_intent_router(request),
+            agent_configuration_runtime=cast(
+                AgentConfigurationRuntime, request.app.state.agent_configuration_runtime
+            ),
         )
 
         async def event_stream() -> AsyncIterator[str]:
@@ -2143,6 +2176,9 @@ def _chat_run_job_handler(
             agent_runner=_chat_agent_runner(request),
             memory_service=_chat_memory_service(request),
             intent_router=_chat_intent_router(request),
+            agent_configuration_runtime=cast(
+                AgentConfigurationRuntime, app.state.agent_configuration_runtime
+            ),
         )
         await ChatRunJobHandler(
             repositories=repositories,
