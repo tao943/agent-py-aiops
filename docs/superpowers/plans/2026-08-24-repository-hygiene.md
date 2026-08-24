@@ -539,7 +539,17 @@ Expected: every resolved target is inside this worktree; `git status --short` is
 
 - [ ] **Step 2: Synchronize every accepted active change into canonical specs in dependency order**
 
-Run this exact ordered archive sequence. OpenSpec archive is used only as its supported spec-merge mechanism; the generated archive history is removed later in this task.
+The first dry archive exposed eight legacy `MODIFIED` headers in `migrate-postgresql-add-redis-runtime` that no longer match canonical requirement titles. Repair that delta before archiving:
+
+- `api-and-sse-contracts`: change `Durable SSE sequence contract` from `MODIFIED` to `ADDED`.
+- `background-job-runtime`: map the two modified headers to `Durable owner-scoped background jobs` and `Durable background job events`.
+- `docker-compose-startup`: map the modified header to `Unified compose startup`.
+- `memory-repositories`: express `PostgreSQL application schema`, `Alembic-managed PostgreSQL migrations`, `Application database project configuration`, and `Database-independent repository boundary` as `ADDED`; express the four superseded SQLite/memory requirements as `REMOVED` with migration reasons.
+- `runtime-readiness-checks`: change `PostgreSQL and Redis readiness semantics` from `MODIFIED` to `ADDED`.
+
+Run `openspec validate migrate-postgresql-add-redis-runtime --strict` and repeat the missing-header audit. It MUST report zero missing `MODIFIED`/`REMOVED` targets before continuing.
+
+Then run this exact ordered archive sequence. OpenSpec archive is used only as its supported spec-merge mechanism; the generated archive history is removed later in this task.
 
 ```powershell
 $changes = @(
@@ -584,6 +594,19 @@ foreach ($capability in $canonical) {
   if (-not (Test-Path -LiteralPath $spec -PathType Leaf)) { throw "Canonical spec missing: $spec" }
 }
 ```
+
+After all archives succeed, normalize canonical storage language against the current PostgreSQL-only runtime in these nine specs: `agent-tool-call-audits`, `aiops-diagnosis-tasks`, `background-job-runtime`, `chat-memory-management`, `chat-sessions`, `document-indexing-jobs`, `memory-repositories`, `runtime-readiness-checks`, and `stream-rag-chat`. Preserve each requirement's behavior while replacing stale SQLite storage, migration, configuration, and readiness statements with PostgreSQL/Redis semantics proven by current code and tests.
+
+Run:
+
+```powershell
+$staleStorage = rg -n 'SQLite|sqlite' openspec/specs
+if ($LASTEXITCODE -eq 0) { throw "Stale canonical storage contract remains: $staleStorage" }
+if ($LASTEXITCODE -ne 1) { throw 'Canonical storage scan failed' }
+openspec validate --all
+```
+
+Expected: no canonical spec describes SQLite as a current runtime, migration, repository, chat, job, audit, or readiness dependency.
 
 - [ ] **Step 3: Replace the contradictory OpenSpec WIKI contract with a curated documentation-site contract**
 

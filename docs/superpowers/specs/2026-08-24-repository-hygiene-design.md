@@ -108,6 +108,8 @@ README 移除 PostgreSQL、Redis、Nginx 的低层运维说明、重复命令、
 
 `openspec/specs/` 是主分支唯一长期 OpenSpec 事实来源。当前 12 个 active changes 中包含尚未进入主规格的有效 delta requirements，因此删除 `openspec/changes/` 前必须按依赖顺序使用 OpenSpec 的规范合并机制逐项同步；任何一项无法无冲突同步时停止删除，不允许用 `--skip-specs` 丢弃要求。
 
+迁移 change 的首次同步暴露出八个旧 `MODIFIED` 标题与当前主规格名称不一致，同时九个 canonical specs 仍把 SQLite 描述为当前存储。同步前应把迁移 delta 修正为准确的新增、修改和移除操作；同步后以当前 PostgreSQL-only 代码、迁移和测试为依据消除 canonical specs 中的 SQLite 事实漂移，并把零 SQLite 残留作为验收门禁。
+
 当前 `openspec/specs/openspec-wiki/` 与取消 Wiki/历史镜像的设计直接冲突。它将被退役，并由只约束精选 VitePress 文档、人工导航和构建行为的 `openspec/specs/documentation-site/` 取代。同步后运行 `openspec validate --all` 必须只验证主规格且全部通过。
 
 保留 `AGENTS.md` 和 `CONTEXT.md`。更新 `AGENTS.md` 中与仓库现状冲突的部分：
