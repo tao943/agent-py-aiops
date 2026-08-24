@@ -123,6 +123,7 @@ def test_rejects_invalid_approval_ttl(tmp_path: Path, ttl: object) -> None:
     [
         (_compose_target(composeFile="../compose.yaml"), "composeFile"),
         (_compose_target(composeFile="C:/outside/compose.yaml"), "composeFile"),
+        (_compose_target(composeFile="/outside/compose.yaml"), "composeFile"),
         (_compose_target(service="api; shutdown"), "service"),
         (_compose_target(healthUrl="https://127.0.0.1:18081/health"), "healthUrl"),
         (_compose_target(healthUrl="http://localhost:18081/health"), "healthUrl"),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 
-from super_ai.api.app import _aiops_job_handler
+from super_ai.api.app import _aiops_job_handler  # pyright: ignore[reportPrivateUsage]
 from super_ai.jobs.runtime import BackgroundJobContext, JobCancelled
 from super_ai.memory.repositories import BackgroundJobRecord, DiagnosticTaskRecord
 from super_ai.recovery.auto_dispatch import AutoRecoveryDispatchResult
@@ -119,7 +120,7 @@ def _fixture(
     *,
     result: AutoRecoveryDispatchResult | None = None,
     cancel_after_checks: int | None = None,
-) -> tuple[object, Runner, Dispatcher, JobRepository]:
+) -> tuple[Awaitable[None], Runner, Dispatcher, JobRepository]:
     diagnostics = Diagnostics(status)
     runner = Runner(diagnostics)
     dispatcher = Dispatcher(

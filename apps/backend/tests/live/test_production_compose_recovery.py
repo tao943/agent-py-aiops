@@ -25,6 +25,8 @@ from super_ai.memory.models import (
 from super_ai.redis_runtime.rate_limit import RateLimitDecision
 from super_ai.vector_store import MilvusHealthCheckResult
 
+pytestmark = pytest.mark.live_docker
+
 ROOT = Path(__file__).resolve().parents[4]
 COMPOSE_FILE = ROOT / "infra" / "compose.yaml"
 ORDER_API = "http://127.0.0.1:18082"

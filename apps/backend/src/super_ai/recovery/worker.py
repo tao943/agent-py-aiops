@@ -14,7 +14,7 @@ from super_ai.aiops.execution import (
     ExecutionResult,
     UnsafeExecutionReplay,
 )
-from super_ai.alert_ingestion.repositories import AlertIncidentQueryRepository
+from super_ai.alert_ingestion.repositories import AlertIncidentOwnerQueryRepository
 from super_ai.jobs import BackgroundJobContext
 from super_ai.memory.repositories import (
     AiopsExecutionRepository,
@@ -419,7 +419,7 @@ class GroundedRecoveryAuthorizer:
         self,
         *,
         diagnostics: DiagnosticMemoryRepository,
-        incidents: AlertIncidentQueryRepository,
+        incidents: AlertIncidentOwnerQueryRepository,
         settings_loader: SettingsLoader,
         policy: RecoveryPolicy | None = None,
         adapter: RecoveryProposalAdapter | None = None,
@@ -682,7 +682,7 @@ def build_production_recovery_handler(
     if intents is None or runtime_provider is None:
         raise RuntimeError("Production recovery repositories are required.")
     incidents = cast(
-        AlertIncidentQueryRepository,
+        AlertIncidentOwnerQueryRepository,
         app.state.alert_incident_repository,
     )
     config_path = cast(str | None, app.state.project_config_path)

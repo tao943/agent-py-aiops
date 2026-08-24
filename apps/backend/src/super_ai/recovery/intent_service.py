@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import cast
 from uuid import uuid4
 
-from super_ai.alert_ingestion.repositories import AlertIncidentQueryRepository
+from super_ai.alert_ingestion.repositories import AlertIncidentDiagnosticQueryRepository
 from super_ai.memory.repositories import (
     DiagnosticEvidenceRecord,
     DiagnosticMemoryRepository,
@@ -36,7 +36,7 @@ class RecoveryIntentService:
         self,
         *,
         diagnostics: DiagnosticMemoryRepository,
-        incidents: AlertIncidentQueryRepository,
+        incidents: AlertIncidentDiagnosticQueryRepository,
         intents: RecoveryIntentRepository,
         settings: ProductionRecoverySettings,
         adapter: RecoveryProposalAdapter | None = None,

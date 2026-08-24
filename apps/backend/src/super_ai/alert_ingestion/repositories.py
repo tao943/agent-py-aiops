@@ -69,7 +69,13 @@ class AlertIncidentPage:
     next_cursor: str | None
 
 
-class AlertIncidentQueryRepository(Protocol):
+class AlertIncidentOwnerQueryRepository(Protocol):
+    async def get_owned(
+        self, *, owner_user_id: str, incident_id: str
+    ) -> AlertIncidentRecord | None: ...
+
+
+class AlertIncidentPageQueryRepository(AlertIncidentOwnerQueryRepository, Protocol):
     async def list_owned(
         self,
         *,
@@ -79,17 +85,26 @@ class AlertIncidentQueryRepository(Protocol):
         cursor: str | None,
     ) -> AlertIncidentPage: ...
 
+
+class AlertIncidentActiveQueryRepository(AlertIncidentOwnerQueryRepository, Protocol):
     async def list_active(
         self, *, owner_user_id: str, limit: int
     ) -> list[AlertIncidentRecord]: ...
 
-    async def get_owned(
-        self, *, owner_user_id: str, incident_id: str
-    ) -> AlertIncidentRecord | None: ...
 
+class AlertIncidentDiagnosticQueryRepository(Protocol):
     async def get_by_diagnostic_task(
         self, *, owner_user_id: str, diagnostic_task_id: str
     ) -> AlertIncidentRecord | None: ...
+
+
+class AlertIncidentQueryRepository(
+    AlertIncidentPageQueryRepository,
+    AlertIncidentActiveQueryRepository,
+    AlertIncidentDiagnosticQueryRepository,
+    Protocol,
+):
+    """Complete incident query surface implemented by the persistence adapter."""
 
 
 @dataclass(frozen=True, slots=True)

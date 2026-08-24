@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from super_ai.alert_ingestion.repositories import (
-    AlertIncidentQueryRepository,
+    AlertIncidentPageQueryRepository,
     AlertIncidentRecord,
     IncidentDiagnosticScheduler,
     IncidentNotActive,
@@ -49,7 +49,7 @@ class DiagnoseIncidentBody(BaseModel):
 def create_incident_router(
     *,
     current_user_dependency: Callable[..., Awaitable[UserRecord]],
-    repository: AlertIncidentQueryRepository,
+    repository: AlertIncidentPageQueryRepository,
     scheduler: IncidentDiagnosticScheduler,
     runtime: RuntimeStarter,
 ) -> APIRouter:
@@ -138,7 +138,7 @@ def create_incident_router(
 
 
 async def _owned_incident(
-    repository: AlertIncidentQueryRepository,
+    repository: AlertIncidentPageQueryRepository,
     owner_user_id: str,
     incident_id: str,
 ) -> AlertIncidentRecord:

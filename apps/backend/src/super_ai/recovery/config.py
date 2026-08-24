@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -242,9 +242,10 @@ def _compose_file(raw: Mapping[str, object], project_root: Path) -> Path:
     value = raw.get("composeFile")
     if not isinstance(value, str) or not value.strip():
         raise ProjectConfigurationError("Project config string is invalid: composeFile")
-    candidate = Path(value.strip())
-    if candidate.is_absolute():
+    normalized = value.strip()
+    if PurePosixPath(normalized).is_absolute() or PureWindowsPath(normalized).is_absolute():
         raise ProjectConfigurationError("Project config path is invalid: composeFile")
+    candidate = Path(normalized)
     resolved = (project_root / candidate).resolve(strict=False)
     if not resolved.is_relative_to(project_root):
         raise ProjectConfigurationError("Project config path is invalid: composeFile")

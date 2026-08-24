@@ -14,7 +14,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from super_ai.alert_ingestion.repositories import (
-    AlertIncidentQueryRepository,
+    AlertIncidentActiveQueryRepository,
     AlertIncidentRecord,
     DiagnosticScheduleResult,
     IncidentDiagnosticScheduler,
@@ -173,7 +173,7 @@ class AiopsBridgeService:
     def __init__(
         self,
         *,
-        incidents: AlertIncidentQueryRepository,
+        incidents: AlertIncidentActiveQueryRepository,
         diagnostics: DiagnosticMemoryRepository,
         scheduler: IncidentDiagnosticScheduler | None = None,
         approval_requests: RecoveryApprovalRequestRepository | None = None,

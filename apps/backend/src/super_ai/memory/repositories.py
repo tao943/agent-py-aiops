@@ -95,7 +95,9 @@ class ChatRunRecord:
     updated_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
-    agent_configuration_snapshot: JsonDict = field(default_factory=dict)
+    agent_configuration_snapshot: JsonDict = field(
+        default_factory=lambda: dict[str, object]()
+    )
 
 
 @dataclass(frozen=True, slots=True)
