@@ -1,4 +1,5 @@
 import type { ReferenceSourceSseEvent } from "./sse";
+import type { AgentRuntimeConfigurationSnapshot } from "./agent-configuration";
 
 export type ChatMessageRole = "user" | "assistant";
 export type ChatRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -18,6 +19,7 @@ export interface ChatRun {
   readonly errorCode: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly agentConfigurationSnapshot?: AgentRuntimeConfigurationSnapshot | null;
 }
 
 export type PendingChatActionType = "start_diagnostic" | "create_recovery_approval";

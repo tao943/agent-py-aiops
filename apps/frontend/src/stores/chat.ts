@@ -46,6 +46,7 @@ export const useChatStore = defineStore("chat", () => {
   const pendingActions = ref<readonly PendingChatAction[]>([]);
   const pendingActionLoadingIds = ref<readonly string[]>([]);
   const activeRunId = ref<string | null>(null);
+  const lastRun = ref<ChatRun | null>(null);
   const isLoading = ref(false);
   const isSending = ref(false);
   const isUpdatingMemory = ref(false);
@@ -97,6 +98,7 @@ export const useChatStore = defineStore("chat", () => {
   async function resumeRun(sessionId: string, run: ChatRun): Promise<void> {
     if (client.streamRunEvents === undefined || client.getRun === undefined) return;
     activeRunId.value = run.id;
+    lastRun.value = run;
     isSending.value = true;
     const draftId = `message_draft_${run.id}`;
     let afterSequence = 0;
@@ -138,6 +140,7 @@ export const useChatStore = defineStore("chat", () => {
           if (error instanceof ApiClientError && [401, 403, 404].includes(error.status)) throw error;
         }
         const current = await client.getRun(sessionId, run.id);
+        lastRun.value = current;
         if (current.status === "succeeded") break;
         if (["failed", "cancelled"].includes(current.status)) {
           throw new Error(current.errorCode ?? "对话任务执行失败。");
@@ -170,6 +173,7 @@ export const useChatStore = defineStore("chat", () => {
     sessions.value = [];
     activeSessionId.value = null;
     activeRunId.value = null;
+    lastRun.value = null;
     messages.value = [];
     toolAudits.value = [];
     liveToolCalls.value = [];
@@ -188,6 +192,7 @@ export const useChatStore = defineStore("chat", () => {
   return {
     activeSessionId,
     activeRunId,
+    lastRun,
     activeSession,
     errorMessage,
     configuration,
@@ -207,8 +212,7 @@ export const useChatStore = defineStore("chat", () => {
       isLoading.value = true;
       errorMessage.value = null;
       try {
-        const [loadedConfiguration] = await Promise.all([client.getConfiguration?.() ?? Promise.resolve(null), reloadSessions()]);
-        configuration.value = loadedConfiguration;
+        await reloadSessions();
         const selected = sessions.value.find((item) => item.id === activeSessionId.value) ?? sessions.value[0];
         if (selected !== undefined) {
           await loadSession(selected.id);

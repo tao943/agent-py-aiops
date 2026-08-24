@@ -263,6 +263,9 @@ def _after_sequence(value: str | None) -> int:
 
 
 def _run_payload(run: ChatRunRecord) -> dict[str, object]:
+    snapshot = dict(run.agent_configuration_snapshot)
+    if snapshot:
+        snapshot["createdAt"] = run.created_at.isoformat()
     return {
         "id": run.id,
         "sessionId": run.session_id,
@@ -272,6 +275,7 @@ def _run_payload(run: ChatRunRecord) -> dict[str, object]:
         "errorCode": run.error_code,
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
+        "agentConfigurationSnapshot": snapshot or None,
     }
 
 
