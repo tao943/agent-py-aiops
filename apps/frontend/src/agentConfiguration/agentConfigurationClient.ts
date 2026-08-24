@@ -18,7 +18,7 @@ export interface AgentVersionValidationResponse {
   readonly warnings: readonly string[];
 }
 
-export interface CreateAgentDraftRequest {
+interface CreateAgentDraftRequest {
   readonly content: string;
   readonly spec: Readonly<Record<string, unknown>>;
   /** Client-only provenance used by the editor; the server derives the next version. */
