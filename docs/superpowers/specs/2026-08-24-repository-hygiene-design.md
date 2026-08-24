@@ -106,7 +106,9 @@ README 移除 PostgreSQL、Redis、Nginx 的低层运维说明、重复命令、
 
 ### 规范与 Agent 指南
 
-`openspec/specs/` 是主分支唯一长期 OpenSpec 事实来源。删除 `openspec/changes/` 后，运行 `openspec validate --all` 必须只验证主规格且全部通过。
+`openspec/specs/` 是主分支唯一长期 OpenSpec 事实来源。当前 12 个 active changes 中包含尚未进入主规格的有效 delta requirements，因此删除 `openspec/changes/` 前必须按依赖顺序使用 OpenSpec 的规范合并机制逐项同步；任何一项无法无冲突同步时停止删除，不允许用 `--skip-specs` 丢弃要求。
+
+当前 `openspec/specs/openspec-wiki/` 与取消 Wiki/历史镜像的设计直接冲突。它将被退役，并由只约束精选 VitePress 文档、人工导航和构建行为的 `openspec/specs/documentation-site/` 取代。同步后运行 `openspec validate --all` 必须只验证主规格且全部通过。
 
 保留 `AGENTS.md` 和 `CONTEXT.md`。更新 `AGENTS.md` 中与仓库现状冲突的部分：
 
@@ -114,6 +116,8 @@ README 移除 PostgreSQL、Redis、Nginx 的低层运维说明、重复命令、
 - 事实来源改为当前代码、测试、`openspec/specs/` 和精选文档。
 - 删除 `wiki-sync`、`docs/changes/` 镜像和 change 归档要求。
 - 保留凭据、权限隔离、迁移、测试和 Git 安全约束。
+
+后端 `test_ci_tooling.py` 当前直接加载将被删除的 `.codex/skills/wiki-sync/scripts/sync_wiki.py`。第一阶段允许一个严格限定的测试兼容性修改：删除该路径常量、专属导入和唯一 wiki-sync 测试；其余 CI、离线配置与启动保护测试保持不变，并运行该文件的 Ruff 与 pytest。
 
 ### 许可证与 GitHub 元数据
 
@@ -175,6 +179,9 @@ Ruff、Pyright 和 Vue TypeScript 检查作为已有直接验证工具。Vulture
 - 目标过程目录不再出现在 `git ls-files` 中，保留目录仍存在。
 - `.gitignore` 能拦截四类本地过程资产。
 - `AGENTS.md` 不再要求 wiki-sync、历史镜像或长期保存 OpenSpec changes。
+- 12 个 active changes 的有效 delta requirements 已进入 canonical specs，且 `openspec/changes/` 才被移除。
+- `openspec-wiki` 规格已由 `documentation-site` 规格替代，仓库及测试不存在 wiki-sync 残留引用。
+- `apps/backend/tests/test_ci_tooling.py` 的剩余测试通过 Ruff 和目标 pytest。
 - `npm run docs:build` 成功。
 - `openspec validate --all` 成功。
 - `git diff --check` 成功。
