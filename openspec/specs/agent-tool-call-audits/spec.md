@@ -7,7 +7,7 @@
 ## Requirements
 
 ### Requirement: Agent tool calls are durably audited
-后端 SHALL 为每个 Agent 工具调用保留一个 SQLite 审计条目，包含稳定的工具调用 ID、工具名称、JSON 安全参数、生命周期状态、有限的结果摘要、安全错误消息、开始时间戳、完成时间戳（如果可用）以及派生的持续时间（以毫秒为单位）。
+后端 SHALL 在 PostgreSQL 中为每个 Agent 工具调用保留一个持久审计条目，包含稳定的工具调用 ID、工具名称、JSON 安全参数、生命周期状态、有限的结果摘要、安全错误消息、开始时间戳、完成时间戳（如果可用）以及派生的持续时间（以毫秒为单位）。
 
 #### Scenario: Successful chat tool call is finalized
 - **WHEN** 一个聊天 Agent 工具调用开始并随后完成

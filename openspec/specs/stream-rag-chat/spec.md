@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义经过身份验证的、由 Agent 驱动的流式 RAG 聊天流程，该流程允许模型决定是否使用工具，发出共享的 SSE 事件，并将聊天消息持久化到后端内存中。
+定义经过身份验证、由 Agent 驱动的流式 RAG 聊天流程：模型决定是否使用工具，后端发出共享 SSE 事件，并将聊天消息持久化到 PostgreSQL。
 ## Requirements
 ### Requirement: Agent-driven streaming chat
 后端 SHALL 进程通过配置的 LangChain `create_agent` Agent 使用 Qwen 聊天模型和可用的 LangChain 工具进行认证聊天。
@@ -58,7 +58,7 @@
 - **THEN** 使用统一的错误消息格式，通过后端 MUST 流式传输 `error` 事件，而不会泄露敏感信息。
 
 ### Requirement: Streaming chat persistence
-后端 SHALL 通过 SQLite 存储库边界保留聊天过程。
+后端 SHALL 通过 PostgreSQL Repository 边界保留聊天过程。
 
 #### Scenario: User message is persisted before Agent execution
 - **WHEN** 接受流式聊天请求
@@ -145,3 +145,17 @@
 #### Scenario: Non-content events pass through unchanged
 - **WHEN** Agent runner 产生 reasoning、tool call 或 reference 事件
 - **THEN** 后端 MUST 保持该事件原有负载和粒度，不得按字符拆分
+
+### Requirement: Chat recovery requests use the formal Intent boundary
+
+Chat Agent SHALL 只能预览并在用户确认后创建或复用 owner-scoped Recovery Intent。Chat tool allowlist MUST NOT 暴露审批、Compose restart、PostgreSQL termination 或任意生产写执行器。
+
+#### Scenario: Confirmed Chat recovery request
+- **WHEN** owner 确认 `create_recovery_approval` pending action
+- **THEN** Background Job MUST 调用正式 Recovery Intent service
+- **AND** Chat MUST 仅展示 Intent 当前状态和后续人工操作入口
+
+#### Scenario: Chat attempts to approve or execute
+- **WHEN** 模型、Prompt 或 Skill 尝试调用审批或生产恢复执行能力
+- **THEN** Tool policy MUST 在调用前拒绝
+- **AND** MUST NOT 创建 execution claim 或副作用

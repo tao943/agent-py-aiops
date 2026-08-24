@@ -26,16 +26,20 @@ def _bash_command() -> str | None:
 def test_root_readme_documents_local_first_startup_and_optional_compose() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "## 本地开发" in readme
-    assert (
-        "docker compose -f infra/compose.yaml up -d etcd minio milvus attu alertmanager"
-        in readme
-    )
+    assert "## 快速开始" in readme
+    assert "docker compose -f infra/compose.yaml up -d postgres redis" in readme
     assert "scripts/start-local.sh" in readme
     assert "scripts\\start-local.bat" in readme
     assert "Docker Compose **只**负责" in readme
-    assert "## 当前功能" in readme
-    for feature in ("用户认证", "流式聊天", "知识库", "AIOps", "活跃告警", "运行状态检查"):
+    assert "## 核心能力" in readme
+    for feature in (
+        "告警与对话入口",
+        "证据驱动的 LangGraph 诊断",
+        "Single/Multi-Agent 路由",
+        "混合 RAG 与可审计引用",
+        "受治理的恢复",
+        "持久任务、审计与评测历史",
+    ):
         assert feature in readme
 
 

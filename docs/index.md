@@ -1,29 +1,29 @@
 ---
 layout: home
-title: Super AI WIKI
+title: Agent Py AIOps 文档
 
 hero:
-  name: Super AI WIKI
-  text: 项目文档与 OpenSpec 变更记录
-  tagline: 从架构、安装和运维手册，到每一次提案、设计与交付任务。
+  name: Agent Py
+  text: 可审计、可评测、恢复受治理的 AIOps Agent
+  tagline: 从真实告警和对话入口，到证据调查、安全恢复、验证与审计。
   actions:
     - theme: brand
-      text: 浏览变更 WIKI
-      link: /changes/
+      text: 查看系统架构
+      link: /architecture
     - theme: alt
-      text: 项目基础
-      link: /foundation
+      text: 查看评测体系
+      link: /aiops/agentpy-domainbench
     - theme: alt
-      text: AIOps 工作台
-      link: /aiops-workbench
+      text: 本地运行
+      link: /setup/windows
 
 features:
-  - title: OpenSpec 变更
-    details: 直接引用 proposal、design、tasks 与 delta specs，保持单一事实来源。
-  - title: 安装与运行
-    details: 提供 macOS、Linux 和 Windows 的依赖安装与本地启动说明。
-  - title: AIOps 实践
-    details: 查看真实日志、告警、知识检索与诊断案例的使用文档。
-  - title: 事件优先工作台
-    details: 查看事件中心、调查工作台、Agent 配置、集成和系统状态的当前运行语义。
+  - title: 证据驱动诊断
+    details: 通过 CLS、PostgreSQL、Redis、Prometheus 与 RAG 收集证据，比较候选根因并保留可追溯结论。
+  - title: 受控恢复
+    details: Validator、Policy Gate、动作白名单与幂等保护共同决定自动恢复或人工审批。
+  - title: 四层评测
+    details: Snapshot、Retrieval、Conversation 与 Docker Live 分别验证诊断、检索、交互和真实闭环。
+  - title: 本地优先运行
+    details: Vue 3、FastAPI、PostgreSQL、Redis、Milvus 与 Nginx 组成可复现的本地工作台。
 ---

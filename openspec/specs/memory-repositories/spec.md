@@ -2,53 +2,9 @@
 
 ## Purpose
 
-定义后端内存持久化、SQLAlchemy/Alembic 模式管理以及知识文档、文档索引、聊天、AIOps 诊断、工具审计和 LangGraph checkpoint 数据的仓库合约。
+定义后端 PostgreSQL 持久化、SQLAlchemy/Alembic 模式管理，以及知识文档、文档索引、聊天、AIOps 诊断、工具审计和 LangGraph checkpoint 数据的 Repository 合约。
 ## Requirements
-### Requirement: SQLite memory schema
-后端 SHALL 使用 SQLAlchemy ORM 模型定义基于 SQLite 的内存模式，用于知识文档、文档索引任务、聊天会话、聊天消息、AIOps 诊断任务、诊断报告、工具调用审计条目以及 AIOps LangGraph checkpoints。
-
-#### Scenario: Memory models expose required tables
-- **WHEN** 检查后端内存元数据
-- **THEN** 它 MUST 包含知识文档的表格、文档索引任务、聊天会话、聊天消息、诊断任务、诊断报告、工具调用审计条目和图 checkpoint。
-
-#### Scenario: Memory records preserve structured payloads
-- **WHEN** 文档、文档索引任务、消息、报告、工具审计或 checkpoint 包含结构化元数据或有效负载
-- **THEN** 的模式 MUST 将这些有效负载作为结构化数据保存并返回，而不是丢失的纯文本块。
-
-### Requirement: Alembic-managed memory migrations
-后端 SHALL 通过 Alembic 迁移来管理内存数据库模式更改。
-
-#### Scenario: Fresh SQLite database is migrated
-- **WHEN** Alembic 将一个全新的 SQLite 数据库升级到最新版本
-- **THEN** 所有仓库实现所需的内存表和索引 MUST 都已存在。
-
-#### Scenario: Application schema creation uses migrations
-- **WHEN** 开发人员需要初始化内存数据库
-- **THEN** 记录的命令 MUST 应使用 Alembic 迁移命令，而不是生产应用程序代码调用元数据 `create_all()`。
-
-### Requirement: Memory database project configuration
-后端 SHALL 从跟踪的项目配置文件中加载 SQLite 内存数据库设置。
-
-#### Scenario: Memory database URL comes from project config
-- **WHEN** 后端内存数据库配置已构建
-- **THEN** 它 MUST 从跟踪的项目配置中读取数据库 URL，并 MUST NOT 读取本地机器环境变量。
-
-#### Scenario: Alembic uses project config for application migrations
-- **WHEN** Alembic 在应用程序启动或开发者迁移命令期间运行
-- **THEN** 它 MUST 能够从后端应用程序使用的相同跟踪项目配置文件中解析内存数据库 URL 。
-
-### Requirement: Repository abstraction boundary
-后端 SHALL 暴露仓库协议和数据类记录，以便业务代码可以访问内存数据，而无需依赖 SQLite 表、SQLAlchemy ORM 模型或 SQL 语句。
-
-#### Scenario: Business code depends on repository interfaces
-- **WHEN** 应用程序服务需要内存持久化
-- **THEN** 它们 MUST 能够依赖于暴露记录和查询参数的仓库协议，而不是 SQLAlchemy 模型类。
-
-#### Scenario: SQLite implementation remains replaceable
-- **WHEN** 将引入一个未来的 PostgreSQL 仓库实现
-- **THEN** 它 MUST 能够在不更改业务服务方法签名的情况下实现相同的仓库协议。
-
-### Requirement: Chat memory repositories
+### Requirement: Chat repositories
 后端 SHALL 为创建聊天会话、追加聊天消息和查询消息历史提供仓库操作。
 
 #### Scenario: Chat history can be queried by session
@@ -59,7 +15,7 @@
 - **WHEN** 在请求的时间范围内外都存在消息
 - **THEN** 仓库 MUST 仅返回创建时间戳在请求范围内的消息
 
-### Requirement: AIOps diagnostic memory repositories
+### Requirement: AIOps diagnostic repositories
 后端 SHALL 为诊断任务、诊断报告、工具调用审核条目和 LangGraph checkpoint 提供仓库操作。
 
 #### Scenario: Diagnostic artifacts can be queried by task
@@ -78,12 +34,12 @@
 - **WHEN** 为 AIOps 诊断图存储一个 checkpoint
 - **THEN** 存储库 MUST 保留诊断任务 ID、线程 ID、checkpoint 命名空间、checkpoint ID 和 checkpoint 负载。
 
-### Requirement: Auth memory schema
-后端 SHALL 将内存数据库模式扩展为 user 和可撤销的授权会话。
+### Requirement: Auth PostgreSQL schema
+后端 SHALL 将 PostgreSQL 应用模式扩展为 user 和可撤销的授权会话。
 
 #### Scenario: User and session tables are migrated
-- **WHEN** Alembic 将全新的 SQLite 数据库升级到最新版本
-- **THEN** 的内存模式 MUST 包含 `users` 和 `auth_sessions` 表，并为电子邮件和令牌哈希查找建立了索引。
+- **WHEN** Alembic 将全新的 PostgreSQL 数据库升级到最新版本
+- **THEN** 应用模式 MUST 包含 `users` 和 `auth_sessions` 表，并为电子邮件和令牌哈希查找建立索引。
 
 #### Scenario: Plaintext secrets are not stored
 - **WHEN** 一个 user 注册或登录
@@ -104,11 +60,11 @@
 - **WHEN** 一个 user 注销
 - **THEN** 的仓库 MUST 标记认证会话已撤销，并阻止该令牌的未来验证。
 
-### Requirement: Tenant-owned memory schema
-后端 SHALL 在 user 专属的内存表和索引范围内使用通用查找维度进行持久化 owner 范围。
+### Requirement: Tenant-owned PostgreSQL schema
+后端 SHALL 在 user 专属的 PostgreSQL 表和索引中使用通用查找维度持久化 owner 范围。
 
 #### Scenario: Memory tables include owner scope
-- **WHEN** Alembic 将一个全新的 SQLite 数据库升级到最新版本
+- **WHEN** Alembic 将一个全新的 PostgreSQL 数据库升级到最新版本
 - **THEN** 知识文档、文档索引任务、聊天会话、聊天消息、AIOps 诊断任务、诊断报告、工具调用审计条目以及图 checkpoints MUST 包含一个 owner user id 列。
 
 #### Scenario: Scoped indexes exist
@@ -116,7 +72,7 @@
 - **THEN** 它 MUST 应包含支持通过 owner user ID 和时间或父 ID 对知识文档、文档索引任务、聊天和 AIOps 记录进行筛选的索引。
 
 ### Requirement: Scoped repository boundary
-后端 SHALL 要求仓库调用者为 tenant 作用域的 user-拥有内存操作提供。
+后端 SHALL 要求 Repository 调用者为 tenant 作用域的 user-owned 持久化操作提供 owner user ID。
 
 #### Scenario: Document operations require owner scope
 - **WHEN** 知识文档被创建、查询、标记为已删除、去重或更新索引状态
@@ -214,7 +170,7 @@
 - **THEN** 仓库 MUST 应拒绝或返回无变更，而不是修改其他 user 的数据。
 
 ### Requirement: Generic tool call audit repository
-后端 SHALL 为创建、完成和查询 tenant 范围的工具调用审计记录提供了一个仓库协议，而不会向业务服务暴露 SQLite 或 SQLAlchemy 的详细信息。
+后端 SHALL 为创建、完成和查询 tenant 范围的工具调用审计记录提供 Repository 协议，而不会向业务服务暴露 PostgreSQL、SQLAlchemy 或 SQL 细节。
 
 #### Scenario: Chat tool audit can be updated by lifecycle id
 - **WHEN** 业务代码创建了一个聊天工具审计记录，之后收到了同一工具调用 ID 的终端事件
@@ -236,14 +192,14 @@
 - **THEN** 仓库 MUST 仅返回属于该 owner 和任务的记录
 
 ### Requirement: User chat configuration repository
-内存层 SHALL 为读取和更新聊天组装配置提供一个 user 范围的 Repository，而不会将 SQLite 模型或 SQL 详情泄露给业务服务。
+持久化层 SHALL 为读取和更新聊天组装配置提供一个 user 范围的 Repository，而不会将 PostgreSQL 模型、SQLAlchemy 或 SQL 细节泄露给业务服务。
 
 #### Scenario: Repository scopes reads and writes by user
 - **WHEN** 服务读取或更新聊天配置
 - **THEN** 仓库 MUST 需要 owner user ID 并仅返回或修改该 user 的行。
 
 #### Scenario: 迁移创建配置存储
-- **WHEN** 初始化或升级内存模式
+- **WHEN** 初始化或升级 PostgreSQL 应用模式
 - **THEN** Alembic MUST 使用唯一的 owner 边界和 JSON 安全的技能选择持久化创建 user 聊天配置存储。
 
 ### Requirement: Persisted document chunking configuration
@@ -252,3 +208,63 @@
 #### Scenario: 返回已存储的配置以供拥有文档使用
 - **WHEN** 一个经过身份验证的 user 在上传后读取其拥有的文档
 - **THEN** 仓库支持的响应 MUST 返回文档的持久化 chunk 配置。
+
+### Requirement: PostgreSQL application schema
+
+后端 SHALL 使用 SQLAlchemy ORM 和 PostgreSQL 16 保存知识文档、索引任务、聊天、AIOps 诊断、证据、报告、工具审计、LangGraph checkpoint、后台任务和 Outbox，并 SHALL NOT 支持第二套关系数据库作为运行时或集成测试替代。
+
+#### Scenario: Fresh PostgreSQL database is migrated
+
+- **WHEN** Alembic 将空 PostgreSQL 数据库升级至 head
+- **THEN** 所有应用 Repository 和运行时所需的表、约束和索引 MUST 存在。
+
+#### Scenario: Structured payloads are persisted
+
+- **WHEN** 业务记录包含结构化工作流负载
+- **THEN** PostgreSQL MUST 使用结构化 JSON 类型完成无损往返。
+
+### Requirement: Alembic-managed PostgreSQL migrations
+
+后端 SHALL 通过 Alembic 迁移管理 PostgreSQL 应用模式，并 SHALL NOT 在运行时调用 SQLAlchemy 元数据 `create_all()` 初始化或变更应用模式。
+
+#### Scenario: Fresh PostgreSQL database is initialized
+
+- **WHEN** 开发者或启动流程将空 PostgreSQL 数据库执行 Alembic upgrade 到 head
+- **THEN** 所有 Repository 与运行时需要的表、约束和索引 MUST 被迁移创建。
+
+#### Scenario: Runtime starts after migrations
+
+- **WHEN** 后端应用连接到已迁移的 PostgreSQL 数据库
+- **THEN** 应用 MUST 使用现有模式启动，并 MUST NOT 调用 `create_all()` 隐式创建或修改表。
+
+### Requirement: Application database project configuration
+
+后端 SHALL 从跟踪的项目配置读取通用数据库 URL，并 SHALL 使用 PostgreSQL 异步驱动。
+
+#### Scenario: Runtime and Alembic share configuration
+
+- **WHEN** 应用和 Alembic 解析数据库配置
+- **THEN** 两者 MUST 使用相同的 `backend.databaseUrl`，且 URL MUST 使用 `postgresql+asyncpg`。
+
+### Requirement: Database-independent repository boundary
+
+后端 SHALL 暴露 Repository 协议和 Record，使业务代码不依赖 PostgreSQL SQL、SQLAlchemy ORM 或数据库实现类。
+
+#### Scenario: Business service uses migrated repositories
+
+- **WHEN** 关系存储实现切换为 PostgreSQL
+- **THEN** 业务服务方法签名 MUST 保持稳定，且实现名称 MUST NOT 表达旧数据库引擎的专属语义。
+
+### Requirement: Evaluation repository boundary
+
+后端 SHALL 通过数据库无关的 Repository 协议和 Record 保存评测运行与一对一结果，业务代码 MUST NOT 依赖 SQLAlchemy ORM 类型。
+
+#### Scenario: Evaluation result is persisted
+
+- **WHEN** runner 完成一个评测并计算 scorecard
+- **THEN** Repository MUST 在 PostgreSQL 保存版本化运行元数据、维度分数、有效性、通过状态、失败项与得分理由。
+
+#### Scenario: Duplicate run conflicts
+
+- **WHEN** 相同 run ID 被用于不同场景或 Agent 版本
+- **THEN** Repository MUST 拒绝覆盖已有运行。
