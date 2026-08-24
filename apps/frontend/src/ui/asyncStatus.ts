@@ -1,4 +1,4 @@
-export type AsyncStatusTone = "neutral" | "waiting" | "running" | "success" | "danger";
+type AsyncStatusTone = "neutral" | "waiting" | "running" | "success" | "danger";
 
 export interface AsyncStatusDescription {
   readonly label: string;

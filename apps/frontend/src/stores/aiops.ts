@@ -10,9 +10,9 @@ import type {
   SseEvent
 } from "@agent-py/api-contracts";
 
-export type PublicSpecialistStatus = "supported" | "refuted" | "inconclusive" | "failed" | "timeout" | "unknown";
+type PublicSpecialistStatus = "supported" | "refuted" | "inconclusive" | "failed" | "timeout" | "unknown";
 
-export interface PublicSpecialistResult {
+interface PublicSpecialistResult {
   readonly role: string;
   readonly status: PublicSpecialistStatus;
   readonly safeSummary: string;

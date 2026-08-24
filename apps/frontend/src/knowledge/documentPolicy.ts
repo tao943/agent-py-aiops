@@ -24,6 +24,6 @@ export function supportedFormatsMessage(): string {
   return `仅支持 Markdown(.md) 与 PDF(.pdf)，单个文件不超过 ${formatBytes(DOCUMENT_UPLOAD_POLICY.maxSizeBytes)}。`;
 }
 
-export function formatBytes(bytes: number): string {
+function formatBytes(bytes: number): string {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
