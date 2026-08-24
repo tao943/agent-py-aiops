@@ -3,13 +3,14 @@ import type { EvaluationRunSummary } from "@agent-py/api-contracts";
 import AppBadge from "../../ui/AppBadge.vue";
 defineProps<{ readonly items: readonly EvaluationRunSummary[] }>();
 const live = (items: readonly EvaluationRunSummary[]) => items.filter((item) => item.mode === "live" || item.evaluationKind.includes("live"));
+const statusLabel = (status: string) => ({ passed: "通过", failed: "失败", completed: "已完成", running: "运行中" }[status] ?? status);
 </script>
 <template>
   <section class="eval-summary" aria-label="评测历史">
     <header><span>EVALUATION</span><h2>已保存评测</h2></header>
     <div data-eval="live">
       <p v-if="live(items).length === 0">暂无已保存结果</p>
-      <article v-for="item in live(items).slice(0, 5)" :key="item.runId"><span><strong>{{ item.scenarioId }}</strong><small>{{ item.evaluationKind }} · {{ item.completedAt ? new Date(item.completedAt).toLocaleString('zh-CN', { hour12: false }) : '未完成' }}</small></span><AppBadge :tone="item.passed === true ? 'success' : item.passed === false ? 'danger' : 'neutral'">{{ item.total === null ? item.status : `${item.total} 分` }}</AppBadge></article>
+      <article v-for="item in live(items).slice(0, 5)" :key="item.runId"><span><strong>{{ item.scenarioId }}</strong><small>{{ item.evaluationKind }} · {{ item.completedAt ? new Date(item.completedAt).toLocaleString('zh-CN', { hour12: false }) : '未完成' }}</small></span><AppBadge :tone="item.passed === true ? 'success' : item.passed === false ? 'danger' : 'neutral'">{{ item.total === null ? statusLabel(item.status) : `${item.total} 分` }}</AppBadge></article>
     </div>
   </section>
 </template>

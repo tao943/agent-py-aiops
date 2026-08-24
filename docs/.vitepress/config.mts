@@ -3,9 +3,13 @@ import { defineConfig } from "vitepress";
 
 const activeItems = [
   { text: "add-agentpy-sre-benchmark", link: "/changes/active/add-agentpy-sre-benchmark/" },
+  { text: "add-auditable-hypothesis-adjudication", link: "/changes/active/add-auditable-hypothesis-adjudication/" },
   { text: "add-blog-derived-retrieval-eval", link: "/changes/active/add-blog-derived-retrieval-eval/" },
   { text: "add-docker-live-postgres-lock-eval", link: "/changes/active/add-docker-live-postgres-lock-eval/" },
   { text: "add-knowledge-batch-import", link: "/changes/active/add-knowledge-batch-import/" },
+  { text: "add-order-pool-leak-live-scenario", link: "/changes/active/add-order-pool-leak-live-scenario/" },
+  { text: "add-production-recovery-execution", link: "/changes/active/add-production-recovery-execution/" },
+  { text: "add-single-multi-agent-source-routing", link: "/changes/active/add-single-multi-agent-source-routing/" },
   { text: "expand-rag-retrieval-benchmark", link: "/changes/active/expand-rag-retrieval-benchmark/" },
   { text: "harden-aiops-decision-validation", link: "/changes/active/harden-aiops-decision-validation/" },
   { text: "migrate-postgresql-add-redis-runtime", link: "/changes/active/migrate-postgresql-add-redis-runtime/" },
@@ -13,6 +17,7 @@ const activeItems = [
 ];
 
 const archivedItems = [
+  { text: "reframe-aiops-workbench", link: "/changes/archive/2026-08-24-reframe-aiops-workbench/" },
   { text: "add-nginx-rate-limit-gateway", link: "/changes/archive/2026-08-09-add-nginx-rate-limit-gateway/" },
   { text: "use-positive-idf-bm25", link: "/changes/archive/2026-07-11-use-positive-idf-bm25/" },
   { text: "show-retrieval-stage-ranks", link: "/changes/archive/2026-07-11-show-retrieval-stage-ranks/" },

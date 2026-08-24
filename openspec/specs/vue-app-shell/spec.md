@@ -5,11 +5,25 @@
 定义具有类型、响应式和经过身份验证的 Vue 应用程序外壳，为产品体验提供稳定的前端传输、路由、状态和反馈边界。
 ## Requirements
 ### Requirement: Route-based application shell
-认证后的应用 SHALL 提供 `/chat`、`/knowledge`、`/aiops` 和 `/mcp` 工作区，并在桌面侧栏与移动导航中提供一致入口。
+
+认证后的应用 SHALL 将 `/incidents` 作为默认首页，并 SHALL 提供事件中心、调查工作台、运维助手、知识中心、Agent 配置、集成中心和系统状态入口。
+
+#### Scenario: Authenticated user opens root route
+- **WHEN** 已认证用户访问 `/`
+- **THEN** router MUST 导航到 `/incidents`，并在共享 Shell 中显示 owner-scoped Incident 队列
+
+#### Scenario: User navigates between workspaces
+- **WHEN** user 使用桌面侧栏或窄屏导航
+- **THEN** 应用 MUST 提供 `/incidents`、`/assistant`、`/knowledge`、`/agent-config`、`/integrations` 和 `/system` 入口
+- **AND** `/incidents/:incidentId` MUST 在同一 Shell 中显示调查工作台
+
+#### Scenario: User opens a legacy route
+- **WHEN** 已认证 user 访问旧 `/chat`、`/aiops` 或 `/mcp` 路由
+- **THEN** router MUST 分别安全重定向到 `/assistant`、`/incidents` 或 `/integrations`
 
 #### Scenario: 用户打开 MCP 管理
-- **WHEN** 已认证用户访问 `/mcp`
-- **THEN** 应用 MUST 在共享工作区框架中显示 MCP 连接管理页面。
+- **WHEN** 已认证用户访问旧 `/mcp`
+- **THEN** 应用 MUST 重定向到 `/integrations`，并在共享工作区中提供 MCP 连接管理入口
 
 ### Requirement: Shared typed frontend transport
 前端 SHALL 通过共享的类型化客户端边界访问后端 JSON 端点和 SSE 流，并且仅消费 `@agent-py/api-contracts` 定义。
@@ -60,21 +74,6 @@
 - **WHEN** 一个工作区接收到现有的异步任务状态
 - **THEN** 它 MUST 将渲染共享的基于文本的中文生命周期处理，而不是单独的未翻译原始状态。
 
-### Requirement: Chat sessions live in the workspace sidebar
-工作区 SHALL 在桌面对话路由的全局左侧栏中提供会话创建和历史会话导航，并使用聊天 store 作为唯一会话状态来源。
-
-#### Scenario: User opens the chat workspace on desktop
-- **WHEN** 已登录 user 进入对话路由且桌面左侧栏可见
-- **THEN** “对话”导航项之后 MUST 显示新建对话入口和按时间倒序排列的历史会话，聊天主区域 MUST NOT 再显示独立历史列
-
-#### Scenario: User creates a conversation from the rail
-- **WHEN** user 点击左侧栏中的新建对话按钮
-- **THEN** 前端 MUST 通过现有 chat store 创建并选中新会话，主对话区域 MUST 切换到该会话
-
-#### Scenario: User selects or deletes rail history
-- **WHEN** user 在左侧栏选择或删除一项历史会话
-- **THEN** 前端 MUST 调用现有会话操作并让左侧栏和主对话区域反映同一状态
-
 ### Requirement: Routed workspaces fill the desktop application surface
 工作区 SHALL 将全局 header 以下、左侧栏右侧的全部可用桌面空间交给当前路由视图，不得使用居中最大宽度或通用外层留白缩小业务界面。
 
@@ -96,3 +95,21 @@
 #### Scenario: 新提示替换旧提示
 - **WHEN** 旧提示的 3 秒计时结束前出现新提示
 - **THEN** 旧计时 MUST 被取消，并且新提示 MUST 从替换时刻起获得完整的 3 秒显示时间。
+
+### Requirement: Accessible responsive workspace shell
+
+应用 Shell SHALL 提供高密度、响应式、可通过键盘操作的中文工作区，并 SHALL 尊重用户的 motion 偏好。
+
+#### Scenario: Keyboard user navigates controls
+- **WHEN** user 使用键盘在链接、按钮和表单控件间移动
+- **THEN** 每个可交互控件 MUST 使用清晰的 `:focus-visible` 指示
+- **AND** 焦点样式 MUST NOT 仅依赖颜色变化
+
+#### Scenario: User opens a narrow viewport
+- **WHEN** viewport 宽度为 375px 或其他窄屏尺寸
+- **THEN** 主导航和路由内容 MUST 保持可读、可操作且没有水平溢出
+- **AND** 关键操作触控目标 MUST 至少为 44px
+
+#### Scenario: User prefers reduced motion
+- **WHEN** 浏览器设置 `prefers-reduced-motion: reduce`
+- **THEN** Shell MUST 禁用非必要位移和循环动画，并保持状态变化可理解

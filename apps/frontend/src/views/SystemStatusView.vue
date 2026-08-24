@@ -18,7 +18,7 @@ function refresh(): void { void runtime.refresh().catch(() => undefined); }
 </script>
 <template>
   <section class="system-status" aria-label="系统状态">
-    <header class="system-status__header"><div><span>RUNTIME OBSERVABILITY</span><h1>系统状态</h1><p>区分进程存活、依赖就绪、配置有效性与异步任务状态。</p></div><div><AppBadge v-if="runtime.stale" tone="warning">数据已陈旧</AppBadge><AppButton size="small" :loading="runtime.loading" @click="refresh"><RefreshCw :size="15" />刷新</AppButton></div></header>
+    <header class="system-status__header"><div><span>RUNTIME OBSERVABILITY</span><h1>系统状态</h1><p>区分进程存活、依赖就绪、配置有效性与异步任务状态。</p></div><div><AppBadge v-if="runtime.stale" tone="warning">数据已陈旧</AppBadge><AppButton size="small" :loading="runtime.loading" @click="refresh"><RefreshCw v-if="!runtime.loading" :size="15" />刷新</AppButton></div></header>
     <AppSkeleton v-if="runtime.loading && runtime.snapshot === null" label="正在读取完整运行状态" />
     <AppErrorState v-else-if="runtime.errorMessage && runtime.snapshot === null" :message="runtime.errorMessage" :can-retry="true" @retry="refresh" />
     <div v-else-if="runtime.snapshot" class="system-status__content">

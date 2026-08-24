@@ -4,9 +4,19 @@
 
 前端 SHALL 在 `/assistant` 通过共享后端 API 提供 owner-scoped 中文运维助手，创建、列出、选择和删除当前 user 的持久会话，并 SHALL 通过旧 `/chat` 路由安全重定向。
 
-#### Scenario: User opens the assistant workspace
+#### Scenario: User opens the Chat workspace
 - **WHEN** 已认证 user 打开 `/assistant` 或旧 `/chat`
 - **THEN** 应用 MUST 在 AIOps Shell 中加载仅属于该 user 的会话，并聚焦运维问答与 Incident 上下文
+
+#### Scenario: User starts and switches conversations
+- **WHEN** user 开始新对话或选择现有会话
+- **THEN** 前端 MUST 通过后端创建或获取会话，并在聚焦的运维助手界面渲染持久化消息历史
+
+#### Scenario: User deletes a conversation
+- **WHEN** user 删除选定的聊天会话
+- **THEN** 前端 MUST 通过后端删除它，并从可见会话列表移除，不得依赖 localStorage
+
+## ADDED Requirements
 
 ### Requirement: Published agent configuration at runtime
 

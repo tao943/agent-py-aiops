@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Event-first authenticated workspace
+### Requirement: Route-based application shell
 
 认证后的应用 SHALL 将 `/incidents` 作为默认首页，并 SHALL 提供事件中心、调查工作台、运维助手、知识中心、Agent 配置、集成中心和系统状态入口。
 
@@ -16,6 +16,12 @@
 #### Scenario: User opens a legacy route
 - **WHEN** 已认证 user 访问旧 `/chat`、`/aiops` 或 `/mcp` 路由
 - **THEN** router MUST 分别安全重定向到 `/assistant`、`/incidents` 或 `/integrations`
+
+#### Scenario: 用户打开 MCP 管理
+- **WHEN** 已认证用户访问旧 `/mcp`
+- **THEN** 应用 MUST 重定向到 `/integrations`，并在共享工作区中提供 MCP 连接管理入口
+
+## ADDED Requirements
 
 ### Requirement: Accessible responsive workspace shell
 

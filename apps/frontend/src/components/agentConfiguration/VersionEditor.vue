@@ -82,7 +82,7 @@ function updateSpec(event: Event): void {
 .version-editor h2 { font-size: 1.05rem; margin: 0.2rem 0; }
 .version-editor p { color: var(--text-secondary); font-size: 0.73rem; margin: 0; }
 .version-editor__version { align-items: center; display: flex; gap: 0.5rem; }
-.version-editor__version label { color: var(--text-tertiary); font-size: 0.68rem; }
+.version-editor__version > label { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
 .version-editor select, .version-editor input, .version-editor textarea { background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: var(--radius-control); color: var(--text-primary); }
 .version-editor select { min-height: 2.4rem; padding: 0 0.65rem; }
 .version-editor__toolbar { align-items: center; background: var(--surface-panel); border-bottom: 1px solid var(--line); display: flex; gap: 1rem; justify-content: space-between; min-height: 3.5rem; padding: 0.5rem 1.4rem; }
@@ -90,7 +90,7 @@ function updateSpec(event: Event): void {
 .version-editor__toolbar > div { display: flex; gap: 0.4rem; }
 .version-editor__fields { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; overflow-y: auto; padding: 1.25rem 1.4rem; }
 .version-editor__fields label { color: var(--text-secondary); display: grid; font-size: 0.7rem; font-weight: 650; gap: 0.4rem; }
-.version-editor input { min-height: 2.6rem; padding: 0 0.75rem; }
+.version-editor input { height: 2.6rem; min-height: 2.6rem; padding: 0 0.75rem; }
 .version-editor textarea { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.75rem; line-height: 1.55; min-height: 15rem; padding: 0.8rem; resize: vertical; }
 .version-editor input[readonly], .version-editor textarea[readonly] { background: var(--surface-panel); color: var(--text-secondary); }
 .version-editor__valid { align-items: center; background: var(--status-success-bg); color: var(--status-success-text) !important; display: flex; gap: 0.4rem; padding: 0.65rem 1.4rem; }
