@@ -118,6 +118,8 @@ Tencent CLS MCP + OpenAI-compatible Qwen models
 - [Linux 安装](docs/setup/linux.md)
 - [macOS 安装](docs/setup/macos.md)
 
+Docker Compose **只**负责 PostgreSQL、Redis、etcd、MinIO、Milvus、Attu、Alertmanager 和 Nginx 等本地基础设施；FastAPI 后端、Vue 前端与官方 CLS MCP Server 继续作为本机进程运行。
+
 Windows PowerShell 从仓库根目录执行：
 
 ```powershell
